@@ -354,7 +354,13 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 		state->rtp.seq = (uint16_t)(rand() & 0xFFFF);
 		state->rtp.timestamp = (uint32_t)rand();
 		state->rtp.ssrc = ((uint32_t)rand() << 16) ^ (uint32_t)rand() ^ 0xA0D1DEAD;
-		state->rtp.payload_type = 110;
+		/* Use standard static PTs for G.711, dynamic PT for raw PCM */
+		if (state->codec_type == AUDIO_TYPE_G711U)
+			state->rtp.payload_type = 0;   /* PCMU */
+		else if (state->codec_type == AUDIO_TYPE_G711A)
+			state->rtp.payload_type = 8;   /* PCMA */
+		else
+			state->rtp.payload_type = 110; /* dynamic (raw PCM) */
 		state->rtp_frame_ticks = 320;
 	} else {
 		memset(&state->rtp, 0, sizeof(state->rtp));
