@@ -383,6 +383,21 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 Audio configuration (enabled, sample rate, channels, codec, volume) is
 set in `/etc/venc.json` only and requires a process restart to change.
 
+Supported codecs: `"pcm"` (raw 16-bit), `"g711a"` (A-law), `"g711u"` (µ-law).
+
+**RTP payload types:** When streaming in RTP mode, venc uses standard static
+payload types when the sample rate matches the RFC 3551 standard:
+
+| Codec | Sample rate | RTP PT | Auto-detect |
+|-------|-------------|--------|-------------|
+| `g711u` | 8000 | 0 (PCMU) | Yes |
+| `g711a` | 8000 | 8 (PCMA) | Yes |
+| `pcm` | 44100 | 11 (L16 mono) | Yes |
+| any | other | 110 (dynamic) | No |
+
+G.711 at non-8kHz rates (e.g. the default 16kHz) is valid but non-standard
+and uses dynamic PT 110 — receivers must be configured to match.
+
 #### Recording (Star6E only)
 
 | Field | Type | Mutability | Description |
