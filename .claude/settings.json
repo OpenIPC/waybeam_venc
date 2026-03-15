@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make build*)",
+      "Bash(make lint*)",
+      "Bash(make clean*)",
+      "Bash(make verify*)",
+      "Bash(make pre-pr*)",
+      "Bash(make stage*)",
+      "Bash(make remote-test*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "make lint SOC_BUILD=star6e 2>/dev/null && echo 'PostEdit: lint OK' || echo 'PostEdit: lint FAILED — run make build for details'"
+          }
+        ]
+      }
+    ]
+  }
+}

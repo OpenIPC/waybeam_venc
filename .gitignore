@@ -1,0 +1,13 @@
+firmware
+toolchain
+star6e-standalone/out/
+star6e-standalone/.build_soc
+.vscode/tasks.json
+.vscode/settings.json
+
+star6e-standalone/tools/ioctl_trace_preload.so
+star6e-standalone/tools/libmaruko_uclibc_shim.so
+
+codex_resume
+resume_codex
+star6e-standalone/tests/test_imu_ring

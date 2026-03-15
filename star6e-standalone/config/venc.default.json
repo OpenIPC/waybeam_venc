@@ -1,0 +1,77 @@
+{
+  "system": { "webPort": 80, "overclockLevel": 1, "verbose": false },
+  "sensor": {
+    "index": -1,
+    "mode": -1,
+    "unlockEnabled": true,
+    "unlockCmd": 35,
+    "unlockReg": 12298,
+    "unlockValue": 128,
+    "unlockDir": 0
+  },
+  "isp": {
+    "sensorBin": "", "exposure": 0,
+    "legacyAe": false,
+    "aeFps": 15, "aeTargetLow": 100, "aeTargetHigh": 140,
+    "aeChangePct": 10, "aeGainMax": 20480,
+    "awbMode": "auto", "awbCt": 5500
+  },
+  "image": { "mirror": false, "flip": false, "rotate": 0 },
+  "video0": {
+    "codec": "h265",
+    "rcMode": "cbr",
+    "fps": 30,
+    "size": "1920x1080",
+    "bitrate": 8192,
+    "gopSize": 1.0,
+    "qpDelta": -4,
+    "slicesEnabled": true,
+    "sliceSize": 4,
+    "lowDelay": false
+  },
+  "outgoing": {
+    "enabled": false,
+    "server": "",
+    "streamMode": "rtp",
+    "maxPayloadSize": 1400,
+    "targetPacketRate": 850,
+    "sendFeedback": false,
+    "audioPort": 5601,
+    "sidecarPort": 5602
+  },
+  "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
+  "audio": {
+    "enabled": false,
+    "sampleRate": 16000,
+    "channels": 1,
+    "codec": "pcm",
+    "volume": 80,
+    "mute": false
+  },
+  "imu": {
+    "enabled": false,
+    "i2cDevice": "/dev/i2c-1",
+    "i2cAddr": "0x68",
+    "sampleRate": 200,
+    "gyroRange": 1000,
+    "calFile": "/etc/imu.cal",
+    "calSamples": 400
+  },
+  "eis": {
+    "enabled": false,
+    "marginPercent": 10,
+    "filterTau": 1.0,
+    "testMode": false,
+    "swapXY": false,
+    "invertX": false,
+    "invertY": false
+  },
+  "record": {
+    "enabled": false,
+    "mode": "mirror",
+    "dir": "/mnt/mmcblk0p1",
+    "format": "ts",
+    "maxSeconds": 300,
+    "maxMB": 500
+  }
+}

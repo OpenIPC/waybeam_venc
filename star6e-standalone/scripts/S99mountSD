@@ -1,0 +1,42 @@
+#!/bin/sh
+# S99mountSD — Auto-mount SD card partition for recording.
+# Place in /etc/init.d/ on the target device.
+# Mounts /dev/mmcblk0p2 to /media as vfat.
+# Formats with mkfs.vfat if no filesystem found.
+# Idempotent: no-op if already mounted.
+
+DEVICE="/dev/mmcblk0p2"
+MOUNT_POINT="/media"
+
+case "$1" in
+start)
+	# Already mounted?
+	if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+		exit 0
+	fi
+
+	# Device exists?
+	if [ ! -b "$DEVICE" ]; then
+		echo "S99mountSD: $DEVICE not found, skipping"
+		exit 0
+	fi
+
+	mkdir -p "$MOUNT_POINT"
+
+	# Check for filesystem; format if none
+	if ! blkid "$DEVICE" >/dev/null 2>&1; then
+		echo "S99mountSD: no filesystem on $DEVICE, formatting as vfat"
+		mkfs.vfat "$DEVICE" || exit 1
+	fi
+
+	mount -t vfat "$DEVICE" "$MOUNT_POINT" -o noatime
+	echo "S99mountSD: mounted $DEVICE on $MOUNT_POINT"
+	;;
+stop)
+	umount "$MOUNT_POINT" 2>/dev/null
+	;;
+*)
+	echo "Usage: $0 {start|stop}"
+	exit 1
+	;;
+esac

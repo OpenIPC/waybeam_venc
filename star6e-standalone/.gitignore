@@ -1,0 +1,3 @@
+tests/test_runner
+shm_consumer_test
+shm_ring_stats

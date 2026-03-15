@@ -1,0 +1,279 @@
+diff --git a/src/tx.cpp b/src/tx.cpp
+index 0dec131..d5759e7 100644
+--- a/src/tx.cpp
++++ b/src/tx.cpp
+@@ -42,6 +42,12 @@
+
+ #include "zfex.h"
+
++// --- SHM ring input support (waybeam_venc) ---
++extern "C" {
++#include "venc_ring.h"
++}
++static venc_ring_t *g_shm_ring = NULL;
++// --- end SHM ring ---
+
+ using namespace std;
+
+@@ -739,10 +745,13 @@ uint32_t extract_rxq_overflow(struct msghdr *msg)
+     return 0;
+ }
+
+-void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd, int fec_timeout, bool mirror, int log_interval)
++void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
++                 int fec_timeout, bool mirror, int log_interval,
++                 const char *shm_name = NULL)
+ {
++    bool use_shm = (shm_name && shm_name[0]);
+     int nfds = rx_fd.size();
+-    assert(nfds > 0);
++    assert(use_shm || nfds > 0);
+
+     struct pollfd fds[nfds + 1];
+     memset(fds, '\0', sizeof(fds));
+@@ -769,6 +778,28 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+     uint32_t count_p_truncated = 0; // injected large packets that were truncated
+     int start_fd_idx = 0;
+
++    // --- SHM ring attach ---
++    uint32_t shm_epoch = 0;
++    if (shm_name && shm_name[0])
++    {
++        g_shm_ring = venc_ring_attach(shm_name);
++        if (!g_shm_ring)
++        {
++            throw runtime_error(string_format("Failed to attach to SHM ring '%s'", shm_name));
++        }
++        shm_epoch = g_shm_ring->hdr->epoch;
++        WFB_INFO("SHM ring attached: '%s' (%u slots x %u bytes, epoch=%u, V%u)\n",
++                 shm_name, g_shm_ring->hdr->slot_count, g_shm_ring->hdr->slot_data_size,
++                 shm_epoch, g_shm_ring->hdr->version);
++        uint64_t write_idx = __atomic_load_n(&g_shm_ring->hdr->write_idx, __ATOMIC_ACQUIRE);
++        uint64_t read_idx = __atomic_load_n(&g_shm_ring->hdr->read_idx, __ATOMIC_RELAXED);
++        if (read_idx < write_idx)
++        {
++            __atomic_store_n(&g_shm_ring->hdr->read_idx, write_idx, __ATOMIC_RELEASE);
++            WFB_INFO("SHM startup skip: %" PRIu64 " stale packets dropped\n", write_idx - read_idx);
++        }
++    }
++    // --- end SHM ring attach ---
++
+     for(;;)
+     {
+         uint64_t cur_ts = get_time_ms();
+@@ -779,7 +810,16 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+             poll_timeout = std::min(poll_timeout, (int)(fec_close_ts > cur_ts ? fec_close_ts - cur_ts : 0));
+         }
+
+-        int rc = poll(fds, nfds + 1, poll_timeout);
++        int rc;
++        if (g_shm_ring)
++        {
++            // SHM mode: only poll control fd with short timeout
++            rc = poll(&fds[nfds], 1, std::min(poll_timeout, 1));
++        }
++        else
++        {
++            rc = poll(fds, nfds + 1, poll_timeout);
++        }
+
+         if (rc < 0)
+         {
+@@ -980,7 +1020,7 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+             }
+         }
+
+-        if (rc == 0) // poll timeout
++        if (rc == 0 && !g_shm_ring) // poll timeout
+         {
+             // close fec only if no data packets and fec timeout expired
+             if (fec_timeout > 0 && cur_ts >= fec_close_ts)
+@@ -994,6 +1034,82 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+             continue;
+         }
+
++        // --- SHM ring read path ---
++        if (g_shm_ring)
++        {
++            // Detect producer teardown via init_complete (visible through shared pages)
++            uint32_t ic = __atomic_load_n(&g_shm_ring->hdr->init_complete, __ATOMIC_ACQUIRE);
++            if (ic != 1)
++            {
++                WFB_INFO("SHM init_complete=%u, producer gone (was epoch=%u). Detaching.\n",
++                         ic, shm_epoch);
++                venc_ring_destroy(g_shm_ring);
++                g_shm_ring = venc_ring_attach(shm_name);
++                if (!g_shm_ring)
++                {
++                    WFB_INFO("SHM re-attach pending for '%s'\n", shm_name);
++                    continue;
++                }
++                shm_epoch = g_shm_ring->hdr->epoch;
++                WFB_INFO("SHM re-attached: epoch=%u\n", shm_epoch);
++                uint64_t w = __atomic_load_n(&g_shm_ring->hdr->write_idx, __ATOMIC_ACQUIRE);
++                __atomic_store_n(&g_shm_ring->hdr->read_idx, w, __ATOMIC_RELEASE);
++                continue;
++            }
++
++            uint8_t buf[MAX_PAYLOAD_SIZE + 1];
++            uint16_t out_len;
++            bool got_shm_packet = false;
++
++            // Drain all available packets from ring
++            for(;;)
++            {
++                int ret = venc_ring_read(g_shm_ring, buf, sizeof(buf), &out_len);
++                if (ret != 0)
++                    break;
++
++                got_shm_packet = true;
++                count_p_incoming += 1;
++                count_b_incoming += out_len;
++
++                ssize_t rsize = out_len;
++                if (rsize > (ssize_t)MAX_PAYLOAD_SIZE)
++                {
++                    rsize = MAX_PAYLOAD_SIZE;
++                    count_p_truncated += 1;
++                }
++
++                cur_ts = get_time_ms();
++
++                t->select_output(mirror ? -1 : 0);
++
++                if (cur_ts >= session_key_announce_ts)
++                {
++                    t->send_session_key();
++                    session_key_announce_ts = cur_ts + SESSION_KEY_ANNOUNCE_MSEC;
++                }
++
++                t->send_packet(buf, rsize, 0);
++
++                if (cur_ts >= log_send_ts)
++                {
++                    break; // go to outer loop for logging
++                }
++            }
++
++            if (fec_timeout > 0)
++            {
++                if (got_shm_packet)
++                {
++                    fec_close_ts = get_time_ms() + fec_timeout;
++                }
++                else if (cur_ts >= fec_close_ts)
++                {
++                    if(t->send_packet(NULL, 0, WFB_PACKET_FEC_ONLY))
++                    {
++                        count_p_fec_timeouts += 1;
++                    }
++                    fec_close_ts = cur_ts + fec_timeout;
++                }
++            }
++            continue;
++        }
++        // --- end SHM ring read path ---
++
+         // rc > 0: events detected
+         // start from last fd index and reset it to zero
+         int _tmp = start_fd_idx;
+@@ -1526,6 +1642,52 @@ void local_loop_unix(int argc, char* const* argv, int optind, int rcv_buf, int l
+ }
+
+
++// --- SHM ring input mode ---
++void local_loop_shm(int argc, char* const* argv, int optind, int log_interval,
++                    const char *shm_name, int debug_port, int k, int n, const string &keypair,
++                    int fec_timeout, uint64_t epoch, uint32_t channel_id, uint32_t fec_delay,
++                    bool use_qdisc, uint32_t fwmark,
++                    radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port,
++                    bool mirror, int snd_buf_size, uint32_t inject_retries,
++                    uint32_t inject_retry_delay)
++{
++    vector<int> rx_fd;
++    vector<string> wlans;
++    vector<tags_item_t> tags;
++    unique_ptr<Transmitter> t;
++
++    for(int i = 0; optind + i < argc; i++)
++    {
++        wlans.push_back(string(argv[optind + i]));
++    }
++
++    if (debug_port)
++    {
++        WFB_INFO("Using %zu ports from %d for wlan emulation\n", wlans.size(), debug_port);
++        t = unique_ptr<UdpTransmitter>(new UdpTransmitter(k, n, keypair, "127.0.0.1", debug_port, epoch, channel_id,
++                                                          fec_delay, tags, use_qdisc, fwmark, snd_buf_size));
++    }
++    else
++    {
++        t = unique_ptr<RawSocketTransmitter>(new RawSocketTransmitter(k, n, keypair, epoch, channel_id, fec_delay, tags,
++                                                                      wlans, radiotap_header, frame_type, use_qdisc, fwmark,
++                                                                      inject_retries, inject_retry_delay));
++    }
++
++    int control_fd = open_control_fd(control_port);
++    WFB_INFO("SHM input mode: reading from ring '%s'\n", shm_name);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, shm_name);
++
++    // Cleanup
++    if (g_shm_ring)
++    {
++        venc_ring_destroy(g_shm_ring);
++        g_shm_ring = NULL;
++    }
++}
++// --- end SHM ring input mode ---
++
++
+ void distributor_loop(int argc, char* const* argv, int optind, int rcv_buf, int log_interval,
+                       int udp_port, int k, int n, const string &keypair, int fec_timeout,
+                       uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, bool use_qdisc, uint32_t fwmark,
+@@ -1669,6 +1831,7 @@ int main(int argc, char * const *argv)
+     int opt;
+     uint8_t k=8, n=12, radio_port=0;
+     uint32_t fec_delay = 0;
++    char *shm_name = NULL;
+     uint32_t link_id = 0x0;
+     uint64_t epoch = 0;
+     int srv_port = 10000;
+@@ -1697,7 +1860,7 @@ int main(int argc, char * const *argv)
+     uint32_t inject_retries = 0;
+     uint32_t inject_retry_delay = 5000; // 5ms
+
+-    while ((opt = getopt(argc, argv, "dI:K:k:n:u:U:p:F:l:B:G:S:L:M:N:D:T:i:e:R:s:f:mVQP:C:J:E:")) != -1) {
++    while ((opt = getopt(argc, argv, "dI:K:k:n:u:U:p:F:l:B:G:S:L:M:N:D:T:i:e:R:s:f:mVQP:C:J:E:H:")) != -1) {
+         switch (opt) {
+         case 'I':
+             tx_mode = INJECTOR;
+@@ -1814,9 +1977,13 @@ int main(int argc, char * const *argv)
+             inject_retry_delay = atoi(optarg);
+             break;
+
++        case 'H':
++            shm_name = optarg;
++            break;
++
+         default: /* '?' */
+         show_usage:
+-            WFB_INFO("Local TX: %s [-K tx_key] [-k RS_K] [-n RS_N] { [-u udp_port] | [-U unix_socket] } [-R rcv_buf] [-p radio_port]\n"
++            WFB_INFO("Local TX: %s [-K tx_key] [-k RS_K] [-n RS_N] { [-u udp_port] | [-U unix_socket] | [-H shm_name] } [-R rcv_buf] [-p radio_port]\n"
+                      "             [-F fec_delay] [-B bandwidth] [-G guard_interval] [-S stbc] [-L ldpc] [-M mcs_index] [-N VHT_NSS]\n"
+                      "             [-T fec_timeout] [-l log_interval] [-e epoch] [-i link_id] [-f { data | rts }] [-m] [-V] [-Q]\n"
+                      "             [-P fwmark] [-J inject_retries] [-E inject_retry_delay] [-C control_port] interface1 [interface2] ...\n",
+@@ -1882,6 +2049,14 @@ int main(int argc, char * const *argv)
+                                 radiotap_header, frame_type, control_port, mirror,
+                                 snd_buf, inject_retries, inject_retry_delay);
+             }
++            else if (shm_name != NULL)
++            {
++                local_loop_shm(argc, argv, optind, log_interval,
++                               shm_name, debug_port, k, n, keypair, fec_timeout,
++                               epoch, channel_id, fec_delay, use_qdisc, fwmark,
++                               radiotap_header, frame_type, control_port, mirror,
++                               snd_buf, inject_retries, inject_retry_delay);
++            }
+             else
+             {
+                 local_loop_udp(argc, argv, optind, rcv_buf, log_interval,

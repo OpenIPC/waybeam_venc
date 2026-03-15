@@ -1,0 +1,16 @@
+# Codex project configuration for waybeam_venc
+# See: https://developers.openai.com/codex/config-reference/
+
+# Read AGENTS.md as the primary instruction file (auto-discovered).
+# Also read CLAUDE.md as fallback so cross-tool instructions are found.
+project_doc_fallback_filenames = ["CLAUDE.md"]
+
+# Allow Codex to write files in the project directory.
+# Codex does not have post-edit hooks (unlike Claude's PostToolUse),
+# so agents must self-trigger `make lint` per AGENTS.md Phase 2 guidance.
+sandbox_mode = "workspace-write"
+
+# Approval policy: auto-approve file edits and make commands in the project dir.
+# Codex will still ask before running anything outside the working directory.
+
+mode = "auto"

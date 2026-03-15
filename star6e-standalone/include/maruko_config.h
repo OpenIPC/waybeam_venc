@@ -1,0 +1,52 @@
+#ifndef MARUKO_CONFIG_H
+#define MARUKO_CONFIG_H
+
+#include "codec_types.h"
+#include "sensor_select.h"
+#include "star6e.h"
+#include "venc_config.h"
+
+#include <stdint.h>
+
+typedef enum {
+	MARUKO_STREAM_COMPACT = 0,
+	MARUKO_STREAM_RTP = 1,
+} MarukoStreamMode;
+
+typedef struct {
+	uint32_t sensor_width;
+	uint32_t sensor_height;
+	uint32_t image_width;
+	uint32_t image_height;
+	uint32_t sensor_fps;
+	uint32_t venc_max_rate;
+	uint32_t venc_gop_size;
+	double venc_gop_seconds;
+	uint16_t max_frame_size;
+	uint16_t rtp_payload_size;
+	uint16_t target_pkt_rate;
+	uint32_t ewma_frame_bytes;
+	uint16_t adapt_cooldown;
+	uint32_t udp_sink_ip;
+	uint16_t udp_sink_port;
+	uint16_t sidecar_port;
+	char shm_name[128];
+	PAYLOAD_TYPE_E rc_codec;
+	int rc_mode;
+	MarukoStreamMode stream_mode;
+	MI_SNR_PAD_ID_e forced_sensor_pad;
+	int forced_sensor_mode;
+	const char *isp_bin_path;
+	int vpe_level_3dnr;
+	uint32_t exposure_cap_us;
+	SensorUnlockConfig sensor_unlock;
+	int verbose;
+} MarukoBackendConfig;
+
+/** Fill config with compiled-in defaults for Maruko backend. */
+void maruko_config_defaults(MarukoBackendConfig *cfg);
+
+/** Convert generic VencConfig into Maruko-specific backend config. */
+int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg);
+
+#endif /* MARUKO_CONFIG_H */
