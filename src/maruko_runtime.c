@@ -58,6 +58,13 @@ static int maruko_reinit_pipeline(MarukoRunnerContext *ctx)
 	int sys_initialized;
 	int ret;
 
+	/* Save current sensor state — live sensor mode changes are not
+	 * supported (the ISP hangs).  We force the same mode after
+	 * config reload so find_best_mode() cannot pick a different one. */
+	int prev_pad = (int)backend->sensor.pad_id;
+	int prev_mode = backend->sensor.mode_index;
+	uint32_t prev_max_fps = backend->sensor.mode.maxFps;
+
 	reinit_mode = venc_api_get_reinit();
 	venc_api_clear_reinit();
 
@@ -65,6 +72,17 @@ static int maruko_reinit_pipeline(MarukoRunnerContext *ctx)
 		printf("> [maruko] reinit: reloading config from disk\n");
 		venc_config_defaults(&ctx->vcfg);
 		(void)venc_config_load(VENC_CONFIG_DEFAULT_PATH, &ctx->vcfg);
+	}
+
+	/* Lock sensor to the mode that was running before teardown.
+	 * Switching sensor modes on a live reinit hangs the ISP. */
+	ctx->vcfg.sensor.index = prev_pad;
+	ctx->vcfg.sensor.mode = prev_mode;
+	if (prev_max_fps > 0 && ctx->vcfg.video0.fps > prev_max_fps) {
+		printf("> [maruko] Reinit: clamping FPS %u -> %u "
+			"(sensor mode change not supported during reinit)\n",
+			ctx->vcfg.video0.fps, prev_max_fps);
+		ctx->vcfg.video0.fps = prev_max_fps;
 	}
 
 	if (maruko_config_from_venc(&ctx->vcfg, &backend->cfg) != 0)

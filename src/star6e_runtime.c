@@ -519,6 +519,13 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 	VencConfig *vcfg = &ctx->vcfg;
 	int ret;
 
+	/* Save current sensor state — live sensor mode changes are not
+	 * supported (the ISP hangs).  We force the same mode after
+	 * config reload so find_best_mode() cannot pick a different one. */
+	int prev_pad = (int)ps->sensor.pad_id;
+	int prev_mode = ps->sensor.mode_index;
+	uint32_t prev_max_fps = ps->sensor.mode.maxFps;
+
 	star6e_cus3a_request_stop();
 
 	star6e_controls_reset();
@@ -545,6 +552,17 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 				"ERROR: config reload failed, shutting down\n");
 			return 1;
 		}
+	}
+
+	/* Lock sensor to the mode that was running before teardown.
+	 * Switching sensor modes on a live reinit hangs the ISP. */
+	vcfg->sensor.index = prev_pad;
+	vcfg->sensor.mode = prev_mode;
+	if (prev_max_fps > 0 && vcfg->video0.fps > prev_max_fps) {
+		printf("> Reinit: clamping FPS %u -> %u "
+			"(sensor mode change not supported during reinit)\n",
+			vcfg->video0.fps, prev_max_fps);
+		vcfg->video0.fps = prev_max_fps;
 	}
 
 	ret = star6e_pipeline_start(ps, vcfg, &g_sdk_quiet);
