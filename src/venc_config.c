@@ -320,6 +320,8 @@ static void load_audio(const cJSON *root, VencConfigAudio *a)
 	a->enabled = json_get_bool(obj, "enabled", a->enabled);
 	a->sample_rate = (uint32_t)json_get_int(obj, "sampleRate",
 		(int)a->sample_rate);
+	if (a->sample_rate < 8000) a->sample_rate = 8000;
+	if (a->sample_rate > 48000) a->sample_rate = 48000;
 	a->channels = (uint32_t)json_get_int(obj, "channels",
 		(int)a->channels);
 	if (a->channels < 1) a->channels = 1;

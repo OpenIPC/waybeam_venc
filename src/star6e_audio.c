@@ -211,7 +211,7 @@ static void *star6e_audio_thread_fn(void *arg)
 		int ret;
 
 		memset(&frame, 0, sizeof(frame));
-		ret = state->lib.fnGetFrame(0, 0, &frame, NULL, 100);
+		ret = state->lib.fnGetFrame(0, 0, &frame, NULL, 50);
 		if (ret != 0)
 			continue;
 
@@ -265,8 +265,9 @@ static int configure_ai_device(Star6eAudioState *state)
 	dev_cfg.rate = (int)state->sample_rate;
 	dev_cfg.intf = 0;
 	dev_cfg.sound = (state->channels >= 2) ? 1 : 0;
-	dev_cfg.frmNum = 16;
-	dev_cfg.packNumPerFrm = 320;
+	dev_cfg.frmNum = 8;
+	/* Scale frame size to maintain ~20ms per frame at any sample rate */
+	dev_cfg.packNumPerFrm = (unsigned int)(state->sample_rate / 50);
 	dev_cfg.codecChnNum = 0;
 	dev_cfg.chnNum = state->channels;
 	dev_cfg.i2s.clock = star6e_audio_clock_for_rate(dev_cfg.rate);
@@ -324,7 +325,7 @@ static int start_ai_capture(Star6eAudioState *state, const VencConfig *vcfg)
 	ai_port.device = 0;
 	ai_port.channel = 0;
 	ai_port.port = 0;
-	ret = MI_SYS_SetChnOutputPortDepth(&ai_port, 4, 16);
+	ret = MI_SYS_SetChnOutputPortDepth(&ai_port, 2, 4);
 	if (ret != 0) {
 		fprintf(stderr, "[audio] ERROR: SetChnOutputPortDepth failed (%d)\n", ret);
 		return -1;
@@ -366,7 +367,8 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 			state->rtp.payload_type = 11;  /* L16 44.1kHz mono */
 		else
 			state->rtp.payload_type = 110; /* dynamic */
-		state->rtp_frame_ticks = 320;
+		/* RTP timestamp increment = samples per frame (matches packNumPerFrm) */
+		state->rtp_frame_ticks = (unsigned int)(state->sample_rate / 50);
 	} else {
 		memset(&state->rtp, 0, sizeof(state->rtp));
 		state->rtp_frame_ticks = 0;
