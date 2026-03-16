@@ -355,18 +355,23 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 		state->rtp.seq = (uint16_t)(rand() & 0xFFFF);
 		state->rtp.timestamp = (uint32_t)rand();
 		state->rtp.ssrc = ((uint32_t)rand() << 16) ^ (uint32_t)rand() ^ 0xA0D1DEAD;
-		/* Use standard static PTs when rate matches RFC 3551 */
+		/* Use standard static PTs when rate matches RFC 3551,
+		 * dynamic PTs for non-standard rates */
 		if (state->codec_type == AUDIO_TYPE_G711U &&
 		    state->sample_rate == 8000)
 			state->rtp.payload_type = 0;   /* PCMU 8kHz mono */
 		else if (state->codec_type == AUDIO_TYPE_G711A &&
 		         state->sample_rate == 8000)
 			state->rtp.payload_type = 8;   /* PCMA 8kHz mono */
+		else if (state->codec_type == AUDIO_TYPE_G711U)
+			state->rtp.payload_type = 112; /* PCMU non-8kHz */
+		else if (state->codec_type == AUDIO_TYPE_G711A)
+			state->rtp.payload_type = 113; /* PCMA non-8kHz */
 		else if (state->codec_type < 0 &&
 		         state->sample_rate == 44100)
 			state->rtp.payload_type = 11;  /* L16 44.1kHz mono */
 		else
-			state->rtp.payload_type = 110; /* dynamic */
+			state->rtp.payload_type = 110; /* dynamic PCM */
 		/* RTP timestamp increment = samples per frame (matches packNumPerFrm) */
 		state->rtp_frame_ticks = (unsigned int)(state->sample_rate / 50);
 	} else {
