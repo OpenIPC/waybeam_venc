@@ -515,31 +515,18 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 	VencConfig *vcfg = &ctx->vcfg;
 	int ret;
 
-	/* Save current sensor state — live sensor mode changes are not
-	 * supported (the ISP hangs).  We force the same mode after
-	 * config reload so find_best_mode() cannot pick a different one. */
-	int prev_pad = (int)ps->sensor.pad_id;
-	int prev_mode = ps->sensor.mode_index;
 	uint32_t prev_max_fps = ps->sensor.mode.maxFps;
 
 	star6e_cus3a_request_stop();
 
 	star6e_controls_reset();
 	star6e_pipeline_cus3a_reset();
-	star6e_pipeline_stop(ps);
-	ctx->pipeline_started = 0;
 
 	star6e_cus3a_join();
 
 	star6e_recorder_stop(&ps->recorder);
 	star6e_ts_recorder_stop(&ps->ts_recorder);
 	ps->audio.rec_ring = NULL;
-
-	/* Write VPE SCL clock preset after pipeline teardown.
-	 * VPE destroy disables the SCL clock, but the kernel
-	 * already_inited flag prevents re-enable on next VPE create.
-	 * This sysfs write resets the flag so pipeline_start succeeds. */
-	star6e_pipeline_vpe_scl_preset_shutdown();
 
 	if (reinit_mode == 1) {
 		venc_config_defaults(vcfg);
@@ -550,16 +537,7 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 		}
 	}
 
-	/* Lock sensor to the mode that was running before teardown.
-	 * MI_SNR_SetRes to a larger mode D-states the MIPI PHY driver.
-	 * Confirmed: mode 1→3 (downsize) works, 3→1 (upsize) hangs. */
-	vcfg->sensor.index = prev_pad;
-	if (vcfg->sensor.mode != prev_mode) {
-		printf("> Reinit: sensor.mode %d -> %d blocked "
-			"(mode change requires process restart)\n",
-			prev_mode, vcfg->sensor.mode);
-	}
-	vcfg->sensor.mode = prev_mode;
+	/* Clamp FPS to current sensor mode (mode changes require restart) */
 	if (prev_max_fps > 0 && vcfg->video0.fps > prev_max_fps) {
 		printf("> Reinit: clamping FPS %u -> %u "
 			"(limited by current sensor mode)\n",
@@ -567,13 +545,16 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 		vcfg->video0.fps = prev_max_fps;
 	}
 
-	ret = star6e_pipeline_start(ps, vcfg, &g_sdk_quiet);
+	/* Partial reinit: keep sensor/VIF/VPE running, only rebuild VENC.
+	 * The SigmaStar MIPI PHY does not recover from MI_SNR_Disable/Enable
+	 * cycles — full pipeline_stop + pipeline_start stalls the encoder. */
+	ret = star6e_pipeline_reinit(ps, vcfg, &g_sdk_quiet);
 	if (ret != 0) {
 		fprintf(stderr, "ERROR: pipeline reinit failed (%d), shutting down\n",
 			ret);
+		ctx->pipeline_started = 0;
 		return ret;
 	}
-	ctx->pipeline_started = 1;
 
 	star6e_controls_bind(ps, vcfg);
 	install_signal_handlers();

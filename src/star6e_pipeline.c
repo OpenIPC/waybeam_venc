@@ -1114,6 +1114,116 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	star6e_pipeline_stop_sensor(state->sensor.pad_id);
 }
 
+/* Partial teardown for SIGHUP reinit: tears down VENC channels, binds,
+ * output, audio, IMU/EIS but keeps sensor/VIF/VPE running.  The SigmaStar
+ * MIPI PHY does not recover from MI_SNR_Disable/Enable cycles, so the
+ * sensor must stay active across reinit. */
+static void star6e_pipeline_stop_venc_level(Star6ePipelineState *state)
+{
+	if (!state)
+		return;
+
+	if (state->imu)
+		imu_stop(state->imu);
+	if (state->eis) {
+		eis_crop_destroy(state->eis);
+		state->eis = NULL;
+	}
+	if (state->imu) {
+		imu_destroy(state->imu);
+		state->imu = NULL;
+	}
+
+	star6e_audio_teardown(&state->audio);
+	star6e_output_teardown(&state->output);
+	if (state->dual)
+		star6e_output_teardown(&state->dual->output);
+
+	if (state->dual && state->dual->rec_started) {
+		state->dual->rec_running = 0;
+		pthread_join(state->dual->rec_thread, NULL);
+		state->dual->rec_started = 0;
+	}
+
+	if (state->dual && state->dual->bound) {
+		MI_SYS_UnBindChnPort(&state->vpe_port, &state->dual->port);
+		state->dual->bound = 0;
+	}
+	if (state->bound_vpe_venc) {
+		MI_SYS_UnBindChnPort(&state->vpe_port, &state->venc_port);
+		state->bound_vpe_venc = 0;
+	}
+
+	drain_venc_channel(state->venc_channel, 500, "ch0");
+	if (state->dual)
+		drain_venc_channel(state->dual->channel, 500, "ch1-post");
+
+	if (state->dual)
+		MI_VENC_StopRecvPic(state->dual->channel);
+	MI_VENC_StopRecvPic(state->venc_channel);
+
+	/* VIF→VPE bind stays active — do NOT unbind */
+
+	if (state->dual) {
+		venc_api_dual_unregister();
+		MI_VENC_DestroyChn(state->dual->channel);
+		free(state->dual);
+		state->dual = NULL;
+	}
+	MI_VENC_DestroyChn(state->venc_channel);
+
+	/* Reset VENC-level state but preserve sensor/VIF/VPE state */
+	star6e_output_reset(&state->output);
+	star6e_video_reset(&state->video);
+}
+
+int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
+	SdkQuietState *sdk_quiet)
+{
+	Star6ePipelineConfig pconf;
+	uint32_t venc_fps;
+	int ret;
+
+	if (!state || !vcfg)
+		return -1;
+
+	star6e_pipeline_stop_venc_level(state);
+
+	if (prepare_pipeline_config(state, vcfg, &pconf) != 0)
+		return -1;
+
+	/* Reuse existing sensor state — don't call sensor_select.
+	 * Recompute image dimensions from the existing sensor mode. */
+	pconf.sensor_framerate = state->sensor.fps;
+	pconf.venc_gop_size = pipeline_common_gop_frames(vcfg->video0.gop_size,
+		pconf.sensor_framerate);
+	pipeline_common_clamp_image_size("",
+		state->sensor.plane.capt.width,
+		state->sensor.plane.capt.height,
+		&pconf.image_width, &pconf.image_height);
+	state->image_width = pconf.image_width;
+	state->image_height = pconf.image_height;
+
+	state->venc_channel = 0;
+	venc_fps = vcfg->video0.fps;
+	if (venc_fps == 0 || venc_fps > pconf.sensor_framerate)
+		venc_fps = pconf.sensor_framerate;
+	ret = star6e_pipeline_start_venc(pconf.image_width, pconf.image_height,
+		pconf.venc_max_rate, venc_fps, pconf.venc_gop_size,
+		pconf.rc_codec, pconf.rc_mode,
+		vcfg->video0.frame_lost, &state->venc_channel);
+	if (ret != 0)
+		return ret;
+
+	ret = bind_and_finalize_pipeline(state, vcfg, &pconf, sdk_quiet);
+	if (ret != 0) {
+		star6e_pipeline_stop_venc(state->venc_channel);
+		return ret;
+	}
+
+	return 0;
+}
+
 int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	SdkQuietState *sdk_quiet)
 {
