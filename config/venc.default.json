@@ -23,6 +23,8 @@
     "bitrate": 8192,
     "gopSize": 1.0,
     "qpDelta": -4,
+    "slicesEnabled": false,
+    "sliceSize": 4,
     "lowDelay": false
   },
   "outgoing": {
@@ -40,7 +42,7 @@
     "enabled": false,
     "sampleRate": 16000,
     "channels": 1,
-    "codec": "pcm",
+    "codec": "g711a",
     "volume": 80,
     "mute": false
   },
