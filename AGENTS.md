@@ -208,17 +208,21 @@ encoding issues). `json_cli` is the only safe tool for modifying
 `/etc/venc.json` on the device.
 
 ```bash
-# Set a field (creates key if absent, updates in-place if present)
-ssh root@<HOST> "json_cli /etc/venc.json set audio.codec opus"
-ssh root@<HOST> "json_cli /etc/venc.json set audio.enabled true"
-ssh root@<HOST> "json_cli /etc/venc.json set audio.sampleRate 48000"
+# Set a field (dot-path, updates in-place)
+ssh root@<HOST> "json_cli -s .audio.codec '\"opus\"' -i /etc/venc.json"
+ssh root@<HOST> "json_cli -s .audio.enabled true -i /etc/venc.json"
+ssh root@<HOST> "json_cli -s .audio.sampleRate 48000 -i /etc/venc.json"
 
 # Read a field
-ssh root@<HOST> "json_cli /etc/venc.json get audio.codec"
+ssh root@<HOST> "json_cli -g .audio.codec --raw -i /etc/venc.json"
 
 # Verify the full audio section after edits
-ssh root@<HOST> "json_cli /etc/venc.json get audio"
+ssh root@<HOST> "json_cli -g .audio -i /etc/venc.json"
 ```
+
+Path syntax: `.field`, `.nested.field`, `.array[0]`. String values must be
+quoted JSON strings: `'"hello"'` (shell single-quotes around JSON double-quotes).
+Booleans and numbers are bare: `true`, `false`, `42`.
 
 ### Quick cycle
 
@@ -233,8 +237,8 @@ ssh root@<HOST> "killall venc; sleep 2"
 scp -O out/star6e/venc root@<HOST>:/usr/bin/venc
 
 # 4. (Optional) Modify config — always use json_cli, never sed
-ssh root@<HOST> "json_cli /etc/venc.json set legacyAe false"
-ssh root@<HOST> "json_cli /etc/venc.json set system.verbose true"
+ssh root@<HOST> "json_cli -s .legacyAe false -i /etc/venc.json"
+ssh root@<HOST> "json_cli -s .system.verbose true -i /etc/venc.json"
 
 # 5. Start venc as daemon with log capture
 ssh root@<HOST> "nohup venc > /tmp/venc.log 2>&1 &"
@@ -257,8 +261,8 @@ ssh root@<HOST> "wget -q -O- http://127.0.0.1/api/v1/ae"
 ssh root@<HOST> "grep 'limits updated' /tmp/venc.log"
 
 # 11. Cleanup — restore config and stop
-ssh root@<HOST> "json_cli /etc/venc.json set legacyAe true"
-ssh root@<HOST> "json_cli /etc/venc.json set system.verbose false"
+ssh root@<HOST> "json_cli -s .legacyAe true -i /etc/venc.json"
+ssh root@<HOST> "json_cli -s .system.verbose false -i /etc/venc.json"
 ssh root@<HOST> "killall venc"
 ```
 
