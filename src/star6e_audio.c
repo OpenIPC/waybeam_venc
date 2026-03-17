@@ -285,7 +285,13 @@ static void *star6e_audio_encode_fn(void *arg)
 			int32_t encoded = do_opus_encode(state->opus_enc,
 				(const int16_t *)data, frame_size,
 				enc_buf, (int32_t)sizeof(enc_buf));
-			if (encoded > 0) { data = enc_buf; len = (size_t)encoded; }
+			if (encoded <= 0) {
+				fprintf(stderr, "[audio] opus_encode error %d, dropping frame\n",
+					(int)encoded);
+				continue;
+			}
+			data = enc_buf;
+			len = (size_t)encoded;
 		} else if (len > 0 &&
 		           (state->codec_type == AUDIO_TYPE_G711A ||
 		            state->codec_type == AUDIO_TYPE_G711U)) {
@@ -320,8 +326,10 @@ static int configure_ai_device(Star6eAudioState *state)
 	dev_cfg.rate = (int)state->sample_rate;
 	dev_cfg.intf = 0;
 	dev_cfg.sound = (state->channels >= 2) ? 1 : 0;
-	/* 20 frames = 400ms DMA ring buffer (20 × 20ms).  Large enough to
-	 * absorb any ISP/AE preemption without "slow fetching" warnings. */
+	/* 20 frames = 400ms DMA ring buffer.  Prevents data loss under ISP/AE
+	 * preemption.  NOTE: the "slow fetching" kernel warning fires whenever
+	 * the DMA write pointer is ahead by any amount (gap=1 always), and
+	 * cannot be suppressed from userspace regardless of frmNum. */
 	dev_cfg.frmNum = 20;
 	/* Scale frame size to maintain ~20ms per frame at any sample rate */
 	dev_cfg.packNumPerFrm = (unsigned int)(state->sample_rate / 50);
@@ -625,6 +633,9 @@ void star6e_audio_teardown(Star6eAudioState *state)
 		audio_ring_wake(&state->cap_ring);
 		pthread_join(state->capture_thread, NULL);
 		pthread_join(state->encode_thread, NULL);
+		if (state->cap_ring.dropped)
+			fprintf(stderr, "[audio] cap_ring dropped %u frames\n",
+				state->cap_ring.dropped);
 		audio_ring_destroy(&state->cap_ring);
 		state->started = 0;
 	}
