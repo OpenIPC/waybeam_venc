@@ -298,11 +298,12 @@ static int configure_ai_device(Star6eAudioState *state)
 	dev_cfg.rate = (int)state->sample_rate;
 	dev_cfg.intf = 0;
 	dev_cfg.sound = (state->channels >= 2) ? 1 : 0;
-	/* 1 frame = one 20ms DMA buffer — delivers each frame as soon as it is
-	 * filled, matching Majestic's 50Hz send rate.  Opus encodes a 320-sample
-	 * frame in <1ms so there is no risk of the application missing the DMA
-	 * window.  If glitches are observed, increase to 2. */
-	dev_cfg.frmNum = 1;
+	/* 2 frames = 40ms DMA ring buffer.  Each frame is one 20ms window so
+	 * frmNum=2 absorbs up to ~20ms of OS scheduling jitter without dropping
+	 * buffers.  frmNum=1 caused "slow fetching" warnings in practice because
+	 * any jitter > 20ms overwrote the single DMA slot before the thread
+	 * could read it. */
+	dev_cfg.frmNum = 2;
 	/* Scale frame size to maintain ~20ms per frame at any sample rate */
 	dev_cfg.packNumPerFrm = (unsigned int)(state->sample_rate / 50);
 	dev_cfg.codecChnNum = 0;
