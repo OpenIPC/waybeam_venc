@@ -229,14 +229,17 @@ static void *star6e_audio_thread_fn(void *arg)
 			state->sample_rate, state->channels, state->codec_type,
 			state->codec_type != -1 ? " (sw encode)" : " (pcm)");
 
-	/* MI_AI_GetFrame prints "[MI WRN ]: ... Buffer(s) is lost due to slow
-	 * fetching" to stderr from libmi_ai.so whenever the DMA index advances
-	 * past the last-read index.  These are benign (gap always 1) but noisy.
-	 * Suppress stderr for the duration of each GetFrame call by redirecting
-	 * fd 2 to /dev/null, then restoring it immediately after.  All other
-	 * stderr (errors during init, teardown, encode) is unaffected. */
+	/* libmi_ai.so writes "[MI WRN ]: ... Buffer(s) is lost due to slow
+	 * fetching" to stderr from its own internal DMA thread, asynchronously
+	 * from our GetFrame calls.  The warnings are benign (gap always 1, no
+	 * data lost) but noisy.  Redirect fd 2 to /dev/null once at thread
+	 * start so the MI library's internal thread never reaches the terminal.
+	 * All venc error output uses printf (stdout) so nothing important is
+	 * lost.  stderr is restored when the thread exits. */
 	int devnull_fd = open("/dev/null", O_WRONLY);
 	int saved_stderr = (devnull_fd >= 0) ? dup(STDERR_FILENO) : -1;
+	if (devnull_fd >= 0)
+		dup2(devnull_fd, STDERR_FILENO);
 
 	while (state->running) {
 		const uint8_t *data;
@@ -244,9 +247,7 @@ static void *star6e_audio_thread_fn(void *arg)
 		int ret;
 
 		memset(&frame, 0, sizeof(frame));
-		if (devnull_fd >= 0) dup2(devnull_fd, STDERR_FILENO);
 		ret = state->lib.fnGetFrame(0, 0, &frame, NULL, 50);
-		if (devnull_fd >= 0) dup2(saved_stderr, STDERR_FILENO);
 		if (ret != 0)
 			continue;
 
@@ -477,7 +478,7 @@ int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 		return 0;
 
 	memset(state, 0, sizeof(*state));
-	state->saved_printk_level = -1; /* unused, kept for ABI */
+	state->saved_printk_level = -1;
 	star6e_audio_output_reset(&state->output);
 	if (!vcfg || !vcfg->audio.enabled || !output)
 		return 0;
