@@ -38,13 +38,15 @@ typedef struct {
 	Star6eAudioOutput output;
 	RtpPacketizerState rtp;
 	uint32_t rtp_frame_ticks;
-	pthread_t thread;
+	pthread_t capture_thread;  /* Thread A: GetFrame→copy→release only */
+	pthread_t encode_thread;   /* Thread B: encode→send */
 	volatile sig_atomic_t running;
 	volatile sig_atomic_t started;
 	int verbose;
+	AudioRing cap_ring;    /* capture→encode bridge (owned by this struct) */
 	AudioRing *rec_ring;   /* recording ring buffer (NULL if not recording) */
-	void *opus_lib;         /* dlopen handle for libopus.so (NULL if not Opus) */
-	void *opus_enc;         /* OpusEncoder* opaque handle (NULL if not Opus) */
+	void *opus_lib;        /* dlopen handle for libopus.so (NULL if not Opus) */
+	void *opus_enc;        /* OpusEncoder* opaque handle (NULL if not Opus) */
 } Star6eAudioState;
 
 /** Initialize audio capture, encoder, and RTP output thread. */

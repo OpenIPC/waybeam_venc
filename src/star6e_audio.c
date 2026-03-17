@@ -209,13 +209,49 @@ static size_t star6e_audio_encode_g711(const int16_t *pcm, size_t num_samples,
 	return num_samples;
 }
 
-static void *star6e_audio_thread_fn(void *arg)
+/* Thread A: audio capture only.
+ * GetFrame → timestamp → push raw PCM to cap_ring → ReleaseFrame.
+ * Nothing else: no encode, no send, no prints in the hot loop.
+ * Runs SCHED_FIFO so it is never preempted past one 20ms DMA frame. */
+static void *star6e_audio_capture_fn(void *arg)
 {
 	Star6eAudioState *state = arg;
 	Star6eAudioFrame frame;
+
+	while (state->running) {
+		int ret;
+		struct timespec ts;
+		uint64_t ts_us;
+
+		memset(&frame, 0, sizeof(frame));
+		ret = state->lib.fnGetFrame(0, 0, &frame, NULL, 50);
+		if (ret != 0)
+			continue;
+
+		if (frame.addr[0] && frame.length > 0) {
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			ts_us = (uint64_t)ts.tv_sec * 1000000ULL +
+				(uint64_t)ts.tv_nsec / 1000ULL;
+			audio_ring_push(&state->cap_ring, frame.addr[0],
+				(uint16_t)(frame.length > 0xFFFF ? 0xFFFF
+					: frame.length),
+				ts_us);
+		}
+
+		state->lib.fnFreeFrame(0, 0, &frame, NULL);
+	}
+	return NULL;
+}
+
+/* Thread B: encode and send.
+ * Pops raw PCM from cap_ring, pushes to rec_ring (recording), encodes,
+ * and sends via RTP/UDP.  Runs at normal SCHED_OTHER priority — timing
+ * here does not affect the DMA capture window. */
+static void *star6e_audio_encode_fn(void *arg)
+{
+	Star6eAudioState *state = arg;
 	uint8_t enc_buf[4096];
 
-	/* Resolve Opus encode function once at thread start to avoid per-frame dlsym */
 	typedef int32_t (*fn_opus_encode_t)(void *, const int16_t *, int,
 		uint8_t *, int32_t);
 	fn_opus_encode_t do_opus_encode = NULL;
@@ -224,65 +260,49 @@ static void *star6e_audio_thread_fn(void *arg)
 			"opus_encode");
 
 	if (state->verbose)
-		printf("[audio] Thread started (rate=%u, ch=%u, codec=%d%s)\n",
-			state->sample_rate, state->channels, state->codec_type,
-			state->codec_type != -1 ? " (sw encode)" : " (pcm)");
+		printf("[audio] Started (rate=%u, ch=%u, codec=%d)\n",
+			state->sample_rate, state->channels, state->codec_type);
 
-	while (state->running) {
+	while (state->running || audio_ring_count(&state->cap_ring) > 0) {
+		AudioRingEntry entry;
 		const uint8_t *data;
 		size_t len;
-		int ret;
 
-		memset(&frame, 0, sizeof(frame));
-		ret = state->lib.fnGetFrame(0, 0, &frame, NULL, 50);
-		if (ret != 0)
+		if (!audio_ring_pop_wait(&state->cap_ring, &entry, 25))
 			continue;
 
-		data = frame.addr[0];
-		len = frame.length;
+		data = entry.pcm;
+		len  = entry.length;
 
-		/* Push raw PCM to recording ring before codec encode */
-		if (data && len > 0 && state->rec_ring) {
-			struct timespec _ts;
-			clock_gettime(CLOCK_MONOTONIC, &_ts);
-			uint64_t ts_us = (uint64_t)_ts.tv_sec * 1000000ULL +
-				(uint64_t)_ts.tv_nsec / 1000ULL;
+		/* Forward raw PCM to recording ring before encode */
+		if (state->rec_ring)
 			audio_ring_push(state->rec_ring, data,
-				(uint16_t)(len > 0xFFFF ? 0xFFFF : len), ts_us);
-		}
+				(uint16_t)len, entry.timestamp_us);
 
-		if (data && len > 0 && state->codec_type == AUDIO_TYPE_OPUS &&
+		if (len > 0 && state->codec_type == AUDIO_TYPE_OPUS &&
 		    state->opus_enc && do_opus_encode) {
 			int frame_size = (int)(len / 2 / state->channels);
 			int32_t encoded = do_opus_encode(state->opus_enc,
 				(const int16_t *)data, frame_size,
 				enc_buf, (int32_t)sizeof(enc_buf));
-			if (encoded > 0) {
-				data = enc_buf;
-				len = (size_t)encoded;
-			}
-		} else if (data && len > 0 &&
+			if (encoded > 0) { data = enc_buf; len = (size_t)encoded; }
+		} else if (len > 0 &&
 		           (state->codec_type == AUDIO_TYPE_G711A ||
 		            state->codec_type == AUDIO_TYPE_G711U)) {
-			size_t num_samples = len / 2;
-
-			if (num_samples > sizeof(enc_buf))
-				num_samples = sizeof(enc_buf);
-			len = star6e_audio_encode_g711((const int16_t *)data, num_samples,
+			size_t n = len / 2;
+			if (n > sizeof(enc_buf)) n = sizeof(enc_buf);
+			len = star6e_audio_encode_g711((const int16_t *)data, n,
 				enc_buf, state->codec_type);
 			data = enc_buf;
 		}
 
-		if (data && len > 0) {
+		if (len > 0)
 			(void)star6e_audio_output_send(&state->output, data, len,
 				&state->rtp, state->rtp_frame_ticks);
-		}
-
-		state->lib.fnFreeFrame(0, 0, &frame, NULL);
 	}
 
 	if (state->verbose)
-		printf("[audio] Thread stopped\n");
+		printf("[audio] Stopped\n");
 	return NULL;
 }
 
@@ -427,25 +447,37 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 	if (star6e_audio_output_port(&state->output) == 0)
 		fprintf(stderr, "[audio] WARNING: audio output has no destination port\n");
 
+	audio_ring_init(&state->cap_ring);
+
 	state->running = 1;
-	if (pthread_create(&state->thread, NULL, star6e_audio_thread_fn, state) != 0) {
-		fprintf(stderr, "[audio] ERROR: pthread_create failed\n");
+	if (pthread_create(&state->capture_thread, NULL,
+	    star6e_audio_capture_fn, state) != 0) {
+		fprintf(stderr, "[audio] ERROR: capture pthread_create failed\n");
 		state->running = 0;
+		audio_ring_destroy(&state->cap_ring);
 		return -1;
 	}
-	/* Elevate audio thread to SCHED_FIFO priority 1 (lowest RT level).
-	 * The thread spends most of its time blocking in MI_AI_GetFrame, so it
-	 * won't starve other threads.  This prevents SCHED_OTHER preemption by
-	 * the video encoder (e.g. during keyframe encoding) from pushing the
-	 * loop iteration past one 20ms DMA frame period, which triggers the
-	 * MI_AI "slow fetching" warning. */
+	/* Capture thread runs SCHED_FIFO so it is never preempted past one
+	 * 20ms DMA frame period by the video encoder or ISP threads. */
 	{
 		struct sched_param sp;
 		sp.sched_priority = 1;
-		if (pthread_setschedparam(state->thread, SCHED_FIFO, &sp) != 0)
+		if (pthread_setschedparam(state->capture_thread, SCHED_FIFO,
+		    &sp) != 0)
 			fprintf(stderr, "[audio] WARNING: could not set RT priority"
 				" (run as root?)\n");
 	}
+
+	if (pthread_create(&state->encode_thread, NULL,
+	    star6e_audio_encode_fn, state) != 0) {
+		fprintf(stderr, "[audio] ERROR: encode pthread_create failed\n");
+		state->running = 0;
+		audio_ring_wake(&state->cap_ring);
+		pthread_join(state->capture_thread, NULL);
+		audio_ring_destroy(&state->cap_ring);
+		return -1;
+	}
+
 	state->started = 1;
 	return 0;
 }
@@ -589,7 +621,11 @@ void star6e_audio_teardown(Star6eAudioState *state)
 
 	if (state->started) {
 		state->running = 0;
-		pthread_join(state->thread, NULL);
+		/* Wake encode thread in case it is blocked in pop_wait */
+		audio_ring_wake(&state->cap_ring);
+		pthread_join(state->capture_thread, NULL);
+		pthread_join(state->encode_thread, NULL);
+		audio_ring_destroy(&state->cap_ring);
 		state->started = 0;
 	}
 	star6e_audio_teardown_opus(state);

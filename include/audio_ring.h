@@ -28,20 +28,24 @@ typedef struct {
 	uint32_t count;     /* entries currently in ring */
 	uint32_t dropped;   /* overflow counter */
 	pthread_mutex_t lock;
+	pthread_cond_t  cond;  /* signalled by push; used by pop_wait */
 } AudioRing;
 
 static inline void audio_ring_init(AudioRing *r)
 {
 	memset(r, 0, sizeof(*r));
 	pthread_mutex_init(&r->lock, NULL);
+	pthread_cond_init(&r->cond, NULL);
 }
 
 static inline void audio_ring_destroy(AudioRing *r)
 {
+	pthread_cond_destroy(&r->cond);
 	pthread_mutex_destroy(&r->lock);
 }
 
-/** Push a PCM frame into the ring.  Drops oldest on overflow. */
+/** Push a PCM frame into the ring.  Drops oldest on overflow.
+ *  Signals any thread blocked in audio_ring_pop_wait(). */
 static inline void audio_ring_push(AudioRing *r,
 	const uint8_t *pcm, uint16_t length, uint64_t timestamp_us)
 {
@@ -64,7 +68,44 @@ static inline void audio_ring_push(AudioRing *r,
 		r->dropped++;
 	}
 
+	pthread_cond_signal(&r->cond);
 	pthread_mutex_unlock(&r->lock);
+}
+
+/** Wake any thread blocked in audio_ring_pop_wait() without pushing data.
+ *  Use to unblock the consumer on shutdown. */
+static inline void audio_ring_wake(AudioRing *r)
+{
+	pthread_mutex_lock(&r->lock);
+	pthread_cond_signal(&r->cond);
+	pthread_mutex_unlock(&r->lock);
+}
+
+/** Pop a PCM frame, blocking up to timeout_ms for one to arrive.
+ *  Returns 1 on success, 0 on timeout. */
+static inline int audio_ring_pop_wait(AudioRing *r, AudioRingEntry *out,
+	int timeout_ms)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	ts.tv_nsec += (long)timeout_ms * 1000000L;
+	if (ts.tv_nsec >= 1000000000L) {
+		ts.tv_sec++;
+		ts.tv_nsec -= 1000000000L;
+	}
+
+	pthread_mutex_lock(&r->lock);
+	while (r->count == 0) {
+		if (pthread_cond_timedwait(&r->cond, &r->lock, &ts) != 0) {
+			pthread_mutex_unlock(&r->lock);
+			return 0;
+		}
+	}
+	*out = r->buf[r->tail];
+	r->tail = (r->tail + 1) % AUDIO_RING_CAPACITY;
+	r->count--;
+	pthread_mutex_unlock(&r->lock);
+	return 1;
 }
 
 /** Pop a PCM frame from the ring.  Returns 1 on success, 0 if empty. */
