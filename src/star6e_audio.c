@@ -128,6 +128,12 @@ static void star6e_audio_lib_unload(Star6eAudioLib *lib)
 	memset(lib, 0, sizeof(*lib));
 }
 
+/* The SSC30KQ I2S interface supports 8kHz and 16kHz (clock=1).
+ * 48kHz is NOT supported — the hardware clock is not changed by the driver
+ * when rates above 16kHz are requested, causing the actual capture rate to
+ * remain at the hardware default and producing ~1000ms of buffering latency
+ * when packNumPerFrm is calculated for 48kHz.
+ * Valid sample rates: 8000, 16000. */
 static int star6e_audio_clock_for_rate(int rate)
 {
 	(void)rate;
@@ -292,7 +298,10 @@ static int configure_ai_device(Star6eAudioState *state)
 	dev_cfg.rate = (int)state->sample_rate;
 	dev_cfg.intf = 0;
 	dev_cfg.sound = (state->channels >= 2) ? 1 : 0;
-	dev_cfg.frmNum = 8;
+	/* 2 frames = 40ms at 20ms/frame — minimizes kernel-side latency.
+	 * 8 frames (old value) added 160ms of buffering before the thread
+	 * could start draining, producing 200-240ms end-to-end delay. */
+	dev_cfg.frmNum = 2;
 	/* Scale frame size to maintain ~20ms per frame at any sample rate */
 	dev_cfg.packNumPerFrm = (unsigned int)(state->sample_rate / 50);
 	dev_cfg.codecChnNum = 0;
@@ -352,7 +361,9 @@ static int start_ai_capture(Star6eAudioState *state, const VencConfig *vcfg)
 	ai_port.device = 0;
 	ai_port.channel = 0;
 	ai_port.port = 0;
-	ret = MI_SYS_SetChnOutputPortDepth(&ai_port, 2, 4);
+	/* user_depth=1, buf_depth=2: minimum port buffering (40ms at 20ms/frame).
+	 * Previous values (2, 4) added another 80ms of latency on top of frmNum. */
+	ret = MI_SYS_SetChnOutputPortDepth(&ai_port, 1, 2);
 	if (ret != 0) {
 		fprintf(stderr, "[audio] ERROR: SetChnOutputPortDepth failed (%d)\n", ret);
 		return -1;
