@@ -300,12 +300,9 @@ static int configure_ai_device(Star6eAudioState *state)
 	dev_cfg.rate = (int)state->sample_rate;
 	dev_cfg.intf = 0;
 	dev_cfg.sound = (state->channels >= 2) ? 1 : 0;
-	/* 3 frames = 60ms DMA ring buffer (3 × 20ms).  Gives the audio thread
-	 * enough slack to absorb ISP/AE event preemption without triggering
-	 * "slow fetching" warnings.  frmNum=1 and frmNum=2 both produced
-	 * warnings in practice; frmNum=3 avoids them while keeping latency
-	 * well below the original frmNum=8 (160ms). */
-	dev_cfg.frmNum = 3;
+	/* 20 frames = 400ms DMA ring buffer (20 × 20ms).  Large enough to
+	 * absorb any ISP/AE preemption without "slow fetching" warnings. */
+	dev_cfg.frmNum = 20;
 	/* Scale frame size to maintain ~20ms per frame at any sample rate */
 	dev_cfg.packNumPerFrm = (unsigned int)(state->sample_rate / 50);
 	dev_cfg.codecChnNum = 0;
