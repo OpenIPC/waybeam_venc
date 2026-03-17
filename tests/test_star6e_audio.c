@@ -89,6 +89,17 @@ static int test_star6e_audio_apply_mute_fail(void)
 	return failures;
 }
 
+static int test_star6e_audio_opus_fields_zero_init(void)
+{
+	Star6eAudioState state;
+	int failures = 0;
+
+	memset(&state, 0, sizeof(state));
+	CHECK("opus_lib zero init", state.opus_lib == NULL);
+	CHECK("opus_enc zero init", state.opus_enc == NULL);
+	return failures;
+}
+
 int test_star6e_audio(void)
 {
 	int failures = 0;
@@ -97,5 +108,6 @@ int test_star6e_audio(void)
 	failures += test_star6e_audio_apply_mute_requires_active_channel();
 	failures += test_star6e_audio_apply_mute_ok();
 	failures += test_star6e_audio_apply_mute_fail();
+	failures += test_star6e_audio_opus_fields_zero_init();
 	return failures;
 }

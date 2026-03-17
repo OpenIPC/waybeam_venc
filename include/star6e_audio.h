@@ -43,6 +43,8 @@ typedef struct {
 	volatile sig_atomic_t started;
 	int verbose;
 	AudioRing *rec_ring;   /* recording ring buffer (NULL if not recording) */
+	void *opus_lib;         /* dlopen handle for libopus.so (NULL if not Opus) */
+	void *opus_enc;         /* OpusEncoder* opaque handle (NULL if not Opus) */
 } Star6eAudioState;
 
 /** Initialize audio capture, encoder, and RTP output thread. */

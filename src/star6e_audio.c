@@ -68,7 +68,12 @@ struct Star6eAudioFrame {
 	unsigned int pcmLength;
 };
 
-enum { AUDIO_TYPE_G711A = 0, AUDIO_TYPE_G711U = 1 };
+enum { AUDIO_TYPE_G711A = 0, AUDIO_TYPE_G711U = 1, AUDIO_TYPE_OPUS = 2 };
+
+/* RFC 7587: Opus RTP payload uses a 48kHz nominal clock for timestamps */
+#define OPUS_RTP_CLOCK_HZ   48000
+/* OPUS_APPLICATION_AUDIO — optimum for most non-voice content at medium bitrates */
+#define OPUS_APPLICATION_AUDIO 2049
 
 extern int MI_SYS_ConfigPrivateMMAPool(AudioMMAPoolConfig *pstConf);
 
@@ -80,6 +85,8 @@ static struct {
 	int initialized;
 	Star6eAudioLib lib;
 } g_ai_persist;
+
+static void star6e_audio_teardown_opus(Star6eAudioState *state);
 
 static int star6e_audio_lib_load(Star6eAudioLib *lib)
 {
@@ -198,7 +205,15 @@ static void *star6e_audio_thread_fn(void *arg)
 {
 	Star6eAudioState *state = arg;
 	Star6eAudioFrame frame;
-	uint8_t enc_buf[2048];
+	uint8_t enc_buf[4096];
+
+	/* Resolve Opus encode function once at thread start to avoid per-frame dlsym */
+	typedef int32_t (*fn_opus_encode_t)(void *, const int16_t *, int,
+		uint8_t *, int32_t);
+	fn_opus_encode_t do_opus_encode = NULL;
+	if (state->codec_type == AUDIO_TYPE_OPUS && state->opus_lib)
+		do_opus_encode = (fn_opus_encode_t)(uintptr_t)dlsym(state->opus_lib,
+			"opus_encode");
 
 	if (state->verbose)
 		printf("[audio] Thread started (rate=%u, ch=%u, codec=%d%s)\n",
@@ -228,7 +243,19 @@ static void *star6e_audio_thread_fn(void *arg)
 				(uint16_t)(len > 0xFFFF ? 0xFFFF : len), ts_us);
 		}
 
-		if (data && len > 0 && state->codec_type >= 0) {
+		if (data && len > 0 && state->codec_type == AUDIO_TYPE_OPUS &&
+		    state->opus_enc && do_opus_encode) {
+			int frame_size = (int)(len / 2 / state->channels);
+			int32_t encoded = do_opus_encode(state->opus_enc,
+				(const int16_t *)data, frame_size,
+				enc_buf, (int32_t)sizeof(enc_buf));
+			if (encoded > 0) {
+				data = enc_buf;
+				len = (size_t)encoded;
+			}
+		} else if (data && len > 0 &&
+		           (state->codec_type == AUDIO_TYPE_G711A ||
+		            state->codec_type == AUDIO_TYPE_G711U)) {
 			size_t num_samples = len / 2;
 
 			if (num_samples > sizeof(enc_buf))
@@ -367,13 +394,19 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 			state->rtp.payload_type = 112; /* PCMU non-8kHz */
 		else if (state->codec_type == AUDIO_TYPE_G711A)
 			state->rtp.payload_type = 113; /* PCMA non-8kHz */
+		else if (state->codec_type == AUDIO_TYPE_OPUS)
+			state->rtp.payload_type = 120; /* dynamic PT for Opus (RFC 7587) */
 		else if (state->codec_type < 0 &&
 		         state->sample_rate == 44100)
 			state->rtp.payload_type = 11;  /* L16 44.1kHz mono */
 		else
 			state->rtp.payload_type = 110; /* dynamic PCM */
-		/* RTP timestamp increment = samples per frame (matches packNumPerFrm) */
-		state->rtp_frame_ticks = (unsigned int)(state->sample_rate / 50);
+		/* Opus uses a 48kHz nominal RTP clock per RFC 7587 §4.2.
+		 * All other codecs use samples per frame at the capture rate. */
+		if (state->codec_type == AUDIO_TYPE_OPUS)
+			state->rtp_frame_ticks = OPUS_RTP_CLOCK_HZ / 50;
+		else
+			state->rtp_frame_ticks = (unsigned int)(state->sample_rate / 50);
 	} else {
 		memset(&state->rtp, 0, sizeof(state->rtp));
 		state->rtp_frame_ticks = 0;
@@ -412,9 +445,45 @@ int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 		state->codec_type = AUDIO_TYPE_G711A;
 	else if (strcmp(vcfg->audio.codec, "g711u") == 0)
 		state->codec_type = AUDIO_TYPE_G711U;
+	else if (strcmp(vcfg->audio.codec, "opus") == 0)
+		state->codec_type = AUDIO_TYPE_OPUS;
 	else if (strcmp(vcfg->audio.codec, "pcm") != 0)
 		fprintf(stderr, "[audio] WARNING: unknown codec '%s', using raw PCM\n",
 			vcfg->audio.codec);
+
+	if (state->codec_type == AUDIO_TYPE_OPUS) {
+		typedef void *(*fn_create_t)(int32_t, int, int, int *);
+		fn_create_t fn_create;
+		int opus_err = 0;
+
+		state->opus_lib = dlopen("libopus.so", RTLD_NOW | RTLD_GLOBAL);
+		if (!state->opus_lib) {
+			fprintf(stderr, "[audio] WARNING: libopus.so not available: %s; "
+				"falling back to pcm\n", dlerror());
+			state->codec_type = -1;
+			goto opus_init_done;
+		}
+		fn_create = (fn_create_t)(uintptr_t)dlsym(state->opus_lib,
+			"opus_encoder_create");
+		if (!fn_create) {
+			fprintf(stderr, "[audio] WARNING: opus_encoder_create missing; "
+				"falling back to pcm\n");
+			dlclose(state->opus_lib);
+			state->opus_lib = NULL;
+			state->codec_type = -1;
+			goto opus_init_done;
+		}
+		state->opus_enc = fn_create((int32_t)state->sample_rate,
+			(int)state->channels, OPUS_APPLICATION_AUDIO, &opus_err);
+		if (!state->opus_enc || opus_err != 0) {
+			fprintf(stderr, "[audio] WARNING: opus_encoder_create failed "
+				"(err=%d); falling back to pcm\n", opus_err);
+			dlclose(state->opus_lib);
+			state->opus_lib = NULL;
+			state->codec_type = -1;
+		}
+	}
+opus_init_done:
 
 	if (g_ai_persist.initialized) {
 		/* Reinit: restore persisted lib and device state, only restart
@@ -453,6 +522,7 @@ int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 	return 0;
 
 fail:
+	star6e_audio_teardown_opus(state);
 	if (!g_ai_persist.initialized) {
 		if (state->channel_enabled) {
 			state->lib.fnDisableChannel(0, 0);
@@ -470,6 +540,22 @@ fail:
 	return 0;
 }
 
+static void star6e_audio_teardown_opus(Star6eAudioState *state)
+{
+	if (state->opus_enc && state->opus_lib) {
+		typedef void (*fn_destroy_t)(void *);
+		fn_destroy_t fn_destroy = (fn_destroy_t)(uintptr_t)dlsym(
+			state->opus_lib, "opus_encoder_destroy");
+		if (fn_destroy)
+			fn_destroy(state->opus_enc);
+		state->opus_enc = NULL;
+	}
+	if (state->opus_lib) {
+		dlclose(state->opus_lib);
+		state->opus_lib = NULL;
+	}
+}
+
 void star6e_audio_teardown(Star6eAudioState *state)
 {
 	if (!state)
@@ -480,6 +566,7 @@ void star6e_audio_teardown(Star6eAudioState *state)
 		pthread_join(state->thread, NULL);
 		state->started = 0;
 	}
+	star6e_audio_teardown_opus(state);
 	if (state->lib_loaded && !g_ai_persist.initialized) {
 		if (state->channel_enabled) {
 			state->lib.fnDisableChannel(0, 0);
