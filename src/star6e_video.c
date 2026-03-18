@@ -1,4 +1,5 @@
 #include "star6e_video.h"
+#include "star6e_audio.h"
 
 #include "rtp_session.h"
 #include "rtp_adapt.h"
@@ -169,7 +170,8 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 		clock_gettime(CLOCK_MONOTONIC, &verbose_ts_now);
 		if (stream_metrics_sample(&state->verbose_metrics, &verbose_ts_now,
 		    &sample)) {
-			printf("[verbose] %lds | %u fps | %u kbps | frame %u | avg %u B/frame | %u packs\n",
+			int ofd = stdout_filter_real_fd();
+			dprintf(ofd, "[verbose] %lds | %u fps | %u kbps | frame %u | avg %u B/frame | %u packs\n",
 				sample.uptime_s, sample.fps, sample.kbps,
 				state->frame_counter, sample.avg_bytes, stream->count);
 			if (star6e_output_is_rtp(output)) {
@@ -178,7 +180,7 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 					? (unsigned int)(state->verbose_packetizer_interval.rtp_payload_bytes /
 						state->verbose_packetizer_interval.rtp_packets) : 0;
 
-				printf("[pktzr] nals %u | rtp %u | fill %u B | single %u | ap %u/%u | fu %u\n",
+				dprintf(ofd, "[pktzr] nals %u | rtp %u | fill %u B | single %u | ap %u/%u | fu %u\n",
 					state->verbose_packetizer_interval.total_nals,
 					state->verbose_packetizer_interval.rtp_packets,
 					avg_rtp_payload,
@@ -187,7 +189,6 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 					state->verbose_packetizer_interval.ap_nals,
 					state->verbose_packetizer_interval.fu_packets);
 			}
-			fflush(stdout);
 			memset(&state->verbose_packetizer_interval, 0,
 				sizeof(state->verbose_packetizer_interval));
 		}

@@ -59,4 +59,9 @@ void star6e_audio_teardown(Star6eAudioState *state);
 /** Apply mute/unmute to audio encoder channel. */
 int star6e_audio_apply_mute(Star6eAudioState *state, int muted);
 
+/** Return the real (unfiltered) stdout fd.
+ *  When the stdout pipe filter is active, returns the saved fd that bypasses
+ *  the pipe.  Use with dprintf() so venc output never stalls on the filter. */
+int stdout_filter_real_fd(void);
+
 #endif /* STAR6E_AUDIO_H */

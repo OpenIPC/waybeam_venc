@@ -116,6 +116,16 @@ static void stdout_filter_start(void)
 	g_stdout_filter.active = 1;
 }
 
+/* Return the real (unfiltered) stdout fd when the filter is active,
+ * or STDOUT_FILENO when it is not.  Video code uses this with dprintf()
+ * so verbose/pktzr output bypasses the pipe and never stalls on a full
+ * pipe buffer or a preempted filter thread. */
+int stdout_filter_real_fd(void)
+{
+	return g_stdout_filter.active ? g_stdout_filter.real_stdout
+	                              : STDOUT_FILENO;
+}
+
 static void stdout_filter_stop(void)
 {
 	if (!g_stdout_filter.active)
@@ -125,10 +135,12 @@ static void stdout_filter_stop(void)
 	 * only reference), causing the filter thread's read() to return EOF. */
 	dup2(g_stdout_filter.real_stdout, STDOUT_FILENO);
 	pthread_join(g_stdout_filter.thread, NULL);
-	/* Safe to close read end only after thread has exited. */
+	/* Mark inactive before closing fds so stdout_filter_real_fd()
+	 * returns STDOUT_FILENO (already restored above) instead of
+	 * a fd that is about to be closed. */
+	g_stdout_filter.active = 0;
 	close(g_stdout_filter.pipe_read);
 	close(g_stdout_filter.real_stdout);
-	g_stdout_filter.active = 0;
 }
 
 /* Persists AI device state across reinit cycles.  After removing MI_SYS_Exit
