@@ -1,5 +1,35 @@
 # History
 
+## [0.3.3] - 2026-03-18
+
+- Add Opus audio codec via `libopus.so` (loaded at runtime; graceful fallback
+  to PCM if absent). RTP payload type PT=120, 48kHz nominal clock per RFC 7587.
+- Fix 48kHz audio on SSC338Q — three root causes:
+  - I2S clock misconfiguration: `i2s.clock` must be `0` (MCLK disabled; I2S
+    master generates clock from internal PLL). Setting clock=1 caused hardware
+    to deliver 16kHz data regardless of `rate` field. Source: SDK reference
+    `audio_all_test_case.c` which uses `eMclk=0, bSyncClock=TRUE`.
+  - Ring buffer too small: `AUDIO_RING_PCM_MAX` was 1280 (16kHz stereo
+    headroom). 48kHz mono frames are 1920 bytes; silent truncation produced
+    invalid Opus frame sizes → `OPUS_BAD_ARG`. Increased to 3840 (48kHz
+    stereo 20ms = 960×2×2).
+  - `bSyncClock` was 0; set to 1 per SDK reference.
+- Fix stdout filter not active on SIGHUP reinit: `stdout_filter_start()` was
+  inside `start_ai_capture()` which is skipped when AI device persists across
+  reinit. Moved to `star6e_audio_init()` to run on every init cycle.
+- Fix `stdout_filter_stop()` ordering: `close(pipe_read)` moved after
+  `pthread_join` to avoid closing the fd while the filter thread may still
+  be reading from it.
+- Add `stdout_filter_stop()` to fail path and libmi_ai unavailable early-return
+  to prevent filter leaks on audio init failure.
+- Remove dead `star6e_audio_clock_for_rate()` function.
+- Increase DMA ring: `frmNum` 8→20 (400ms), prevents data loss under ISP/AE
+  preemption bursts.
+- Reduce output port depth to `user=1, buf=2` (was 2,4), saving ~40ms latency.
+- Audio init survives SIGHUP reinit: AI device/channel state is persisted in
+  `g_ai_persist` across reinit cycles to avoid `CamOsMutexLock` deadlock after
+  2+ VPE create/destroy cycles.
+
 ## [0.3.2] - 2026-03-17
 - Fix SIGHUP reinit D-state: switch from full pipeline_stop/start to partial
   teardown that keeps sensor/VIF/VPE running. The SigmaStar MIPI PHY does not

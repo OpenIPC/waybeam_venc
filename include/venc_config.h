@@ -62,7 +62,7 @@ typedef struct {
 	bool enabled;
 	uint32_t sample_rate;   /* Hz: 8000, 16000, 48000 */
 	uint32_t channels;      /* 1 or 2 */
-	char codec[16];         /* "pcm", "g711a", "g711u" */
+	char codec[16];         /* "pcm", "g711a", "g711u", "opus" */
 	int volume;             /* 0..100 */
 	bool mute;
 } VencConfigAudio;
@@ -74,7 +74,9 @@ typedef struct {
 	uint16_t max_payload_size;
 	uint16_t target_pkt_rate;           /* adaptive pkt/s target (0=disable) */
 	bool send_feedback;
-	uint16_t audio_port;                /* 0 = same as video port */
+	uint16_t audio_port;                /* 0 = same as video port — AVOID: mixing
+	                                     * audio and video RTP on one socket causes
+	                                     * video decoder instability at the receiver */
 	uint16_t sidecar_port;              /* 0 = disabled */
 } VencConfigOutgoing;
 

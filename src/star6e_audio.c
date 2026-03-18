@@ -3,40 +3,14 @@
 #include "star6e.h"
 
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-
-typedef struct {
-	uint32_t _pad0[4];
-	uint16_t eModule;
-	uint16_t _pad1;
-	uint32_t u32Devid;
-	uint32_t u32PrivateHeapSize;
-} AudioDevPoolConf;
-
-typedef struct {
-	uint32_t _pad0[4];
-	uint16_t eModule;
-	uint16_t _pad1;
-	uint32_t u32Devid;
-	uint32_t u32Channel;
-	uint32_t u32Port;
-	uint32_t u32PrivateHeapSize;
-} AudioChnPortPoolConf;
-
-typedef struct {
-	uint32_t eConfigType;
-	char bCreate;
-	char _pad[3];
-	union {
-		uint8_t _pad[64];
-		AudioDevPoolConf stPreDevPrivPoolConfig;
-		AudioChnPortPoolConf stPreChnPortOutputPrivPool;
-	} uConfig;
-} AudioMMAPoolConfig;
 
 struct Star6eAudioDevConfig {
 	int rate;
@@ -68,9 +42,94 @@ struct Star6eAudioFrame {
 	unsigned int pcmLength;
 };
 
-enum { AUDIO_TYPE_G711A = 0, AUDIO_TYPE_G711U = 1 };
+enum { AUDIO_TYPE_G711A = 0, AUDIO_TYPE_G711U = 1, AUDIO_TYPE_OPUS = 2 };
 
-extern int MI_SYS_ConfigPrivateMMAPool(AudioMMAPoolConfig *pstConf);
+/* RFC 7587: Opus RTP payload uses a 48kHz nominal clock for timestamps */
+#define OPUS_RTP_CLOCK_HZ   48000
+/* OPUS_APPLICATION_AUDIO — optimum for most non-voice content at medium bitrates */
+#define OPUS_APPLICATION_AUDIO 2049
+
+/* MI_SYS_ConfigPrivateMMAPool is intentionally not called: on MMU-enabled
+ * platforms (including SSC30KQ) the kernel unconditionally disables private
+ * MMA pools and prints a kernel warning on every call regardless of
+ * parameters.  Audio DMA uses the shared pool without measurable impact. */
+
+/* Stdout filter: libmi_ai.so's internal thread (ai0_P0_MAIN) writes "[MI WRN]"
+ * noise to stdout using ANSI yellow escape codes (\033[1;33m).  Normal venc
+ * output never starts with ESC.  The filter interposes fd 1 with a pipe and
+ * drops any line beginning with ESC (0x1B), forwarding everything else to the
+ * real stdout.  Installed at audio init; torn down at audio teardown. */
+static struct {
+	pthread_t thread;
+	int pipe_read;
+	int real_stdout;
+	int active;
+} g_stdout_filter;
+
+static void *stdout_filter_fn(void *arg)
+{
+	(void)arg;
+	int rfd = g_stdout_filter.pipe_read;
+	int wfd = g_stdout_filter.real_stdout;
+	char buf[1024];
+	char line[1024];
+	int lpos = 0;
+	ssize_t n;
+
+	while ((n = read(rfd, buf, sizeof(buf))) > 0) {
+		for (ssize_t i = 0; i < n; i++) {
+			char c = buf[i];
+			if (lpos < (int)sizeof(line) - 1)
+				line[lpos++] = c;
+			if (c == '\n' || lpos == (int)sizeof(line) - 1) {
+				/* Discard lines beginning with ESC (MI library ANSI output) */
+				if (lpos > 0 && (unsigned char)line[0] != 0x1B)
+					(void)write(wfd, line, (size_t)lpos);
+				lpos = 0;
+			}
+		}
+	}
+	/* Flush any partial line */
+	if (lpos > 0 && (unsigned char)line[0] != 0x1B)
+		(void)write(wfd, line, (size_t)lpos);
+	return NULL;
+}
+
+static void stdout_filter_start(void)
+{
+	int pipefd[2];
+	if (pipe(pipefd) != 0)
+		return;
+	fflush(stdout);
+	g_stdout_filter.real_stdout = dup(STDOUT_FILENO);
+	g_stdout_filter.pipe_read = pipefd[0];
+	dup2(pipefd[1], STDOUT_FILENO);
+	close(pipefd[1]);
+	if (pthread_create(&g_stdout_filter.thread, NULL, stdout_filter_fn,
+	    NULL) != 0) {
+		/* Failed: restore and close */
+		dup2(g_stdout_filter.real_stdout, STDOUT_FILENO);
+		close(g_stdout_filter.real_stdout);
+		close(pipefd[0]);
+		return;
+	}
+	g_stdout_filter.active = 1;
+}
+
+static void stdout_filter_stop(void)
+{
+	if (!g_stdout_filter.active)
+		return;
+	fflush(stdout);
+	/* Restore real stdout — this closes the pipe write end (fd 1 was the
+	 * only reference), causing the filter thread's read() to return EOF. */
+	dup2(g_stdout_filter.real_stdout, STDOUT_FILENO);
+	pthread_join(g_stdout_filter.thread, NULL);
+	/* Safe to close read end only after thread has exited. */
+	close(g_stdout_filter.pipe_read);
+	close(g_stdout_filter.real_stdout);
+	g_stdout_filter.active = 0;
+}
 
 /* Persists AI device state across reinit cycles.  After removing MI_SYS_Exit
  * from the reinit path, the kernel AI device/channel state survives pipeline
@@ -81,10 +140,13 @@ static struct {
 	Star6eAudioLib lib;
 } g_ai_persist;
 
+static void star6e_audio_teardown_opus(Star6eAudioState *state);
+
 static int star6e_audio_lib_load(Star6eAudioLib *lib)
 {
 	memset(lib, 0, sizeof(*lib));
 	lib->handle = dlopen("libmi_ai.so", RTLD_NOW | RTLD_GLOBAL);
+
 	if (!lib->handle) {
 		fprintf(stderr, "[audio] Cannot load libmi_ai.so: %s\n", dlerror());
 		return -1;
@@ -119,12 +181,6 @@ static void star6e_audio_lib_unload(Star6eAudioLib *lib)
 	if (lib->handle)
 		dlclose(lib->handle);
 	memset(lib, 0, sizeof(*lib));
-}
-
-static int star6e_audio_clock_for_rate(int rate)
-{
-	(void)rate;
-	return 1;
 }
 
 static int star6e_audio_volume_to_db(int volume)
@@ -194,111 +250,130 @@ static size_t star6e_audio_encode_g711(const int16_t *pcm, size_t num_samples,
 	return num_samples;
 }
 
-static void *star6e_audio_thread_fn(void *arg)
+/* Thread A: audio capture only.
+ * GetFrame → timestamp → push raw PCM to cap_ring → ReleaseFrame.
+ * Nothing else: no encode, no send, no prints in the hot loop.
+ * Runs SCHED_FIFO so it is never preempted past one 20ms DMA frame. */
+static void *star6e_audio_capture_fn(void *arg)
 {
 	Star6eAudioState *state = arg;
 	Star6eAudioFrame frame;
-	uint8_t enc_buf[2048];
-
-	if (state->verbose)
-		printf("[audio] Thread started (rate=%u, ch=%u, codec=%d%s)\n",
-			state->sample_rate, state->channels, state->codec_type,
-			state->codec_type != -1 ? " (sw encode)" : " (pcm)");
 
 	while (state->running) {
-		const uint8_t *data;
-		size_t len;
 		int ret;
+		struct timespec ts;
+		uint64_t ts_us;
 
 		memset(&frame, 0, sizeof(frame));
 		ret = state->lib.fnGetFrame(0, 0, &frame, NULL, 50);
 		if (ret != 0)
 			continue;
 
-		data = frame.addr[0];
-		len = frame.length;
-
-		/* Push raw PCM to recording ring before codec encode */
-		if (data && len > 0 && state->rec_ring) {
-			struct timespec _ts;
-			clock_gettime(CLOCK_MONOTONIC, &_ts);
-			uint64_t ts_us = (uint64_t)_ts.tv_sec * 1000000ULL +
-				(uint64_t)_ts.tv_nsec / 1000ULL;
-			audio_ring_push(state->rec_ring, data,
-				(uint16_t)(len > 0xFFFF ? 0xFFFF : len), ts_us);
-		}
-
-		if (data && len > 0 && state->codec_type >= 0) {
-			size_t num_samples = len / 2;
-
-			if (num_samples > sizeof(enc_buf))
-				num_samples = sizeof(enc_buf);
-			len = star6e_audio_encode_g711((const int16_t *)data, num_samples,
-				enc_buf, state->codec_type);
-			data = enc_buf;
-		}
-
-		if (data && len > 0) {
-			(void)star6e_audio_output_send(&state->output, data, len,
-				&state->rtp, state->rtp_frame_ticks);
+		if (frame.addr[0] && frame.length > 0) {
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			ts_us = (uint64_t)ts.tv_sec * 1000000ULL +
+				(uint64_t)ts.tv_nsec / 1000ULL;
+			audio_ring_push(&state->cap_ring, frame.addr[0],
+				(uint16_t)(frame.length > 0xFFFF ? 0xFFFF
+					: frame.length),
+				ts_us);
 		}
 
 		state->lib.fnFreeFrame(0, 0, &frame, NULL);
 	}
+	return NULL;
+}
+
+/* Thread B: encode and send.
+ * Pops raw PCM from cap_ring, pushes to rec_ring (recording), encodes,
+ * and sends via RTP/UDP.  Runs at normal SCHED_OTHER priority — timing
+ * here does not affect the DMA capture window. */
+static void *star6e_audio_encode_fn(void *arg)
+{
+	Star6eAudioState *state = arg;
+	uint8_t enc_buf[4096];
+
+	typedef int32_t (*fn_opus_encode_t)(void *, const int16_t *, int,
+		uint8_t *, int32_t);
+	fn_opus_encode_t do_opus_encode = NULL;
+	if (state->codec_type == AUDIO_TYPE_OPUS && state->opus_lib)
+		do_opus_encode = (fn_opus_encode_t)(uintptr_t)dlsym(state->opus_lib,
+			"opus_encode");
 
 	if (state->verbose)
-		printf("[audio] Thread stopped\n");
+		printf("[audio] Started (rate=%u, ch=%u, codec=%d)\n",
+			state->sample_rate, state->channels, state->codec_type);
+
+	while (state->running || audio_ring_count(&state->cap_ring) > 0) {
+		AudioRingEntry entry;
+		const uint8_t *data;
+		size_t len;
+
+		if (!audio_ring_pop_wait(&state->cap_ring, &entry, 25))
+			continue;
+
+		data = entry.pcm;
+		len  = entry.length;
+
+		/* Forward raw PCM to recording ring before encode */
+		if (state->rec_ring)
+			audio_ring_push(state->rec_ring, data,
+				(uint16_t)len, entry.timestamp_us);
+
+		if (len > 0 && state->codec_type == AUDIO_TYPE_OPUS &&
+		    state->opus_enc && do_opus_encode) {
+			int frame_size = (int)(len / 2 / state->channels);
+			int32_t encoded = do_opus_encode(state->opus_enc,
+				(const int16_t *)data, frame_size,
+				enc_buf, (int32_t)sizeof(enc_buf));
+			if (encoded <= 0) {
+				fprintf(stderr, "[audio] opus_encode error %d, dropping frame\n",
+					(int)encoded);
+				continue;
+			}
+			data = enc_buf;
+			len = (size_t)encoded;
+		} else if (len > 0 &&
+		           (state->codec_type == AUDIO_TYPE_G711A ||
+		            state->codec_type == AUDIO_TYPE_G711U)) {
+			size_t n = len / 2;
+			if (n > sizeof(enc_buf)) n = sizeof(enc_buf);
+			len = star6e_audio_encode_g711((const int16_t *)data, n,
+				enc_buf, state->codec_type);
+			data = enc_buf;
+		}
+
+		if (len > 0)
+			(void)star6e_audio_output_send(&state->output, data, len,
+				&state->rtp, state->rtp_frame_ticks);
+	}
+
+	if (state->verbose)
+		printf("[audio] Stopped\n");
 	return NULL;
 }
 
 static int configure_ai_device(Star6eAudioState *state)
 {
 	Star6eAudioDevConfig dev_cfg;
-	AudioMMAPoolConfig pool_cfg;
-	uint32_t dev_heap = 64 * 1024;
-	uint32_t buf_size;
-	uint32_t chn_heap;
-	int pool_ret;
 	int ret;
 
 	memset(&dev_cfg, 0, sizeof(dev_cfg));
 	dev_cfg.rate = (int)state->sample_rate;
 	dev_cfg.intf = 0;
 	dev_cfg.sound = (state->channels >= 2) ? 1 : 0;
-	dev_cfg.frmNum = 8;
+	/* 20 frames = 400ms DMA ring buffer.  Prevents data loss under ISP/AE
+	 * preemption. */
+	dev_cfg.frmNum = 20;
 	/* Scale frame size to maintain ~20ms per frame at any sample rate */
 	dev_cfg.packNumPerFrm = (unsigned int)(state->sample_rate / 50);
 	dev_cfg.codecChnNum = 0;
 	dev_cfg.chnNum = state->channels;
-	dev_cfg.i2s.clock = star6e_audio_clock_for_rate(dev_cfg.rate);
-
-	buf_size = dev_cfg.packNumPerFrm * 2 * state->channels * 2;
-	buf_size = ((buf_size + 4095) / 4096) * 4096;
-	chn_heap = buf_size * dev_cfg.frmNum * 2;
-
-	memset(&pool_cfg, 0, sizeof(pool_cfg));
-	pool_cfg.eConfigType = 2;
-	pool_cfg.bCreate = 1;
-	pool_cfg.uConfig.stPreDevPrivPoolConfig.eModule = 4;
-	pool_cfg.uConfig.stPreDevPrivPoolConfig.u32Devid = 0;
-	pool_cfg.uConfig.stPreDevPrivPoolConfig.u32PrivateHeapSize = dev_heap;
-	pool_ret = MI_SYS_ConfigPrivateMMAPool(&pool_cfg);
-	if (pool_ret != 0)
-		fprintf(stderr, "[audio] WARNING: ConfigPrivateMMAPool(dev) failed %d\n",
-			pool_ret);
-
-	memset(&pool_cfg, 0, sizeof(pool_cfg));
-	pool_cfg.eConfigType = 3;
-	pool_cfg.bCreate = 1;
-	pool_cfg.uConfig.stPreChnPortOutputPrivPool.eModule = 4;
-	pool_cfg.uConfig.stPreChnPortOutputPrivPool.u32Devid = 0;
-	pool_cfg.uConfig.stPreChnPortOutputPrivPool.u32Channel = 0;
-	pool_cfg.uConfig.stPreChnPortOutputPrivPool.u32Port = 0;
-	pool_cfg.uConfig.stPreChnPortOutputPrivPool.u32PrivateHeapSize = chn_heap;
-	pool_ret = MI_SYS_ConfigPrivateMMAPool(&pool_cfg);
-	if (pool_ret != 0)
-		fprintf(stderr, "[audio] WARNING: ConfigPrivateMMAPool(chn) failed %d\n",
-			pool_ret);
+	/* SDK reference (audio_all_test_case.c): MCLK disabled (clock=0); the
+	 * I2S master generates its own clock from internal PLL based on rate.
+	 * bSyncClock=1: I2S TX and RX share clock source. */
+	dev_cfg.i2s.clock = 0;
+	dev_cfg.i2s.syncRxClkOn = 1;
 
 	ret = state->lib.fnSetDeviceConfig(0, &dev_cfg);
 	if (ret != 0) {
@@ -325,7 +400,9 @@ static int start_ai_capture(Star6eAudioState *state, const VencConfig *vcfg)
 	ai_port.device = 0;
 	ai_port.channel = 0;
 	ai_port.port = 0;
-	ret = MI_SYS_SetChnOutputPortDepth(&ai_port, 2, 4);
+	/* user_depth=1, buf_depth=2: minimum port buffering (40ms at 20ms/frame).
+	 * Previous values (2, 4) added another 80ms of latency on top of frmNum. */
+	ret = MI_SYS_SetChnOutputPortDepth(&ai_port, 1, 2);
 	if (ret != 0) {
 		fprintf(stderr, "[audio] ERROR: SetChnOutputPortDepth failed (%d)\n", ret);
 		return -1;
@@ -367,13 +444,19 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 			state->rtp.payload_type = 112; /* PCMU non-8kHz */
 		else if (state->codec_type == AUDIO_TYPE_G711A)
 			state->rtp.payload_type = 113; /* PCMA non-8kHz */
+		else if (state->codec_type == AUDIO_TYPE_OPUS)
+			state->rtp.payload_type = 120; /* dynamic PT for Opus (RFC 7587) */
 		else if (state->codec_type < 0 &&
 		         state->sample_rate == 44100)
 			state->rtp.payload_type = 11;  /* L16 44.1kHz mono */
 		else
 			state->rtp.payload_type = 110; /* dynamic PCM */
-		/* RTP timestamp increment = samples per frame (matches packNumPerFrm) */
-		state->rtp_frame_ticks = (unsigned int)(state->sample_rate / 50);
+		/* Opus uses a 48kHz nominal RTP clock per RFC 7587 §4.2.
+		 * All other codecs use samples per frame at the capture rate. */
+		if (state->codec_type == AUDIO_TYPE_OPUS)
+			state->rtp_frame_ticks = OPUS_RTP_CLOCK_HZ / 50;
+		else
+			state->rtp_frame_ticks = (unsigned int)(state->sample_rate / 50);
 	} else {
 		memset(&state->rtp, 0, sizeof(state->rtp));
 		state->rtp_frame_ticks = 0;
@@ -382,12 +465,39 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 	if (star6e_audio_output_port(&state->output) == 0)
 		fprintf(stderr, "[audio] WARNING: audio output has no destination port\n");
 
+	audio_ring_init(&state->cap_ring);
+
 	state->running = 1;
-	if (pthread_create(&state->thread, NULL, star6e_audio_thread_fn, state) != 0) {
-		fprintf(stderr, "[audio] ERROR: pthread_create failed\n");
+	if (pthread_create(&state->capture_thread, NULL,
+	    star6e_audio_capture_fn, state) != 0) {
+		fprintf(stderr, "[audio] ERROR: capture pthread_create failed\n");
 		state->running = 0;
+		audio_ring_destroy(&state->cap_ring);
 		return -1;
 	}
+	/* SCHED_FIFO priority 1 (minimum RT) is sufficient: the MI AI kernel
+	 * thread (ai0_P0_MAIN) signals frame-ready at SCHED_RR/98, and any
+	 * briefly-delayed fetch is handled by the 400ms DMA ring (frmNum=20).
+	 * Higher priorities (e.g. 90) were tested and made timing worse. */
+	{
+		struct sched_param sp;
+		sp.sched_priority = 1;
+		if (pthread_setschedparam(state->capture_thread, SCHED_FIFO,
+		    &sp) != 0 && state->verbose)
+			fprintf(stderr, "[audio] note: could not set RT priority"
+				" (run as root?)\n");
+	}
+
+	if (pthread_create(&state->encode_thread, NULL,
+	    star6e_audio_encode_fn, state) != 0) {
+		fprintf(stderr, "[audio] ERROR: encode pthread_create failed\n");
+		state->running = 0;
+		audio_ring_wake(&state->cap_ring);
+		pthread_join(state->capture_thread, NULL);
+		audio_ring_destroy(&state->cap_ring);
+		return -1;
+	}
+
 	state->started = 1;
 	return 0;
 }
@@ -412,9 +522,51 @@ int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 		state->codec_type = AUDIO_TYPE_G711A;
 	else if (strcmp(vcfg->audio.codec, "g711u") == 0)
 		state->codec_type = AUDIO_TYPE_G711U;
+	else if (strcmp(vcfg->audio.codec, "opus") == 0)
+		state->codec_type = AUDIO_TYPE_OPUS;
 	else if (strcmp(vcfg->audio.codec, "pcm") != 0)
 		fprintf(stderr, "[audio] WARNING: unknown codec '%s', using raw PCM\n",
 			vcfg->audio.codec);
+
+	if (state->codec_type == AUDIO_TYPE_OPUS) {
+		typedef void *(*fn_create_t)(int32_t, int, int, int *);
+		fn_create_t fn_create;
+		int opus_err = 0;
+
+		state->opus_lib = dlopen("libopus.so", RTLD_NOW | RTLD_GLOBAL);
+		if (!state->opus_lib) {
+			fprintf(stderr, "[audio] WARNING: libopus.so not available: %s; "
+				"falling back to pcm\n", dlerror());
+			state->codec_type = -1;
+			goto opus_init_done;
+		}
+		fn_create = (fn_create_t)(uintptr_t)dlsym(state->opus_lib,
+			"opus_encoder_create");
+		if (!fn_create) {
+			fprintf(stderr, "[audio] WARNING: opus_encoder_create missing; "
+				"falling back to pcm\n");
+			dlclose(state->opus_lib);
+			state->opus_lib = NULL;
+			state->codec_type = -1;
+			goto opus_init_done;
+		}
+		state->opus_enc = fn_create((int32_t)state->sample_rate,
+			(int)state->channels, OPUS_APPLICATION_AUDIO, &opus_err);
+		if (!state->opus_enc || opus_err != 0) {
+			fprintf(stderr, "[audio] WARNING: opus_encoder_create failed "
+				"(err=%d); falling back to pcm\n", opus_err);
+			dlclose(state->opus_lib);
+			state->opus_lib = NULL;
+			state->codec_type = -1;
+		}
+	}
+opus_init_done:
+
+	/* Install stdout filter before touching the MI AI library.  The
+	 * library's internal thread (ai0_P0_MAIN) writes "[MI WRN]" lines to
+	 * stdout at any time once the device is enabled — including on reinit
+	 * when the device stays enabled across the stop/start cycle. */
+	stdout_filter_start();
 
 	if (g_ai_persist.initialized) {
 		/* Reinit: restore persisted lib and device state, only restart
@@ -430,6 +582,7 @@ int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 	} else {
 		if (star6e_audio_lib_load(&state->lib) != 0) {
 			fprintf(stderr, "[audio] WARNING: audio enabled but libmi_ai.so not available\n");
+			stdout_filter_stop();
 			return 0;
 		}
 		state->lib_loaded = 1;
@@ -453,6 +606,7 @@ int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 	return 0;
 
 fail:
+	star6e_audio_teardown_opus(state);
 	if (!g_ai_persist.initialized) {
 		if (state->channel_enabled) {
 			state->lib.fnDisableChannel(0, 0);
@@ -466,8 +620,25 @@ fail:
 		state->lib_loaded = 0;
 	}
 	star6e_audio_output_teardown(&state->output);
+	stdout_filter_stop();
 	fprintf(stderr, "[audio] WARNING: audio init failed, continuing without audio\n");
 	return 0;
+}
+
+static void star6e_audio_teardown_opus(Star6eAudioState *state)
+{
+	if (state->opus_enc && state->opus_lib) {
+		typedef void (*fn_destroy_t)(void *);
+		fn_destroy_t fn_destroy = (fn_destroy_t)(uintptr_t)dlsym(
+			state->opus_lib, "opus_encoder_destroy");
+		if (fn_destroy)
+			fn_destroy(state->opus_enc);
+		state->opus_enc = NULL;
+	}
+	if (state->opus_lib) {
+		dlclose(state->opus_lib);
+		state->opus_lib = NULL;
+	}
 }
 
 void star6e_audio_teardown(Star6eAudioState *state)
@@ -477,9 +648,17 @@ void star6e_audio_teardown(Star6eAudioState *state)
 
 	if (state->started) {
 		state->running = 0;
-		pthread_join(state->thread, NULL);
+		/* Wake encode thread in case it is blocked in pop_wait */
+		audio_ring_wake(&state->cap_ring);
+		pthread_join(state->capture_thread, NULL);
+		pthread_join(state->encode_thread, NULL);
+		if (state->cap_ring.dropped)
+			fprintf(stderr, "[audio] cap_ring dropped %u frames\n",
+				state->cap_ring.dropped);
+		audio_ring_destroy(&state->cap_ring);
 		state->started = 0;
 	}
+	star6e_audio_teardown_opus(state);
 	if (state->lib_loaded && !g_ai_persist.initialized) {
 		if (state->channel_enabled) {
 			state->lib.fnDisableChannel(0, 0);
@@ -493,6 +672,7 @@ void star6e_audio_teardown(Star6eAudioState *state)
 		state->lib_loaded = 0;
 	}
 	star6e_audio_output_teardown(&state->output);
+	stdout_filter_stop();
 }
 
 int star6e_audio_apply_mute(Star6eAudioState *state, int muted)

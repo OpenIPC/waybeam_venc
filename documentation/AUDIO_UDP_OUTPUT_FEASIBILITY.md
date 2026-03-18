@@ -4,9 +4,9 @@
 
 venc supports optional audio capture via the SigmaStar MI_AI hardware audio
 input interface. Audio is captured in a dedicated thread, optionally encoded
-in software, and sent as UDP packets alongside (or separate from) the video
-stream. The MI_AI library (`libmi_ai.so`) is loaded at runtime via `dlopen`;
-if the library is absent, audio is silently disabled.
+in software, and sent as UDP/RTP packets alongside (or separate from) the
+video stream. The MI_AI library (`libmi_ai.so`) is loaded at runtime via
+`dlopen`; if the library is absent, audio is silently disabled.
 
 ## Configuration
 
@@ -19,9 +19,9 @@ Audio is configured via the `audio` section in `venc.json`, plus the
 {
   "audio": {
     "enabled": true,
-    "sampleRate": 8000,
+    "sampleRate": 48000,
     "channels": 1,
-    "codec": "g711a",
+    "codec": "opus",
     "volume": 80
   },
   "outgoing": {
@@ -38,22 +38,23 @@ Audio is configured via the `audio` section in `venc.json`, plus the
 | Field | Type | Default | Valid values | Description |
 |-------|------|---------|-------------|-------------|
 | `enabled` | bool | `false` | `true`, `false` | Master enable for audio capture |
-| `sampleRate` | int | `16000` | `8000`, `16000`, `32000`, `48000` | Sample rate in Hz. Lower rates use less bandwidth. 8000 is typical for voice. |
-| `channels` | int | `1` | `1`, `2` | 1 = mono, 2 = stereo. Clamped to 1-2. |
-| `codec` | string | `"pcm"` | `"pcm"`, `"g711a"`, `"g711u"` | Audio codec (see below). Unknown values fall back to PCM with a warning. |
+| `sampleRate` | int | `16000` | `8000`, `16000`, `32000`, `48000` | Sample rate in Hz. Hardware-validated on SSC338Q at 8/16/48 kHz. |
+| `channels` | int | `1` | `1`, `2` | 1 = mono, 2 = stereo. |
+| `codec` | string | `"pcm"` | `"pcm"`, `"g711a"`, `"g711u"`, `"opus"` | Audio codec (see below). Unknown values fall back to PCM with a warning. |
 | `volume` | int | `80` | `0`-`100` | Capture volume. Mapped to MI_AI dB scale (-60 to +30 dB). |
+| `mute` | bool | `false` | `true`, `false` | Mute audio output (capture still runs). |
 
 ### Outgoing settings (audio-related)
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `audioPort` | int | `5601` | UDP port for audio. `0` = same destination as video (demux by RTP payload type or packet header). Any other value = dedicated audio port. |
+| `audioPort` | int | `0` | UDP port for audio. `0` = same destination as video (demux by RTP payload type). Any non-zero value = dedicated audio port. |
 
 ## Codecs
 
 All encoding is done in software. The SigmaStar MI_AI hardware encoder
-(`MI_AI_EnableAenc`) is not used due to a confirmed segfault in the vendor
-library's `MI_AI_GetFrame` when encoding is enabled.
+(`MI_AI_EnableAenc`) is not used due to a confirmed segfault inside the
+vendor library when encoding is enabled.
 
 ### pcm — Raw PCM
 
@@ -63,33 +64,40 @@ library's `MI_AI_GetFrame` when encoding is enabled.
   - 16 kHz mono: 256 kbps
   - 48 kHz mono: 768 kbps
 - CPU overhead: none (memcpy only)
-- Use when bandwidth is not a concern or for maximum quality.
 
 ### g711a — G.711 A-law
 
-- ITU-T G.711 A-law companding. 16-bit PCM compressed to 8-bit.
-- 2:1 compression ratio.
-- Bandwidth: `sampleRate * channels` bytes/sec
-  - 8 kHz mono: 64 kbps
-- CPU overhead: ~0% (measured on SSC30KQ at 8 kHz mono)
-- Standard telephony codec. Good voice quality at low bandwidth.
-- RTP payload type: PT=8 at 8kHz (RFC 3551), PT=113 at other rates (Waybeam convention)
+- ITU-T G.711 A-law companding. 16-bit PCM → 8-bit.
+- Bandwidth: `sampleRate * channels` bytes/sec (8 kHz mono: 64 kbps)
+- CPU overhead: ~0%
+- RTP payload type: PT=8 at 8kHz (RFC 3551), PT=113 at other rates
 
 ### g711u — G.711 μ-law
 
-- ITU-T G.711 μ-law companding. 16-bit PCM compressed to 8-bit.
-- 2:1 compression ratio. Slightly better SNR than A-law at low signal levels.
+- ITU-T G.711 μ-law companding. Slightly better SNR than A-law at low signal levels.
 - Bandwidth: same as g711a
-- CPU overhead: ~0% (measured on SSC30KQ at 8 kHz mono)
-- RTP payload type: PT=0 at 8kHz (RFC 3551), PT=112 at other rates (Waybeam convention)
+- CPU overhead: ~0%
+- RTP payload type: PT=0 at 8kHz (RFC 3551), PT=112 at other rates
+
+### opus — Opus
+
+- Opus codec via `libopus.so` (loaded at runtime via `dlopen`).
+- If `libopus.so` is unavailable, falls back to raw PCM with a warning.
+- Bandwidth: ~16–64 kbps depending on encoder bitrate (Opus default for VoIP quality)
+- CPU overhead: small (~1–2% on SSC338Q at 48kHz mono)
+- RTP payload type: PT=120 (dynamic, per RFC 7587)
+- RTP clock: **always 48kHz** per RFC 7587 §4.2, regardless of encoder sample rate
+  - Timestamp increments by 960 per 20ms frame (48000/50 = 960)
+- Recommended: `sampleRate: 48000` — native Opus rate, no resampling
 
 ### Codec comparison
 
-| Codec | Bandwidth (8kHz mono) | CPU | Quality |
-|-------|-----------------------|-----|---------|
-| pcm | 128 kbps | 0% | Lossless |
-| g711a | 64 kbps | 0% | Good (telephony standard) |
-| g711u | 64 kbps | 0% | Good (slightly better low-level SNR) |
+| Codec | Bandwidth (48kHz mono) | CPU | Quality | Library required |
+|-------|----------------------|-----|---------|-----------------|
+| pcm | 768 kbps | 0% | Lossless | none |
+| g711a | 48 kbps | ~0% | Good (telephony) | none |
+| g711u | 48 kbps | ~0% | Good (μ-law) | none |
+| opus | ~32 kbps | ~1% | Excellent | `libopus.so` |
 
 ## Transport modes
 
@@ -102,13 +110,10 @@ Standard RTP packetization with 12-byte header:
 | Field | Value |
 |-------|-------|
 | Version | 2 |
-| Payload type | Per codec/rate (see PT table in README.md) |
+| Payload type | Per codec/rate (see table above) |
 | SSRC | Random, distinct from video SSRC |
-| Timestamp | Increments by `sample_rate / 50` per frame (~20ms) |
-| Clock rate | Matches sample rate |
-
-Audio uses a separate SSRC from video, allowing receivers to demux streams
-on the same port by SSRC or payload type.
+| Timestamp | +960 per frame for Opus (48kHz nominal); +`sampleRate/50` for others |
+| Clock rate | 48kHz for Opus (RFC 7587); `sampleRate` for PCM/G.711 |
 
 ### Compact mode (`"streamMode": "compact"`)
 
@@ -122,138 +127,139 @@ on the same port by SSRC or payload type.
 [4..] = audio payload
 ```
 
-Payload is fragmented into chunks of `maxPayloadSize - 4` bytes if needed.
-
 ## Port behavior
 
 - **`audioPort: 0`** (default): Audio packets share the video UDP socket and
   destination. Receivers demux by RTP payload type (RTP mode) or magic byte
   (compact mode).
 - **`audioPort: N`** (N > 0): Audio is sent to a dedicated UDP port on the
-  same destination host. A separate UDP socket is created. Clean separation;
-  receivers bind two ports independently.
-
-Audio destination IP always follows the video destination. When the video
-server is changed at runtime (via HTTP API `apply_server`), audio
-automatically follows because the audio thread reads the video destination
-via a shared pointer.
+  same destination host as video. Clean separation; receivers bind two ports.
 
 ## Architecture
 
 ```
-Microphone/I2S ─► MI_AI device ─► MI_AI channel ─► GetFrame loop
-                                                        │
-                                              ┌─────────┴─────────┐
-                                              │ SW G.711 encode   │
-                                              │ (or pass-through  │
-                                              │  for PCM)         │
-                                              └─────────┬─────────┘
-                                                        │
-                                              ┌─────────┴─────────┐
-                                              │ RTP packetize or  │
-                                              │ compact header    │
-                                              └─────────┬─────────┘
-                                                        │
-                                                   UDP sendto
+Microphone/I2S ──► MI_AI device ──► DMA ring (frmNum=20, 400ms)
+                                         │
+                                  GetFrame (50ms timeout)
+                                         │
+                                ┌────────▼────────┐
+                                │ Capture thread  │  SCHED_FIFO/1
+                                │ (Thread A)      │
+                                └────────┬────────┘
+                                         │  cap_ring (64 entries)
+                                ┌────────▼────────┐
+                                │ Encode thread   │  SCHED_OTHER
+                                │ (Thread B)      │
+                                │                 │
+                                │ ┌─────────────┐ │
+                                │ │ Opus/G.711  │ │
+                                │ │ SW encode   │ │
+                                │ └──────┬──────┘ │
+                                └────────┼────────┘
+                                         │
+                                  RTP packetize
+                                         │
+                                    UDP sendto
 ```
 
 ### Threading model
 
-Audio capture runs in a **separate thread** from the video streaming loop.
-`MI_AI_GetFrame` blocks with a 50ms timeout per call. The audio thread is
-created during `pipeline_start` and joined during `pipeline_stop`.
+Audio uses two threads:
 
-Thread safety: the audio thread shares the video UDP socket (when
-`audioPort == 0`). `sendto`/`sendmsg` is thread-safe on Linux.
+- **Thread A (capture)**: Calls `MI_AI_GetFrame` in a tight loop with 50ms
+  timeout, copies the PCM frame into `cap_ring`, releases the MI frame
+  immediately. Runs at `SCHED_FIFO` priority 1 (minimum RT) — sufficient
+  since the DMA ring holds 400ms (frmNum=20), and no data loss occurs unless
+  the ring fills. Higher RT priority was tested and made timing worse due to
+  interference with ISP threads.
+- **Thread B (encode+send)**: Pops frames from `cap_ring`, encodes (Opus/G.711
+  or passthrough), packetizes, and sends via UDP. Runs at `SCHED_OTHER`.
+
+### MI_AI device configuration
+
+Key parameters:
+- `rate`: sample rate (8000, 16000, 48000)
+- `i2s.clock = 0`: MCLK **disabled** — I2S master generates its clock from
+  the internal PLL based on `rate`. Must be 0; setting to 1 (12.288 MHz MCLK)
+  causes the driver to ignore the `rate` field and deliver 16kHz data
+  regardless of configuration.
+- `i2s.syncRxClkOn = 1`: I2S TX and RX share the same clock source (per SDK
+  reference).
+- `frmNum = 20`: 400ms DMA ring — protects against ISP/AE preemption bursts.
+- `packNumPerFrm = sampleRate/50`: ~20ms per DMA frame at all sample rates.
+- Port depth: `user=1, buf=2` — minimum buffering (40ms), down from the
+  default (2,4) which added 80ms unnecessarily.
+
+### stdout filter
+
+`libmi_ai.so`'s internal DMA thread (`ai0_P0_MAIN`, SCHED_RR/98) writes
+`[MI WRN]: Buffer(s) is lost due to slow fetching` to **stdout** (fd 1)
+using ANSI yellow escape codes. The filter interposes fd 1 with a pipe;
+a filter thread discards any line beginning with ESC (0x1B) and forwards
+everything else to the real stdout. Installed at every audio init (including
+reinit), torn down at teardown.
 
 ### Library loading
 
 `libmi_ai.so` is loaded via `dlopen("libmi_ai.so", RTLD_NOW | RTLD_GLOBAL)`.
-`RTLD_NOW` ensures all symbols are resolved at load time — if any are
-missing, `dlopen` fails cleanly with a `dlerror()` message instead of
-crashing at runtime. Nine MI_AI functions are resolved via `dlsym`.
-
-If the library is not present on the target filesystem, audio init prints
-a warning and continues without audio. The video pipeline is unaffected.
-
-### MMA pool allocation
-
-The SigmaStar MI_AI module requires private DMA buffer pools allocated
-before device configuration. Two pools are created:
-
-1. **Device pool** (64 KB): DMA buffers for the audio input hardware.
-2. **Channel output pool** (variable): Ring buffer for captured frames.
-   Size = `packNumPerFrm * bytesPerSample * channels * 2 * 8` (aligned to 4K).
-
-Without these pools, `MI_AI_GetFrame` returns `MI_AI_ERR_NOBUF` (0xA004200D).
-
-## HTTP API
-
-All audio settings are exposed via the existing HTTP API with `MUT_RESTART`
-mutability (changes require pipeline restart):
-
-```
-GET  /api/v1/get?audio.enabled
-POST /api/v1/set?audio.enabled=true
-POST /api/v1/set?audio.codec=g711a
-POST /api/v1/set?audio.sampleRate=8000
-POST /api/v1/set?audio.volume=80
-POST /api/v1/set?outgoing.audioPort=5601
-```
+`libopus.so` is loaded on demand when `codec: "opus"` is configured.
+Missing libraries cause graceful fallback (warning + continue without audio).
 
 ## Receiving audio
 
-### With ffplay (RTP mode, separate audio port)
+### Opus (recommended)
 
 ```bash
+# ffplay
 ffplay -nodisp -f rtp -i rtp://0.0.0.0:5601
+
+# GStreamer
+gst-launch-1.0 udpsrc port=5601 caps="application/x-rtp,payload=120,clock-rate=48000,encoding-name=OPUS" ! \
+  rtpopusdepay ! opusdec ! autoaudiosink
 ```
 
-### With GStreamer (RTP mode, separate audio port)
+### G.711 A-law
 
 ```bash
-# G.711 A-law
+# GStreamer (8kHz)
 gst-launch-1.0 udpsrc port=5601 ! \
   "application/x-rtp,encoding-name=PCMA,clock-rate=8000" ! \
   rtppcmadepay ! alawdec ! autoaudiosink
+```
 
-# Raw PCM
+### Raw PCM
+
+```bash
+# GStreamer (16kHz mono)
 gst-launch-1.0 udpsrc port=5601 ! \
-  "application/x-rtp,encoding-name=L16,clock-rate=8000,channels=1" ! \
+  "application/x-rtp,encoding-name=L16,clock-rate=16000,channels=1" ! \
   rtpL16depay ! autoaudiosink
 ```
 
 ## Hardware requirements
 
 Audio requires an I2S audio source connected to the SoC's I2S pins. The
-SSC30KQ/SSC338Q exposes I2S master pins, but board-level routing varies.
-Common options:
+SSC338Q exposes I2S master pins; board-level routing varies. Common options:
 
 - MEMS microphone breakout (INMP441, ICS-43434) on I2S
 - Line-in codec (ES8388, NAU88C22) on I2S
-- Digital PDM microphone (some SoC variants)
 
 If no audio hardware is connected, `MI_AI_GetFrame` will return silence or
-timeout. The audio thread will idle with no output. The video pipeline is
+timeout; the audio thread idles without output. The video pipeline is
 unaffected.
 
 ## Known limitations
 
-- **No hardware encoding**: The SigmaStar MI_AI hardware encoder
-  (`MI_AI_EnableAenc` / `MI_AI_SetAencAttr`) causes a segfault inside
-  `MI_AI_GetFrame` on the SSC30KQ. This was confirmed with both
-  `RTLD_LAZY` and `RTLD_NOW` loading — the crash is inside the vendor
-  library, not from missing symbols. All encoding is done in software.
+- **No hardware encoding**: `MI_AI_EnableAenc` / `MI_AI_SetAencAttr` causes
+  a segfault inside `MI_AI_GetFrame`. All encoding is software.
 
-- **No G.726 codec**: G.726 (ADPCM) would require a ~200 LOC software
-  encoder with per-sample state tracking. Not implemented. Use G.711
-  instead (same bandwidth class for voice).
-
-- **No Opus codec**: Would require cross-compiling `libopus`, violating
-  the project's no-external-dependency policy.
+- **No G.726 codec**: G.726 (ADPCM) requires per-sample state tracking
+  (~200 LOC). Not implemented; use G.711 instead.
 
 - **Maruko backend**: Audio is not supported on the Maruko backend.
-  Enabling audio on Maruko prints a warning and continues without audio.
 
-- **Single audio source**: Only device 0, channel 0 is used. No
-  multi-channel or multi-device support.
+- **Single audio source**: Only device 0, channel 0 is used.
+
+- **32kHz not hardware-validated**: The SDK lists `E_MI_AUDIO_SAMPLE_RATE_32000`
+  as valid and the code supports it, but it has not been tested on SSC338Q
+  hardware. 8kHz, 16kHz, and 48kHz are confirmed working.
