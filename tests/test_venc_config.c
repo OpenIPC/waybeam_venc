@@ -377,7 +377,7 @@ static int test_sample_config_file(void)
 	CHECK("sample_load_ok", ret == 0);
 	if (ret != 0) return failures;
 
-	CHECK("sample_fps_60", cfg.video0.fps == 60);
+	CHECK("sample_fps_30", cfg.video0.fps == 30);
 	CHECK("sample_codec_h265", strcmp(cfg.video0.codec, "h265") == 0);
 	CHECK("sample_enabled", cfg.outgoing.enabled == false);
 	CHECK("sample_server", strcmp(cfg.outgoing.server, "") == 0);

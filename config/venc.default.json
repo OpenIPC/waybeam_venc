@@ -18,7 +18,7 @@
   "video0": {
     "codec": "h265",
     "rcMode": "cbr",
-    "fps": 60,
+    "fps": 30,
     "size": "1920x1080",
     "bitrate": 8192,
     "gopSize": 1.0,
@@ -30,17 +30,16 @@
     "server": "",
     "streamMode": "rtp",
     "maxPayloadSize": 1400,
-    "targetPacketRate": 0,
     "connectedUdp": true,
     "audioPort": 5601,
     "sidecarPort": 5602
   },
-  "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 3, "roiCenter": 0.4, "noiseLevel": 0 },
+  "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
   "audio": {
     "enabled": false,
     "sampleRate": 16000,
     "channels": 1,
-    "codec": "g711a",
+    "codec": "pcm",
     "volume": 80,
     "mute": false
   },
