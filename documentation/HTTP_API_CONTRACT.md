@@ -15,7 +15,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.4.0`
+- `contract_version`: `0.5.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -444,6 +444,112 @@ Error `501`:
 {"ok":false,"error":{"code":"not_implemented","message":"AWB query not available"}}
 ```
 
+### `GET /api/v1/iq`
+
+Query all ISP IQ parameter values. Always available on Star6E backend.
+
+```bash
+curl http://192.168.2.10/api/v1/iq
+```
+
+Response `200`:
+```json
+{
+  "ok": true,
+  "data": {
+    "lightness": {"ret": 0, "enabled": true, "op_type": "auto", "value": 50},
+    "contrast": {"ret": 0, "enabled": true, "op_type": "manual", "value": 70},
+    "color_to_gray": {"ret": 0, "value": false},
+    "demosaic": {"ret": 0, "enabled": true, "value": 45}
+  }
+}
+```
+
+Each parameter reports:
+- `ret`: MI_ISP return code (0 = success)
+- `enabled`: bEnable flag
+- `op_type`: `"auto"` or `"manual"` (omitted for bool-only and manual-only params)
+- `value`: current primary value (manual level for auto/manual params, enable for bools)
+- `available`: `false` if the dlsym symbol was not found
+
+Error `501` if backend doesn't support IQ (Maruko):
+```json
+{"ok":false,"error":{"code":"not_implemented","message":"IQ query not available"}}
+```
+
+### `GET /api/v1/iq/set?<param>=<value>`
+
+Set a single IQ parameter. The parameter is switched to manual mode (for
+auto/manual params) and the value is written to the primary manual field.
+
+```bash
+curl "http://192.168.2.10/api/v1/iq/set?contrast=70"
+curl "http://192.168.2.10/api/v1/iq/set?saturation=80"
+curl "http://192.168.2.10/api/v1/iq/set?color_to_gray=1"
+```
+
+Response `200`:
+```json
+{"ok":true,"data":{"param":"contrast","value":70}}
+```
+
+**Available parameters (46 total, Star6E):**
+
+| Parameter | Type | Range | Description |
+|-----------|------|-------|-------------|
+| `lightness` | u32 | 0-100 | Lightness level |
+| `contrast` | u32 | 0-100 | Contrast level |
+| `brightness` | u32 | 0-100 | Brightness level |
+| `saturation` | u8 | 0-127 | Color saturation (32=1X) |
+| `sharpness` | u8 | 0-255 | Overshoot gain |
+| `hsv` | u8 | 0-64 | Hue LUT first entry |
+| `nr3d` | u8 | 0-255 | 3D NR motion threshold |
+| `nr3d_ex` | u32 | 0-1 | 3D NR extended AR enable |
+| `nr_despike` | u8 | 0-15 | De-spike blend ratio |
+| `nr_luma` | u8 | 0-255 | Luma NR strength |
+| `nr_luma_adv` | u32 | 0-1 | Advanced luma NR debug enable |
+| `nr_chroma` | u8 | 0-127 | Chroma NR match ratio |
+| `nr_chroma_adv` | u8 | 0-255 | Advanced chroma NR strength |
+| `false_color` | u8 | 0-255 | False color frequency threshold |
+| `crosstalk` | u8 | 0-31 | Cross-talk correction strength |
+| `demosaic` | u8 | 0-63 | Demosaic direction threshold |
+| `obc` | u16 | 0-255 | Optical black correction R value |
+| `dynamic_dp` | u8 | 0-1 | Hot pixel detection enable |
+| `dp_cluster` | u32 | 0-1 | Cluster dead pixel edge mode |
+| `r2y` | u16 | 0-1023 | R2Y matrix first coefficient |
+| `colortrans` | u16 | 0-2047 | Color transform Y offset |
+| `rgb_matrix` | u16 | 0-8191 | CCM first coefficient |
+| `wdr` | u8 | 0-4 | WDR box number |
+| `wdr_curve_adv` | u16 | 0-16384 | WDR curve slope |
+| `pfc` | u8 | 0-255 | Phase focus correction strength |
+| `pfc_ex` | u32 | 0-1 | Extended PFC debug enable |
+| `hdr` | u8 | 0-1 | HDR NR enable |
+| `hdr_ex` | u16 | 0-65535 | HDR sensor exposure ratio |
+| `shp_ex` | u32 | 0-1 | Extended sharpness debug enable |
+| `rgbir` | u8 | 0-7 | RGBIR position type |
+| `iq_mode` | u32 | 0-1 | IQ mode (0=day, 1=night) |
+| `lsc` | u16 | 0-65535 | Lens shading center X |
+| `lsc_ctrl` | u8 | 0-255 | LSC R ratio by CCT |
+| `alsc` | u8 | 0-255 | Adaptive LSC grid X |
+| `alsc_ctrl` | u8 | 0-255 | ALSC R ratio by CCT |
+| `obc_p1` | u16 | 0-255 | OBC phase 1 R value |
+| `stitch_lpf` | u16 | 0-256 | Stitch LPF first coefficient |
+| `rgb_gamma` | bool | 0/1 | RGB gamma enable |
+| `yuv_gamma` | bool | 0/1 | YUV gamma enable |
+| `wdr_curve_full` | bool | 0/1 | WDR full curve enable |
+| `dummy` | bool | 0/1 | Dummy tuning enable |
+| `dummy_ex` | bool | 0/1 | Extended dummy enable |
+| `defog` | bool | 0/1 | Defogging enable |
+| `color_to_gray` | bool | 0/1 | Grayscale mode |
+| `nr3d_p1` | bool | 0/1 | 3D NR phase 1 enable |
+| `fpn` | bool | 0/1 | Fixed pattern noise enable |
+
+**Hardware test results (SSC30KQ, imx335):**
+- 45/46 symbols resolved (`stitch_lpf` not present)
+- 40/45 params roundtrip correctly (set → query reads same value)
+- 3 offset mismatches: `nr_despike`, `pfc`, `hdr` (set succeeds but readback differs — struct padding)
+- 2 ISP-rejected: `nr3d_p1`, `fpn` (set succeeds but ISP ignores on this sensor)
+
 ### `GET /metrics/isp`
 
 Return a compact Prometheus-style ISP metrics snapshot.
@@ -650,6 +756,13 @@ Behavior:
 - `GET` endpoints must remain consistent across backends.
 
 ## Change Log (Contract)
+- `0.5.0`:
+  - Added `GET /api/v1/iq` — query all ISP IQ parameter values (46 params).
+  - Added `GET /api/v1/iq/set?param=value` — set individual IQ parameters live.
+  - Always enabled on Star6E (no config toggle needed — zero runtime overhead).
+  - Params cover image quality, noise reduction, corrections, dynamic range,
+    lens calibration, LUT enables, and ISP mode controls.
+  - Star6E: 45/46 symbols resolved, Maruko returns 501.
 - `0.4.0`:
   - Added `GET /api/v1/dual/status` — query secondary VENC channel state.
   - Added `GET /api/v1/dual/set?bitrate=N` — live ch1 bitrate change.

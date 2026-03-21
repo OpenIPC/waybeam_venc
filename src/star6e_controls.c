@@ -3,6 +3,7 @@
 #include "pipeline_common.h"
 #include "star6e_audio.h"
 #include "star6e_cus3a.h"
+#include "star6e_iq.h"
 #include "star6e_output.h"
 
 #include <dlfcn.h>
@@ -953,6 +954,8 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.query_awb_info = query_awb_info,
 	.query_isp_metrics = query_isp_metrics,
 	.apply_awb_mode = apply_awb_mode,
+	.query_iq_info = star6e_iq_query,
+	.apply_iq_param = star6e_iq_set,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)
