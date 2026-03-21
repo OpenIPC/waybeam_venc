@@ -6,6 +6,7 @@
 #include "sdk_quiet.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
+#include "star6e_iq.h"
 #include "star6e_pipeline.h"
 #include "star6e.h"
 #include "venc_api.h"
@@ -389,6 +390,7 @@ static void star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 
 	g_runner_ctx = ctx;
 	star6e_controls_bind(ps, vcfg);
+	star6e_iq_init();
 	venc_api_register(vcfg, "star6e", star6e_controls_callbacks());
 	venc_api_set_record_status_fn(record_status_callback);
 
@@ -910,6 +912,7 @@ static void star6e_runner_teardown(void *opaque)
 	 * open until StopRecvPic completes.  The thread skips SD writes
 	 * when g_running==0 (already set by the signal handler). */
 	if (ctx->pipeline_started) {
+		star6e_iq_cleanup();
 		star6e_controls_reset();
 		star6e_pipeline_stop(&ctx->ps);
 		ctx->pipeline_started = 0;

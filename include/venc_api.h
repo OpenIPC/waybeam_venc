@@ -33,6 +33,10 @@ typedef struct {
 	char *(*query_isp_metrics)(void);
 	/* AWB mode: 0=auto, 1=ct_manual. Returns 0 on success. */
 	int (*apply_awb_mode)(int mode, uint32_t ct);
+	/* IQ query: returns malloc'd JSON string, caller frees. NULL if unsupported. */
+	char *(*query_iq_info)(void);
+	/* IQ set: param name + value string. Returns 0 on success, -1 on error. */
+	int (*apply_iq_param)(const char *param, const char *value);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.
