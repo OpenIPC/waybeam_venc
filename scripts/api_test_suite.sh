@@ -185,7 +185,7 @@ assert_get "outgoing.server" string
 assert_get "outgoing.stream_mode" string
 assert_get "outgoing.max_payload_size" uint
 assert_get "outgoing.target_pkt_rate" uint
-assert_get "outgoing.send_feedback" bool
+assert_get "outgoing.connected_udp" bool
 assert_get "outgoing.audio_port" uint
 
 # FPV

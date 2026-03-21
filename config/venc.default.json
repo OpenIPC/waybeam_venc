@@ -31,7 +31,7 @@
     "streamMode": "rtp",
     "maxPayloadSize": 1400,
     "targetPacketRate": 0,
-    "sendFeedback": false,
+    "connectedUdp": true,
     "audioPort": 5601,
     "sidecarPort": 5602
   },

@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define RTP_DEFAULT_PAYLOAD 1400
+#define RTP_BUFFER_MAX 8192
+
 typedef struct {
 	uint16_t seq;
 	uint32_t timestamp;
@@ -18,12 +21,14 @@ typedef struct {
 } RtpPacketizerResult;
 
 typedef int (*RtpPacketizerWriteFn)(const uint8_t *header, size_t header_len,
-	const uint8_t *payload, size_t payload_len, void *opaque);
+	const uint8_t *payload1, size_t payload1_len,
+	const uint8_t *payload2, size_t payload2_len, void *opaque);
 
-/** Send a single RTP packet with the given payload and marker bit. */
+/** Send a single RTP packet.  payload2 may be NULL/0 for single-part payloads. */
 int rtp_packetizer_send_packet(RtpPacketizerState *state,
-	RtpPacketizerWriteFn writer, void *opaque, const uint8_t *payload,
-	size_t payload_len, int marker);
+	RtpPacketizerWriteFn writer, void *opaque, const uint8_t *payload1,
+	size_t payload1_len, const uint8_t *payload2, size_t payload2_len,
+	int marker);
 
 /** Fragment and send a large HEVC NAL unit as FU-A packets. */
 size_t rtp_packetizer_send_hevc_fu(RtpPacketizerState *state,

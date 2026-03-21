@@ -757,7 +757,7 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	}
 	if (star6e_output_prepare(&pconf->output_setup, vcfg->outgoing.server,
 	    vcfg->outgoing.stream_mode, vcfg->outgoing.max_payload_size,
-	    vcfg->outgoing.send_feedback) != 0)
+	    vcfg->outgoing.connected_udp) != 0)
 		return -1;
 
 	if (star6e_output_setup_is_rtp(&pconf->output_setup) &&
@@ -942,6 +942,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	bind_dst_fps = vcfg->video0.fps;
 	if (bind_dst_fps == 0 || bind_dst_fps > bind_src_fps)
 		bind_dst_fps = bind_src_fps;
+
 	ret = MI_SYS_BindChnPort2(&state->vpe_port, &state->venc_port,
 		bind_src_fps, bind_dst_fps, I6_SYS_LINK_FRAMEBASE, 0);
 	if (ret != 0) {
@@ -951,7 +952,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		return ret;
 	}
 	state->bound_vpe_venc = 1;
-	MI_SYS_SetChnOutputPortDepth(&state->venc_port, 2, 6);
+	MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
 
 	if (star6e_output_init(&state->output, &pconf->output_setup) != 0) {
 		MI_SYS_UnBindChnPort(&state->vpe_port, &state->venc_port);
@@ -1160,10 +1161,14 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	if (state->dual) {
 		venc_api_dual_unregister();
 		MI_VENC_DestroyChn(state->dual->channel);
+		free(state->dual->stream_packs);
 		free(state->dual);
 		state->dual = NULL;
 	}
 	MI_VENC_DestroyChn(state->venc_channel);
+	free(state->stream_packs);
+	state->stream_packs = NULL;
+	state->stream_packs_cap = 0;
 	star6e_pipeline_stop_vpe();
 	star6e_pipeline_stop_vif();
 	star6e_pipeline_stop_sensor(state->sensor.pad_id);
@@ -1593,6 +1598,7 @@ void star6e_pipeline_stop_dual(Star6ePipelineState *state)
 		d->bound = 0;
 	}
 	MI_VENC_DestroyChn(d->channel);
+	free(d->stream_packs);
 	free(d);
 	state->dual = NULL;
 }

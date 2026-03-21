@@ -61,8 +61,7 @@ static int test_defaults(void)
 	CHECK("defaults_server", cfg.outgoing.server[0] == '\0');
 	CHECK("defaults_stream_mode", strcmp(cfg.outgoing.stream_mode, "rtp") == 0);
 	CHECK("defaults_payload", cfg.outgoing.max_payload_size == 1400);
-	CHECK("defaults_target_pkt_rate", cfg.outgoing.target_pkt_rate == 0);
-	CHECK("defaults_send_feedback", cfg.outgoing.send_feedback == false);
+	CHECK("defaults_connected_udp", cfg.outgoing.connected_udp == true);
 
 	CHECK("defaults_roi_on", cfg.fpv.roi_enabled == true);
 	CHECK("defaults_roi_qp", cfg.fpv.roi_qp == 0);
@@ -91,7 +90,7 @@ static int test_load_full_json(void)
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
 		"    \"frameLost\": false },"
-		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"targetPacketRate\": 500, \"sendFeedback\": true },"
+		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false },"
 		"  \"fpv\": { \"roiEnabled\": true, \"roiQp\": -18, \"roiSteps\": 2, \"noiseLevel\": 5 }"
 		"}";
 
@@ -129,8 +128,7 @@ static int test_load_full_json(void)
 	CHECK("load_server", strcmp(cfg.outgoing.server, "udp://10.0.0.1:6000") == 0);
 	CHECK("load_stream_mode", strcmp(cfg.outgoing.stream_mode, "compact") == 0);
 	CHECK("load_payload", cfg.outgoing.max_payload_size == 1200);
-	CHECK("load_target_pkt_rate", cfg.outgoing.target_pkt_rate == 500);
-	CHECK("load_send_feedback", cfg.outgoing.send_feedback == true);
+	CHECK("load_connected_udp", cfg.outgoing.connected_udp == false);
 	CHECK("load_roi_on", cfg.fpv.roi_enabled == true);
 	CHECK("load_roi_qp", cfg.fpv.roi_qp == -18);
 	CHECK("load_roi_steps", cfg.fpv.roi_steps == 2);

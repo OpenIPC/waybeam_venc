@@ -159,13 +159,13 @@
 - Added live destination redirect (`outgoing.server`, MUT_LIVE):
   - Change UDP destination without pipeline restart.
   - IDR keyframe issued on destination change for stream continuity.
-  - Re-connects UDP socket when `sendFeedback` is enabled.
+  - Re-connects UDP socket when `connectedUdp` is enabled.
 - Added stream mode config field (`outgoing.streamMode`, MUT_RESTART):
   - Values: `"rtp"` (default) or `"compact"`.
   - Replaces scheme-derived mode detection; URI scheme must be `udp://`.
-- Added connected UDP feedback (`outgoing.sendFeedback`, MUT_RESTART):
-  - When true: `connect()` called on UDP socket, kernel returns ICMP errors.
-  - Enables detection of unreachable destinations via `sendmsg()` errors.
+- Added connected UDP (`outgoing.connectedUdp`, MUT_RESTART):
+  - When true: `connect()` called on UDP socket, skips per-packet routing
+    lookup and enables kernel ICMP error feedback.
 - Added IDR request after live bitrate change for immediate quality update.
 - Updated HTTP API contract to v0.2.0.
 

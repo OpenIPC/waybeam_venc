@@ -24,9 +24,6 @@ typedef struct {
 	double venc_gop_seconds;
 	uint16_t max_frame_size;
 	uint16_t rtp_payload_size;
-	uint16_t target_pkt_rate;
-	uint32_t ewma_frame_bytes;
-	uint16_t adapt_cooldown;
 	uint32_t udp_sink_ip;
 	uint16_t udp_sink_port;
 	uint16_t sidecar_port;

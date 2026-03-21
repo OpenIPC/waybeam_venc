@@ -2,7 +2,7 @@
 
 #include "codec_config.h"
 #include "pipeline_common.h"
-#include "rtp_adapt.h"
+#include "rtp_packetizer.h"
 
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -59,12 +59,7 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 
 	cfg->max_frame_size = vcfg->outgoing.max_payload_size;
 	cfg->rtp_payload_size = vcfg->outgoing.max_payload_size;
-	if (cfg->rtp_payload_size < RTP_MIN_PAYLOAD) {
-		cfg->rtp_payload_size = RTP_MIN_PAYLOAD;
-	}
-	cfg->target_pkt_rate = vcfg->outgoing.target_pkt_rate;
 	cfg->sidecar_port = vcfg->outgoing.sidecar_port;
-	cfg->ewma_frame_bytes = 0;
 
 	if (vcfg->outgoing.server[0]) {
 		if (strncmp(vcfg->outgoing.server, "shm://", 6) == 0) {

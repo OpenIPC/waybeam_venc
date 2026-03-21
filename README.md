@@ -98,7 +98,7 @@ template is provided at `config/venc.default.json`.
   "outgoing": {
     "enabled": false, "server": "", "streamMode": "rtp",
     "maxPayloadSize": 1400, "targetPacketRate": 0,
-    "sendFeedback": false, "audioPort": 5601, "sidecarPort": 0
+    "connectedUdp": true, "audioPort": 5601, "sidecarPort": 0
   },
   "fpv": {
     "roiEnabled": true, "roiQp": 0, "roiSteps": 2,
@@ -350,7 +350,7 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 | `outgoing.stream_mode` | string | restart | `"rtp"` or `"compact"` |
 | `outgoing.max_payload_size` | uint16 | restart | Max UDP payload bytes |
 | `outgoing.target_pkt_rate` | uint16 | restart | Target packets/sec for adaptive sizing |
-| `outgoing.send_feedback` | bool | restart | Enable receiver feedback |
+| `outgoing.connected_udp` | bool | restart | Connect UDP socket (skip per-packet routing lookup) |
 | `outgoing.audio_port` | uint16 | restart | Separate audio UDP port |
 | `outgoing.sidecar_port` | uint16 | restart | RTP timing sidecar port (0 = disabled) |
 

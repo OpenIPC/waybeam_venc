@@ -1,4 +1,3 @@
-#include "rtp_adapt.h"
 #include "rtp_packetizer.h"
 #include "test_helpers.h"
 
@@ -18,12 +17,13 @@ typedef struct {
 } TestRtpWriter;
 
 static int test_rtp_writer(const uint8_t *header, size_t header_len,
-	const uint8_t *payload, size_t payload_len, void *opaque)
+	const uint8_t *payload1, size_t payload1_len,
+	const uint8_t *payload2, size_t payload2_len, void *opaque)
 {
 	TestRtpWriter *writer = opaque;
 	TestRtpWrite *write;
 
-	if (!writer || !header || !payload)
+	if (!writer || !header || !payload1)
 		return -1;
 	if (writer->fail_at_call >= 0 && writer->call_count == writer->fail_at_call)
 		return -1;
@@ -33,9 +33,11 @@ static int test_rtp_writer(const uint8_t *header, size_t header_len,
 
 	write = &writer->writes[writer->call_count++];
 	write->header_len = header_len;
-	write->payload_len = payload_len;
+	write->payload_len = payload1_len + payload2_len;
 	memcpy(write->header, header, header_len);
-	memcpy(write->payload, payload, payload_len);
+	memcpy(write->payload, payload1, payload1_len);
+	if (payload2 && payload2_len > 0)
+		memcpy(write->payload + payload1_len, payload2, payload2_len);
 	return 0;
 }
 
@@ -53,7 +55,7 @@ static int test_rtp_packetizer_send_packet_ok(void)
 
 	CHECK("rtp_pkt_send_packet_ok",
 		rtp_packetizer_send_packet(&state, test_rtp_writer, &writer,
-			payload, sizeof(payload), 1) == 0 &&
+			payload, sizeof(payload), NULL, 0, 1) == 0 &&
 		writer.call_count == 1 &&
 		state.seq == 0x1235);
 	CHECK("rtp_pkt_send_packet_header",
@@ -91,7 +93,7 @@ static int test_rtp_packetizer_send_packet_fail(void)
 
 	CHECK("rtp_pkt_send_packet_fail",
 		rtp_packetizer_send_packet(&state, test_rtp_writer, &writer,
-			payload, sizeof(payload), 0) == -1 &&
+			payload, sizeof(payload), NULL, 0, 0) == -1 &&
 		writer.call_count == 0 &&
 		state.seq == 0x2222);
 
@@ -199,13 +201,13 @@ int test_rtp_packetizer(void)
 
 	CHECK("rtp_pkt_null_state",
 		rtp_packetizer_send_packet(NULL, test_rtp_writer, NULL, payload,
-			sizeof(payload), 0) == -1);
+			sizeof(payload), NULL, 0, 0) == -1);
 	CHECK("rtp_pkt_null_writer",
 		rtp_packetizer_send_packet(&state, NULL, NULL, payload,
-			sizeof(payload), 0) == -1);
+			sizeof(payload), NULL, 0, 0) == -1);
 	CHECK("rtp_pkt_null_payload",
 		rtp_packetizer_send_packet(&state, test_rtp_writer, NULL, NULL,
-			0, 0) == -1);
+			0, NULL, 0, 0) == -1);
 
 	failures += test_rtp_packetizer_send_packet_ok();
 	failures += test_rtp_packetizer_send_packet_fail();

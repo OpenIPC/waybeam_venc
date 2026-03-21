@@ -18,7 +18,6 @@ extern int test_maruko_config(void);
 extern int test_pipeline_common(void);
 extern int test_codec_config(void);
 extern int test_sdk_quiet(void);
-extern int test_rtp_adapt(void);
 extern int test_rtp_packetizer(void);
 extern int test_isp_runtime(void);
 extern int test_rtp_session(void);
@@ -74,9 +73,6 @@ int main(void)
 
 	printf("\n--- test_sdk_quiet ---\n");
 	failures += test_sdk_quiet();
-
-	printf("\n--- test_rtp_adapt ---\n");
-	failures += test_rtp_adapt();
 
 	printf("\n--- test_rtp_packetizer ---\n");
 	failures += test_rtp_packetizer();

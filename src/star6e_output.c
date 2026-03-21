@@ -38,27 +38,35 @@ static void star6e_write_be32(uint8_t *data, uint32_t value)
 
 static int star6e_output_send_udp_parts(int socket_handle,
 	const struct sockaddr_in *dst, const uint8_t *header, size_t header_len,
-	const uint8_t *payload, size_t payload_len)
+	const uint8_t *payload1, size_t payload1_len,
+	const uint8_t *payload2, size_t payload2_len)
 {
-	struct iovec vec[2];
+	struct iovec vec[3];
 	struct msghdr msg;
 	ssize_t sent;
+	int iovcnt;
 
-	if (socket_handle < 0 || !dst || !header || !payload ||
-	    header_len == 0 || payload_len == 0) {
+	if (socket_handle < 0 || !dst || !header || !payload1 ||
+	    header_len == 0 || payload1_len == 0) {
 		return -1;
 	}
 
 	vec[0].iov_base = (void *)header;
 	vec[0].iov_len = header_len;
-	vec[1].iov_base = (void *)payload;
-	vec[1].iov_len = payload_len;
+	vec[1].iov_base = (void *)payload1;
+	vec[1].iov_len = payload1_len;
+	iovcnt = 2;
+	if (payload2 && payload2_len > 0) {
+		vec[2].iov_base = (void *)payload2;
+		vec[2].iov_len = payload2_len;
+		iovcnt = 3;
+	}
 
 	memset(&msg, 0, sizeof(msg));
 	msg.msg_name = (void *)dst;
 	msg.msg_namelen = sizeof(*dst);
 	msg.msg_iov = vec;
-	msg.msg_iovlen = 2;
+	msg.msg_iovlen = iovcnt;
 	sent = sendmsg(socket_handle, &msg, 0);
 	if (sent < 0) {
 		fprintf(stderr, "ERROR: sendmsg failed (%d)\n", errno);
@@ -81,7 +89,8 @@ static int star6e_audio_output_resolve_destination(
 }
 
 static int star6e_audio_output_write_rtp(const uint8_t *header,
-	size_t header_len, const uint8_t *payload, size_t payload_len, void *opaque)
+	size_t header_len, const uint8_t *payload1, size_t payload1_len,
+	const uint8_t *payload2, size_t payload2_len, void *opaque)
 {
 	const Star6eAudioOutput *audio_output = opaque;
 	struct sockaddr_in dst;
@@ -92,7 +101,8 @@ static int star6e_audio_output_write_rtp(const uint8_t *header,
 	}
 
 	return star6e_output_send_udp_parts(audio_output->socket_handle, &dst,
-		header, header_len, payload, payload_len);
+		header, header_len, payload1, payload1_len,
+		payload2, payload2_len);
 }
 
 static void star6e_output_setup_reset(Star6eOutputSetup *setup)
@@ -232,21 +242,34 @@ int star6e_output_is_shm(const Star6eOutput *output)
 }
 
 int star6e_output_send_rtp_parts(const Star6eOutput *output,
-	const uint8_t *header, size_t header_len, const uint8_t *payload,
-	size_t payload_len)
+	const uint8_t *header, size_t header_len,
+	const uint8_t *payload1, size_t payload1_len,
+	const uint8_t *payload2, size_t payload2_len)
 {
-	if (!output || !header || !payload || header_len == 0 || payload_len == 0)
+	if (!output || !header || !payload1 || header_len == 0 || payload1_len == 0)
 		return -1;
 
 	if (output->ring) {
-		if (header_len > UINT16_MAX || payload_len > UINT16_MAX)
+		size_t total_payload = payload1_len + payload2_len;
+		if (header_len > UINT16_MAX || total_payload > UINT16_MAX)
 			return -1;
+		if (payload2 && payload2_len > 0) {
+			uint8_t flat[RTP_BUFFER_MAX];
+			if (total_payload > sizeof(flat))
+				return -1;
+			memcpy(flat, payload1, payload1_len);
+			memcpy(flat + payload1_len, payload2, payload2_len);
+			return venc_ring_write(output->ring, header,
+				(uint16_t)header_len, flat,
+				(uint16_t)total_payload);
+		}
 		return venc_ring_write(output->ring, header, (uint16_t)header_len,
-			payload, (uint16_t)payload_len);
+			payload1, (uint16_t)payload1_len);
 	}
 
 	return star6e_output_send_udp_parts(output->socket_handle, &output->dst,
-		header, header_len, payload, payload_len);
+		header, header_len, payload1, payload1_len,
+		payload2, payload2_len);
 }
 
 int star6e_output_send_compact_packet(const Star6eOutput *output,
@@ -498,7 +521,7 @@ int star6e_audio_output_send_rtp(const Star6eAudioOutput *audio_output,
 		return -1;
 
 	if (rtp_packetizer_send_packet(rtp_state, star6e_audio_output_write_rtp,
-	    (void *)audio_output, data, len, 0) != 0) {
+	    (void *)audio_output, data, len, NULL, 0, 0) != 0) {
 		return -1;
 	}
 
