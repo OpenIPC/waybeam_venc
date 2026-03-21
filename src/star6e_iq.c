@@ -4,16 +4,16 @@
  * Exposes MI_ISP_IQ_* functions as HTTP-queryable/settable parameters.
  * Uses cached dlopen handle (opened once at init, closed at cleanup).
  *
- * All IQ structs follow the pattern:
- *   offset 0: bEnable   (uint32_t, 0=off 1=on)
- *   offset 4: enOpType  (uint32_t, 0=auto 1=manual)
- *   offset 8+: auto attrs, then manual attrs
+ * Struct layouts from SDK mi_isp_iq_datatype.h (pudding/infinity6e):
  *
- * For simple level params (contrast, brightness, saturation, sharpness),
- * the manual value is expected at a fixed offset within the struct.
- * Since exact struct layouts are not in SDK headers, we use oversized
- * 8KB buffers and include raw hex in query output for on-device
- * verification of offsets.
+ *   Standard auto/manual (manual_offset > 4):
+ *     { bEnable(4), enOpType(4), stAuto(N*16), stManual(...) }
+ *
+ *   Manual-only (manual_offset == 4):
+ *     { bEnable(4), stManual(...) }
+ *
+ *   Bool-only (manual_offset == 0):
+ *     { bEnable(4) }
  */
 
 #include "star6e_iq.h"
@@ -27,24 +27,15 @@
 typedef int MI_S32;
 typedef MI_S32 (*iq_fn_t)(uint32_t channel, void *param);
 
-/* IQ struct field offsets (from SDK mi_isp_iq_datatype.h):
- *   All level structs: { bEnable(4), enOpType(4), stAuto(N*16), stManual }
- *   color_to_gray: just { bEnable(4) }
- *
- * Struct sizes and manual value offsets:
- *   contrast:    76 bytes, manual u32Lev at offset 72 (0-100)
- *   brightness:  76 bytes, manual u32Lev at offset 72 (0-100)
- *   saturation: 416 bytes, manual u8SatAllStr at offset 392 (0-127, 32=1X)
- *   sharpness: 1268 bytes, manual u8OverShootGain at offset 1192 (0-255, complex)
- */
 #define IQ_OFFSET_ENABLE   0
 #define IQ_OFFSET_OPTYPE   4
 #define IQ_BUF_SIZE        8192
 
 typedef enum {
-	VT_U32,     /* uint32_t level (contrast, brightness) */
-	VT_U8,      /* uint8_t level (saturation, sharpness) */
-	VT_BOOL,    /* color_to_gray: just bEnable */
+	VT_BOOL,    /* just bEnable (color_to_gray, defog) */
+	VT_U8,      /* uint8_t */
+	VT_U16,     /* uint16_t */
+	VT_U32,     /* uint32_t */
 } IqValueType;
 
 typedef struct {
@@ -54,20 +45,81 @@ typedef struct {
 	iq_fn_t     fn_get;
 	iq_fn_t     fn_set;
 	IqValueType vtype;
-	uint32_t    manual_offset;  /* byte offset of primary manual value */
-	uint32_t    max_val;        /* max valid value */
+	uint32_t    manual_offset;  /* 0=bool-only, 4=manual-only, >4=auto/manual */
+	uint32_t    max_val;
 } IqParamDesc;
 
+/*
+ * Parameter table — offsets computed from SDK structs:
+ *   auto/manual: manual_offset = 8 + (16 * sizeof(per_iso_param))
+ *   manual-only: manual_offset = 4
+ *   bool-only:   manual_offset = 0
+ */
 static IqParamDesc g_params[] = {
-	{ "contrast",      "MI_ISP_IQ_GetContrast",    "MI_ISP_IQ_SetContrast",
+	/* ── Image quality ─────────────────────────────────────────── */
+	/* LEVEL_BASE_PARAM_t = 4B, auto=64, manual@72 */
+	{ "lightness",    "MI_ISP_IQ_GetLightness",   "MI_ISP_IQ_SetLightness",
 	  NULL, NULL, VT_U32, 72,   100 },
-	{ "brightness",    "MI_ISP_IQ_GetBrightness",  "MI_ISP_IQ_SetBrightness",
+	{ "contrast",     "MI_ISP_IQ_GetContrast",    "MI_ISP_IQ_SetContrast",
 	  NULL, NULL, VT_U32, 72,   100 },
-	{ "saturation",    "MI_ISP_IQ_GetSaturation",  "MI_ISP_IQ_SetSaturation",
+	{ "brightness",   "MI_ISP_IQ_GetBrightness",  "MI_ISP_IQ_SetBrightness",
+	  NULL, NULL, VT_U32, 72,   100 },
+	/* SATURATION_PARAM_t = 24B, auto=384, manual@392 (u8SatAllStr 0-127, 32=1X) */
+	{ "saturation",   "MI_ISP_IQ_GetSaturation",  "MI_ISP_IQ_SetSaturation",
 	  NULL, NULL, VT_U8,  392,  127 },
-	{ "sharpness",     "MI_ISP_IQ_GetSharpness",   "MI_ISP_IQ_SetSharpness",
+	/* SHARPNESS_PARAM_t = 74B, auto=1184, manual@1192 (u8OverShootGain) */
+	{ "sharpness",    "MI_ISP_IQ_GetSharpness",   "MI_ISP_IQ_SetSharpness",
 	  NULL, NULL, VT_U8,  1192, 255 },
-	{ "color_to_gray", "MI_ISP_IQ_GetColorToGray", "MI_ISP_IQ_SetColorToGray",
+
+	/* ── Noise reduction ───────────────────────────────────────── */
+	/* NR3D_PARAM_t = 80B, auto=1280, manual@1288 (u8MdThd) */
+	{ "nr3d",         "MI_ISP_IQ_GetNR3D",        "MI_ISP_IQ_SetNR3D",
+	  NULL, NULL, VT_U8,  1288, 255 },
+	/* NRDESPIKE_PARAM_t = 39B, auto=624, manual@632 (u8BlendRatio) */
+	{ "nr_despike",   "MI_ISP_IQ_GetNRDeSpike",   "MI_ISP_IQ_SetNRDeSpike",
+	  NULL, NULL, VT_U8,  632,  15 },
+	/* NRLUMA_PARAM_t = 6B, auto=96, manual@104 (u8Strength) */
+	{ "nr_luma",      "MI_ISP_IQ_GetNRLuma",      "MI_ISP_IQ_SetNRLuma",
+	  NULL, NULL, VT_U8,  104,  255 },
+	/* NRCHROMA_PARAM_t = 13B, auto=208, manual@216 (u8MatchRatio) */
+	{ "nr_chroma",    "MI_ISP_IQ_GetNRChroma",    "MI_ISP_IQ_SetNRChroma",
+	  NULL, NULL, VT_U8,  216,  127 },
+
+	/* ── Corrections ───────────────────────────────────────────── */
+	/* FALSECOLOR_PARAM_t = 7B, auto=112, manual@120 (u8FreqThrd) */
+	{ "false_color",  "MI_ISP_IQ_GetFalseColor",  "MI_ISP_IQ_SetFalseColor",
+	  NULL, NULL, VT_U8,  120,  255 },
+	/* CROSSTALK_PARAM_t = 18B, auto=288, manual@296 (u8Strength) */
+	{ "crosstalk",    "MI_ISP_IQ_GetCrossTalk",   "MI_ISP_IQ_SetCrossTalk",
+	  NULL, NULL, VT_U8,  296,  31 },
+	/* DEMOSAIC: manual-only, bEnable(4) + stManual@4 (u8DirThrd) */
+	{ "demosaic",     "MI_ISP_IQ_GetDEMOSAIC",    "MI_ISP_IQ_SetDEMOSAIC",
+	  NULL, NULL, VT_U8,  4,    63 },
+	/* OBC_PARAM_t = 8B, auto=128, manual@136 (u16ValR) */
+	{ "obc",          "MI_ISP_IQ_GetOBC",          "MI_ISP_IQ_SetOBC",
+	  NULL, NULL, VT_U16, 136,  255 },
+	/* DYNAMIC_DP_PARAM_t = 30B, auto=480, manual@488 (bHotPixEn) */
+	{ "dynamic_dp",   "MI_ISP_IQ_GetDynamicDP",   "MI_ISP_IQ_SetDynamicDP",
+	  NULL, NULL, VT_U8,  488,  1 },
+
+	/* ── Dynamic range & special ───────────────────────────────── */
+	/* WDR_PARAM_t = 40B, auto=640, manual@648 (u8BoxNum) */
+	{ "wdr",          "MI_ISP_IQ_GetWDR",          "MI_ISP_IQ_SetWDR",
+	  NULL, NULL, VT_U8,  648,  4 },
+	/* PFC_PARAM_t = 28B, auto=448, manual@456 (u8Strength) */
+	{ "pfc",          "MI_ISP_IQ_GetPFC",          "MI_ISP_IQ_SetPFC",
+	  NULL, NULL, VT_U8,  456,  255 },
+	/* HDR_PARAM_t = 68B, auto=1088, manual@1096 (bNrEn) */
+	{ "hdr",          "MI_ISP_IQ_GetHDR",          "MI_ISP_IQ_SetHDR",
+	  NULL, NULL, VT_U8,  1096, 1 },
+	/* RGBIR_PARAM_t = 37B, auto=592, manual@600 (u8IrPosType) */
+	{ "rgbir",        "MI_ISP_IQ_GetRGBIR",        "MI_ISP_IQ_SetRGBIR",
+	  NULL, NULL, VT_U8,  600,  7 },
+
+	/* ── Toggle controls ───────────────────────────────────────── */
+	{ "defog",        "MI_ISP_IQ_GetDefog",        "MI_ISP_IQ_SetDefog",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	{ "color_to_gray","MI_ISP_IQ_GetColorToGray",  "MI_ISP_IQ_SetColorToGray",
 	  NULL, NULL, VT_BOOL, 0,   1 },
 };
 #define NUM_PARAMS (sizeof(g_params) / sizeof(g_params[0]))
@@ -113,13 +165,46 @@ void star6e_iq_cleanup(void)
 	}
 }
 
-/* Format first N bytes as hex string for debugging struct layout */
-static void hex_dump(const uint8_t *data, size_t len, char *out, size_t out_sz)
+static uint32_t read_value(const uint8_t *buf, uint32_t offset, IqValueType vt)
 {
-	size_t pos = 0;
-	for (size_t i = 0; i < len && pos + 3 < out_sz; i++) {
-		pos += (size_t)snprintf(out + pos, out_sz - pos,
-			"%02x", data[i]);
+	switch (vt) {
+	case VT_U32: {
+		uint32_t v;
+		memcpy(&v, buf + offset, sizeof(v));
+		return v;
+	}
+	case VT_U16: {
+		uint16_t v;
+		memcpy(&v, buf + offset, sizeof(v));
+		return v;
+	}
+	case VT_U8:
+		return buf[offset];
+	case VT_BOOL: {
+		uint32_t v;
+		memcpy(&v, buf + offset, sizeof(v));
+		return v;
+	}
+	}
+	return 0;
+}
+
+static void write_value(uint8_t *buf, uint32_t offset, IqValueType vt,
+	uint32_t val)
+{
+	switch (vt) {
+	case VT_U32:
+	case VT_BOOL:
+		memcpy(buf + offset, &val, sizeof(uint32_t));
+		break;
+	case VT_U16: {
+		uint16_t v = (uint16_t)val;
+		memcpy(buf + offset, &v, sizeof(v));
+		break;
+	}
+	case VT_U8:
+		buf[offset] = (uint8_t)val;
+		break;
 	}
 }
 
@@ -128,7 +213,7 @@ char *star6e_iq_query(void)
 	if (!g_isp_handle)
 		return NULL;
 
-	char buf[4096];
+	char buf[8192];
 	int pos = 0;
 
 	pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
@@ -147,11 +232,7 @@ char *star6e_iq_query(void)
 		memset(iq_buf, 0, sizeof(iq_buf));
 		MI_S32 ret = p->fn_get(0, iq_buf);
 
-		uint32_t enable = 0, optype = 0;
-		memcpy(&enable, iq_buf + IQ_OFFSET_ENABLE, sizeof(enable));
-
-		char hex[65];
-		hex_dump(iq_buf, 32, hex, sizeof(hex));
+		uint32_t enable = read_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32);
 
 		if (p->vtype == VT_BOOL) {
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
@@ -159,23 +240,30 @@ char *star6e_iq_query(void)
 				p->name, ret,
 				enable ? "true" : "false",
 				(i + 1 < NUM_PARAMS) ? "," : "");
+		} else if (p->manual_offset == 4) {
+			/* Manual-only struct: no enOpType */
+			uint32_t val = read_value(iq_buf, p->manual_offset,
+				p->vtype);
+			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+				"\"%s\":{\"ret\":%d,\"enabled\":%s,"
+				"\"value\":%u}%s",
+				p->name, ret,
+				enable ? "true" : "false",
+				val,
+				(i + 1 < NUM_PARAMS) ? "," : "");
 		} else {
-			memcpy(&optype, iq_buf + IQ_OFFSET_OPTYPE,
-				sizeof(optype));
-			/* Read the manual value at the known offset */
-			uint32_t manual_val = 0;
-			if (p->vtype == VT_U32)
-				memcpy(&manual_val, iq_buf + p->manual_offset,
-					sizeof(uint32_t));
-			else
-				manual_val = iq_buf[p->manual_offset];
+			/* Standard auto/manual struct */
+			uint32_t optype = read_value(iq_buf,
+				IQ_OFFSET_OPTYPE, VT_U32);
+			uint32_t val = read_value(iq_buf, p->manual_offset,
+				p->vtype);
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
 				"\"%s\":{\"ret\":%d,\"enabled\":%s,"
 				"\"op_type\":\"%s\",\"value\":%u}%s",
 				p->name, ret,
 				enable ? "true" : "false",
 				optype == 1 ? "manual" : "auto",
-				manual_val,
+				val,
 				(i + 1 < NUM_PARAMS) ? "," : "");
 		}
 	}
@@ -223,22 +311,21 @@ int star6e_iq_set(const char *param, const char *value)
 		level = target->max_val;
 
 	if (target->vtype == VT_BOOL) {
-		/* color_to_gray: struct is just { bEnable } */
-		uint32_t v = level ? 1 : 0;
-		memcpy(iq_buf + IQ_OFFSET_ENABLE, &v, sizeof(v));
+		/* Bool-only: just set bEnable */
+		write_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32,
+			level ? 1 : 0);
+	} else if (target->manual_offset == 4) {
+		/* Manual-only: set bEnable=1, write value (no enOpType) */
+		write_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32, 1);
+		write_value(iq_buf, target->manual_offset, target->vtype,
+			level);
 	} else {
-		/* Level params: set bEnable=1, enOpType=1 (manual),
-		 * write level at the SDK-defined manual value offset */
-		uint32_t enable = 1;
-		uint32_t optype = 1; /* SS_OP_TYP_MANUAL */
-		memcpy(iq_buf + IQ_OFFSET_ENABLE, &enable, sizeof(enable));
-		memcpy(iq_buf + IQ_OFFSET_OPTYPE, &optype, sizeof(optype));
-
-		if (target->vtype == VT_U32)
-			memcpy(iq_buf + target->manual_offset, &level,
-				sizeof(uint32_t));
-		else
-			iq_buf[target->manual_offset] = (uint8_t)level;
+		/* Standard auto/manual: set bEnable=1, enOpType=1 (manual),
+		 * write value at the SDK-defined manual offset */
+		write_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32, 1);
+		write_value(iq_buf, IQ_OFFSET_OPTYPE, VT_U32, 1);
+		write_value(iq_buf, target->manual_offset, target->vtype,
+			level);
 	}
 
 	ret = target->fn_set(0, iq_buf);
