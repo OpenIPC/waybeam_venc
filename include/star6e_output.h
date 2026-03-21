@@ -37,6 +37,7 @@ typedef struct {
 	struct sockaddr_in dst;
 	int connected_udp;
 	venc_ring_t *ring;
+	uint32_t send_errors;
 } Star6eOutput;
 
 typedef struct {
@@ -68,10 +69,15 @@ int star6e_output_is_rtp(const Star6eOutput *output);
 /** Check if active output uses shared memory mode. */
 int star6e_output_is_shm(const Star6eOutput *output);
 
-/** Send RTP header and payload as a single UDP datagram. */
+/** Send RTP header and payload parts as a single UDP datagram.
+ *  payload2 may be NULL/0 for single-part payloads. */
 int star6e_output_send_rtp_parts(const Star6eOutput *output,
-	const uint8_t *header, size_t header_len, const uint8_t *payload,
-	size_t payload_len);
+	const uint8_t *header, size_t header_len,
+	const uint8_t *payload1, size_t payload1_len,
+	const uint8_t *payload2, size_t payload2_len);
+
+/** Return and reset accumulated send error count. */
+uint32_t star6e_output_drain_send_errors(Star6eOutput *output);
 
 /** Send one raw packet in compact stream mode. */
 int star6e_output_send_compact_packet(const Star6eOutput *output,

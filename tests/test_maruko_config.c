@@ -40,7 +40,6 @@ int test_maruko_config(void)
 	strcpy(vcfg.outgoing.server, "udp://192.168.2.20:5602");
 	strcpy(vcfg.outgoing.stream_mode, "compact");
 	vcfg.outgoing.max_payload_size = 900;
-	vcfg.outgoing.target_pkt_rate = 850;
 	vcfg.sensor.index = 2;
 	vcfg.sensor.mode = 3;
 	strcpy(vcfg.isp.sensor_bin, "/etc/sensors/imx415.bin");
@@ -54,8 +53,7 @@ int test_maruko_config(void)
 	CHECK("maruko config bitrate", cfg.venc_max_rate == 6000);
 	CHECK("maruko config gop", cfg.venc_gop_size == 135);
 	CHECK("maruko config gop seconds", cfg.venc_gop_seconds == 1.5);
-	CHECK("maruko config payload clamped", cfg.rtp_payload_size == 1000);
-	CHECK("maruko config target pkt rate", cfg.target_pkt_rate == 850);
+	CHECK("maruko config payload", cfg.rtp_payload_size == 900);
 	CHECK("maruko config sink ip",
 		cfg.udp_sink_ip == inet_addr("192.168.2.20"));
 	CHECK("maruko config sink port", cfg.udp_sink_port == 5602);

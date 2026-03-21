@@ -49,7 +49,7 @@ static int test_star6e_video_init_rtp_state(void)
 	int ret;
 
 	venc_config_defaults(&cfg);
-	cfg.outgoing.target_pkt_rate = 0;
+
 	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 1400, 0);
 	CHECK("star6e video rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
@@ -58,7 +58,6 @@ static int test_star6e_video_init_rtp_state(void)
 	star6e_video_init(&state, &cfg, 60, &output);
 	CHECK("star6e video rtp max frame", state.max_frame_size == 1400);
 	CHECK("star6e video rtp payload", state.rtp_payload_size == 1400);
-	CHECK("star6e video rtp target", state.target_pkt_rate == 0);
 	CHECK("star6e video rtp sensor fps", state.sensor_framerate == 60);
 	CHECK("star6e video rtp frame ticks", state.rtp_frame_ticks == 1500);
 	CHECK("star6e video rtp payload type", state.rtp_state.payload_type == 97);
@@ -114,7 +113,7 @@ static int test_star6e_video_send_frame_rtp(void)
 	int ret;
 
 	venc_config_defaults(&cfg);
-	cfg.outgoing.target_pkt_rate = 0;
+
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e video send receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
@@ -169,7 +168,7 @@ static int test_star6e_video_send_frame_disabled(void)
 	int ret;
 
 	venc_config_defaults(&cfg);
-	cfg.outgoing.target_pkt_rate = 0;
+
 	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 1400, 0);
 	CHECK("star6e video disabled prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);

@@ -102,7 +102,7 @@ Response `200`:
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "exposure": 9, "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500 },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
       "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0 },
-      "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "targetPacketRate": 0, "sendFeedback": false },
+      "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "targetPacketRate": 0, "connectedUdp": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 }
     }
   }
@@ -135,7 +135,7 @@ Response `200`:
       "outgoing.server": { "mutability": "live", "supported": true },
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
       "outgoing.target_pkt_rate": { "mutability": "restart_required", "supported": true },
-      "outgoing.send_feedback": { "mutability": "restart_required", "supported": true },
+      "outgoing.connected_udp": { "mutability": "restart_required", "supported": true },
       "fpv.roi_qp": { "mutability": "live", "supported": true }
     }
   }
@@ -334,7 +334,7 @@ curl "http://192.168.2.10/api/v1/set?outgoing.server=udp://192.168.1.100:5600"
 
 - No pipeline restart required.
 - An IDR keyframe is issued after the change for stream continuity.
-- If `sendFeedback` is enabled, the socket is re-connected to the new destination.
+- If `connectedUdp` is enabled, the socket is re-connected to the new destination.
 - Only `udp://` scheme is accepted.
 
 ### Stream Mode and Send Feedback
@@ -342,7 +342,7 @@ curl "http://192.168.2.10/api/v1/set?outgoing.server=udp://192.168.1.100:5600"
 ```bash
 # These require pipeline restart
 curl "http://192.168.2.10/api/v1/set?outgoing.stream_mode=compact"
-curl "http://192.168.2.10/api/v1/set?outgoing.send_feedback=true"
+curl "http://192.168.2.10/api/v1/set?outgoing.connected_udp=true"
 ```
 
 - `outgoing.stream_mode`: `"rtp"` (default) or `"compact"`. Determines packetization format.
@@ -353,7 +353,7 @@ curl "http://192.168.2.10/api/v1/set?outgoing.send_feedback=true"
   Default `0` (disabled — uses fixed `maxPayloadSize`). When non-zero, the adaptive
   algorithm adjusts the effective payload size to hit this target, clamped to
   `[1000, maxPayloadSize]`.
-- `outgoing.send_feedback`: When `true`, calls `connect()` on the UDP socket so the kernel
+- `outgoing.connected_udp`: When `true`, calls `connect()` on the UDP socket so the kernel
   returns ICMP port-unreachable errors via `sendmsg()`. Useful for detecting that a receiver
   is down. Default `false` (fire-and-forget).
 
@@ -683,7 +683,7 @@ Behavior:
   - Added `outgoing.enabled` (MUT_LIVE): enable/disable UDP output with FPS idle.
   - Added `outgoing.server` changed from MUT_RESTART to MUT_LIVE: live destination redirect.
   - Added `outgoing.streamMode` (MUT_RESTART): explicit stream mode selection.
-  - Added `outgoing.sendFeedback` (MUT_RESTART): connected UDP error reporting.
+  - Added `outgoing.connectedUdp` (MUT_RESTART): connected UDP error reporting.
   - IDR keyframe issued on output enable, destination change, and bitrate change.
   - Only `udp://` scheme is accepted for server URIs.
 - `0.1.3`:

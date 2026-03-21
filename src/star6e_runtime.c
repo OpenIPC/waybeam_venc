@@ -16,7 +16,9 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
+#include <sys/syscall.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +26,17 @@
 #include <unistd.h>
 
 static SdkQuietState g_sdk_quiet = SDK_QUIET_STATE_INIT;
+
+static MI_VENC_Pack_t *ensure_packs(MI_VENC_Pack_t **buf,
+	uint32_t *cap, uint32_t need)
+{
+	if (need <= *cap)
+		return *buf;
+	free(*buf);
+	*buf = malloc(need * sizeof(MI_VENC_Pack_t));
+	*cap = *buf ? need : 0;
+	return *buf;
+}
 
 /* Forward declaration — record status callback for HTTP API */
 static void record_status_callback(VencRecordStatus *out);
@@ -280,7 +293,8 @@ static void *dual_rec_thread_fn(void *arg)
 		}
 
 		stream.count = stat.curPacks;
-		stream.packet = calloc(stat.curPacks, sizeof(MI_VENC_Pack_t));
+		stream.packet = ensure_packs(&d->stream_packs,
+			&d->stream_packs_cap, stat.curPacks);
 		if (!stream.packet) {
 			usleep(1000);
 			continue;
@@ -289,7 +303,6 @@ static void *dual_rec_thread_fn(void *arg)
 		ret = MI_VENC_GetStream(d->channel, &stream,
 			g_running ? 40 : 0);
 		if (ret != 0) {
-			free(stream.packet);
 			if (ret == -EAGAIN || ret == EAGAIN)
 				usleep(1000);
 			continue;
@@ -308,7 +321,6 @@ static void *dual_rec_thread_fn(void *arg)
 		}
 
 		MI_VENC_ReleaseStream(d->channel, &stream);
-		free(stream.packet);
 		total_count++;
 
 		/* Peek: is another frame already waiting?  If so, we're
@@ -468,7 +480,7 @@ static void star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			if (star6e_output_prepare(&ds_setup, ps->dual->server,
 			    vcfg->outgoing.stream_mode,
 			    vcfg->outgoing.max_payload_size,
-			    vcfg->outgoing.send_feedback) == 0) {
+			    vcfg->outgoing.connected_udp) == 0) {
 				star6e_output_init(&ps->dual->output, &ds_setup);
 				star6e_video_init(&ps->dual->video, vcfg,
 					ps->sensor.mode.maxFps,
@@ -650,7 +662,8 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	*idle_counter = 0;
 
 	stream.count = stat.curPacks;
-	stream.packet = calloc(stat.curPacks, sizeof(MI_VENC_Pack_t));
+	stream.packet = ensure_packs(&ps->stream_packs,
+		&ps->stream_packs_cap, stat.curPacks);
 	if (!stream.packet) {
 		fprintf(stderr, "ERROR: Unable to allocate stream packets\n");
 		return -1;
@@ -658,8 +671,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 
 	ret = MI_VENC_GetStream(ps->venc_channel, &stream, 40);
 	if (ret != 0) {
-		free(stream.packet);
-		stream.packet = NULL;
 		if (ret == -EAGAIN || ret == EAGAIN) {
 			idle_wait(&ps->video.sidecar, 2);
 			return 0;
@@ -740,7 +751,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	}
 
 	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
-	free(stream.packet);
 
 	/* ch1 frames are now drained by the dedicated recording thread
 	 * (dual_rec_thread_fn) — no polling needed here. */
@@ -799,6 +809,21 @@ static int star6e_runner_run(void *opaque)
 
 	clock_gettime(CLOCK_MONOTONIC, &cus3a_ts_last);
 
+	/* Pin encoder to CPU 0 with minimum RT priority.  Reduces
+	 * scheduling jitter from ISP/audio/httpd threads.  Silent
+	 * fallback if unprivileged or single-core. */
+	{
+		unsigned long mask = 1UL;  /* CPU 0 */
+		syscall(__NR_sched_setaffinity, 0, sizeof(mask), &mask);
+
+		struct sched_param sp;
+		sp.sched_priority = 1;
+		if (pthread_setschedparam(pthread_self(), SCHED_FIFO,
+		    &sp) != 0)
+			printf("> note: RT priority not available"
+				" (run as root)\n");
+	}
+
 	while (g_running) {
 		ret = star6e_runtime_handle_reinit(ctx, &cus3a_ts_last,
 			&idle_counter, &handled);
@@ -835,6 +860,11 @@ static void star6e_runner_teardown(void *opaque)
 	{
 		pid_t watchdog = fork();
 		if (watchdog == 0) {
+			/* Close inherited stdout — it may be a pipe from the
+			 * audio stdout filter.  Keeping it open prevents the
+			 * filter thread's read() from seeing EOF, which
+			 * deadlocks pthread_join in audio teardown. */
+			close(STDOUT_FILENO);
 			/* Child: poll parent liveness, escalate if stuck.
 			 * Check every second — exit early if parent dies
 			 * normally so we don't linger as an orphan. */

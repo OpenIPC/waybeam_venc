@@ -1,7 +1,6 @@
 #include "maruko_video.h"
 
 #include "h26x_util.h"
-#include "rtp_adapt.h"
 #include "rtp_packetizer.h"
 #include "rtp_session.h"
 
@@ -16,21 +15,34 @@ typedef struct {
 } MarukoRtpWriteContext;
 
 static int maruko_rtp_write(const uint8_t *header, size_t header_len,
-	const uint8_t *payload, size_t payload_len, void *opaque)
+	const uint8_t *payload1, size_t payload1_len,
+	const uint8_t *payload2, size_t payload2_len, void *opaque)
 {
 	const MarukoRtpWriteContext *ctx = opaque;
-	struct iovec vec[2];
+	struct iovec vec[3];
 	struct msghdr msg;
+	int iovcnt;
 
-	if (!ctx || !header || !payload || header_len == 0 || payload_len == 0)
+	if (!ctx || !header || !payload1 || header_len == 0 || payload1_len == 0)
 		return -1;
 
-	/* SHM path: write RTP packet to ring buffer */
+	/* SHM path: write RTP packet to ring buffer (flatten payload parts) */
 	if (ctx->ring) {
-		if (header_len > UINT16_MAX || payload_len > UINT16_MAX)
+		size_t total_payload = payload1_len + payload2_len;
+		if (header_len > UINT16_MAX || total_payload > UINT16_MAX)
 			return -1;
+		if (payload2 && payload2_len > 0) {
+			uint8_t flat[RTP_BUFFER_MAX];
+			if (total_payload > sizeof(flat))
+				return -1;
+			memcpy(flat, payload1, payload1_len);
+			memcpy(flat + payload1_len, payload2, payload2_len);
+			return venc_ring_write(ctx->ring, header,
+				(uint16_t)header_len, flat,
+				(uint16_t)total_payload);
+		}
 		return venc_ring_write(ctx->ring, header, (uint16_t)header_len,
-			payload, (uint16_t)payload_len);
+			payload1, (uint16_t)payload1_len);
 	}
 
 	/* UDP path */
@@ -39,14 +51,20 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 
 	vec[0].iov_base = (void *)header;
 	vec[0].iov_len = header_len;
-	vec[1].iov_base = (void *)payload;
-	vec[1].iov_len = payload_len;
+	vec[1].iov_base = (void *)payload1;
+	vec[1].iov_len = payload1_len;
+	iovcnt = 2;
+	if (payload2 && payload2_len > 0) {
+		vec[2].iov_base = (void *)payload2;
+		vec[2].iov_len = payload2_len;
+		iovcnt = 3;
+	}
 
 	memset(&msg, 0, sizeof(msg));
 	msg.msg_name = (void *)ctx->dst;
 	msg.msg_namelen = sizeof(*ctx->dst);
 	msg.msg_iov = vec;
-	msg.msg_iovlen = 2;
+	msg.msg_iovlen = iovcnt;
 	return sendmsg(ctx->socket_handle, &msg, 0) < 0 ? -1 : 0;
 }
 
@@ -73,7 +91,7 @@ static int maruko_send_rtp_packet(int socket_handle,
 	state.payload_type = rtp->payload_type;
 
 	ret = rtp_packetizer_send_packet(&state, maruko_rtp_write, &ctx,
-		payload, payload_len, marker);
+		payload, payload_len, NULL, 0, marker);
 	rtp->seq = state.seq;
 	return ret;
 }
@@ -91,7 +109,13 @@ static size_t maruko_send_fu_h264(const uint8_t *data, size_t length,
 	size_t remaining;
 	size_t total_bytes = 0;
 	int start = 1;
-	uint8_t fragment[2 + RTP_BUFFER_MAX];
+	uint8_t fu_hdr[2];
+	MarukoRtpWriteContext ctx = {
+		.socket_handle = socket_handle,
+		.dst = dst,
+		.ring = ring,
+	};
+	RtpPacketizerState state;
 
 	if (!data || length <= 1 || !rtp || max_payload <= 2) {
 		return 0;
@@ -103,18 +127,23 @@ static size_t maruko_send_fu_h264(const uint8_t *data, size_t length,
 	max_fragment = max_payload - 2;
 	remaining = length - 1;
 
+	state.seq = rtp->seq;
+	state.timestamp = rtp->timestamp;
+	state.ssrc = rtp->ssrc;
+	state.payload_type = rtp->payload_type;
+
 	while (remaining > 0) {
 		size_t chunk = remaining > max_fragment ? max_fragment : remaining;
 		int end = (remaining == chunk);
 		int marker = (end && is_last) ? 1 : 0;
 
-		fragment[0] = fu_indicator;
-		fragment[1] = (uint8_t)((start ? 0x80 : 0x00) |
+		fu_hdr[0] = fu_indicator;
+		fu_hdr[1] = (uint8_t)((start ? 0x80 : 0x00) |
 			(end ? 0x40 : 0x00) | nal_type);
-		memcpy(fragment + 2, payload, chunk);
 
-		if (maruko_send_rtp_packet(socket_handle, dst, ring,
-		    fragment, chunk + 2, rtp, marker) != 0) {
+		if (rtp_packetizer_send_packet(&state, maruko_rtp_write, &ctx,
+		    fu_hdr, 2, payload, chunk, marker) != 0) {
+			rtp->seq = state.seq;
 			return total_bytes;
 		}
 
@@ -124,6 +153,7 @@ static size_t maruko_send_fu_h264(const uint8_t *data, size_t length,
 		start = 0;
 	}
 
+	rtp->seq = state.seq;
 	return total_bytes + 1;
 }
 
@@ -388,30 +418,6 @@ static size_t maruko_send_frame_compact(const i6c_venc_strm *stream,
 	return total_bytes;
 }
 
-static void maruko_adaptive_payload_update(MarukoBackendConfig *cfg,
-	size_t frame_bytes)
-{
-	RtpAdaptState state;
-
-	if (!cfg) {
-		return;
-	}
-
-	state.payload_size = cfg->rtp_payload_size;
-	state.target_pkt_rate = cfg->target_pkt_rate;
-	state.max_frame_size = cfg->max_frame_size;
-	state.adapt_cooldown = cfg->adapt_cooldown;
-	state.ewma_frame_bytes = cfg->ewma_frame_bytes;
-	state.sensor_fps = cfg->sensor_fps;
-
-	(void)rtp_adapt_update(&state,
-		cfg->stream_mode == MARUKO_STREAM_RTP, frame_bytes,
-		cfg->verbose);
-	cfg->rtp_payload_size = state.payload_size;
-	cfg->adapt_cooldown = state.adapt_cooldown;
-	cfg->ewma_frame_bytes = state.ewma_frame_bytes;
-}
-
 void maruko_video_init_rtp_state(MarukoRtpState *rtp,
 	PAYLOAD_TYPE_E codec, uint32_t sensor_fps)
 {
@@ -446,6 +452,5 @@ size_t maruko_video_send_frame(const i6c_venc_strm *stream,
 		return 0;
 	}
 
-	maruko_adaptive_payload_update(cfg, total_bytes);
 	return total_bytes;
 }

@@ -134,7 +134,7 @@ static int test_star6e_output_udp_send_rtp(void)
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output udp rtp init", ret == 0);
 	ret = star6e_output_send_rtp_parts(&output, header, sizeof(header), payload,
-		sizeof(payload));
+		sizeof(payload), NULL, 0);
 	CHECK("star6e output udp rtp send", ret == 0);
 	received = recv(recv_socket, buf, sizeof(buf), 0);
 	CHECK("star6e output udp rtp recv size",
@@ -171,7 +171,7 @@ static int test_star6e_output_shm_send_rtp(void)
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output shm send init", ret == 0);
 	ret = star6e_output_send_rtp_parts(&output, header, sizeof(header), payload,
-		sizeof(payload));
+		sizeof(payload), NULL, 0);
 	CHECK("star6e output shm send", ret == 0);
 	attached = venc_ring_attach(name);
 	CHECK("star6e output shm attach", attached != NULL);
@@ -677,7 +677,7 @@ static int test_star6e_audio_output_shared_teardown_keeps_video_socket(void)
 
 	star6e_audio_output_teardown(&audio_output);
 	ret = star6e_output_send_rtp_parts(&output, header, sizeof(header), payload,
-		sizeof(payload));
+		sizeof(payload), NULL, 0);
 	CHECK("star6e audio shared teardown video send", ret == 0);
 	received = recv(recv_socket, buf, sizeof(buf), 0);
 	CHECK("star6e audio shared teardown recv size",

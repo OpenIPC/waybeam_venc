@@ -20,9 +20,6 @@ typedef struct {
 	uint32_t sensor_framerate;
 	uint16_t max_frame_size;
 	uint16_t rtp_payload_size;
-	uint16_t target_pkt_rate;
-	uint32_t ewma_frame_bytes;
-	uint16_t adapt_cooldown;
 	unsigned int frame_counter;
 	StreamMetricsState verbose_metrics;
 	Star6eHevcRtpStats verbose_packetizer_interval;

@@ -38,6 +38,8 @@ typedef struct {
 	AudioRing audio_ring;
 	ImuState *imu;              /* NULL if IMU disabled */
 	struct EisCropState *eis;   /* NULL if EIS disabled */
+	MI_VENC_Pack_t *stream_packs;     /* pre-allocated for main loop */
+	uint32_t stream_packs_cap;
 	/* Dual VENC (gemini mode) — heap-allocated, NULL when inactive */
 	struct Star6eDualVenc *dual;
 } Star6ePipelineState;
@@ -61,6 +63,8 @@ typedef struct Star6eDualVenc {
 	volatile sig_atomic_t rec_started;
 	Star6eTsRecorderState *ts_recorder;  /* borrowed, NULL in dual-stream */
 	int is_dual_stream;
+	MI_VENC_Pack_t *stream_packs;     /* pre-allocated for rec thread */
+	uint32_t stream_packs_cap;
 } Star6eDualVenc;
 
 /** Create secondary VENC channel and bind to VPE output.

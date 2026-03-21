@@ -34,7 +34,7 @@ MARUKO_SHIM_SO := tools/libmaruko_uclibc_shim.so
 VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
 COMMON_CFLAGS := -Os -s -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VERSION=\"$(VENC_VERSION)\"
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/sensor_select.c src/venc_ring.c lib/cJSON.c
-HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/sdk_quiet.c src/rtp_adapt.c src/rtp_packetizer.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c
+HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/sdk_quiet.c src/rtp_packetizer.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c
 MARUKO_ONLY_SRC := src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/imu_bmi270.c src/eis_crop.c
 LIB_RUNPATH ?= /usr/lib
@@ -128,7 +128,7 @@ check:
 lint: $(TOOLCHAIN_TARGET) check
 	$(CC) $(CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -Wno-old-style-declaration -fsyntax-only $(SRC)
 
-$(TARGET): $(SRC) include/backend.h include/codec_config.h include/codec_types.h include/file_util.h include/h26x_param_sets.h include/h26x_util.h include/isp_runtime.h include/maruko_bindings.h include/maruko_config.h include/maruko_controls.h include/maruko_output.h include/maruko_pipeline.h include/maruko_runtime.h include/maruko_video.h include/rtp_adapt.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/sdk_quiet.h include/star6e_audio.h include/star6e_controls.h include/star6e_cus3a.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_pipeline.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_runtime.h include/star6e_video.h include/stream_metrics.h include/venc_config.h include/venc_httpd.h include/venc_api.h include/sensor_select.h include/venc_ring.h include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h include/imu_bmi270.h include/eis_crop.h $(if $(filter 1,$(BUILD_MARUKO_SHIM)),$(MARUKO_SHIM_SO),)
+$(TARGET): $(SRC) include/backend.h include/codec_config.h include/codec_types.h include/file_util.h include/h26x_param_sets.h include/h26x_util.h include/isp_runtime.h include/maruko_bindings.h include/maruko_config.h include/maruko_controls.h include/maruko_output.h include/maruko_pipeline.h include/maruko_runtime.h include/maruko_video.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/sdk_quiet.h include/star6e_audio.h include/star6e_controls.h include/star6e_cus3a.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_pipeline.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_runtime.h include/star6e_video.h include/stream_metrics.h include/venc_config.h include/venc_httpd.h include/venc_api.h include/sensor_select.h include/venc_ring.h include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h include/imu_bmi270.h include/eis_crop.h $(if $(filter 1,$(BUILD_MARUKO_SHIM)),$(MARUKO_SHIM_SO),)
 	$(CC) $(CFLAGS) $(LDFLAGS) $(SRC) -L$(DRV) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) -Ltools $(BASE_LIBS) $(SOC_LIBS) -o $@
 
 $(TEST_TARGET): $(TEST_SRC) include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h
@@ -174,7 +174,7 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_maruko_config.c \
                 tests/test_pipeline_common.c \
                 tests/test_codec_config.c tests/test_sdk_quiet.c \
-                tests/test_rtp_adapt.c tests/test_rtp_packetizer.c \
+                tests/test_rtp_packetizer.c \
                 tests/test_isp_runtime.c tests/test_rtp_session.c \
                 tests/test_stream_metrics.c \
                 tests/test_star6e_hevc_rtp.c tests/test_star6e_output.c \
@@ -185,9 +185,9 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_backend.c
 # Production sources compiled into the test binary (pure-logic modules only).
 # sensor_select.c is included here; its MI_SNR_* deps are stubbed in test_sensor_select.c.
-TEST_LIB_SRCS := src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/sensor_select.c src/venc_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_adapt.c src/rtp_packetizer.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c lib/cJSON.c
+TEST_LIB_SRCS := src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/sensor_select.c src/venc_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c lib/cJSON.c
 
-$(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/h26x_param_sets.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_adapt.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h
+$(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/h26x_param_sets.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h
 	$(HOST_CC) $(HOST_CFLAGS) $(HOST_TEST_EXTRA) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -o $@
 
 test: $(TEST_RUNNER)

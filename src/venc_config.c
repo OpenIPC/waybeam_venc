@@ -92,7 +92,7 @@ void venc_config_defaults(VencConfig *cfg)
 	/* video0 */
 	safe_strcpy(cfg->video0.codec, sizeof(cfg->video0.codec), "h265");
 	safe_strcpy(cfg->video0.rc_mode, sizeof(cfg->video0.rc_mode), "cbr");
-	cfg->video0.fps = 30;
+	cfg->video0.fps = 60;
 	cfg->video0.width = 1920;
 	cfg->video0.height = 1080;
 	cfg->video0.bitrate = 8192;
@@ -105,21 +105,20 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->outgoing.server[0] = '\0';
 	safe_strcpy(cfg->outgoing.stream_mode, sizeof(cfg->outgoing.stream_mode), "rtp");
 	cfg->outgoing.max_payload_size = 1400;
-	cfg->outgoing.target_pkt_rate = 0;
-	cfg->outgoing.send_feedback = false;
+	cfg->outgoing.connected_udp = true;
 
 	/* fpv */
 	cfg->fpv.roi_enabled = true;
 	cfg->fpv.roi_qp = 0;
 	cfg->fpv.roi_steps = 2;
-	cfg->fpv.roi_center = 0.25;
+	cfg->fpv.roi_center = 0.4;
 	cfg->fpv.noise_level = 0;
 
 	/* audio */
 	cfg->audio.enabled = false;
-	cfg->audio.sample_rate = 16000;
+	cfg->audio.sample_rate = 48000;
 	cfg->audio.channels = 1;
-	safe_strcpy(cfg->audio.codec, sizeof(cfg->audio.codec), "pcm");
+	safe_strcpy(cfg->audio.codec, sizeof(cfg->audio.codec), "opus");
 	cfg->audio.volume = 80;
 	cfg->audio.mute = false;
 	cfg->outgoing.audio_port = 5601;
@@ -300,9 +299,8 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 		json_get_string(obj, "streamMode", s->stream_mode));
 	s->max_payload_size = (uint16_t)json_get_int(obj, "maxPayloadSize",
 		(int)s->max_payload_size);
-	s->target_pkt_rate = (uint16_t)json_get_int(obj, "targetPacketRate",
-		(int)s->target_pkt_rate);
-	s->send_feedback = json_get_bool(obj, "sendFeedback", s->send_feedback);
+	s->connected_udp = json_get_bool(obj, "connectedUdp",
+		json_get_bool(obj, "sendFeedback", s->connected_udp));
 	s->audio_port = (uint16_t)json_get_int(obj, "audioPort",
 		(int)s->audio_port);
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
@@ -557,8 +555,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(out, "server", cfg->outgoing.server);
 		cJSON_AddStringToObject(out, "streamMode", cfg->outgoing.stream_mode);
 		cJSON_AddNumberToObject(out, "maxPayloadSize", cfg->outgoing.max_payload_size);
-		cJSON_AddNumberToObject(out, "targetPacketRate", cfg->outgoing.target_pkt_rate);
-		cJSON_AddBoolToObject(out, "sendFeedback", cfg->outgoing.send_feedback);
+		cJSON_AddBoolToObject(out, "connectedUdp", cfg->outgoing.connected_udp);
 		cJSON_AddNumberToObject(out, "audioPort", cfg->outgoing.audio_port);
 		cJSON_AddNumberToObject(out, "sidecarPort", cfg->outgoing.sidecar_port);
 	}

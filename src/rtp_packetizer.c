@@ -1,7 +1,5 @@
 #include "rtp_packetizer.h"
 
-#include "rtp_adapt.h"
-
 #include <string.h>
 
 #define RTP_HEADER_SIZE 12
@@ -14,12 +12,13 @@ static void rtp_packetizer_reset_result(RtpPacketizerResult *result)
 }
 
 int rtp_packetizer_send_packet(RtpPacketizerState *state,
-	RtpPacketizerWriteFn writer, void *opaque, const uint8_t *payload,
-	size_t payload_len, int marker)
+	RtpPacketizerWriteFn writer, void *opaque, const uint8_t *payload1,
+	size_t payload1_len, const uint8_t *payload2, size_t payload2_len,
+	int marker)
 {
 	uint8_t header[RTP_HEADER_SIZE];
 
-	if (!state || !writer || !payload || payload_len == 0)
+	if (!state || !writer || !payload1 || payload1_len == 0)
 		return -1;
 
 	header[0] = 0x80;
@@ -36,7 +35,8 @@ int rtp_packetizer_send_packet(RtpPacketizerState *state,
 	header[10] = (uint8_t)((state->ssrc >> 8) & 0xFF);
 	header[11] = (uint8_t)(state->ssrc & 0xFF);
 
-	if (writer(header, sizeof(header), payload, payload_len, opaque) != 0)
+	if (writer(header, sizeof(header), payload1, payload1_len,
+		payload2, payload2_len, opaque) != 0)
 		return -1;
 
 	state->seq++;
@@ -53,7 +53,7 @@ size_t rtp_packetizer_send_hevc_fu(RtpPacketizerState *state,
 	size_t total_bytes = 0;
 	size_t max_fragment;
 	int start = 1;
-	uint8_t fragment[3 + RTP_BUFFER_MAX];
+	uint8_t fu_hdr[3];
 	uint8_t nal_header0;
 	uint8_t nal_header1;
 	uint8_t forbidden_zero;
@@ -91,14 +91,13 @@ size_t rtp_packetizer_send_hevc_fu(RtpPacketizerState *state,
 		int end = (remaining == chunk);
 		int marker = (end && is_last) ? 1 : 0;
 
-		fragment[0] = fu_indicator0;
-		fragment[1] = fu_indicator1;
-		fragment[2] = (uint8_t)((start ? 0x80 : 0x00) |
+		fu_hdr[0] = fu_indicator0;
+		fu_hdr[1] = fu_indicator1;
+		fu_hdr[2] = (uint8_t)((start ? 0x80 : 0x00) |
 			(end ? 0x40 : 0x00) | (nal_type & 0x3F));
-		memcpy(fragment + 3, payload, chunk);
 
-		if (rtp_packetizer_send_packet(state, writer, opaque, fragment,
-			chunk + 3, marker) != 0)
+		if (rtp_packetizer_send_packet(state, writer, opaque,
+			fu_hdr, 3, payload, chunk, marker) != 0)
 			return total_bytes;
 
 		if (result) {
@@ -127,8 +126,8 @@ size_t rtp_packetizer_send_hevc_nal(RtpPacketizerState *state,
 		return 0;
 
 	if (length <= max_payload) {
-		if (rtp_packetizer_send_packet(state, writer, opaque, data, length,
-			is_last ? 1 : 0) == 0) {
+		if (rtp_packetizer_send_packet(state, writer, opaque, data,
+			length, NULL, 0, is_last ? 1 : 0) == 0) {
 			if (result) {
 				result->packet_count = 1;
 				result->payload_bytes = (uint32_t)length;

@@ -72,8 +72,7 @@ typedef struct {
 	char server[VENC_CONFIG_STRING_MAX]; /* "udp://host:port" */
 	char stream_mode[16];               /* "rtp" or "compact" */
 	uint16_t max_payload_size;
-	uint16_t target_pkt_rate;           /* adaptive pkt/s target (0=disable) */
-	bool send_feedback;
+	bool connected_udp;             /* connect() socket (skip per-packet routing) */
 	uint16_t audio_port;                /* 0 = same as video port — AVOID: mixing
 	                                     * audio and video RTP on one socket causes
 	                                     * video decoder instability at the receiver */

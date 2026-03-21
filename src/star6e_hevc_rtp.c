@@ -1,7 +1,6 @@
 #include "star6e_hevc_rtp.h"
 
 #include "h26x_util.h"
-#include "rtp_adapt.h"
 
 #include <string.h>
 
@@ -30,10 +29,11 @@ static void star6e_hevc_rtp_apply_stats(Star6eHevcRtpStats *stats,
 }
 
 static int star6e_hevc_rtp_write(const uint8_t *header, size_t header_len,
-	const uint8_t *payload, size_t payload_len, void *opaque)
+	const uint8_t *payload1, size_t payload1_len,
+	const uint8_t *payload2, size_t payload2_len, void *opaque)
 {
-	return star6e_output_send_rtp_parts(opaque, header, header_len, payload,
-		payload_len);
+	return star6e_output_send_rtp_parts(opaque, header, header_len,
+		payload1, payload1_len, payload2, payload2_len);
 }
 
 static void hevc_ap_reset(HevcApBuilder *ap)
@@ -103,7 +103,7 @@ static int send_rtp_packet(const Star6eOutput *output, const uint8_t *payload,
 		return 0;
 
 	return rtp_packetizer_send_packet(rtp, star6e_hevc_rtp_write,
-		(void *)output, payload, payload_len, marker);
+		(void *)output, payload, payload_len, NULL, 0, marker);
 }
 
 static size_t hevc_ap_flush(HevcApBuilder *ap, const Star6eOutput *output,

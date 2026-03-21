@@ -2,7 +2,6 @@
 #include "star6e_audio.h"
 
 #include "rtp_session.h"
-#include "rtp_adapt.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -40,28 +39,6 @@ static size_t send_frame_output_rtp(const Star6eOutput *output,
 		ctx->frame_ticks, ctx->params, ctx->max_payload, ctx->stats);
 }
 
-static void adaptive_payload_update(Star6eVideoState *state,
-	const Star6eOutput *output, size_t frame_bytes, int verbose)
-{
-	RtpAdaptState adapt_state;
-
-	if (!state || !output)
-		return;
-
-	adapt_state.payload_size = state->rtp_payload_size;
-	adapt_state.target_pkt_rate = state->target_pkt_rate;
-	adapt_state.max_frame_size = state->max_frame_size;
-	adapt_state.adapt_cooldown = state->adapt_cooldown;
-	adapt_state.ewma_frame_bytes = state->ewma_frame_bytes;
-	adapt_state.sensor_fps = state->sensor_framerate;
-
-	(void)rtp_adapt_update(&adapt_state,
-		star6e_output_is_rtp(output), frame_bytes, verbose);
-	state->rtp_payload_size = adapt_state.payload_size;
-	state->adapt_cooldown = adapt_state.adapt_cooldown;
-	state->ewma_frame_bytes = adapt_state.ewma_frame_bytes;
-}
-
 void star6e_video_reset(Star6eVideoState *state)
 {
 	if (!state)
@@ -81,9 +58,6 @@ void star6e_video_init(Star6eVideoState *state, const VencConfig *vcfg,
 	state->sensor_framerate = sensor_framerate;
 	state->max_frame_size = vcfg->outgoing.max_payload_size;
 	state->rtp_payload_size = vcfg->outgoing.max_payload_size;
-	if (state->rtp_payload_size < RTP_MIN_PAYLOAD)
-		state->rtp_payload_size = RTP_MIN_PAYLOAD;
-	state->target_pkt_rate = vcfg->outgoing.target_pkt_rate;
 
 	if (output && star6e_output_is_rtp(output)) {
 		RtpSessionState session;
@@ -144,9 +118,6 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 			seq_before,
 			(uint16_t)(state->rtp_state.seq - seq_before),
 			capture_us, ready_us);
-
-		adaptive_payload_update(state, output, total_bytes,
-			verbose_enabled);
 	}
 
 	if (!verbose_enabled)
@@ -188,6 +159,13 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 					state->verbose_packetizer_interval.ap_packets,
 					state->verbose_packetizer_interval.ap_nals,
 					state->verbose_packetizer_interval.fu_packets);
+			}
+			{
+				uint32_t errs = star6e_output_drain_send_errors(
+					(Star6eOutput *)output);
+				if (errs > 0)
+					dprintf(ofd, "[net] %u send errors\n",
+						errs);
 			}
 			memset(&state->verbose_packetizer_interval, 0,
 				sizeof(state->verbose_packetizer_interval));
