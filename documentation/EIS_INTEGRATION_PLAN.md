@@ -128,28 +128,24 @@ auto-applies one entry per frame.
 
 ## Recommended Phased Implementation
 
-### Phase A: IMU Integration (no EIS yet)
+### Phase A: IMU Integration — COMPLETE
 
-Bring BMI270 driver code into venc as a background thread. Validate IMU data
-quality and timing on the Star6E target.
+BMI270 driver integrated as `src/imu_bmi270.c`. FIFO mode (frame-synced,
+no thread) is the primary path; polling mode as fallback. Validated on
+SSC30KQ hardware with `/dev/i2c-1` at 200 Hz.
 
-1. Port BMI270 I2C driver from wfb_openipc into `src/`
-2. Add IMU reader thread that samples at 200 Hz with `CLOCK_MONOTONIC` timestamps
-3. Ring buffer for IMU samples (gyro + accel + timestamp)
-4. CLI flag `--eis` to enable IMU thread (disabled by default)
-5. Log IMU data alongside frame PTS for sync validation
+### Phase B: Crop-Based EIS — COMPLETE
 
-### Phase B: Crop-Based EIS (Approach 1)
+Implemented as modular EIS framework with two backends:
+- `eis_legacy.c` — original LPF-based approach (Approach 1 as described above)
+- `eis_gyroglide.c` — GyroGlide-Lite: timestamp-based integration, motion-gated
+  recenter, edge-aware recentering, slew limiting, runtime bias adaptation
 
-Implement translation-only stabilization using `MI_VPE_SetPortCrop()`.
+Hardware-validated on SSC30KQ at 60fps with BMI270 IMU. VPE crop margin
+capped at 30% (VPE stalls above this when scaling is active). See
+`documentation/GYROGLIDE_LITE_DESIGN.md` for the full design.
 
-1. Configure overscan: VPE capture = sensor resolution, VPE port output = target - margin
-2. Per-frame: integrate gyro between frame timestamps → X/Y offset
-3. Clamp offset to margin bounds
-4. Call `MI_VPE_SetPortCrop()` with shifted window
-5. Tuning: low-pass filter on offset to avoid over-correction
-
-### Phase C: LDC Warp EIS (Approach 3)
+### Phase C: LDC Warp EIS (Approach 3) — FUTURE
 
 Upgrade to full rotation compensation if crop-based EIS proves insufficient.
 

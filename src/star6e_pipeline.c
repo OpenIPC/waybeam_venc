@@ -2,7 +2,7 @@
 
 #include "codec_config.h"
 #include "codec_types.h"
-#include "eis_crop.h"
+#include "eis.h"
 #include "star6e_cus3a.h"
 #include "file_util.h"
 #include "isp_runtime.h"
@@ -881,12 +881,12 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	return 0;
 }
 
-/* IMU push callback: forwards each sample to the EIS crop module */
+/* IMU push callback: forwards each sample to the EIS module */
 static void star6e_pipeline_imu_push(void *ctx, const ImuSample *sample)
 {
 	Star6ePipelineState *ps = (Star6ePipelineState *)ctx;
 	if (ps->eis)
-		eis_crop_push_sample(ps->eis, sample->gyro_x, sample->gyro_y,
+		eis_push_sample(ps->eis, sample->gyro_x, sample->gyro_y,
 			sample->gyro_z, &sample->ts);
 }
 
@@ -1014,22 +1014,27 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		if (!state->imu && !vcfg->eis.test_mode) {
 			fprintf(stderr, "WARNING: EIS requires IMU (unless testMode), skipping\n");
 		} else {
-			EisCropConfig eis_cfg = {
+			EisConfig eis_cfg = {
+				.mode = vcfg->eis.mode,
 				.margin_percent = vcfg->eis.margin_percent,
 				.capture_w = (uint16_t)state->image_width,
 				.capture_h = (uint16_t)state->image_height,
 				.vpe_channel = 0,
 				.vpe_port = 0,
-				.filter_tau = vcfg->eis.filter_tau,
 				.pixels_per_radian = 0.0f,  /* auto: capture_w/2 */
 				.test_mode = vcfg->eis.test_mode ? 1 : 0,
 				.swap_xy = vcfg->eis.swap_xy ? 1 : 0,
 				.invert_x = vcfg->eis.invert_x ? 1 : 0,
 				.invert_y = vcfg->eis.invert_y ? 1 : 0,
+				.gain = vcfg->eis.gain,
+				.deadband_rad = vcfg->eis.deadband_rad,
+				.recenter_rate = vcfg->eis.recenter_rate,
+				.max_slew_px = vcfg->eis.max_slew_px,
+				.bias_alpha = vcfg->eis.bias_alpha,
 			};
-			state->eis = eis_crop_init(&eis_cfg);
+			state->eis = eis_create(&eis_cfg);
 			if (state->eis && state->imu)
-				eis_crop_set_imu_active(state->eis, 1);
+				eis_set_imu_active(state->eis, 1);
 		}
 	}
 
@@ -1102,7 +1107,7 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	if (state->imu)
 		imu_stop(state->imu);
 	if (state->eis) {
-		eis_crop_destroy(state->eis);
+		eis_destroy(state->eis);
 		state->eis = NULL;
 	}
 	if (state->imu) {
@@ -1186,7 +1191,7 @@ static void star6e_pipeline_stop_venc_level(Star6ePipelineState *state)
 	if (state->imu)
 		imu_stop(state->imu);
 	if (state->eis) {
-		eis_crop_destroy(state->eis);
+		eis_destroy(state->eis);
 		state->eis = NULL;
 	}
 	if (state->imu) {

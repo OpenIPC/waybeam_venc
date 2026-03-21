@@ -22,8 +22,8 @@ via HTTP API.
 - Gemini mode: dual VENC for concurrent stream + high-quality record
 - Adaptive recording bitrate: auto-reduces if SD card can't keep up
 - Dual-backend: Star6E and Maruko from shared codebase
-- BMI270 IMU driver with frame-synced FIFO (Star6E only, POC)
-- Crop-based electronic image stabilization (Star6E only, POC)
+- BMI270 IMU driver with frame-synced FIFO (Star6E only)
+- GyroGlide-Lite: gyro-based electronic image stabilization (Star6E only)
 
 ## Build
 
@@ -114,7 +114,8 @@ template is provided at `config/venc.default.json`.
     "calFile": "/etc/imu.cal", "calSamples": 400
   },
   "eis": {
-    "enabled": false, "marginPercent": 10, "filterTau": 1.0,
+    "enabled": false, "marginPercent": 30,
+    "gain": 1.0, "deadbandRad": 0.0, "recenterRate": 0.5,
     "testMode": false, "swapXY": false, "invertX": false, "invertY": false
   },
   "record": {
@@ -423,13 +424,18 @@ modes, the secondary channel parameters can be adjusted live via `/api/v1/dual/s
 | `imu.cal_file` | string | restart | Calibration file path |
 | `imu.cal_samples` | int | restart | Auto-bias samples at startup |
 
-#### EIS (Star6E only, POC)
+#### EIS (Star6E only)
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `eis.enabled` | bool | restart | Enable crop-based stabilization |
-| `eis.margin_percent` | int | restart | Overscan margin (1-49%) |
-| `eis.filter_tau` | float | restart | IIR filter time constant (seconds) |
+| `eis.enabled` | bool | restart | Enable gyro-based image stabilization |
+| `eis.mode` | string | restart | EIS backend (default: `"gyroglide"`) |
+| `eis.margin_percent` | int | restart | Overscan margin 1-30% (default 30) |
+| `eis.gain` | float | restart | Correction gain 0.0-1.0 (default 1.0) |
+| `eis.deadband_rad` | float | restart | Per-frame angle threshold in rad (default 0.0) |
+| `eis.recenter_rate` | float | restart | Return-to-center speed when idle, 1/s (default 0.5) |
+| `eis.max_slew_px` | float | restart | Max crop change per frame in px (0 = off) |
+| `eis.bias_alpha` | float | restart | Runtime gyro bias adaptation rate (default 0.001) |
 | `eis.test_mode` | bool | restart | Inject sine wobble (no IMU needed) |
 | `eis.swap_xy` | bool | restart | Swap gyro X/Y axis mapping |
 | `eis.invert_x` | bool | restart | Invert gyro X correction |
@@ -677,25 +683,100 @@ Run the API test suite against a live device:
 ./scripts/api_test_suite.sh 192.168.2.13 8888
 ```
 
-## IMU & EIS (Proof of Concept)
+## GyroGlide-Lite: Gyro-Based Image Stabilization
 
-The BMI270 IMU driver and crop-based EIS module are integrated into the
-Star6E pipeline as a proof of concept. Both are **disabled by default**
-and have zero runtime impact when disabled — no I2C bus access, no VPE
-crop calls, no CPU overhead.
+GyroGlide-Lite is a low-latency 2-axis electronic image stabilization
+system that uses the BMI270 gyroscope to compensate for camera shake via
+per-frame crop-window shifting. It runs entirely on the SigmaStar VPE
+hardware scaler with negligible CPU overhead.
 
-When enabled, the IMU reads 6-axis data via frame-synced FIFO (no
-separate thread). The EIS module uses an IIR low-pass filter to extract
-smooth camera motion and applies per-frame VPE crop corrections within
-a configurable overscan margin.
+### How it works
 
-**Current state:** 2-DOF crop-based stabilization (pan + tilt). Tested
-on SSC30KQ at 120fps with ~200 IMU samples/s and no FPS regression.
+1. The BMI270 IMU samples gyro data at 200 Hz via hardware FIFO
+2. Each video frame, the FIFO is drained and gyro samples are integrated
+   over the frame interval using per-sample timestamps
+3. The integrated angular displacement is converted to a pixel offset
+4. `MI_VPE_SetPortCrop()` shifts the crop window to cancel the motion
+5. VPE upscales the cropped region back to the output resolution
 
-**Planned extensions:**
-- 3-DOF LDC warp-based rotation correction (roll) via VPE hardware
-- Tunable `pixelsPerRadian` for lens-specific calibration
-- IMU telemetry export for ground station display
-- Integration with waybeam-hub for remote EIS control
+The crop window returns to center only when the camera is stationary,
+preventing the recenter from fighting active corrections.
+
+### Quick start
+
+Add to `/etc/venc.json`:
+
+```json
+{
+  "imu": {
+    "enabled": true,
+    "i2cDevice": "/dev/i2c-1",
+    "i2cAddr": "0x68",
+    "sampleRate": 200,
+    "gyroRange": 1000,
+    "calSamples": 400
+  },
+  "eis": {
+    "enabled": true,
+    "mode": "gyroglide",
+    "marginPercent": 30
+  }
+}
+```
+
+Restart venc. Hold the board still during the 2-second IMU auto-calibration
+at startup.
+
+### Recommended settings
+
+- **FPS: 60 or lower.** At 120fps the per-frame integration window is too
+  short for effective correction. At 60fps the sensor selects a higher-res
+  mode (2560x1920) giving more headroom.
+- **Margin: 30% (default, maximum safe).** This gives ±288px horizontal and
+  ±162px vertical correction range from a 1344x756 crop within 1920x1080.
+  Values above 30% can stall the VPE pipeline and are automatically clamped.
+- **Gain: 1.0** for full correction. Reduce to 0.5-0.8 if overcorrecting.
+- **Deadband: 0.0** recommended. The motion-gated recenter handles bias
+  drift when the camera is stationary.
+
+### Test mode
+
+To verify EIS is working without an IMU connected:
+
+```json
+"eis": { "enabled": true, "testMode": true }
+```
+
+This injects a visible sine-wave wobble into the crop window.
+
+### Axis calibration
+
+If the stabilization moves the wrong direction, use the axis flags:
+
+```json
+"eis": { "swapXY": true, "invertX": false, "invertY": true }
+```
+
+The correct mapping depends on how the IMU is mounted relative to the
+camera sensor.
+
+### Architecture
+
+The EIS system uses a modular dispatch framework. The **gyroglide** backend
+provides timestamp-based integration, motion-gated recenter, edge-aware
+recentering, and optional slew limiting. New backends can be added by
+implementing the `EisOps` vtable in `eis.h`.
+
+### Limitations
+
+- **Translation only** — cannot correct roll (rotation around optical axis)
+- **30% max margin** — VPE hardware limit when scaling is active
+- **Resolution loss** — 30% overscan means the effective output is cropped
+  from a 1344x756 window (upscaled to output resolution)
+- **No rolling-shutter correction** — CMOS line-by-line readout skew is
+  not addressed by crop-window shifting
+
+See `documentation/GYROGLIDE_LITE_DESIGN.md` for the full design document
+and `documentation/EIS_INTEGRATION_PLAN.md` for the implementation roadmap.
 
 [logo]: https://openipc.org/assets/openipc-logo-black.svg

@@ -1,7 +1,7 @@
 #include "star6e_runtime.h"
 
 #include "cJSON.h"
-#include "eis_crop.h"
+#include "eis.h"
 #include "imu_bmi270.h"
 #include "sdk_quiet.h"
 #include "star6e_controls.h"
@@ -669,6 +669,14 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		return -1;
 	}
 
+	/* Drain IMU FIFO and update EIS crop BEFORE GetStream so the
+	 * new crop position is latched by VPE for the frame currently
+	 * being captured, reducing stabilization latency by one frame. */
+	if (ps->imu)
+		imu_drain(ps->imu);
+	if (ps->eis)
+		eis_update(ps->eis);
+
 	ret = MI_VENC_GetStream(ps->venc_channel, &stream, 40);
 	if (ret != 0) {
 		if (ret == -EAGAIN || ret == EAGAIN) {
@@ -678,11 +686,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		fprintf(stderr, "ERROR: MI_VENC_GetStream failed %d\n", ret);
 		return ret;
 	}
-
-	if (ps->imu)
-		imu_drain(ps->imu);
-	if (ps->eis)
-		eis_crop_update(ps->eis);
 
 	(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
 		ps->output_enabled, vcfg->system.verbose);
@@ -738,8 +741,8 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 					ist.last_gyro_x, ist.last_gyro_y, ist.last_gyro_z);
 			}
 			if (ps->eis) {
-				EisCropStatus est;
-				eis_crop_get_status(ps->eis, &est);
+				EisStatus est;
+				eis_get_status(ps->eis, &est);
 				printf("[eis] crop(%u,%u) off(%.1f,%.1f) n=%u ring=%u\n",
 					est.crop_x, est.crop_y,
 					est.offset_x, est.offset_y,
