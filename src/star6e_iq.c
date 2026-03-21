@@ -201,6 +201,58 @@ static IqParamDesc g_params[] = {
 	  NULL, NULL, VT_BOOL, 0,   1 },
 	{ "fpn",          "MI_ISP_IQ_GetFPN",           "MI_ISP_IQ_SetFPN",
 	  NULL, NULL, VT_BOOL, 0,   1 },
+
+	/* ── AE (auto-exposure) ────────────────────────────────────── */
+	/* EV_COMP: {s32EV(4), u32Grad(4)} = 8B, primary s32EV@0 */
+	{ "ae_ev_comp",   "MI_ISP_AE_GetEVComp",      "MI_ISP_AE_SetEVComp",
+	  NULL, NULL, VT_U32, 0,    200 },
+	/* AE mode enum: 0=A, 1=AV, 2=SV, 3=TV, 4=M */
+	{ "ae_mode",      "MI_ISP_AE_GetExpoMode",    "MI_ISP_AE_SetExpoMode",
+	  NULL, NULL, VT_U32, 0,    4 },
+	/* AE state enum: 0=normal, 1=pause */
+	{ "ae_state",     "MI_ISP_AE_GetState",        "MI_ISP_AE_SetState",
+	  NULL, NULL, VT_U32, 0,    1 },
+	/* Flicker enum: 0=disable, 1=60Hz, 2=50Hz, 3=auto */
+	{ "ae_flicker",   "MI_ISP_AE_GetFlicker",      "MI_ISP_AE_SetFlicker",
+	  NULL, NULL, VT_U32, 0,    3 },
+	/* FlickerEX: bEnable(4)+enOpType(4)+u8Sensitivity@8 */
+	{ "ae_flicker_ex","MI_ISP_AE_GetFlickerEX",   "MI_ISP_AE_SetFlickerEX",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	/* Metering mode enum: 0=average, 1=center, 2=spot */
+	{ "ae_win_wgt_type","MI_ISP_AE_GetWinWgtType", "MI_ISP_AE_SetWinWgtType",
+	  NULL, NULL, VT_U32, 0,    2 },
+	/* Manual exposure: {u32FNx10(4), u32SensorGain(4), u32ISPGain(4), u32ShutterUS(4)} = 16B */
+	{ "ae_manual_expo","MI_ISP_AE_GetManualExpo",  "MI_ISP_AE_SetManualExpo",
+	  NULL, NULL, VT_U32, 0,    65535 },
+	/* Exposure limit: {u32MinShutterUS,...} = 32B, 8 x u32 */
+	{ "ae_expo_limit", "MI_ISP_AE_GetExposureLimit","MI_ISP_AE_SetExposureLimit",
+	  NULL, NULL, VT_U32, 0,    65535 },
+	/* AE stabilizer: bEnable(4)+u16DiffThd(2)+u16Percent(2) = 8B */
+	{ "ae_stabilizer","MI_ISP_AE_GetStabilizer",   "MI_ISP_AE_SetStabilizer",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	/* AE RGBIR: bEnable(4)+u16MaxYWithIR(2)+u16MinISPGainCompRatio(2) = 8B */
+	{ "ae_rgbir",     "MI_ISP_AE_GetRGBIRAE",      "MI_ISP_AE_SetRGBIRAE",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	/* AE HDR: complex LUT struct = 140B */
+	{ "ae_hdr",       "MI_ISP_AE_GetHDR",          "MI_ISP_AE_SetHDR",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+
+	/* ── AWB (auto white balance) ──────────────────────────────── */
+	/* AWB AttrEx: bExtraLightEn(4)+stLightInfo[4] = 20B */
+	{ "awb_attr_ex",  "MI_ISP_AWB_GetAttrEx",      "MI_ISP_AWB_SetAttrEx",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	/* AWB MultiLS: bEnable(4)+u8Sensitive(1)+u8CaliStrength(1)+CCMs = 44B */
+	{ "awb_multi_ls", "MI_ISP_AWB_GetMultiLSAttr", "MI_ISP_AWB_SetMultiLSAttr",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	/* AWB stabilizer: bEnable(4)+thresholds = 12B */
+	{ "awb_stabilizer","MI_ISP_AWB_GetStabilizer",  "MI_ISP_AWB_SetStabilizer",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	/* AWB CT calibration: u16StartIdx(2)+... = 84B */
+	{ "awb_ct_cali",  "MI_ISP_AWB_GetCTCaliAttr",  "MI_ISP_AWB_SetCTCaliAttr",
+	  NULL, NULL, VT_U16, 0,    65535 },
+	/* AWB CT weight: u16LvIndex(2)+stParaAPI = 22B */
+	{ "awb_ct_weight","MI_ISP_AWB_GetCTWeight",    "MI_ISP_AWB_SetCTWeight",
+	  NULL, NULL, VT_U16, 0,    65535 },
 };
 #define NUM_PARAMS (sizeof(g_params) / sizeof(g_params[0]))
 
@@ -348,7 +400,52 @@ char *star6e_iq_query(void)
 		}
 	}
 
-	pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "}}");
+	/* ── Read-only ISP diagnostics ─────────────────────────────── */
+	pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, ",\"_diag\":{");
+	{
+		typedef int (*fn_ver_t)(uint32_t, void *);
+		typedef int (*fn_ind_t)(uint32_t, void *);
+		typedef int (*fn_ccm_t)(uint32_t, void *);
+
+		fn_ver_t fn_ver = (fn_ver_t)dlsym(g_isp_handle,
+			"MI_ISP_IQ_GetVersionInfo");
+		fn_ind_t fn_ind = (fn_ind_t)dlsym(g_isp_handle,
+			"MI_ISP_IQ_GetIQind");
+		fn_ccm_t fn_ccm = (fn_ccm_t)dlsym(g_isp_handle,
+			"MI_ISP_IQ_QueryCCMInfo");
+
+		/* IQ bin version */
+		if (fn_ver) {
+			uint32_t ver[3] = {0, 0, 0};
+			int r = fn_ver(0, ver);
+			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+				"\"version\":{\"ret\":%d,\"vendor\":%u,"
+				"\"major\":%u,\"minor\":%u},",
+				r, ver[0], ver[1], ver[2]);
+		}
+
+		/* Current IQ/ISO index */
+		if (fn_ind) {
+			uint32_t idx = 0;
+			int r = fn_ind(0, &idx);
+			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+				"\"iq_index\":{\"ret\":%d,\"value\":%u},",
+				r, idx);
+		}
+
+		/* Current CCM info */
+		if (fn_ccm) {
+			static uint8_t ccm_buf[64];
+			memset(ccm_buf, 0, sizeof(ccm_buf));
+			int r = fn_ccm(0, ccm_buf);
+			uint16_t cct = 0;
+			memcpy(&cct, ccm_buf + 24, sizeof(cct));
+			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+				"\"ccm\":{\"ret\":%d,\"color_temp\":%u}",
+				r, cct);
+		}
+	}
+	pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "}}}");
 	return strdup(buf);
 }
 
