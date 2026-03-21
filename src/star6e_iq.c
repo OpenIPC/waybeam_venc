@@ -29,7 +29,7 @@ typedef MI_S32 (*iq_fn_t)(uint32_t channel, void *param);
 
 #define IQ_OFFSET_ENABLE   0
 #define IQ_OFFSET_OPTYPE   4
-#define IQ_BUF_SIZE        8192
+#define IQ_BUF_SIZE        32768  /* must fit largest struct: DUMMY ~26KB */
 
 typedef enum {
 	VT_BOOL,    /* just bEnable (color_to_gray, defog) */
@@ -155,6 +155,43 @@ static IqParamDesc g_params[] = {
 	{ "iq_mode",      "MI_ISP_IQ_GetIQMode",       "MI_ISP_IQ_SetIQMode",
 	  NULL, NULL, VT_U32, 0,    1 },
 
+	/* ── Lens & sensor calibration (flat structs) ─────────────── */
+	/* LSC: flat, bEnable(4) + u16CenterX@4 */
+	{ "lsc",          "MI_ISP_IQ_GetLSC",          "MI_ISP_IQ_SetLSC",
+	  NULL, NULL, VT_U16, 4,    65535 },
+	/* LSC_CTRL: flat, bEnable(4) + u8RRatioByCct[0]@4 */
+	{ "lsc_ctrl",     "MI_ISP_IQ_GetLSC_CTRL",    "MI_ISP_IQ_SetLSC_CTRL",
+	  NULL, NULL, VT_U8,  4,    255 },
+	/* ALSC: flat, bEnable(4) + u8GridX@4 */
+	{ "alsc",         "MI_ISP_IQ_GetALSC",         "MI_ISP_IQ_SetALSC",
+	  NULL, NULL, VT_U8,  4,    255 },
+	/* ALSC_CTRL: flat, bEnable(4) + u8RRatioByCct[0]@4 */
+	{ "alsc_ctrl",    "MI_ISP_IQ_GetALSC_CTRL",   "MI_ISP_IQ_SetALSC_CTRL",
+	  NULL, NULL, VT_U8,  4,    255 },
+	/* OBC_P1: same struct as OBC, separate API ID */
+	{ "obc_p1",       "MI_ISP_IQ_GetOBC_P1",       "MI_ISP_IQ_SetOBC_P1",
+	  NULL, NULL, VT_U16, 136,  255 },
+	/* STITCH_LPF: flat, bEnable(4) + u16Coeff[0]@4 */
+	{ "stitch_lpf",   "MI_ISP_IQ_GetSTITCH_LPF",  "MI_ISP_IQ_SetSTITCH_LPF",
+	  NULL, NULL, VT_U16, 4,    256 },
+
+	/* ── LUT-based (enable/mode control, value = first LUT entry) ─ */
+	/* RGBGAMMA: auto/manual, huge LUT struct */
+	{ "rgb_gamma",    "MI_ISP_IQ_GetRGBGamma",    "MI_ISP_IQ_SetRGBGamma",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	/* YUVGAMMA: auto/manual, huge LUT struct */
+	{ "yuv_gamma",    "MI_ISP_IQ_GetYUVGamma",    "MI_ISP_IQ_SetYUVGamma",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	/* WDRCurveFull: auto/manual, 256-entry curve */
+	{ "wdr_curve_full","MI_ISP_IQ_GetWDRCurveFull","MI_ISP_IQ_SetWDRCurveFull",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+
+	/* ── Debug/test ────────────────────────────────────────────── */
+	{ "dummy",        "MI_ISP_IQ_GetDUMMY",        "MI_ISP_IQ_SetDUMMY",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	{ "dummy_ex",     "MI_ISP_IQ_GetDUMMY_EX",    "MI_ISP_IQ_SetDUMMY_EX",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+
 	/* ── Toggle controls ───────────────────────────────────────── */
 	{ "defog",        "MI_ISP_IQ_GetDefog",        "MI_ISP_IQ_SetDefog",
 	  NULL, NULL, VT_BOOL, 0,   1 },
@@ -271,8 +308,8 @@ char *star6e_iq_query(void)
 			continue;
 		}
 
-		uint8_t iq_buf[IQ_BUF_SIZE];
-		memset(iq_buf, 0, sizeof(iq_buf));
+		static uint8_t iq_buf[IQ_BUF_SIZE];
+		memset(iq_buf, 0, IQ_BUF_SIZE);
 		MI_S32 ret = p->fn_get(0, iq_buf);
 
 		uint32_t enable = read_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32);
