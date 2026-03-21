@@ -27,12 +27,25 @@
 typedef int MI_S32;
 typedef MI_S32 (*iq_fn_t)(uint32_t channel, void *param);
 
-/* IQ struct field offsets (common SigmaStar pattern) */
+/* IQ struct field offsets (from SDK mi_isp_iq_datatype.h):
+ *   All level structs: { bEnable(4), enOpType(4), stAuto(N*16), stManual }
+ *   color_to_gray: just { bEnable(4) }
+ *
+ * Struct sizes and manual value offsets:
+ *   contrast:    76 bytes, manual u32Lev at offset 72 (0-100)
+ *   brightness:  76 bytes, manual u32Lev at offset 72 (0-100)
+ *   saturation: 416 bytes, manual u8SatAllStr at offset 392 (0-127, 32=1X)
+ *   sharpness: 1268 bytes, manual u8OverShootGain at offset 1192 (0-255, complex)
+ */
 #define IQ_OFFSET_ENABLE   0
 #define IQ_OFFSET_OPTYPE   4
-
-/* For color_to_gray, the struct is just { bEnable }, no optype/manual */
 #define IQ_BUF_SIZE        8192
+
+typedef enum {
+	VT_U32,     /* uint32_t level (contrast, brightness) */
+	VT_U8,      /* uint8_t level (saturation, sharpness) */
+	VT_BOOL,    /* color_to_gray: just bEnable */
+} IqValueType;
 
 typedef struct {
 	const char *name;
@@ -40,15 +53,22 @@ typedef struct {
 	const char *set_sym;
 	iq_fn_t     fn_get;
 	iq_fn_t     fn_set;
-	int         is_bool;   /* color_to_gray: only bEnable matters */
+	IqValueType vtype;
+	uint32_t    manual_offset;  /* byte offset of primary manual value */
+	uint32_t    max_val;        /* max valid value */
 } IqParamDesc;
 
 static IqParamDesc g_params[] = {
-	{ "contrast",      "MI_ISP_IQ_GetContrast",    "MI_ISP_IQ_SetContrast",    NULL, NULL, 0 },
-	{ "brightness",    "MI_ISP_IQ_GetBrightness",  "MI_ISP_IQ_SetBrightness",  NULL, NULL, 0 },
-	{ "saturation",    "MI_ISP_IQ_GetSaturation",  "MI_ISP_IQ_SetSaturation",  NULL, NULL, 0 },
-	{ "sharpness",     "MI_ISP_IQ_GetSharpness",   "MI_ISP_IQ_SetSharpness",   NULL, NULL, 0 },
-	{ "color_to_gray", "MI_ISP_IQ_GetColorToGray", "MI_ISP_IQ_SetColorToGray", NULL, NULL, 1 },
+	{ "contrast",      "MI_ISP_IQ_GetContrast",    "MI_ISP_IQ_SetContrast",
+	  NULL, NULL, VT_U32, 72,   100 },
+	{ "brightness",    "MI_ISP_IQ_GetBrightness",  "MI_ISP_IQ_SetBrightness",
+	  NULL, NULL, VT_U32, 72,   100 },
+	{ "saturation",    "MI_ISP_IQ_GetSaturation",  "MI_ISP_IQ_SetSaturation",
+	  NULL, NULL, VT_U8,  392,  127 },
+	{ "sharpness",     "MI_ISP_IQ_GetSharpness",   "MI_ISP_IQ_SetSharpness",
+	  NULL, NULL, VT_U8,  1192, 255 },
+	{ "color_to_gray", "MI_ISP_IQ_GetColorToGray", "MI_ISP_IQ_SetColorToGray",
+	  NULL, NULL, VT_BOOL, 0,   1 },
 };
 #define NUM_PARAMS (sizeof(g_params) / sizeof(g_params[0]))
 
@@ -133,24 +153,29 @@ char *star6e_iq_query(void)
 		char hex[65];
 		hex_dump(iq_buf, 32, hex, sizeof(hex));
 
-		if (p->is_bool) {
+		if (p->vtype == VT_BOOL) {
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
-				"\"%s\":{\"ret\":%d,\"enabled\":%s,"
-				"\"raw32\":\"%s\"}%s",
+				"\"%s\":{\"ret\":%d,\"value\":%s}%s",
 				p->name, ret,
 				enable ? "true" : "false",
-				hex,
 				(i + 1 < NUM_PARAMS) ? "," : "");
 		} else {
 			memcpy(&optype, iq_buf + IQ_OFFSET_OPTYPE,
 				sizeof(optype));
+			/* Read the manual value at the known offset */
+			uint32_t manual_val = 0;
+			if (p->vtype == VT_U32)
+				memcpy(&manual_val, iq_buf + p->manual_offset,
+					sizeof(uint32_t));
+			else
+				manual_val = iq_buf[p->manual_offset];
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
 				"\"%s\":{\"ret\":%d,\"enabled\":%s,"
-				"\"op_type\":%u,"
-				"\"raw32\":\"%s\"}%s",
+				"\"op_type\":\"%s\",\"value\":%u}%s",
 				p->name, ret,
 				enable ? "true" : "false",
-				optype, hex,
+				optype == 1 ? "manual" : "auto",
+				manual_val,
 				(i + 1 < NUM_PARAMS) ? "," : "");
 		}
 	}
@@ -193,31 +218,27 @@ int star6e_iq_set(const char *param, const char *value)
 		return -1;
 	}
 
-	if (target->is_bool) {
+	uint32_t level = (uint32_t)atoi(value);
+	if (level > target->max_val)
+		level = target->max_val;
+
+	if (target->vtype == VT_BOOL) {
 		/* color_to_gray: struct is just { bEnable } */
-		uint32_t v = (uint32_t)atoi(value);
+		uint32_t v = level ? 1 : 0;
 		memcpy(iq_buf + IQ_OFFSET_ENABLE, &v, sizeof(v));
 	} else {
-		/* Level params: set bEnable=1, enOpType=1 (manual) */
+		/* Level params: set bEnable=1, enOpType=1 (manual),
+		 * write level at the SDK-defined manual value offset */
 		uint32_t enable = 1;
 		uint32_t optype = 1; /* SS_OP_TYP_MANUAL */
 		memcpy(iq_buf + IQ_OFFSET_ENABLE, &enable, sizeof(enable));
 		memcpy(iq_buf + IQ_OFFSET_OPTYPE, &optype, sizeof(optype));
 
-		/* Manual value — exact offset is TBD, for now we log
-		 * what we're doing so on-device testing can verify.
-		 * The manual level for simple params is typically a
-		 * uint32 early in the manual attr section. We'll need
-		 * to verify the offset on hardware. For now, skip
-		 * setting the manual value field — just switch to
-		 * manual mode with whatever value was last set. */
-		uint32_t level = (uint32_t)atoi(value);
-		if (level > 100)
-			level = 100;
-		printf("[iq] %s: switching to manual mode (level=%u "
-			"requested, offset TBD — verify on device)\n",
-			param, level);
-		(void)level;
+		if (target->vtype == VT_U32)
+			memcpy(iq_buf + target->manual_offset, &level,
+				sizeof(uint32_t));
+		else
+			iq_buf[target->manual_offset] = (uint8_t)level;
 	}
 
 	ret = target->fn_set(0, iq_buf);
