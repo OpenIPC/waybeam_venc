@@ -81,9 +81,9 @@ static IqParamDesc g_params[] = {
 	/* NR3D_EX: manual-only@4, 24B (bAREn) */
 	{ "nr3d_ex",      "MI_ISP_IQ_GetNR3D_EX",     "MI_ISP_IQ_SetNR3D_EX",
 	  NULL, NULL, VT_U32, 4,    1 },
-	/* NRDESPIKE_PARAM_t = 39B, auto=624, manual@632 (u8BlendRatio) */
+	/* NRDESPIKE_PARAM_t = 34B, auto=544, manual@552 (u8BlendRatio) */
 	{ "nr_despike",   "MI_ISP_IQ_GetNRDeSpike",   "MI_ISP_IQ_SetNRDeSpike",
-	  NULL, NULL, VT_U8,  632,  15 },
+	  NULL, NULL, VT_U8,  552,  15 },
 	/* NRLUMA_PARAM_t = 6B, auto=96, manual@104 (u8Strength) */
 	{ "nr_luma",      "MI_ISP_IQ_GetNRLuma",      "MI_ISP_IQ_SetNRLuma",
 	  NULL, NULL, VT_U8,  104,  255 },
@@ -133,15 +133,15 @@ static IqParamDesc g_params[] = {
 	/* WDRCurveAdv_PARAM_t = 6B, auto=96, manual@104 (u16Slope) */
 	{ "wdr_curve_adv","MI_ISP_IQ_GetWDRCurveAdv", "MI_ISP_IQ_SetWDRCurveAdv",
 	  NULL, NULL, VT_U16, 104,  16384 },
-	/* PFC_PARAM_t = 28B, auto=448, manual@456 (u8Strength) */
+	/* PFC_PARAM_t = 23B, auto=368, manual@376 (u8Strength) */
 	{ "pfc",          "MI_ISP_IQ_GetPFC",          "MI_ISP_IQ_SetPFC",
-	  NULL, NULL, VT_U8,  456,  255 },
+	  NULL, NULL, VT_U8,  376,  255 },
 	/* PFC_EX: manual-only@4 (bDbgEn) */
 	{ "pfc_ex",       "MI_ISP_IQ_GetPFC_EX",      "MI_ISP_IQ_SetPFC_EX",
 	  NULL, NULL, VT_U32, 4,    1 },
-	/* HDR_PARAM_t = 68B, auto=1088, manual@1096 (bNrEn) */
+	/* HDR_PARAM_t = 56B, auto=896, manual@904 (bNrEn as MI_ISP_BOOL_e) */
 	{ "hdr",          "MI_ISP_IQ_GetHDR",          "MI_ISP_IQ_SetHDR",
-	  NULL, NULL, VT_U8,  1096, 1 },
+	  NULL, NULL, VT_U32, 904,  1 },
 	/* HDR_EX: manual-only@4 (u16SensorExpRatio) */
 	{ "hdr_ex",       "MI_ISP_IQ_GetHDR_EX",      "MI_ISP_IQ_SetHDR_EX",
 	  NULL, NULL, VT_U16, 4,    65535 },
