@@ -752,6 +752,30 @@ static int handle_iq_set(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_json(fd, 200, buf);
 }
 
+#if HAVE_BACKEND_STAR6E
+extern int star6e_iq_import(const char *json_str);
+#endif
+
+static int handle_iq_import(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)ctx;
+#if HAVE_BACKEND_STAR6E
+	if (req->body_len <= 0 || !req->body[0]) {
+		return httpd_send_error(fd, 400, "invalid_request",
+			"POST JSON body required (output of /api/v1/iq)");
+	}
+	int ret = star6e_iq_import(req->body);
+	if (ret != 0)
+		return httpd_send_error(fd, 500, "import_partial",
+			"some parameters failed to apply");
+	return httpd_send_ok(fd, "{\"imported\":true}");
+#else
+	(void)req;
+	return httpd_send_error(fd, 501, "not_implemented",
+		"IQ import not available on this backend");
+#endif
+}
+
 static int handle_ae(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
@@ -1145,6 +1169,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/ae",           handle_ae, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/awb",          handle_awb, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/iq/set",       handle_iq_set, NULL);
+	r |= venc_httpd_route("POST", "/api/v1/iq/import",  handle_iq_import, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/iq",           handle_iq, NULL);
 	r |= venc_httpd_route("GET", "/metrics/isp",         handle_isp_metrics, NULL);
 	r |= venc_httpd_route("GET", "/request/idr",         handle_idr, NULL);

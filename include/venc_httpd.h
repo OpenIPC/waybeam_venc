@@ -11,7 +11,7 @@ extern "C" {
 #define HTTPD_MAX_METHOD    8
 #define HTTPD_MAX_PATH      256
 #define HTTPD_MAX_QUERY     512
-#define HTTPD_MAX_BODY      4096
+#define HTTPD_MAX_BODY      8192
 #define HTTPD_MAX_ROUTES    48
 
 /* Parsed HTTP request passed to route handlers */

@@ -18,8 +18,15 @@ void star6e_iq_cleanup(void);
 char *star6e_iq_query(void);
 
 /** Set a single IQ parameter by name.
+ *  Supports dot-notation for sub-fields (e.g. "colortrans.y_ofst")
+ *  and comma-separated values for arrays.
  *  Returns 0 on success, -1 on error. */
 int star6e_iq_set(const char *param, const char *value);
+
+/** Import IQ parameters from JSON string (output of star6e_iq_query).
+ *  Applies all params found in the JSON via star6e_iq_set.
+ *  Returns 0 if all succeeded, -1 if any failed. */
+int star6e_iq_import(const char *json_str);
 
 #ifdef __cplusplus
 }

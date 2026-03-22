@@ -17,6 +17,7 @@
  */
 
 #include "star6e_iq.h"
+#include "cJSON.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -662,4 +663,94 @@ int star6e_iq_set(const char *param, const char *value)
 out:
 	pthread_mutex_unlock(&g_iq_mutex);
 	return rc;
+}
+
+int star6e_iq_import(const char *json_str)
+{
+	cJSON *root, *data, *param_obj, *fields_obj, *field_val;
+	int applied = 0, failed = 0;
+	char val_buf[512];
+
+	if (!json_str)
+		return -1;
+
+	root = cJSON_Parse(json_str);
+	if (!root) {
+		fprintf(stderr, "[iq] import: JSON parse failed\n");
+		return -1;
+	}
+
+	/* Accept both raw data object and wrapped {"ok":true,"data":{...}} */
+	data = cJSON_GetObjectItemCaseSensitive(root, "data");
+	if (!data)
+		data = root;
+
+	/* Iterate all params in the JSON */
+	cJSON *item = NULL;
+	cJSON_ArrayForEach(item, data) {
+		const char *pname = item->string;
+		if (!pname || pname[0] == '_')
+			continue;  /* skip _diag */
+
+		/* Handle fields object for multi-field params */
+		fields_obj = cJSON_GetObjectItemCaseSensitive(item, "fields");
+		if (fields_obj && cJSON_IsObject(fields_obj)) {
+			cJSON *fld = NULL;
+			cJSON_ArrayForEach(fld, fields_obj) {
+				const char *fname = fld->string;
+				if (!fname) continue;
+
+				char key[128];
+				snprintf(key, sizeof(key), "%s.%s", pname, fname);
+
+				if (cJSON_IsArray(fld)) {
+					/* Build comma-separated value */
+					int pos = 0;
+					cJSON *elem = NULL;
+					cJSON_ArrayForEach(elem, fld) {
+						if (pos > 0 && pos < (int)sizeof(val_buf) - 1)
+							val_buf[pos++] = ',';
+						pos += snprintf(val_buf + pos,
+							sizeof(val_buf) - (size_t)pos,
+							"%d", elem->valueint);
+					}
+					val_buf[pos] = '\0';
+				} else if (cJSON_IsNumber(fld)) {
+					snprintf(val_buf, sizeof(val_buf), "%d",
+						fld->valueint);
+				} else {
+					continue;
+				}
+
+				if (star6e_iq_set(key, val_buf) == 0)
+					applied++;
+				else
+					failed++;
+			}
+			continue;
+		}
+
+		/* Handle simple value or bool */
+		cJSON *val_item = cJSON_GetObjectItemCaseSensitive(item, "value");
+		if (!val_item) continue;
+
+		if (cJSON_IsBool(val_item)) {
+			snprintf(val_buf, sizeof(val_buf), "%d",
+				cJSON_IsTrue(val_item) ? 1 : 0);
+		} else if (cJSON_IsNumber(val_item)) {
+			snprintf(val_buf, sizeof(val_buf), "%d",
+				val_item->valueint);
+		} else {
+			continue;
+		}
+
+		if (star6e_iq_set(pname, val_buf) == 0)
+			applied++;
+		else
+			failed++;
+	}
+
+	cJSON_Delete(root);
+	printf("[iq] import: %d applied, %d failed\n", applied, failed);
+	return failed > 0 ? -1 : 0;
 }
