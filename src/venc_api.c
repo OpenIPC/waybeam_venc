@@ -201,6 +201,10 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, mode,        FT_STRING, MUT_RESTART),
 	FIELD(record, max_seconds, FT_UINT,   MUT_RESTART),
 	FIELD(record, max_mb,      FT_UINT,   MUT_RESTART),
+	FIELD(record, bitrate,     FT_UINT,   MUT_RESTART),
+	FIELD(record, fps,         FT_UINT,   MUT_RESTART),
+	FIELD(record, gop_size,    FT_DOUBLE, MUT_RESTART),
+	FIELD(record, server,      FT_STRING, MUT_RESTART),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -257,6 +261,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "eis.biasAlpha", "eis.bias_alpha" },
 	{ "record.maxSeconds", "record.max_seconds" },
 	{ "record.maxMB", "record.max_mb" },
+	{ "record.gopSize", "record.gop_size" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },

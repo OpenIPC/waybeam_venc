@@ -163,6 +163,10 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->record.mode, sizeof(cfg->record.mode), "mirror");
 	cfg->record.max_seconds = 300;
 	cfg->record.max_mb = 500;
+	cfg->record.bitrate = 0;
+	cfg->record.fps = 0;
+	cfg->record.gop_size = 0;
+	cfg->record.server[0] = '\0';
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -407,6 +411,11 @@ static void load_record(const cJSON *root, VencConfigRecord *s)
 	s->max_seconds = (uint32_t)json_get_int(obj, "maxSeconds",
 		(int)s->max_seconds);
 	s->max_mb = (uint32_t)json_get_int(obj, "maxMB", (int)s->max_mb);
+	s->bitrate = (uint32_t)json_get_int(obj, "bitrate", (int)s->bitrate);
+	s->fps = (uint32_t)json_get_int(obj, "fps", (int)s->fps);
+	s->gop_size = json_get_double(obj, "gopSize", s->gop_size);
+	safe_strcpy(s->server, sizeof(s->server),
+		json_get_string(obj, "server", s->server));
 }
 
 static void load_fpv(const cJSON *root, VencConfigFpv *s)
@@ -650,6 +659,10 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(rec, "mode", cfg->record.mode);
 		cJSON_AddNumberToObject(rec, "maxSeconds", cfg->record.max_seconds);
 		cJSON_AddNumberToObject(rec, "maxMB", cfg->record.max_mb);
+		cJSON_AddNumberToObject(rec, "bitrate", cfg->record.bitrate);
+		cJSON_AddNumberToObject(rec, "fps", cfg->record.fps);
+		cJSON_AddNumberToObject(rec, "gopSize", cfg->record.gop_size);
+		cJSON_AddStringToObject(rec, "server", cfg->record.server);
 	}
 
 	return root;

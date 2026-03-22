@@ -120,6 +120,11 @@ typedef struct {
 	char mode[16];            /* "off","mirror","dual","dual-stream" */
 	uint32_t max_seconds;     /* rotation interval: 0=off, default 300 */
 	uint32_t max_mb;          /* rotation size in MB: 0=off, default 500 */
+	/* Dual/gemini channel settings (used when mode=dual or dual-stream) */
+	uint32_t bitrate;         /* ch1 bitrate kbps, 0=match ch0 */
+	uint32_t fps;             /* ch1 fps, 0=match sensor */
+	double gop_size;          /* ch1 GOP in seconds, 0=match ch0 */
+	char server[VENC_CONFIG_STRING_MAX]; /* dual-stream destination URI */
 } VencConfigRecord;
 
 /* ── Top-level config ────────────────────────────────────────────────── */

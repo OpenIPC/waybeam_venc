@@ -426,55 +426,11 @@ static void star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	if (vcfg->record.enabled &&
 	    (strcmp(vcfg->record.mode, "dual") == 0 ||
 	     strcmp(vcfg->record.mode, "dual-stream") == 0)) {
-		/* Read dual params from JSON config (not in VencConfig to
-		 * avoid struct size change that breaks ISP bin loading). */
-		uint32_t dual_bitrate = 0, dual_fps = 0;
-		double dual_gop = 0;
-		const char *dual_server = "";
-		FILE *f = fopen(VENC_CONFIG_DEFAULT_PATH, "r");
-		if (f) {
-			fseek(f, 0, SEEK_END);
-			long sz = ftell(f);
-			fseek(f, 0, SEEK_SET);
-			if (sz > 0) {
-				char *buf = malloc((size_t)sz + 1);
-				if (buf) {
-					size_t n = fread(buf, 1, (size_t)sz, f);
-					buf[n] = '\0';
-					cJSON *root = cJSON_Parse(buf);
-					if (root) {
-						cJSON *rec = cJSON_GetObjectItemCaseSensitive(
-							root, "record");
-						if (rec) {
-							cJSON *v;
-							v = cJSON_GetObjectItemCaseSensitive(
-								rec, "bitrate");
-							if (cJSON_IsNumber(v))
-								dual_bitrate = (uint32_t)v->valueint;
-							v = cJSON_GetObjectItemCaseSensitive(
-								rec, "fps");
-							if (cJSON_IsNumber(v))
-								dual_fps = (uint32_t)v->valueint;
-							v = cJSON_GetObjectItemCaseSensitive(
-								rec, "gopSize");
-							if (cJSON_IsNumber(v))
-								dual_gop = v->valuedouble;
-							v = cJSON_GetObjectItemCaseSensitive(
-								rec, "server");
-							if (cJSON_IsString(v) && v->valuestring)
-								dual_server = v->valuestring;
-						}
-						star6e_pipeline_start_dual(ps,
-							dual_bitrate, dual_fps, dual_gop,
-							vcfg->record.mode, dual_server,
-							vcfg->video0.frame_lost);
-						cJSON_Delete(root);
-					}
-					free(buf);
-				}
-			}
-			fclose(f);
-		}
+		star6e_pipeline_start_dual(ps,
+			vcfg->record.bitrate, vcfg->record.fps,
+			vcfg->record.gop_size, vcfg->record.mode,
+			vcfg->record.server[0] ? vcfg->record.server : "",
+			vcfg->video0.frame_lost);
 
 		/* For dual-stream: init second RTP output */
 		if (ps->dual && strcmp(vcfg->record.mode, "dual-stream") == 0 &&
