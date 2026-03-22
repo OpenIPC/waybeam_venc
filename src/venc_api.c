@@ -102,7 +102,7 @@ void venc_api_set_record_status_fn(VencRecordStatusFn fn)
 /* ── Field descriptor table ──────────────────────────────────────────── */
 
 typedef enum { MUT_LIVE, MUT_RESTART } Mutability;
-typedef enum { FT_BOOL, FT_INT, FT_UINT, FT_UINT16, FT_DOUBLE, FT_FLOAT, FT_STRING, FT_SIZE } FieldType;
+typedef enum { FT_BOOL, FT_INT, FT_UINT, FT_UINT8, FT_UINT16, FT_DOUBLE, FT_FLOAT, FT_STRING, FT_SIZE } FieldType;
 
 typedef struct {
 	const char *key;          /* dot-separated JSON path, e.g. "video0.bitrate" */
@@ -176,7 +176,7 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(imu, enabled,        FT_BOOL,   MUT_RESTART),
 	FIELD(imu, i2c_device,     FT_STRING, MUT_RESTART),
-	FIELD(imu, i2c_addr,       FT_UINT,   MUT_RESTART),
+	FIELD(imu, i2c_addr,       FT_UINT8,  MUT_RESTART),
 	FIELD(imu, sample_rate_hz, FT_INT,    MUT_RESTART),
 	FIELD(imu, gyro_range_dps, FT_INT,    MUT_RESTART),
 	FIELD(imu, cal_file,       FT_STRING, MUT_RESTART),
@@ -293,6 +293,9 @@ static char *field_to_json_value(const FieldDesc *f)
 	case FT_UINT:
 		snprintf(buf, sizeof(buf), "%u", *(const uint32_t *)ptr);
 		return strdup(buf);
+	case FT_UINT8:
+		snprintf(buf, sizeof(buf), "%u", (unsigned)*(const uint8_t *)ptr);
+		return strdup(buf);
 	case FT_UINT16:
 		snprintf(buf, sizeof(buf), "%u", (unsigned)*(const uint16_t *)ptr);
 		return strdup(buf);
@@ -344,6 +347,13 @@ static int field_from_string(const FieldDesc *f, const char *val)
 		unsigned long v = strtoul(val, &end, 10);
 		if (end == val || *end != '\0') return -1;
 		*(uint32_t *)ptr = (uint32_t)v;
+		break;
+	}
+	case FT_UINT8: {
+		char *end;
+		unsigned long v = strtoul(val, &end, 0);  /* base 0: accepts 0x hex */
+		if (end == val || *end != '\0' || v > 255) return -1;
+		*(uint8_t *)ptr = (uint8_t)v;
 		break;
 	}
 	case FT_UINT16: {
