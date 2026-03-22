@@ -102,7 +102,7 @@ void venc_api_set_record_status_fn(VencRecordStatusFn fn)
 /* ── Field descriptor table ──────────────────────────────────────────── */
 
 typedef enum { MUT_LIVE, MUT_RESTART } Mutability;
-typedef enum { FT_BOOL, FT_INT, FT_UINT, FT_UINT16, FT_DOUBLE, FT_STRING, FT_SIZE } FieldType;
+typedef enum { FT_BOOL, FT_INT, FT_UINT, FT_UINT16, FT_DOUBLE, FT_FLOAT, FT_STRING, FT_SIZE } FieldType;
 
 typedef struct {
 	const char *key;          /* dot-separated JSON path, e.g. "video0.bitrate" */
@@ -158,6 +158,14 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, audio_port,        FT_UINT16, MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
 
+	FIELD(isp, legacy_ae,      FT_BOOL,   MUT_RESTART),
+	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
+
+	FIELD(audio, enabled,      FT_BOOL,   MUT_RESTART),
+	FIELD(audio, sample_rate,  FT_UINT,   MUT_RESTART),
+	FIELD(audio, channels,     FT_UINT,   MUT_RESTART),
+	FIELD(audio, codec,        FT_STRING, MUT_RESTART),
+	FIELD(audio, volume,       FT_INT,    MUT_RESTART),
 	FIELD(audio, mute,         FT_BOOL,   MUT_LIVE),
 
 	FIELD(fpv, roi_enabled,  FT_BOOL,   MUT_LIVE),
@@ -165,6 +173,34 @@ static const FieldDesc g_fields[] = {
 	FIELD(fpv, roi_steps,    FT_UINT16, MUT_LIVE),
 	FIELD(fpv, roi_center,   FT_DOUBLE, MUT_LIVE),
 	FIELD(fpv, noise_level,  FT_INT,    MUT_RESTART),
+
+	FIELD(imu, enabled,        FT_BOOL,   MUT_RESTART),
+	FIELD(imu, i2c_device,     FT_STRING, MUT_RESTART),
+	FIELD(imu, i2c_addr,       FT_UINT,   MUT_RESTART),
+	FIELD(imu, sample_rate_hz, FT_INT,    MUT_RESTART),
+	FIELD(imu, gyro_range_dps, FT_INT,    MUT_RESTART),
+	FIELD(imu, cal_file,       FT_STRING, MUT_RESTART),
+	FIELD(imu, cal_samples,    FT_INT,    MUT_RESTART),
+
+	FIELD(eis, enabled,        FT_BOOL,   MUT_RESTART),
+	FIELD(eis, mode,           FT_STRING, MUT_RESTART),
+	FIELD(eis, margin_percent, FT_INT,    MUT_RESTART),
+	FIELD(eis, test_mode,      FT_BOOL,   MUT_RESTART),
+	FIELD(eis, swap_xy,        FT_BOOL,   MUT_RESTART),
+	FIELD(eis, invert_x,       FT_BOOL,   MUT_RESTART),
+	FIELD(eis, invert_y,       FT_BOOL,   MUT_RESTART),
+	FIELD(eis, gain,           FT_FLOAT,  MUT_RESTART),
+	FIELD(eis, deadband_rad,   FT_FLOAT,  MUT_RESTART),
+	FIELD(eis, recenter_rate,  FT_FLOAT,  MUT_RESTART),
+	FIELD(eis, max_slew_px,    FT_FLOAT,  MUT_RESTART),
+	FIELD(eis, bias_alpha,     FT_FLOAT,  MUT_RESTART),
+
+	FIELD(record, enabled,     FT_BOOL,   MUT_RESTART),
+	FIELD(record, dir,         FT_STRING, MUT_RESTART),
+	FIELD(record, format,      FT_STRING, MUT_RESTART),
+	FIELD(record, mode,        FT_STRING, MUT_RESTART),
+	FIELD(record, max_seconds, FT_UINT,   MUT_RESTART),
+	FIELD(record, max_mb,      FT_UINT,   MUT_RESTART),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -201,6 +237,29 @@ static const FieldAlias g_field_aliases[] = {
 	{ "fpv.roiSteps", "fpv.roi_steps" },
 	{ "fpv.roiCenter", "fpv.roi_center" },
 	{ "fpv.noiseLevel", "fpv.noise_level" },
+	{ "isp.legacyAe", "isp.legacy_ae" },
+	{ "isp.aeFps", "isp.ae_fps" },
+	{ "audio.sampleRate", "audio.sample_rate" },
+	{ "imu.i2cDevice", "imu.i2c_device" },
+	{ "imu.i2cAddr", "imu.i2c_addr" },
+	{ "imu.sampleRateHz", "imu.sample_rate_hz" },
+	{ "imu.gyroRangeDps", "imu.gyro_range_dps" },
+	{ "imu.calFile", "imu.cal_file" },
+	{ "imu.calSamples", "imu.cal_samples" },
+	{ "eis.marginPercent", "eis.margin_percent" },
+	{ "eis.testMode", "eis.test_mode" },
+	{ "eis.swapXY", "eis.swap_xy" },
+	{ "eis.invertX", "eis.invert_x" },
+	{ "eis.invertY", "eis.invert_y" },
+	{ "eis.deadbandRad", "eis.deadband_rad" },
+	{ "eis.recenterRate", "eis.recenter_rate" },
+	{ "eis.maxSlewPx", "eis.max_slew_px" },
+	{ "eis.biasAlpha", "eis.bias_alpha" },
+	{ "record.maxSeconds", "record.max_seconds" },
+	{ "record.maxMB", "record.max_mb" },
+	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
+	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
+	{ "outgoing.streamMode", "outgoing.stream_mode" },
 };
 
 static const char *canonicalize_field_key(const char *key)
@@ -239,6 +298,9 @@ static char *field_to_json_value(const FieldDesc *f)
 		return strdup(buf);
 	case FT_DOUBLE:
 		snprintf(buf, sizeof(buf), "%g", *(const double *)ptr);
+		return strdup(buf);
+	case FT_FLOAT:
+		snprintf(buf, sizeof(buf), "%g", (double)*(const float *)ptr);
 		return strdup(buf);
 	case FT_STRING: {
 		cJSON *s = cJSON_CreateString((const char *)ptr);
@@ -296,6 +358,13 @@ static int field_from_string(const FieldDesc *f, const char *val)
 		double v = strtod(val, &end);
 		if (end == val || *end != '\0') return -1;
 		*(double *)ptr = v;
+		break;
+	}
+	case FT_FLOAT: {
+		char *end;
+		float v = (float)strtod(val, &end);
+		if (end == val || *end != '\0') return -1;
+		*(float *)ptr = v;
 		break;
 	}
 	case FT_STRING:
