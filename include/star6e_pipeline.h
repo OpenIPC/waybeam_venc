@@ -72,7 +72,7 @@ typedef struct Star6eDualVenc {
  *  On failure, state->dual is NULL and pipeline operates in mirror mode. */
 int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	uint32_t bitrate, uint32_t fps, double gop_sec,
-	const char *mode, const char *server);
+	const char *mode, const char *server, bool frame_lost);
 
 /** Tear down secondary VENC channel if active. */
 void star6e_pipeline_stop_dual(Star6ePipelineState *state);

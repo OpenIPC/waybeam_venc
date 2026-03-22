@@ -466,7 +466,8 @@ static void star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 						}
 						star6e_pipeline_start_dual(ps,
 							dual_bitrate, dual_fps, dual_gop,
-							vcfg->record.mode, dual_server);
+							vcfg->record.mode, dual_server,
+							vcfg->video0.frame_lost);
 						cJSON_Delete(root);
 					}
 					free(buf);
@@ -501,7 +502,7 @@ static void star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			dual_rec_thread_start(ps->dual);
 			venc_api_dual_register(ps->dual->channel,
 				ps->dual->bitrate, ps->dual->fps,
-				ps->dual->gop);
+				ps->dual->gop, vcfg->video0.frame_lost);
 		}
 	}
 

@@ -414,6 +414,10 @@ static const char *validate_field(const char *key)
 		if (g_cfg->fpv.roi_qp < -30 || g_cfg->fpv.roi_qp > 30)
 			return "roi_qp must be in range [-30, 30]";
 	}
+	if (strcmp(key, "video0.bitrate") == 0) {
+		if (g_cfg->video0.bitrate == 0 || g_cfg->video0.bitrate > 200000)
+			return "bitrate must be 1-200000 kbps";
+	}
 	return NULL;
 }
 
@@ -878,6 +882,7 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 /* ── Dual VENC channel API ───────────────────────────────────────────── */
 
 #include "star6e.h"  /* MI_VENC_* */
+#include "star6e_controls.h"
 
 static struct {
 	int active;
@@ -885,32 +890,55 @@ static struct {
 	uint32_t bitrate;   /* current kbps (may differ from config after adaptive) */
 	uint32_t fps;
 	uint32_t gop;
+	bool frame_lost;
 } g_dual;
 
+/* Mutex protecting g_dual field access from the httpd thread.
+ * Handlers run on the httpd pthread; register/unregister run on the
+ * main thread.  This mutex prevents torn reads during registration
+ * and ensures handlers don't start operations on a channel being
+ * torn down. */
+static pthread_mutex_t g_dual_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 void venc_api_dual_register(int channel, uint32_t bitrate, uint32_t fps,
-	uint32_t gop)
+	uint32_t gop, bool frame_lost)
 {
+	pthread_mutex_lock(&g_dual_mutex);
 	g_dual.channel = (MI_VENC_CHN)channel;
 	g_dual.bitrate = bitrate;
 	g_dual.fps = fps;
 	g_dual.gop = gop;
+	g_dual.frame_lost = frame_lost;
 	g_dual.active = 1;
+	pthread_mutex_unlock(&g_dual_mutex);
 }
 
 void venc_api_dual_unregister(void)
 {
+	pthread_mutex_lock(&g_dual_mutex);
 	g_dual.active = 0;
+	pthread_mutex_unlock(&g_dual_mutex);
 }
 
 static int handle_dual_status(int fd, const HttpRequest *req, void *ctx)
 {
 	char buf[512];
+	int ch;
+	uint32_t br, fps, gop;
 
 	(void)req; (void)ctx;
 
-	if (!g_dual.active)
+	pthread_mutex_lock(&g_dual_mutex);
+	if (!g_dual.active) {
+		pthread_mutex_unlock(&g_dual_mutex);
 		return httpd_send_error(fd, 404, "not_active",
 			"Dual VENC channel is not active");
+	}
+	ch = (int)g_dual.channel;
+	br = g_dual.bitrate;
+	fps = g_dual.fps;
+	gop = g_dual.gop;
+	pthread_mutex_unlock(&g_dual_mutex);
 
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
@@ -920,7 +948,7 @@ static int handle_dual_status(int fd, const HttpRequest *req, void *ctx)
 		"\"fps\":%u,"
 		"\"gop\":%u"
 		"}}",
-		(int)g_dual.channel, g_dual.bitrate, g_dual.fps, g_dual.gop);
+		ch, br, fps, gop);
 	return httpd_send_json(fd, 200, buf);
 }
 
@@ -928,7 +956,11 @@ static int handle_dual_status(int fd, const HttpRequest *req, void *ctx)
 static int dual_apply_bitrate(uint32_t kbps)
 {
 	MI_VENC_ChnAttr_t attr = {0};
-	MI_U32 bits = kbps * 1024;
+	MI_U32 bits;
+
+	if (kbps > 200000)
+		kbps = 200000;
+	bits = kbps * 1024;
 
 	if (MI_VENC_GetChnAttr(g_dual.channel, &attr) != 0)
 		return -1;
@@ -953,16 +985,9 @@ static int dual_apply_bitrate(uint32_t kbps)
 	if (MI_VENC_SetChnAttr(g_dual.channel, &attr) != 0)
 		return -1;
 #ifdef HAVE_BACKEND_STAR6E
-	{
-		MI_VENC_ParamFrameLost_t lost = {0};
-
-		lost.bFrmLostOpen = 1;
-		lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
-		lost.u32FrmLostBpsThr = bits + bits / 5;
-		lost.u32EncFrmGaps = 0;
-		if (MI_VENC_SetFrameLostStrategy(g_dual.channel, &lost) != 0)
-			return -1;
-	}
+	if (star6e_controls_apply_frame_lost_threshold(g_dual.channel,
+	    g_dual.frame_lost, kbps) != 0)
+		return -1;
 #endif
 	g_dual.bitrate = kbps;
 	return 0;
@@ -1002,24 +1027,38 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 {
 	char buf[256];
 	const char *q;
+	int ret;
 
 	(void)ctx;
 
-	if (!g_dual.active)
+	pthread_mutex_lock(&g_dual_mutex);
+	if (!g_dual.active) {
+		pthread_mutex_unlock(&g_dual_mutex);
 		return httpd_send_error(fd, 404, "not_active",
 			"Dual VENC channel is not active");
-	if (!*req->query)
+	}
+	if (!*req->query) {
+		pthread_mutex_unlock(&g_dual_mutex);
 		return httpd_send_error(fd, 400, "missing_param",
 			"Usage: /api/v1/dual/set?bitrate=N or ?gop=N");
+	}
 
 	q = req->query;
 
 	if (strncmp(q, "bitrate=", 8) == 0) {
-		uint32_t kbps = (uint32_t)atoi(q + 8);
-		if (kbps == 0)
+		char *end;
+		unsigned long val = strtoul(q + 8, &end, 10);
+		uint32_t kbps;
+		if (end == q + 8 || (*end != '\0' && *end != '&') ||
+		    val == 0 || val > 200000) {
+			pthread_mutex_unlock(&g_dual_mutex);
 			return httpd_send_error(fd, 400, "invalid_value",
-				"bitrate must be > 0");
-		if (dual_apply_bitrate(kbps) != 0)
+				"bitrate must be 1-200000 kbps");
+		}
+		kbps = (uint32_t)val;
+		ret = dual_apply_bitrate(kbps);
+		pthread_mutex_unlock(&g_dual_mutex);
+		if (ret != 0)
 			return httpd_send_error(fd, 500, "apply_failed",
 				"MI_VENC_SetChnAttr failed");
 		snprintf(buf, sizeof(buf),
@@ -1031,12 +1070,16 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 	if (strncmp(q, "gop=", 4) == 0) {
 		double gop_sec = atof(q + 4);
 		uint32_t frames;
-		if (gop_sec <= 0)
+		if (gop_sec <= 0) {
+			pthread_mutex_unlock(&g_dual_mutex);
 			return httpd_send_error(fd, 400, "invalid_value",
 				"gop must be > 0 (seconds)");
+		}
 		frames = (uint32_t)(gop_sec * g_dual.fps + 0.5);
 		if (frames < 1) frames = 1;
-		if (dual_apply_gop(frames) != 0)
+		ret = dual_apply_gop(frames);
+		pthread_mutex_unlock(&g_dual_mutex);
+		if (ret != 0)
 			return httpd_send_error(fd, 500, "apply_failed",
 				"MI_VENC_SetChnAttr failed");
 		snprintf(buf, sizeof(buf),
@@ -1045,19 +1088,29 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_json(fd, 200, buf);
 	}
 
+	pthread_mutex_unlock(&g_dual_mutex);
 	return httpd_send_error(fd, 400, "unknown_param",
 		"Supported: bitrate, gop");
 }
 
 static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 {
+	MI_VENC_CHN ch;
+	int ret;
+
 	(void)req; (void)ctx;
 
-	if (!g_dual.active)
+	pthread_mutex_lock(&g_dual_mutex);
+	if (!g_dual.active) {
+		pthread_mutex_unlock(&g_dual_mutex);
 		return httpd_send_error(fd, 404, "not_active",
 			"Dual VENC channel is not active");
+	}
+	ch = g_dual.channel;
+	pthread_mutex_unlock(&g_dual_mutex);
 
-	if (MI_VENC_RequestIdr(g_dual.channel, 1) != 0)
+	ret = MI_VENC_RequestIdr(ch, 1);
+	if (ret != 0)
 		return httpd_send_error(fd, 500, "idr_failed",
 			"MI_VENC_RequestIdr failed");
 
