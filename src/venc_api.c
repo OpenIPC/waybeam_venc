@@ -914,7 +914,6 @@ static int dual_apply_bitrate(uint32_t kbps)
 			return -1;
 	}
 #endif
-	MI_VENC_RequestIdr(g_dual.channel, 1);
 	g_dual.bitrate = kbps;
 	return 0;
 }

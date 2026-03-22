@@ -224,7 +224,6 @@ static int apply_bitrate(uint32_t kbps)
 	if (apply_frame_lost_threshold(g_star6e_control_ctx.venc_chn,
 	    frame_lost_enabled, kbps) != 0)
 		return -1;
-	MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1);
 	return 0;
 }
 
