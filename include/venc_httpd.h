@@ -51,6 +51,10 @@ int httpd_send_text(int client_fd, int status_code, const char *text_str);
 /* Send an HTML response body. */
 int httpd_send_html(int client_fd, int status_code, const char *html_str);
 
+/* Send a pre-compressed gzip HTML response. */
+int httpd_send_html_gz(int client_fd, int status_code,
+	const void *gz_data, int gz_len);
+
 /* Send a JSON success envelope: {"ok":true,"data":{...}} */
 int httpd_send_ok(int client_fd, const char *data_json);
 

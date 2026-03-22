@@ -128,6 +128,25 @@ int httpd_send_html(int client_fd, int status_code, const char *html_str)
 		"text/html; charset=utf-8", html_str, (int)strlen(html_str));
 }
 
+int httpd_send_html_gz(int client_fd, int status_code,
+	const void *gz_data, int gz_len)
+{
+	char header[512];
+	int hlen = snprintf(header, sizeof(header),
+		"HTTP/1.0 %d %s\r\n"
+		"Content-Type: text/html; charset=utf-8\r\n"
+		"Content-Encoding: gzip\r\n"
+		"Content-Length: %d\r\n"
+		"Connection: close\r\n"
+		"\r\n",
+		status_code, status_text(status_code), gz_len);
+	if (write_socket_all(client_fd, header, hlen) != 0)
+		return -1;
+	if (write_socket_all(client_fd, (const char *)gz_data, gz_len) != 0)
+		return -1;
+	return 0;
+}
+
 int httpd_send_ok(int client_fd, const char *data_json)
 {
 	char buf[2048];
