@@ -423,6 +423,37 @@ Read these before working on related areas:
 | Code structure prestudy | `documentation/CODE_STRUCTURE_PRESTUDY.md` |
 | Refactoring plan | `documentation/REFACTORING_PLAN.md` |
 
+## Config / WebUI / API Sync Rules
+
+The config system spans three layers that MUST stay in sync:
+
+1. **C struct + parser** (`include/venc_config.h`, `src/venc_config.c`) — defines
+   all fields, defaults, JSON key names for parsing and serialization.
+2. **API field table + alias table** (`src/venc_api.c`) — `g_fields[]` maps
+   `section.snake_case` names to struct offsets; `g_aliases[]` maps camelCase
+   webui keys to snake_case API keys.
+3. **WebUI dashboard** (`src/venc_webui.c`, embedded gzip) — `SECTIONS[]` lists
+   every field the UI exposes, using camelCase keys that must match either the
+   config JSON key names (for value lookup) or the alias table (for API set calls).
+4. **Default config file** (`config/venc.default.json`) — reference config
+   showing all available options with sensible defaults.
+
+When adding or removing a config field, update ALL FOUR locations in the same PR:
+
+- Add the field to `VencConfig` struct and set its default in `venc_config_defaults()`
+- Add parsing in the `load_<section>()` function and serialization in `venc_config_to_json()`
+- Add a `FIELD()` entry in `g_fields[]` and a camelCase alias in `g_aliases[]` if needed
+- Add the key to the appropriate `SECTIONS[]` entry in the dashboard HTML
+- Add the key with its default value to `config/venc.default.json`
+- Regenerate the embedded gzip: update `venc_webui.c` after HTML changes
+
+Key naming conventions:
+- C struct fields: `snake_case` (e.g., `sample_rate_hz`)
+- API field names: `section.snake_case` (e.g., `imu.sample_rate_hz`)
+- Config JSON keys: `camelCase` (e.g., `sampleRateHz`)
+- WebUI SECTIONS keys: must match config JSON keys exactly
+- Alias table: maps config JSON camelCase → API snake_case
+
 ## Versioning Policy
 
 - SemVer tracked in `VERSION` file.
@@ -504,3 +535,6 @@ between them.  `make build` (default) always produces `out/star6e/venc`.
   Fix errors in order; earlier errors often cause later ones.
 - Do NOT switch implementation approach mid-task without re-planning. If the
   current approach fails, diagnose why before changing course.
+- Do NOT add or remove a config field without updating all four layers: C struct/parser,
+  API field+alias tables, WebUI SECTIONS, and default config file. See
+  **Config / WebUI / API Sync Rules** above.

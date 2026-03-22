@@ -47,13 +47,14 @@
     "enabled": false,
     "i2cDevice": "/dev/i2c-1",
     "i2cAddr": "0x68",
-    "sampleRate": 200,
-    "gyroRange": 1000,
+    "sampleRateHz": 200,
+    "gyroRangeDps": 1000,
     "calFile": "/etc/imu.cal",
     "calSamples": 400
   },
   "eis": {
     "enabled": false,
+    "mode": "gyroglide",
     "marginPercent": 30,
     "testMode": false,
     "swapXY": false,
@@ -71,6 +72,10 @@
     "dir": "/mnt/mmcblk0p1",
     "format": "ts",
     "maxSeconds": 300,
-    "maxMB": 500
+    "maxMB": 500,
+    "bitrate": 0,
+    "fps": 0,
+    "gopSize": 0,
+    "server": ""
   }
 }

@@ -317,8 +317,7 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 		json_get_string(obj, "streamMode", s->stream_mode));
 	s->max_payload_size = (uint16_t)json_get_int(obj, "maxPayloadSize",
 		(int)s->max_payload_size);
-	s->connected_udp = json_get_bool(obj, "connectedUdp",
-		json_get_bool(obj, "sendFeedback", s->connected_udp));
+	s->connected_udp = json_get_bool(obj, "connectedUdp", s->connected_udp);
 	s->audio_port = (uint16_t)json_get_int(obj, "audioPort",
 		(int)s->audio_port);
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
@@ -356,10 +355,10 @@ static void load_imu(const cJSON *root, VencConfigImu *s)
 	const char *addr_str = json_get_string(obj, "i2cAddr", NULL);
 	if (addr_str)
 		s->i2c_addr = (uint8_t)strtoul(addr_str, NULL, 0);
-	s->sample_rate_hz = json_get_int(obj, "sampleRate", s->sample_rate_hz);
+	s->sample_rate_hz = json_get_int(obj, "sampleRateHz", s->sample_rate_hz);
 	if (s->sample_rate_hz < 25) s->sample_rate_hz = 25;
 	if (s->sample_rate_hz > 1600) s->sample_rate_hz = 1600;
-	s->gyro_range_dps = json_get_int(obj, "gyroRange", s->gyro_range_dps);
+	s->gyro_range_dps = json_get_int(obj, "gyroRangeDps", s->gyro_range_dps);
 	safe_strcpy(s->cal_file, sizeof(s->cal_file),
 		json_get_string(obj, "calFile", s->cal_file));
 	s->cal_samples = json_get_int(obj, "calSamples", s->cal_samples);
@@ -627,8 +626,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		char addr_buf[8];
 		snprintf(addr_buf, sizeof(addr_buf), "0x%02x", cfg->imu.i2c_addr);
 		cJSON_AddStringToObject(imu, "i2cAddr", addr_buf);
-		cJSON_AddNumberToObject(imu, "sampleRate", cfg->imu.sample_rate_hz);
-		cJSON_AddNumberToObject(imu, "gyroRange", cfg->imu.gyro_range_dps);
+		cJSON_AddNumberToObject(imu, "sampleRateHz", cfg->imu.sample_rate_hz);
+		cJSON_AddNumberToObject(imu, "gyroRangeDps", cfg->imu.gyro_range_dps);
 		cJSON_AddStringToObject(imu, "calFile", cfg->imu.cal_file);
 		cJSON_AddNumberToObject(imu, "calSamples", cfg->imu.cal_samples);
 	}
