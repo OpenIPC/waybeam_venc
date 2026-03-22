@@ -165,6 +165,7 @@ static int parse_request(int fd, HttpRequest *req)
 	int total = 0;
 	while (total < (int)sizeof(raw) - 1) {
 		int n = (int)read(fd, raw + total, (size_t)(sizeof(raw) - 1 - (size_t)total));
+		if (n < 0 && errno == EINTR) continue;
 		if (n <= 0) break;
 		total += n;
 		/* Check for end of headers (body handled via Content-Length) */
@@ -225,6 +226,7 @@ static int parse_request(int fd, HttpRequest *req)
 		while (already < content_len) {
 			int n = (int)read(fd, req->body + already,
 				(size_t)(content_len - already));
+			if (n < 0 && errno == EINTR) continue;
 			if (n <= 0) break;
 			already += n;
 		}

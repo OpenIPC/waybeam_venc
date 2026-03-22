@@ -12,7 +12,7 @@ extern "C" {
 #define HTTPD_MAX_PATH      256
 #define HTTPD_MAX_QUERY     512
 #define HTTPD_MAX_BODY      8192
-#define HTTPD_MAX_ROUTES    48
+#define HTTPD_MAX_ROUTES    64
 
 /* Parsed HTTP request passed to route handlers */
 typedef struct {

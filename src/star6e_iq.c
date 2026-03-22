@@ -174,7 +174,7 @@ static IqParamDesc g_params[] = {
 	{ "demosaic",     "MI_ISP_IQ_GetDEMOSAIC",    "MI_ISP_IQ_SetDEMOSAIC",
 	  NULL, NULL, VT_U8,  4,    63,  FIELDS(demosaic_fields) },
 	{ "obc",          "MI_ISP_IQ_GetOBC",          "MI_ISP_IQ_SetOBC",
-	  NULL, NULL, VT_U16, 136,  255, FIELDS(obc_fields) },
+	  NULL, NULL, VT_U16, 136,  65535, FIELDS(obc_fields) },
 	{ "dynamic_dp",   "MI_ISP_IQ_GetDynamicDP",   "MI_ISP_IQ_SetDynamicDP",
 	  NULL, NULL, VT_U8,  488,  1,   NULL, 0 },
 	{ "dp_cluster",   "MI_ISP_IQ_GetDynamicDP_CLUSTER", "MI_ISP_IQ_SetDynamicDP_CLUSTER",
@@ -216,7 +216,7 @@ static IqParamDesc g_params[] = {
 	{ "alsc_ctrl",    "MI_ISP_IQ_GetALSC_CTRL",   "MI_ISP_IQ_SetALSC_CTRL",
 	  NULL, NULL, VT_U8,  4,    255, NULL, 0 },
 	{ "obc_p1",       "MI_ISP_IQ_GetOBC_P1",       "MI_ISP_IQ_SetOBC_P1",
-	  NULL, NULL, VT_U16, 136,  255, FIELDS(obc_fields) },
+	  NULL, NULL, VT_U16, 136,  65535, FIELDS(obc_fields) },
 	{ "stitch_lpf",   "MI_ISP_IQ_GetSTITCH_LPF",  "MI_ISP_IQ_SetSTITCH_LPF",
 	  NULL, NULL, VT_U16, 4,    256, NULL, 0 },
 
@@ -367,8 +367,11 @@ static void write_value(uint8_t *buf, uint32_t offset, IqValueType vt,
 }
 
 /* Bounds-checked single-char append for JSON building. */
+/* Bounds-checked single-char append and snprintf clamp for JSON building. */
 #define JSON_CHR(b, p, sz, c) do { \
 	if ((size_t)(p) < (sz) - 1) (b)[(p)++] = (c); } while (0)
+#define JSON_CLAMP(p, sz) do { \
+	if ((p) >= (int)(sz)) (p) = (int)(sz) - 1; } while (0)
 
 static int emit_fields_json(char *buf, size_t buf_size,
 	const IqParamDesc *p, const uint8_t *iq_buf)
@@ -377,30 +380,34 @@ static int emit_fields_json(char *buf, size_t buf_size,
 	uint32_t elem_size;
 
 	pos += snprintf(buf + pos, buf_size - (size_t)pos, "\"fields\":{");
+	JSON_CLAMP(pos, buf_size);
 	for (uint16_t f = 0; f < p->field_count; f++) {
 		const IqFieldDesc *fd = &p->fields[f];
-		uint32_t abs = p->manual_offset + fd->rel_offset;
+		uint32_t foff = p->manual_offset + fd->rel_offset;
 
 		if (f > 0)
 			JSON_CHR(buf, pos, buf_size, ',');
 		if (fd->count == 1) {
-			uint32_t val = read_value(iq_buf, abs, fd->vtype);
+			uint32_t val = read_value(iq_buf, foff, fd->vtype);
 			pos += snprintf(buf + pos, buf_size - (size_t)pos,
 				"\"%s\":%u", fd->name, val);
 		} else {
 			pos += snprintf(buf + pos, buf_size - (size_t)pos,
 				"\"%s\":[", fd->name);
+			JSON_CLAMP(pos, buf_size);
 			elem_size = (fd->vtype == VT_U8) ? 1 :
 				(fd->vtype == VT_U16) ? 2 : 4;
 			for (uint16_t e = 0; e < fd->count; e++) {
 				uint32_t val = read_value(iq_buf,
-					abs + e * elem_size, fd->vtype);
+					foff + e * elem_size, fd->vtype);
 				if (e > 0) JSON_CHR(buf, pos, buf_size, ',');
 				pos += snprintf(buf + pos,
 					buf_size - (size_t)pos, "%u", val);
+				JSON_CLAMP(pos, buf_size);
 			}
 			JSON_CHR(buf, pos, buf_size, ']');
 		}
+		JSON_CLAMP(pos, buf_size);
 	}
 	JSON_CHR(buf, pos, buf_size, '}');
 	buf[pos < (int)buf_size ? pos : (int)buf_size - 1] = '\0';
@@ -421,6 +428,7 @@ char *star6e_iq_query(void)
 
 	pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
 		"{\"ok\":true,\"data\":{");
+	JSON_CLAMP(pos, sizeof(buf));
 
 	for (size_t i = 0; i < NUM_PARAMS; i++) {
 		IqParamDesc *p = &g_params[i];
@@ -428,6 +436,7 @@ char *star6e_iq_query(void)
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
 				"\"%s\":{\"available\":false}%s",
 				p->name, (i + 1 < NUM_PARAMS) ? "," : "");
+			JSON_CLAMP(pos, sizeof(buf));
 			continue;
 		}
 
@@ -443,7 +452,6 @@ char *star6e_iq_query(void)
 				p->name, ret,
 				enable ? "true" : "false");
 		} else if (p->manual_offset == 4) {
-			/* Manual-only struct: no enOpType */
 			uint32_t val = read_value(iq_buf, p->manual_offset,
 				p->vtype);
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
@@ -451,6 +459,7 @@ char *star6e_iq_query(void)
 				"\"value\":%u",
 				p->name, ret,
 				enable ? "true" : "false", val);
+			JSON_CLAMP(pos, sizeof(buf));
 			if (p->fields) {
 				JSON_CHR(buf, pos, sizeof(buf), ',');
 				pos += emit_fields_json(buf + pos,
@@ -458,7 +467,6 @@ char *star6e_iq_query(void)
 			}
 			JSON_CHR(buf, pos, sizeof(buf), '}');
 		} else {
-			/* Standard auto/manual struct */
 			uint32_t optype = read_value(iq_buf,
 				IQ_OFFSET_OPTYPE, VT_U32);
 			uint32_t val = read_value(iq_buf, p->manual_offset,
@@ -469,6 +477,7 @@ char *star6e_iq_query(void)
 				p->name, ret,
 				enable ? "true" : "false",
 				optype == 1 ? "manual" : "auto", val);
+			JSON_CLAMP(pos, sizeof(buf));
 			if (p->fields) {
 				JSON_CHR(buf, pos, sizeof(buf), ',');
 				pos += emit_fields_json(buf + pos,
@@ -482,10 +491,12 @@ char *star6e_iq_query(void)
 
 	/* ── Read-only ISP diagnostics ─────────────────────────────── */
 	pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, ",\"_diag\":{");
+	JSON_CLAMP(pos, sizeof(buf));
 	{
 		typedef int (*fn_ver_t)(uint32_t, void *);
 		typedef int (*fn_ind_t)(uint32_t, void *);
 		typedef int (*fn_ccm_t)(uint32_t, void *);
+		int diag_first = 1;
 
 		fn_ver_t fn_ver = (fn_ver_t)dlsym(g_isp_handle,
 			"MI_ISP_IQ_GetVersionInfo");
@@ -494,38 +505,45 @@ char *star6e_iq_query(void)
 		fn_ccm_t fn_ccm = (fn_ccm_t)dlsym(g_isp_handle,
 			"MI_ISP_IQ_QueryCCMInfo");
 
-		/* IQ bin version */
 		if (fn_ver) {
 			uint32_t ver[3] = {0, 0, 0};
 			int r = fn_ver(0, ver);
+			if (!diag_first) JSON_CHR(buf, pos, sizeof(buf), ',');
+			diag_first = 0;
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
 				"\"version\":{\"ret\":%d,\"vendor\":%u,"
-				"\"major\":%u,\"minor\":%u},",
+				"\"major\":%u,\"minor\":%u}",
 				r, ver[0], ver[1], ver[2]);
+			JSON_CLAMP(pos, sizeof(buf));
 		}
 
-		/* Current IQ/ISO index */
 		if (fn_ind) {
 			uint32_t idx = 0;
 			int r = fn_ind(0, &idx);
+			if (!diag_first) JSON_CHR(buf, pos, sizeof(buf), ',');
+			diag_first = 0;
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
-				"\"iq_index\":{\"ret\":%d,\"value\":%u},",
+				"\"iq_index\":{\"ret\":%d,\"value\":%u}",
 				r, idx);
+			JSON_CLAMP(pos, sizeof(buf));
 		}
 
-		/* Current CCM info */
 		if (fn_ccm) {
 			static uint8_t ccm_buf[64];
 			memset(ccm_buf, 0, sizeof(ccm_buf));
 			int r = fn_ccm(0, ccm_buf);
 			uint16_t cct = 0;
 			memcpy(&cct, ccm_buf + 24, sizeof(cct));
+			if (!diag_first) JSON_CHR(buf, pos, sizeof(buf), ',');
+			diag_first = 0;
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
 				"\"ccm\":{\"ret\":%d,\"color_temp\":%u}",
 				r, cct);
+			JSON_CLAMP(pos, sizeof(buf));
 		}
 	}
 	pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "}}}");
+	JSON_CLAMP(pos, sizeof(buf));
 	result = strdup(buf);
 	pthread_mutex_unlock(&g_iq_mutex);
 	return result;
