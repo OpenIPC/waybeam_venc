@@ -685,7 +685,7 @@ out:
 
 int star6e_iq_import(const char *json_str)
 {
-	cJSON *root, *data, *param_obj, *fields_obj, *field_val;
+	cJSON *root, *data, *fields_obj;
 	int applied = 0, failed = 0;
 	char val_buf[512];
 
