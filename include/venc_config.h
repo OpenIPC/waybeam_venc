@@ -130,6 +130,7 @@ typedef struct {
 typedef struct {
 	bool enabled;
 	bool verbose;
+	uint32_t fps;
 } VencConfigOptflow;
 
 /* ── Top-level config ────────────────────────────────────────────────── */

@@ -171,6 +171,7 @@ void venc_config_defaults(VencConfig *cfg)
 	/* optflow */
 	cfg->optflow.enabled = true;
 	cfg->optflow.verbose = false;
+	cfg->optflow.fps = 5;
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -428,6 +429,9 @@ static void load_optflow(const cJSON *root, VencConfigOptflow *s)
 	if (!obj) return;
 	s->enabled = json_get_bool(obj, "enabled", s->enabled);
 	s->verbose = json_get_bool(obj, "verbose", s->verbose);
+	s->fps = (uint32_t)json_get_int(obj, "fps", (int)s->fps);
+	if (s->fps < 1) s->fps = 1;
+	if (s->fps > 60) s->fps = 60;
 }
 
 static void load_fpv(const cJSON *root, VencConfigFpv *s)
@@ -683,6 +687,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	if (optflow) {
 		cJSON_AddBoolToObject(optflow, "enabled", cfg->optflow.enabled);
 		cJSON_AddBoolToObject(optflow, "verbose", cfg->optflow.verbose);
+		cJSON_AddNumberToObject(optflow, "fps", cfg->optflow.fps);
 	}
 
 	return root;

@@ -75,6 +75,7 @@
   },
   "optflow": {
     "enabled": false,
-    "verbose": false
+    "verbose": false,
+    "fps": 5
   }
 }

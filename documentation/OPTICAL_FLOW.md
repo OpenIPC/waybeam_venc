@@ -5,20 +5,17 @@
 The current Star6E optflow path is a lightweight motion estimator that runs
 alongside the encoder stream loop.
 
-It produces two outputs:
+It currently produces one motion output:
 
-1. A coarse motion ROI based on SigmaStar IVE SAD block differences.
-2. A relative planar motion estimate:
-   - `tx`: horizontal image translation in full-frame pixels
-   - `ty`: vertical image translation in full-frame pixels
-   - `tz`: unitless relative surface-scale term
-     - positive means the camera appears to move closer to the scene
-     - negative means the camera appears to move farther away
+1. An LK optical-flow estimate:
+  - `lk tx`: horizontal image translation in full-frame pixels
+  - `lk ty`: vertical image translation in full-frame pixels
+  - `lk rz`: image-plane rotation proxy derived from tracked feature motion
 
 This is not a full 6-DoF visual odometry system and it is not a strict sparse
-Lucas-Kanade implementation. It is a hybrid of:
-- hardware-assisted SAD change detection
-- CPU-side patch matching on downsampled luma frames
+Lucas-Kanade implementation. The current hardcoded mode disables the older SAD
+ROI path and the CPU planar estimator and keeps only the vendor LK optical
+flow path on a downsampled `U8C1` image pair.
 
 ## Where It Runs
 
@@ -38,12 +35,15 @@ sensor thread.
 motion processing is rate-limited.
 
 Current interval:
-- one processing pass every 200 ms
-- effective processing rate: about 5 Hz
+- configured by `optflow.fps` in `venc.json`
+- default value: 5
+- default effective interval: about 200 ms
+- default effective processing rate: about 5 Hz
 
 So:
 - encoded stream rate can be around 60 fps
-- motion estimation still only runs around 5 times per second
+- motion estimation runs at the configured `optflow.fps` rate, bounded by the
+  actual incoming frame cadence
 
 ## Frame Source
 
@@ -76,90 +76,19 @@ If validation fails:
 - the buffer is returned with `MI_SYS_ChnOutputPortPutBuf(...)`
 - the function returns without producing motion output
 
-### 2. Wrap the current luma plane as an IVE image
-
-`wrap_current_luma(...)` builds a lightweight `MI_IVE_Image_t` view over the
-current frame.
-
-Important details:
-- image type is single-channel luma (`U8C1`)
-- width and height are the processed frame dimensions
-- stride and addresses point directly at the current frame buffer
-- no copy happens here
-
-This gives the IVE SAD path direct access to the current luma plane.
-
-### 3. Bootstrap the previous-frame history on first use
+### 2. Bootstrap the previous-frame history on first use
 
 If there is no previous frame yet:
 - `copy_luma_to_prev(...)` copies the current luma plane into the persistent
   previous-frame buffer
 - `have_prev_frame` is set
 - the buffer is returned immediately
-- no ROI or planar motion is emitted for this first frame
+- no LK motion is emitted for this first frame
 
-This is required because both motion paths compare current frame against the
+This is required because the LK path compares the current frame against the
 previous frame.
 
-### 4. Run SigmaStar IVE SAD between previous and current luma
-
-For non-bootstrap frames, the code calls:
-
-- `state->ive_sad(...)`
-
-Inputs:
-- previous frame
-- current frame
-
-Outputs:
-- `sad_result`
-- `thr_result`
-
-Configuration:
-- 8x8 SAD mode
-- thresholded output enabled
-- threshold derived from:
-  - block size
-  - configured per-pixel difference threshold
-
-Conceptually:
-- the hardware computes block-wise absolute differences
-- blocks whose summed difference exceeds the threshold are marked as motion
-
-If the SAD call fails:
-- current luma is still copied into the previous-frame buffer
-- the frame buffer is returned
-- processing exits with failure for that cycle
-
-### 5. Convert the thresholded SAD map into a motion ROI
-
-`compute_motion_box(...)` scans the thresholded SAD output.
-
-What it does:
-- searches all non-zero motion blocks
-- finds min/max block coordinates
-- expands the box by one block of padding when possible
-- scales block coordinates back to full-frame pixel coordinates
-
-Output:
-- `x`, `y`, `width`, `height`
-
-If no thresholded blocks are active:
-- ROI becomes zero-sized
-- this is treated as no coarse motion region
-
-This ROI is useful as a cheap where-did-motion-happen signal, but by itself it
-does not estimate camera translation.
-
-### 6. Run CPU-side planar motion estimation
-
-If the frame got far enough for ROI evaluation, the code then calls:
-
-- `compute_planar_motion(...)`
-
-This is the path that produces `tx`, `ty`, and `tz`.
-
-#### 6.1. Downsample previous and current luma
+### 3. Downsample previous and current luma
 
 Both frames are downsampled into persistent tracking buffers.
 
@@ -168,112 +97,47 @@ Current implementation:
 - height scaled to preserve aspect ratio
 - minimum size clamped to avoid degenerate cases
 
-The goal is to reduce CPU cost while keeping enough structure for patch
-tracking.
+The goal is to reduce CPU cost while keeping enough structure for LK tracking.
 
-#### 6.2. Build a fixed tracking grid
+### 4. Run LK optical flow
 
-The downsampled frame is sampled on a fixed grid:
+If the runtime exports `MI_IVE_LkOpticalFlow(...)`, the tracker runs the LK
+path on the downsampled luma pair.
 
-- 8 columns
-- 5 rows
+Important implementation constraints from the SigmaStar SDK:
+- LK input size must stay within `64x64` to `720x576`
+- input and output physical addresses must be 16-byte aligned
+- stride must be 16-pixel aligned
 
-This yields up to 40 candidate tracking points.
+To satisfy that:
+- the existing downsampled tracking view is copied into dedicated IVE images
+- a small persistent point cluster around a tracked image-center estimate is
+  written into an IVE memory buffer
+- the LK motion-vector output is written into a separate IVE memory buffer
 
-The grid avoids the image borders by keeping a margin large enough for:
-- patch radius
-- local search window
+The current LK path follows a simplified single-layer pattern closer to the
+standalone SDK samples:
+- it does not use a separate hardware corner detector
+- it tracks a small center-following point cluster
+- it reduces the resulting LK vectors into translation and an image-plane
+  rotation proxy
 
-#### 6.3. Reject low-texture patches
+The returned per-point LK motion vectors are then reduced into:
+- `lk tx`
+- `lk ty`
+- `lk rz`
 
-For each candidate point, `patch_texture_score(...)` computes a simple texture
-score from local horizontal and vertical intensity changes.
+`lk rz` is an image-plane rotation proxy from the residual flow field around
+the image center. It is not a full 3D yaw/pitch/roll estimate.
 
-If a patch is too flat, it is skipped.
+### 5. Update previous-frame history
 
-Reason:
-- flat regions do not provide stable matching
-- this avoids noisy or ambiguous motion vectors
-
-#### 6.4. Search locally for the best patch match
-
-Each accepted previous-frame patch is matched against the current frame using a
-small brute-force search window.
-
-Current behavior:
-- patch radius: 6 pixels
-- search range: +/-8 pixels
-
-For every candidate offset:
-- `patch_sad_score(...)` computes patch SAD
-- the offset with the smallest score is kept
-
-This produces one local displacement vector per tracked patch:
-- `dx`
-- `dy`
-
-#### 6.5. Robustly reject outliers
-
-The set of patch displacements is filtered in two stages.
-
-First:
-- median `dx`
-- median `dy`
-
-Then:
-- each track is compared against the median motion
-- tracks with large residual error are discarded
-
-This protects the estimate from:
-- unstable matches
-- independently moving objects
-- local texture failures
-
-#### 6.6. Estimate image-plane translation
-
-The remaining inlier vectors are averaged.
-
-The resulting average displacement on the downsampled frame is then scaled back
-to full-frame coordinates.
-
-This becomes:
-- `tx`
-- `ty`
-
-Interpretation:
-- positive or negative sign depends on image motion direction
-- units are full-frame pixels per processed interval
-- values are relative, not metric world-space units
-
-#### 6.7. Estimate relative scale term (`tz`)
-
-After translation is estimated, the code looks at the residual motion field.
-
-For each inlier track:
-- subtract the average translation
-- compute the point's radius from the image center
-- project residual motion onto that radius
-
-This approximates radial expansion or contraction:
-- outward residual flow -> positive scale -> camera approaching scene
-- inward residual flow -> negative scale -> camera receding from scene
-
-The result is averaged into `tz`.
-
-Important limitation:
-- `tz` is not metric depth
-- it is only a relative image-scale indicator
-- it is most meaningful when the scene is roughly planar and dominant motion is
-  camera motion rather than object motion
-
-### 7. Update previous-frame history
-
-After ROI and planar motion are computed, the current luma plane is copied into
-the persistent previous-frame buffer with `copy_luma_to_prev(...)`.
+After LK motion is computed, the current luma plane is copied into the
+persistent previous-frame buffer with `copy_luma_to_prev(...)`.
 
 This prepares the state for the next processing cycle.
 
-### 8. Return the frame buffer
+### 6. Return the frame buffer
 
 The borrowed buffer is always returned through:
 
@@ -300,36 +164,22 @@ Printed on a slower heartbeat.
 Active example fields:
 - encoded frame count
 - packet count
-- SAD grid dimensions
-- block size
-- planar tracking buffer size
+- LK tracking buffer size
 
 This confirms the tracker is alive even when no strong motion is happening.
 
 ### 3. Motion outputs
 
-#### ROI log
+#### LK log
 
 Example shape:
-- `[optflow] motion roi x=... y=... w=... h=...`
+- `[optflow] lk tx=... ty=... rz=... tracks=used/found ...`
 
 Meaning:
-- bounding box of thresholded SAD motion blocks
-- full-frame pixel coordinates
-
-#### Planar log
-
-Example shape:
-- `[optflow] planar tx=... ty=... tz=... tracks=used/found ...`
-
-Meaning:
-- `tx`, `ty`: estimated image-plane translation
-- `tz`: relative scale term
-- `found`: textured candidate patches matched
-- `used`: inliers remaining after outlier rejection
-
-A high `used/found` ratio usually means the frame pair is coherent and the
-estimate is more trustworthy.
+- `lk tx`, `lk ty`: LK-derived image-plane translation
+- `lk rz`: LK-derived image-plane rotation proxy
+- `found`: candidate textured points passed to LK
+- `used`: LK tracks with successful status used in reduction
 
 ## Current Limitations
 
@@ -343,11 +193,11 @@ Known limits:
 - no rotation compensation
 - no feature identity persistence across long sequences
 - no explicit moving-object segmentation
-- processing cadence is only about 5 Hz
-- `tz` is only a heuristic scale term, not real Z distance
+- configured processing cadence is clamped to the supported range
+- `lk rz` is only an image-plane rotation proxy, not full 3D attitude
 
 Because of that, the current output should be interpreted as:
-- a useful relative planar motion signal
+- a useful relative image-motion signal
 - not a final navigation-grade pose estimator
 
 ## Summary
@@ -355,15 +205,12 @@ Because of that, the current output should be interpreted as:
 After a frame is retrieved from the VPE output port, the current logic does:
 
 1. validate the buffer
-2. wrap its luma plane
-3. bootstrap previous frame if needed
-4. run hardware SAD against the previous frame
-5. extract a coarse motion ROI
-6. run CPU patch matching on downsampled luma
-7. estimate robust `tx` and `ty`
-8. derive heuristic radial scale `tz`
-9. copy current luma into previous-frame state
-10. return the SYS buffer
+2. bootstrap previous frame if needed
+3. downsample previous and current luma into tracking buffers
+4. run LK optical flow on the reduced image pair
+5. derive `lk tx`, `lk ty`, and `lk rz`
+6. copy current luma into previous-frame state
+7. return the SYS buffer
 
 This gives the project a low-cost relative motion signal that is already useful
 for debugging and future stabilization or guidance work, while staying within

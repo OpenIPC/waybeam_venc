@@ -1035,6 +1035,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	if (vcfg->optflow.enabled && !state->optflow) {
 		state->optflow = optflow_create(state->image_width,
 			state->image_height, vcfg->optflow.verbose ? 1 : 0,
+			vcfg->optflow.fps,
 			&state->vpe_port);
 		if (!state->optflow) {
 			fprintf(stderr, "WARNING: OptFlow init failed, continuing without motion tracking\n");

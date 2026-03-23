@@ -67,7 +67,7 @@ SRC := src/main.c src/backend_star6e.c $(STAR6E_ONLY_SRC) $(HELPER_SRC) $(CONFIG
 DRV := $(STAR6E_DRV)
 DRV_EXTRA :=
 SOC_DEFS := -DPLATFORM_STAR6E -DHAVE_BACKEND_STAR6E=1
-SOC_LDFLAGS := -Wl,-rpath-link,$(DRV)
+SOC_LDFLAGS := -Wl,-rpath-link,$(DRV) -Wl,-E
 SOC_LIBS := -lm
 BUILD_TESTS := 1
 BUILD_MARUKO_SHIM := 0
