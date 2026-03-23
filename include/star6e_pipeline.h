@@ -17,6 +17,7 @@
 #include <time.h>
 
 struct EisState;  /* forward declaration — see eis.h */
+struct OptFlowState;
 
 typedef struct {
 	SensorSelectResult sensor;
@@ -38,6 +39,7 @@ typedef struct {
 	AudioRing audio_ring;
 	ImuState *imu;              /* NULL if IMU disabled */
 	struct EisState *eis;       /* NULL if EIS disabled */
+	struct OptFlowState *optflow;
 	MI_VENC_Pack_t *stream_packs;     /* pre-allocated for main loop */
 	uint32_t stream_packs_cap;
 	/* Dual VENC (gemini mode) — heap-allocated, NULL when inactive */

@@ -1,5 +1,6 @@
 #include "star6e_runtime.h"
 
+#include "OptFlow.h"
 #include "eis.h"
 #include "imu_bmi270.h"
 #include "sdk_quiet.h"
@@ -644,6 +645,8 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		fprintf(stderr, "ERROR: MI_VENC_GetStream failed %d\n", ret);
 		return ret;
 	}
+
+	optflow_on_stream(ps->optflow, stream.count);
 
 	(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
 		ps->output_enabled, vcfg->system.verbose);

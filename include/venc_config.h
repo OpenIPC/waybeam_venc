@@ -127,6 +127,11 @@ typedef struct {
 	char server[VENC_CONFIG_STRING_MAX]; /* dual-stream destination URI */
 } VencConfigRecord;
 
+typedef struct {
+	bool enabled;
+	bool verbose;
+} VencConfigOptflow;
+
 /* ── Top-level config ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -141,6 +146,7 @@ typedef struct {
 	VencConfigImu imu;
 	VencConfigEis eis;
 	VencConfigRecord record;
+	VencConfigOptflow optflow;
 } VencConfig;
 
 /* Fill cfg with compiled defaults. */

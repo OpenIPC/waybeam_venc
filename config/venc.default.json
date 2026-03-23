@@ -72,5 +72,9 @@
     "format": "ts",
     "maxSeconds": 300,
     "maxMB": 500
+  },
+  "optflow": {
+    "enabled": false,
+    "verbose": false
   }
 }

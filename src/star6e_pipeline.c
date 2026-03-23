@@ -1,5 +1,6 @@
 #include "star6e_pipeline.h"
 
+#include "OptFlow.h"
 #include "codec_config.h"
 #include "codec_types.h"
 #include "eis.h"
@@ -1031,6 +1032,15 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 	}
 
+	if (vcfg->optflow.enabled && !state->optflow) {
+		state->optflow = optflow_create(state->image_width,
+			state->image_height, vcfg->optflow.verbose ? 1 : 0,
+			&state->vpe_port);
+		if (!state->optflow) {
+			fprintf(stderr, "WARNING: OptFlow init failed, continuing without motion tracking\n");
+		}
+	}
+
 	return 0;
 }
 
@@ -1102,6 +1112,10 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	if (state->eis) {
 		eis_destroy(state->eis);
 		state->eis = NULL;
+	}
+	if (state->optflow) {
+		optflow_destroy(state->optflow);
+		state->optflow = NULL;
 	}
 	if (state->imu) {
 		imu_destroy(state->imu);
@@ -1186,6 +1200,10 @@ static void star6e_pipeline_stop_venc_level(Star6ePipelineState *state)
 	if (state->eis) {
 		eis_destroy(state->eis);
 		state->eis = NULL;
+	}
+	if (state->optflow) {
+		optflow_destroy(state->optflow);
+		state->optflow = NULL;
 	}
 	if (state->imu) {
 		imu_destroy(state->imu);

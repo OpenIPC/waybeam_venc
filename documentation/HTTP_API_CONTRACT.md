@@ -103,7 +103,8 @@ Response `200`:
       "image": { "mirror": false, "flip": false, "rotate": 0 },
       "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0 },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "targetPacketRate": 0, "connectedUdp": false },
-      "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 }
+      "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
+      "optflow": { "enabled": false, "verbose": false }
     }
   }
 }

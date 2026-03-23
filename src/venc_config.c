@@ -167,6 +167,10 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->record.fps = 0;
 	cfg->record.gop_size = 0;
 	cfg->record.server[0] = '\0';
+
+	/* optflow */
+	cfg->optflow.enabled = true;
+	cfg->optflow.verbose = false;
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -418,6 +422,14 @@ static void load_record(const cJSON *root, VencConfigRecord *s)
 		json_get_string(obj, "server", s->server));
 }
 
+static void load_optflow(const cJSON *root, VencConfigOptflow *s)
+{
+	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "optflow");
+	if (!obj) return;
+	s->enabled = json_get_bool(obj, "enabled", s->enabled);
+	s->verbose = json_get_bool(obj, "verbose", s->verbose);
+}
+
 static void load_fpv(const cJSON *root, VencConfigFpv *s)
 {
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "fpv");
@@ -475,6 +487,7 @@ int venc_config_load(const char *path, VencConfig *cfg)
 	load_imu(root, &cfg->imu);
 	load_eis(root, &cfg->eis);
 	load_record(root, &cfg->record);
+	load_optflow(root, &cfg->optflow);
 
 	cJSON_Delete(root);
 	fprintf(stderr, "[venc_config] Loaded config from %s\n", path);
@@ -663,6 +676,13 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(rec, "fps", cfg->record.fps);
 		cJSON_AddNumberToObject(rec, "gopSize", cfg->record.gop_size);
 		cJSON_AddStringToObject(rec, "server", cfg->record.server);
+	}
+
+	/* optflow */
+	cJSON *optflow = cJSON_AddObjectToObject(root, "optflow");
+	if (optflow) {
+		cJSON_AddBoolToObject(optflow, "enabled", cfg->optflow.enabled);
+		cJSON_AddBoolToObject(optflow, "verbose", cfg->optflow.verbose);
 	}
 
 	return root;
