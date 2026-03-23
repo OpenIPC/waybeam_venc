@@ -16,6 +16,13 @@ enum {
 	OPTFLOW_SAD_BLOCK_SIZE = 8,
 	OPTFLOW_SAD_PIXEL_DIFF = 15,
 	OPTFLOW_IVE_HANDLE = 2,
+	OPTFLOW_TRACK_WIDTH = 320,
+	OPTFLOW_TRACK_GRID_COLS = 8,
+	OPTFLOW_TRACK_GRID_ROWS = 5,
+	OPTFLOW_TRACK_PATCH_RADIUS = 6,
+	OPTFLOW_TRACK_SEARCH_RANGE = 8,
+	OPTFLOW_TRACK_MIN_TEXTURE = 450,
+	OPTFLOW_TRACK_MAX_RESIDUAL_SQ = 9 * 9,
 };
 
 typedef uint64_t MI_PHY;
@@ -172,11 +179,22 @@ typedef struct {
 	int height;
 } OptflowMotionBox;
 
+typedef struct {
+	int valid;
+	double tx;
+	double ty;
+	double tz;
+	uint32_t points_found;
+	uint32_t points_used;
+} OptflowPlanarMotion;
+
 struct OptFlowState {
 	uint32_t capture_width;
 	uint32_t capture_height;
 	uint32_t process_width;
 	uint32_t process_height;
+	uint32_t track_width;
+	uint32_t track_height;
 	uint32_t prev_stride;
 	uint32_t sad_stride;
 	uint32_t sad_width;
@@ -201,6 +219,8 @@ struct OptFlowState {
 	MI_IVE_Image_t prev_frame;
 	MI_IVE_Image_t sad_result;
 	MI_IVE_Image_t thr_result;
+	uint8_t *track_prev;
+	uint8_t *track_curr;
 	MI_SYS_ChnPort_t vpe_port;
 };
 
@@ -394,6 +414,317 @@ static void free_image(MI_IVE_Image_t *image)
 	memset(image, 0, sizeof(*image));
 }
 
+static int prepare_tracking_buffers(OptFlowState *state)
+{
+	uint32_t width;
+	uint32_t height;
+	uint32_t track_bytes;
+
+	width = state->process_width;
+	if (width > OPTFLOW_TRACK_WIDTH)
+		width = OPTFLOW_TRACK_WIDTH;
+	if (width < 64)
+		width = 64;
+
+	height = (uint32_t)(((uint64_t)state->process_height * width) /
+		state->process_width);
+	if (height < 64)
+		height = 64;
+	if (height > state->process_height)
+		height = state->process_height;
+	if (height & 1u)
+		height--;
+
+	state->track_width = width;
+	state->track_height = height;
+	track_bytes = state->track_width * state->track_height;
+
+	state->track_prev = calloc(track_bytes, 1);
+	state->track_curr = calloc(track_bytes, 1);
+	if (!state->track_prev || !state->track_curr) {
+		free(state->track_prev);
+		free(state->track_curr);
+		state->track_prev = NULL;
+		state->track_curr = NULL;
+		state->track_width = 0;
+		state->track_height = 0;
+		return -1;
+	}
+
+	return 0;
+}
+
+static void release_tracking_buffers(OptFlowState *state)
+{
+	free(state->track_prev);
+	free(state->track_curr);
+	state->track_prev = NULL;
+	state->track_curr = NULL;
+	state->track_width = 0;
+	state->track_height = 0;
+}
+
+static int abs_int(int value)
+{
+	return value < 0 ? -value : value;
+}
+
+static void downsample_luma(uint8_t *dst, uint32_t dst_width,
+	uint32_t dst_height, const uint8_t *src, uint32_t src_stride,
+	uint32_t src_width, uint32_t src_height)
+{
+	uint32_t dst_y;
+
+	for (dst_y = 0; dst_y < dst_height; ++dst_y) {
+		uint32_t src_y = (uint32_t)(((uint64_t)dst_y * src_height) /
+			dst_height);
+		uint32_t dst_x;
+
+		if (src_y >= src_height)
+			src_y = src_height - 1;
+		for (dst_x = 0; dst_x < dst_width; ++dst_x) {
+			uint32_t src_x = (uint32_t)(((uint64_t)dst_x * src_width) /
+				dst_width);
+			if (src_x >= src_width)
+				src_x = src_width - 1;
+			dst[dst_y * dst_width + dst_x] =
+				src[src_y * src_stride + src_x];
+		}
+	}
+}
+
+static int patch_texture_score(const uint8_t *image, uint32_t stride,
+	int center_x, int center_y, int patch_radius)
+{
+	int score = 0;
+	int sample_y;
+
+	for (sample_y = center_y - patch_radius + 1;
+	     sample_y <= center_y + patch_radius; ++sample_y) {
+		const uint8_t *line = image + sample_y * (int)stride;
+		const uint8_t *prev_line = image + (sample_y - 1) * (int)stride;
+		int sample_x;
+
+		for (sample_x = center_x - patch_radius + 1;
+		     sample_x <= center_x + patch_radius; ++sample_x) {
+			score += abs_int((int)line[sample_x] - (int)line[sample_x - 1]);
+			score += abs_int((int)line[sample_x] - (int)prev_line[sample_x]);
+		}
+	}
+
+	return score;
+}
+
+static uint32_t patch_sad_score(const uint8_t *prev_image,
+	const uint8_t *curr_image, uint32_t stride, int prev_center_x,
+	int prev_center_y, int curr_center_x, int curr_center_y, int patch_radius)
+{
+	uint32_t score = 0;
+	int sample_y;
+
+	for (sample_y = -patch_radius; sample_y <= patch_radius; ++sample_y) {
+		const uint8_t *prev_line = prev_image +
+			(prev_center_y + sample_y) * (int)stride;
+		const uint8_t *curr_line = curr_image +
+			(curr_center_y + sample_y) * (int)stride;
+		int sample_x;
+
+		for (sample_x = -patch_radius; sample_x <= patch_radius; ++sample_x) {
+			score += (uint32_t)abs_int(
+				(int)prev_line[prev_center_x + sample_x] -
+				(int)curr_line[curr_center_x + sample_x]);
+		}
+	}
+
+	return score;
+}
+
+static int compare_double_values(const void *lhs, const void *rhs)
+{
+	const double left = *(const double *)lhs;
+	const double right = *(const double *)rhs;
+
+	if (left < right)
+		return -1;
+	if (left > right)
+		return 1;
+	return 0;
+}
+
+static double median_double(double *values, uint32_t count)
+{
+	qsort(values, count, sizeof(values[0]), compare_double_values);
+	if (count & 1u)
+		return values[count / 2];
+	return (values[(count / 2) - 1] + values[count / 2]) * 0.5;
+}
+
+static int compute_planar_motion(OptFlowState *state,
+	const MI_SYS_BufInfo_t *buf_info, OptflowPlanarMotion *motion)
+{
+	double delta_x_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
+	double delta_y_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
+	double median_x_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
+	double median_y_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
+	double sample_x_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
+	double sample_y_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
+	uint32_t sample_count = 0;
+	uint32_t used_count = 0;
+	double median_x;
+	double median_y;
+	double average_x = 0.0;
+	double average_y = 0.0;
+	double scale_sum = 0.0;
+	uint32_t scale_count = 0;
+	int usable_margin_x;
+	int usable_margin_y;
+	uint32_t row_index;
+
+	memset(motion, 0, sizeof(*motion));
+	if (!state->track_prev || !state->track_curr ||
+	    state->track_width == 0 || state->track_height == 0)
+		return 0;
+
+	downsample_luma(state->track_prev, state->track_width,
+		state->track_height, state->prev_frame.apu8VirAddr[0],
+		state->prev_stride, state->process_width, state->process_height);
+	downsample_luma(state->track_curr, state->track_width,
+		state->track_height, buf_info->stFrameData.pVirAddr[0],
+		buf_info->stFrameData.u32Stride[0], state->process_width,
+		state->process_height);
+
+	usable_margin_x = OPTFLOW_TRACK_PATCH_RADIUS + OPTFLOW_TRACK_SEARCH_RANGE + 1;
+	usable_margin_y = OPTFLOW_TRACK_PATCH_RADIUS + OPTFLOW_TRACK_SEARCH_RANGE + 1;
+	if ((int)state->track_width <= usable_margin_x * 2 ||
+	    (int)state->track_height <= usable_margin_y * 2)
+		return 0;
+
+	for (row_index = 0; row_index < OPTFLOW_TRACK_GRID_ROWS; ++row_index) {
+		int center_y;
+		uint32_t col_index;
+
+		if (OPTFLOW_TRACK_GRID_ROWS == 1) {
+			center_y = (int)state->track_height / 2;
+		} else {
+			center_y = usable_margin_y + (int)((((uint64_t)row_index) *
+				(state->track_height - 1 - (uint32_t)(usable_margin_y * 2))) /
+				(OPTFLOW_TRACK_GRID_ROWS - 1));
+		}
+
+		for (col_index = 0; col_index < OPTFLOW_TRACK_GRID_COLS; ++col_index) {
+			int center_x;
+			uint32_t best_score = UINT32_MAX;
+			int best_dx = 0;
+			int best_dy = 0;
+			int search_y;
+
+			if (OPTFLOW_TRACK_GRID_COLS == 1) {
+				center_x = (int)state->track_width / 2;
+			} else {
+				center_x = usable_margin_x + (int)((((uint64_t)col_index) *
+					(state->track_width - 1 - (uint32_t)(usable_margin_x * 2))) /
+					(OPTFLOW_TRACK_GRID_COLS - 1));
+			}
+
+			if (patch_texture_score(state->track_prev, state->track_width,
+					center_x, center_y,
+					OPTFLOW_TRACK_PATCH_RADIUS) < OPTFLOW_TRACK_MIN_TEXTURE)
+				continue;
+
+			for (search_y = -OPTFLOW_TRACK_SEARCH_RANGE;
+			     search_y <= OPTFLOW_TRACK_SEARCH_RANGE; ++search_y) {
+				int search_x;
+
+				for (search_x = -OPTFLOW_TRACK_SEARCH_RANGE;
+				     search_x <= OPTFLOW_TRACK_SEARCH_RANGE; ++search_x) {
+					uint32_t score = patch_sad_score(state->track_prev,
+						state->track_curr, state->track_width,
+						center_x, center_y,
+						center_x + search_x,
+						center_y + search_y,
+						OPTFLOW_TRACK_PATCH_RADIUS);
+
+					if (score < best_score) {
+						best_score = score;
+						best_dx = search_x;
+						best_dy = search_y;
+					}
+				}
+			}
+
+			delta_x_values[sample_count] = (double)best_dx;
+			delta_y_values[sample_count] = (double)best_dy;
+			sample_x_values[sample_count] = (double)center_x;
+			sample_y_values[sample_count] = (double)center_y;
+			sample_count++;
+		}
+	}
+
+	motion->points_found = sample_count;
+	if (sample_count < 6)
+		return 0;
+
+	memcpy(median_x_values, delta_x_values,
+		sample_count * sizeof(delta_x_values[0]));
+	memcpy(median_y_values, delta_y_values,
+		sample_count * sizeof(delta_y_values[0]));
+	median_x = median_double(median_x_values, sample_count);
+	median_y = median_double(median_y_values, sample_count);
+
+	for (row_index = 0; row_index < sample_count; ++row_index) {
+		double residual_x = delta_x_values[row_index] - median_x;
+		double residual_y = delta_y_values[row_index] - median_y;
+		double residual_sq = residual_x * residual_x + residual_y * residual_y;
+
+		if (residual_sq > OPTFLOW_TRACK_MAX_RESIDUAL_SQ)
+			continue;
+
+		average_x += delta_x_values[row_index];
+		average_y += delta_y_values[row_index];
+		used_count++;
+	}
+
+	motion->points_used = used_count;
+	if (used_count < 4)
+		return 0;
+
+	average_x /= used_count;
+	average_y /= used_count;
+
+	for (row_index = 0; row_index < sample_count; ++row_index) {
+		double residual_x = delta_x_values[row_index] - average_x;
+		double residual_y = delta_y_values[row_index] - average_y;
+		double radius_x;
+		double radius_y;
+		double radius_sq;
+
+		if (((delta_x_values[row_index] - median_x) *
+			 (delta_x_values[row_index] - median_x)) +
+		    ((delta_y_values[row_index] - median_y) *
+			 (delta_y_values[row_index] - median_y)) >
+		    OPTFLOW_TRACK_MAX_RESIDUAL_SQ)
+			continue;
+
+		radius_x = sample_x_values[row_index] -
+			((double)state->track_width * 0.5);
+		radius_y = sample_y_values[row_index] -
+			((double)state->track_height * 0.5);
+		radius_sq = radius_x * radius_x + radius_y * radius_y;
+		if (radius_sq < 100.0)
+			continue;
+
+		scale_sum += (residual_x * radius_x + residual_y * radius_y) /
+			radius_sq;
+		scale_count++;
+	}
+
+	motion->valid = 1;
+	motion->tx = average_x * ((double)state->process_width / state->track_width);
+	motion->ty = average_y * ((double)state->process_height / state->track_height);
+	motion->tz = scale_count ? (scale_sum / scale_count) : 0.0;
+	return 1;
+}
+
 static int prepare_ive_buffers(OptFlowState *state)
 {
 	state->process_width = state->capture_width -
@@ -426,9 +757,13 @@ static int prepare_ive_buffers(OptFlowState *state)
 			(uint16_t)state->sad_height) != 0)
 		goto fail;
 
+	if (prepare_tracking_buffers(state) != 0)
+		goto fail;
+
 	return 0;
 
 fail:
+	release_tracking_buffers(state);
 	free_image(&state->thr_result);
 	free_image(&state->sad_result);
 	free_image(&state->prev_frame);
@@ -437,6 +772,7 @@ fail:
 
 static void release_ive_buffers(OptFlowState *state)
 {
+	release_tracking_buffers(state);
 	free_image(&state->thr_result);
 	free_image(&state->sad_result);
 	free_image(&state->prev_frame);
@@ -518,7 +854,8 @@ static int compute_motion_box(const OptFlowState *state, OptflowMotionBox *box)
 	return 1;
 }
 
-static int grab_frame_and_detect(OptFlowState *state, OptflowMotionBox *box)
+static int grab_frame_and_detect(OptFlowState *state, OptflowMotionBox *box,
+	OptflowPlanarMotion *motion)
 {
 	union {
 		MI_SYS_BufInfo_t info;
@@ -531,6 +868,7 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowMotionBox *box)
 
 	memset(&buf_storage, 0, sizeof(buf_storage));
 	memset(&current_frame, 0, sizeof(current_frame));
+	memset(motion, 0, sizeof(*motion));
 
 	ret = MI_SYS_ChnOutputPortGetBuf(&state->vpe_port, buf_info, &buf_handle);
 	if (ret != MI_SUCCESS)
@@ -579,6 +917,8 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowMotionBox *box)
 	}
 
 	ret = compute_motion_box(state, box);
+	if (ret >= 0)
+		(void)compute_planar_motion(state, buf_info, motion);
 	copy_luma_to_prev(state, buf_info);
 	(void)MI_SYS_ChnOutputPortPutBuf(buf_handle);
 	return ret;
@@ -598,6 +938,10 @@ static void log_capability_summary(const OptFlowState *state, const char *phase)
 	    !frame_feed_ready(state)) {
 		printf("[optflow] disabled: IVE tracking is not available in this build/runtime yet"
 			" (missing bindings, runtime library, or raw-frame feed path)\n");
+	} else {
+		printf("[optflow] planar: tx/ty are full-frame pixels; tz is relative surface scale"
+			" (positive = approach) using %ux%u tracking\n",
+			state->track_width, state->track_height);
 	}
 
 	fflush(stdout);
@@ -658,6 +1002,7 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 	long long now_ms;
 	int interval_ms;
 	OptflowMotionBox box;
+	OptflowPlanarMotion motion;
 	int ret;
 
 	if (!state)
@@ -681,10 +1026,17 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 	    frame_feed_ready(state) &&
 	    (now_ms - state->last_process_ms) >= OPTFLOW_PROCESS_INTERVAL_MS) {
 		state->last_process_ms = now_ms;
-		ret = grab_frame_and_detect(state, &box);
+		ret = grab_frame_and_detect(state, &box, &motion);
 		if (ret > 0 && box.width > 0 && box.height > 0) {
 			printf("[optflow] motion roi x=%d y=%d w=%d h=%d frames=%" PRIu64 "\n",
 				box.x, box.y, box.width, box.height, state->frames_seen);
+			fflush(stdout);
+		}
+		if (motion.valid) {
+			printf("[optflow] planar tx=%.1f ty=%.1f tz=%.5f tracks=%u/%u frames=%" PRIu64 "\n",
+				motion.tx, motion.ty, motion.tz,
+				motion.points_used, motion.points_found,
+				state->frames_seen);
 			fflush(stdout);
 		}
 	}
@@ -697,12 +1049,14 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 	if (OPTFLOW_HAVE_IVE_BINDINGS && state->runtime_ive_present &&
 	    frame_feed_ready(state)) {
 		printf("[optflow] active: encoded_frames=%" PRIu64 " packets=%" PRIu64
-			" sad=%ux%u block=%u\n",
+			" sad=%ux%u block=%u track=%ux%u\n",
 			state->frames_seen,
 			state->packets_seen,
 			state->sad_width,
 			state->sad_height,
-			OPTFLOW_SAD_BLOCK_SIZE);
+			OPTFLOW_SAD_BLOCK_SIZE,
+			state->track_width,
+			state->track_height);
 	} else {
 		printf("[optflow] standby: encoded_frames=%" PRIu64 " packets=%" PRIu64
 			" 6dof=unavailable\n",

@@ -23,6 +23,9 @@ This folder is the canonical place for waybeam_venc project documentation.
 - `documentation/LIVE_FPS_CONTROL.md`
   - Live FPS control via hardware bind decimation (MI_SYS_BindChnPort2).
   - Covers clamping behavior, mode selection, tested configurations, and mode switching limitation.
+- `documentation/OPTICAL_FLOW.md`
+  - Technical description of the current Star6E optflow pipeline.
+  - Covers post-frame-retrieval processing, ROI extraction, and planar `tx`/`ty`/`tz` estimation.
 - `documentation/REMOTE_TEST_WORKFLOW.md`
   - Standard remote build/upload/run workflow, cold-state rules, and hang handling.
 - `documentation/CRASH_LOG.md`
