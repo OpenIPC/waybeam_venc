@@ -168,6 +168,23 @@ Active example fields:
 
 This confirms the tracker is alive even when no strong motion is happening.
 
+#### Perf log
+
+Example shape:
+- `[optflow] perf: window_ms=... runs=... rate_hz=... scale_ms=... lk_ms=... total_ms=... avg_corners=...`
+
+Meaning:
+- `window_ms`: aggregation window length in milliseconds
+- `runs`: how many processed optflow passes ran in that window
+- `rate_hz`: processed optflow execution rate over the window
+- `scale_ms`: total time spent downsampling previous and current frames
+- `lk_ms`: total time spent inside `MI_IVE_LkOpticalFlow(...)`
+- `total_ms`: total time spent in the processed per-frame path
+- `avg_corners`: average `state->lk_ctrl.u16CornerNum` value used in the window
+
+These are aggregated millisecond-resolution timings for the current logging
+window, not per-frame microbenchmarks.
+
 ### 3. Motion outputs
 
 #### LK log

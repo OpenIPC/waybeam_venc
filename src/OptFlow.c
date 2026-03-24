@@ -15,7 +15,7 @@ enum {
 	OPTFLOW_DEFAULT_INTERVAL_MS = 10000,
 	OPTFLOW_DEFAULT_PROCESS_FPS = 5,
 	OPTFLOW_IVE_HANDLE = 2,
-	OPTFLOW_TRACK_WIDTH = 320,
+	OPTFLOW_TRACK_WIDTH = 160, //was 320,
 	OPTFLOW_TRACK_PATCH_RADIUS = 6,
 	OPTFLOW_TRACK_SEARCH_RANGE = 8,
 	OPTFLOW_LK_POINT_COUNT = 5,
@@ -204,7 +204,13 @@ struct OptFlowState {
 	long long init_ms;
 	long long last_log_ms;
 	long long last_process_ms;
+	long long perf_window_start_ms;
 	int first_frame_logged;
+	uint64_t perf_scale_ms;
+	uint64_t perf_lk_ms;
+	uint64_t perf_total_ms;
+	uint64_t perf_corner_sum;
+	uint32_t perf_runs;
 	MI_IVE_HANDLE ive_handle;
 	void *ive_library;
 	OptflowIveCreateFn ive_create;
@@ -533,12 +539,47 @@ static void downsample_luma(uint8_t *dst, uint32_t dst_width,
 	uint32_t dst_height, uint32_t dst_stride, const uint8_t *src, uint32_t src_stride,
 	uint32_t src_width, uint32_t src_height)
 {
+	uint32_t *x_map;
+	uint32_t *y_map;
 	uint32_t dst_y;
+	uint32_t dst_x;
 
+	x_map = malloc(dst_width * sizeof(*x_map));
+	y_map = malloc(dst_height * sizeof(*y_map));
+	if (!x_map || !y_map)
+		goto fallback;
+
+	for (dst_x = 0; dst_x < dst_width; ++dst_x) {
+		x_map[dst_x] = (uint32_t)(((uint64_t)dst_x * src_width) / dst_width);
+		if (x_map[dst_x] >= src_width)
+			x_map[dst_x] = src_width - 1;
+	}
+
+	for (dst_y = 0; dst_y < dst_height; ++dst_y) {
+		y_map[dst_y] = (uint32_t)(((uint64_t)dst_y * src_height) / dst_height);
+		if (y_map[dst_y] >= src_height)
+			y_map[dst_y] = src_height - 1;
+	}
+
+	for (dst_y = 0; dst_y < dst_height; ++dst_y) {
+		uint32_t src_y = y_map[dst_y];
+		uint8_t *dst_row = dst + dst_y * dst_stride;
+		const uint8_t *src_row = src + src_y * src_stride;
+
+		for (dst_x = 0; dst_x < dst_width; ++dst_x)
+			dst_row[dst_x] = src_row[x_map[dst_x]];
+	}
+
+	free(y_map);
+	free(x_map);
+	return;
+
+fallback:
+	free(y_map);
+	free(x_map);
 	for (dst_y = 0; dst_y < dst_height; ++dst_y) {
 		uint32_t src_y = (uint32_t)(((uint64_t)dst_y * src_height) /
 			dst_height);
-		uint32_t dst_x;
 
 		if (src_y >= src_height)
 			src_y = src_height - 1;
@@ -644,6 +685,7 @@ static int compute_lk_motion(OptFlowState *state, OptflowLkMotion *motion)
 	uint32_t point_count;
 	uint32_t used_count = 0;
 	uint32_t index;
+	long long lk_start_ms;
 	MI_S32 ret;
 
 	memset(motion, 0, sizeof(*motion));
@@ -671,10 +713,13 @@ static int compute_lk_motion(OptFlowState *state, OptflowLkMotion *motion)
 		return 0;
 
 	state->lk_ctrl.u16CornerNum = (MI_U16)point_count;
+	state->perf_corner_sum += state->lk_ctrl.u16CornerNum;
+	lk_start_ms = monotonic_ms();
 	ret = state->ive_lk_optical_flow(state->ive_handle,
 		&state->lk_prev_frame, &state->lk_curr_frame,
 		&state->lk_points, &state->lk_motion_vectors,
 		&state->lk_ctrl, 0);
+	state->perf_lk_ms += (uint64_t)(monotonic_ms() - lk_start_ms);
 	if (ret != MI_SUCCESS)
 		return 0;
 
@@ -823,10 +868,13 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowLkMotion *lk_motion
 	} buf_storage;
 	MI_SYS_BufInfo_t *buf_info = &buf_storage.info;
 	MI_SYS_BUF_HANDLE buf_handle = 0;
+	long long frame_start_ms;
+	long long scale_start_ms;
 	MI_S32 ret;
 
 	memset(&buf_storage, 0, sizeof(buf_storage));
 	memset(lk_motion, 0, sizeof(*lk_motion));
+	frame_start_ms = monotonic_ms();
 
 	ret = MI_SYS_ChnOutputPortGetBuf(&state->vpe_port, buf_info, &buf_handle);
 	if (ret != MI_SUCCESS)
@@ -858,14 +906,50 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowLkMotion *lk_motion
 			fflush(stdout);
 		}
 		(void)MI_SYS_ChnOutputPortPutBuf(buf_handle);
+		state->perf_total_ms += (uint64_t)(monotonic_ms() - frame_start_ms);
 		return 0;
 	}
 
+	scale_start_ms = monotonic_ms();
 	update_tracking_buffers(state, buf_info);
+	state->perf_scale_ms += (uint64_t)(monotonic_ms() - scale_start_ms);
 	ret = compute_lk_motion(state, lk_motion);
 	copy_luma_to_prev(state, buf_info);
 	(void)MI_SYS_ChnOutputPortPutBuf(buf_handle);
+	state->perf_total_ms += (uint64_t)(monotonic_ms() - frame_start_ms);
 	return ret;
+}
+
+static void log_perf_summary(OptFlowState *state, long long now_ms)
+{
+	long long window_ms;
+	double avg_corners;
+	double rate_hz;
+
+	window_ms = now_ms - state->perf_window_start_ms;
+	if (window_ms <= 0)
+		window_ms = 1;
+	avg_corners = state->perf_runs ?
+		(double)state->perf_corner_sum / (double)state->perf_runs : 0.0;
+	rate_hz = ((double)state->perf_runs * 1000.0) / (double)window_ms;
+
+	printf("[optflow] perf: window_ms=%lld runs=%u rate_hz=%.2f scale_ms=%" PRIu64
+		" lk_ms=%" PRIu64 " total_ms=%" PRIu64 " avg_corners=%.2f\n",
+		window_ms,
+		state->perf_runs,
+		rate_hz,
+		state->perf_scale_ms,
+		state->perf_lk_ms,
+		state->perf_total_ms,
+		avg_corners);
+	fflush(stdout);
+
+	state->perf_window_start_ms = now_ms;
+	state->perf_corner_sum = 0;
+	state->perf_scale_ms = 0;
+	state->perf_lk_ms = 0;
+	state->perf_total_ms = 0;
+	state->perf_runs = 0;
 }
 
 static void log_capability_summary(const OptFlowState *state, const char *phase)
@@ -909,10 +993,11 @@ OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
 	state->init_ms = monotonic_ms();
 	state->last_log_ms = state->init_ms;
 	state->last_process_ms = state->init_ms;
+	state->perf_window_start_ms = state->init_ms;
 	state->ive_handle = OPTFLOW_IVE_HANDLE;
-	state->lk_ctrl.u0q8MinEigThr = 32;
-	state->lk_ctrl.u8IterCount = 10;
-	state->lk_ctrl.u0q8Epsilon = 4;
+	state->lk_ctrl.u0q8MinEigThr = 16; //was 32
+	state->lk_ctrl.u8IterCount = 5; //was 10
+	state->lk_ctrl.u0q8Epsilon = 8; //was 4
 	if (vpe_port)
 		memcpy(&state->vpe_port, vpe_port, sizeof(state->vpe_port));
 
@@ -968,6 +1053,7 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 	    (now_ms - state->last_process_ms) >= (long long)state->process_interval_ms) {
 		state->last_process_ms = now_ms;
 		(void)grab_frame_and_detect(state, &lk_motion);
+		state->perf_runs++;
 		if (lk_motion.valid) {
 			printf("[optflow] lk tx=%.1f ty=%.1f rz=%.5f tracks=%u/%u frames=%" PRIu64 "\n",
 				lk_motion.tx, lk_motion.ty, lk_motion.rz,
@@ -991,11 +1077,13 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 			state->track_width,
 			state->track_height,
 			state->ive_lk_optical_flow ? "yes" : "no");
+		log_perf_summary(state, now_ms);
 	} else {
 		printf("[optflow] standby: encoded_frames=%" PRIu64 " packets=%" PRIu64
 			" 6dof=unavailable\n",
 			state->frames_seen,
 			state->packets_seen);
+		log_perf_summary(state, now_ms);
 	}
 
 	fflush(stdout);
