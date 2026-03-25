@@ -93,11 +93,18 @@ previous frame.
 Both frames are downsampled into persistent tracking buffers.
 
 Current implementation:
-- target width up to 320 pixels
-- height scaled to preserve aspect ratio
+- center-crop the source frame to exactly half of the full frame width
+- keep the full frame height
+- then scale that cropped image to a target width up to 160 pixels
+- height scaled to preserve the cropped aspect ratio
 - minimum size clamped to avoid degenerate cases
 
 The goal is to reduce CPU cost while keeping enough structure for LK tracking.
+
+Example:
+- `1920x1080` source frame
+- centered crop to `960x1080`
+- scaled tracking image to `160x180`
 
 ### 4. Run LK optical flow
 

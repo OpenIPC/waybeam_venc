@@ -1,5 +1,7 @@
 #include "OptFlow.h"
 
+#include "star6e_osd_simple.h"
+
 #include <dlfcn.h>
 #include <inttypes.h>
 #include <math.h>
@@ -15,7 +17,10 @@ enum {
 	OPTFLOW_DEFAULT_INTERVAL_MS = 10000,
 	OPTFLOW_DEFAULT_PROCESS_FPS = 5,
 	OPTFLOW_IVE_HANDLE = 2,
-	OPTFLOW_TRACK_WIDTH = 160, //was 320,
+	OPTFLOW_OSD_CALIBRATION_MODE = 0,
+	OPTFLOW_OSD_CALIBRATION_STEP_MS = 2000,
+	OPTFLOW_OSD_CENTER_HOLD_MS = 1000,
+	OPTFLOW_TRACK_WIDTH = 120, //was 320,
 	OPTFLOW_TRACK_PATCH_RADIUS = 6,
 	OPTFLOW_TRACK_SEARCH_RANGE = 8,
 	OPTFLOW_LK_POINT_COUNT = 5,
@@ -187,8 +192,12 @@ typedef struct {
 struct OptFlowState {
 	uint32_t capture_width;
 	uint32_t capture_height;
+	uint32_t osd_space_width;
+	uint32_t osd_space_height;
 	uint32_t process_width;
 	uint32_t process_height;
+	uint32_t track_crop_x;
+	uint32_t track_crop_width;
 	uint32_t track_width;
 	uint32_t track_height;
 	uint32_t prev_stride;
@@ -211,6 +220,11 @@ struct OptFlowState {
 	uint64_t perf_total_ms;
 	uint64_t perf_corner_sum;
 	uint32_t perf_runs;
+	uint32_t osd_dot_x;
+	uint32_t osd_dot_y;
+	int osd_calibration_anchor;
+	int osd_region_ready;
+	int osd_region_disabled;
 	MI_IVE_HANDLE ive_handle;
 	void *ive_library;
 	OptflowIveCreateFn ive_create;
@@ -480,16 +494,25 @@ static int prepare_tracking_buffers(OptFlowState *state)
 {
 	uint32_t width;
 	uint32_t height;
+	uint32_t crop_width;
 	uint32_t track_bytes;
 
-	width = state->process_width;
+	crop_width = state->process_width / 2;
+	if (crop_width < 64)
+		crop_width = state->process_width;
+	if (crop_width > state->process_width)
+		crop_width = state->process_width;
+	state->track_crop_width = crop_width;
+	state->track_crop_x = (state->process_width - crop_width) / 2;
+
+	width = crop_width;
 	if (width > OPTFLOW_TRACK_WIDTH)
 		width = OPTFLOW_TRACK_WIDTH;
 	if (width < 64)
 		width = 64;
 
 	height = (uint32_t)(((uint64_t)state->process_height * width) /
-		state->process_width);
+		crop_width);
 	if (height < 64)
 		height = 64;
 	if (height > state->process_height)
@@ -522,6 +545,8 @@ static void release_tracking_buffers(OptFlowState *state)
 	free(state->track_curr);
 	state->track_prev = NULL;
 	state->track_curr = NULL;
+	state->track_crop_x = 0;
+	state->track_crop_width = 0;
 	state->track_width = 0;
 	state->track_height = 0;
 }
@@ -533,6 +558,119 @@ static int clamp_int(int value, int min_value, int max_value)
 	if (value > max_value)
 		return max_value;
 	return value;
+}
+
+static uint32_t optflow_osd_max_x(const OptFlowState *state)
+{
+	if (state->osd_space_width <= STAR6E_OSD_DOT_W)
+		return 0;
+	return state->osd_space_width - STAR6E_OSD_DOT_W;
+}
+
+static uint32_t optflow_osd_max_y(const OptFlowState *state)
+{
+	if (state->osd_space_height <= STAR6E_OSD_DOT_H)
+		return 0;
+	return state->osd_space_height - STAR6E_OSD_DOT_H;
+}
+
+static void optflow_osd_center_marker(OptFlowState *state)
+{
+	state->osd_dot_x = optflow_osd_max_x(state) / 2;
+	state->osd_dot_y = optflow_osd_max_y(state) / 2;
+}
+
+static void optflow_osd_apply_motion(OptFlowState *state,
+	const OptflowLkMotion *lk_motion)
+{
+	int next_x;
+	int next_y;
+	double scaled_tx;
+	double scaled_ty;
+
+	if (!lk_motion->valid)
+		return;
+	if (state->process_width == 0 || state->process_height == 0)
+		return;
+
+	scaled_tx = lk_motion->tx *
+		((double)state->osd_space_width / (double)state->process_width);
+	scaled_ty = lk_motion->ty *
+		((double)state->osd_space_height / (double)state->process_height);
+	next_x = (int)state->osd_dot_x + (int)lround(scaled_tx);
+	next_y = (int)state->osd_dot_y + (int)lround(scaled_ty);
+	state->osd_dot_x = (uint32_t)clamp_int(next_x, 0,
+		(int)optflow_osd_max_x(state));
+	state->osd_dot_y = (uint32_t)clamp_int(next_y, 0,
+		(int)optflow_osd_max_y(state));
+}
+
+static const char *optflow_osd_anchor_name(int anchor)
+{
+	switch (anchor) {
+	case 0:
+		return "top-left";
+	case 1:
+		return "center";
+	case 2:
+		return "bottom-right";
+	default:
+		return "unknown";
+	}
+}
+
+static void optflow_osd_set_anchor(OptFlowState *state, int anchor)
+{
+	switch (anchor) {
+	case 0:
+		state->osd_dot_x = 0;
+		state->osd_dot_y = 0;
+		break;
+	case 1:
+		optflow_osd_center_marker(state);
+		break;
+	case 2:
+		state->osd_dot_x = optflow_osd_max_x(state);
+		state->osd_dot_y = optflow_osd_max_y(state);
+		break;
+	default:
+		optflow_osd_center_marker(state);
+		break;
+	}
+}
+
+static void optflow_osd_apply_calibration(OptFlowState *state,
+	long long frame_start_ms)
+{
+	int anchor;
+	double norm_x;
+	double norm_y;
+
+	anchor = (int)(((frame_start_ms - state->init_ms) /
+		OPTFLOW_OSD_CALIBRATION_STEP_MS) % 3);
+	optflow_osd_set_anchor(state, anchor);
+	if (anchor == state->osd_calibration_anchor)
+		return;
+
+	state->osd_calibration_anchor = anchor;
+	norm_x = state->osd_space_width > STAR6E_OSD_DOT_W ?
+		(double)state->osd_dot_x /
+		(double)(state->osd_space_width - STAR6E_OSD_DOT_W) : 0.0;
+	norm_y = state->osd_space_height > STAR6E_OSD_DOT_H ?
+		(double)state->osd_dot_y /
+		(double)(state->osd_space_height - STAR6E_OSD_DOT_H) : 0.0;
+	printf("[optflow] osd-cal anchor=%s req=%u,%u max=%u,%u norm=%.3f,%.3f\n",
+		optflow_osd_anchor_name(anchor),
+		state->osd_dot_x, state->osd_dot_y,
+		optflow_osd_max_x(state), optflow_osd_max_y(state),
+		norm_x, norm_y);
+	fflush(stdout);
+}
+
+static unsigned int optflow_osd_cycle_color(uint32_t cycle_ms)
+{
+	(void)cycle_ms;
+	return STAR6E_OSD_COLOR_RED;
 }
 
 static void downsample_luma(uint8_t *dst, uint32_t dst_width,
@@ -611,12 +749,13 @@ static void update_tracking_buffers(OptFlowState *state,
 {
 	downsample_luma(state->track_prev, state->track_width,
 		state->track_height, state->track_width,
-		state->prev_frame.apu8VirAddr[0], state->prev_stride,
-		state->process_width, state->process_height);
+		state->prev_frame.apu8VirAddr[0] + state->track_crop_x,
+		state->prev_stride, state->track_crop_width,
+		state->process_height);
 	downsample_luma(state->track_curr, state->track_width,
 		state->track_height, state->track_width,
-		buf_info->stFrameData.pVirAddr[0],
-		buf_info->stFrameData.u32Stride[0], state->process_width,
+		buf_info->stFrameData.pVirAddr[0] + state->track_crop_x,
+		buf_info->stFrameData.u32Stride[0], state->track_crop_width,
 		state->process_height);
 }
 
@@ -773,7 +912,8 @@ static int compute_lk_motion(OptFlowState *state, OptflowLkMotion *motion)
 	}
 
 	motion->valid = 1;
-	motion->tx = average_x * ((double)state->process_width / state->track_width);
+	motion->tx = average_x *
+		((double)state->track_crop_width / state->track_width);
 	motion->ty = average_y * ((double)state->process_height / state->track_height);
 	motion->rz = rotation_sum / used_count;
 	state->lk_center_x = clamp_int((int)(state->lk_center_x + average_x + 0.5),
@@ -870,11 +1010,15 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowLkMotion *lk_motion
 	MI_SYS_BUF_HANDLE buf_handle = 0;
 	long long frame_start_ms;
 	long long scale_start_ms;
+	uint32_t cycle_ms;
+	unsigned int osd_color;
 	MI_S32 ret;
 
 	memset(&buf_storage, 0, sizeof(buf_storage));
 	memset(lk_motion, 0, sizeof(*lk_motion));
 	frame_start_ms = monotonic_ms();
+	cycle_ms = (uint32_t)(frame_start_ms - state->init_ms);
+	osd_color = optflow_osd_cycle_color(cycle_ms);
 
 	ret = MI_SYS_ChnOutputPortGetBuf(&state->vpe_port, buf_info, &buf_handle);
 	if (ret != MI_SUCCESS)
@@ -910,10 +1054,56 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowLkMotion *lk_motion
 		return 0;
 	}
 
+	if (!state->osd_region_ready && !state->osd_region_disabled) {
+		if (OPTFLOW_OSD_CALIBRATION_MODE)
+			optflow_osd_apply_calibration(state, frame_start_ms);
+		else if (cycle_ms < OPTFLOW_OSD_CENTER_HOLD_MS)
+			optflow_osd_center_marker(state);
+		else
+			optflow_osd_apply_motion(state, lk_motion);
+
+		printf("[optflow] osd: creating region on frame=%" PRIu64 "\n",
+			state->frames_seen);
+		fflush(stdout);
+		ret = star6e_osd_add_dot_region(state->osd_dot_x,
+			state->osd_dot_y, osd_color);
+		if (ret == MI_SUCCESS) {
+			state->osd_region_ready = 1;
+			printf("[optflow] osd: region ready\n");
+			fflush(stdout);
+		} else {
+			state->osd_region_disabled = 1;
+			fprintf(stderr,
+				"[optflow] osd: disabling region after create failure ret=%d\n",
+				ret);
+			fflush(stderr);
+		}
+	}
+
 	scale_start_ms = monotonic_ms();
 	update_tracking_buffers(state, buf_info);
 	state->perf_scale_ms += (uint64_t)(monotonic_ms() - scale_start_ms);
 	ret = compute_lk_motion(state, lk_motion);
+	if (state->osd_region_ready) {
+		if (OPTFLOW_OSD_CALIBRATION_MODE)
+			optflow_osd_apply_calibration(state, frame_start_ms);
+		else if (cycle_ms < OPTFLOW_OSD_CENTER_HOLD_MS)
+			optflow_osd_center_marker(state);
+		else
+			optflow_osd_apply_motion(state, lk_motion);
+
+		ret = star6e_osd_move_dot_region(state->osd_dot_x,
+			state->osd_dot_y, osd_color);
+		if (ret != MI_SUCCESS) {
+			fprintf(stderr,
+				"[optflow] osd: move failed ret=%d frame=%" PRIu64
+				" x=%u y=%u\n",
+				ret, state->frames_seen, state->osd_dot_x, state->osd_dot_y);
+			fflush(stderr);
+			state->osd_region_ready = 0;
+			state->osd_region_disabled = 1;
+		}
+	}
 	copy_luma_to_prev(state, buf_info);
 	(void)MI_SYS_ChnOutputPortPutBuf(buf_handle);
 	state->perf_total_ms += (uint64_t)(monotonic_ms() - frame_start_ms);
@@ -967,8 +1157,9 @@ static void log_capability_summary(const OptFlowState *state, const char *phase)
 		printf("[optflow] disabled: IVE tracking is not available in this build/runtime yet"
 			" (missing bindings, runtime library, or raw-frame feed path)\n");
 	} else {
-		printf("[optflow] lk: tx/ty are full-frame pixels; rz is image-plane rotation proxy"
-			" using %ux%u tracking at %u fps\n",
+		printf("[optflow] lk: tx/ty are image-space pixels; osd-space=%ux%u"
+			" track=%ux%u fps=%u\n",
+			state->osd_space_width, state->osd_space_height,
 			state->track_width, state->track_height, state->process_fps);
 	}
 
@@ -976,7 +1167,8 @@ static void log_capability_summary(const OptFlowState *state, const char *phase)
 }
 
 OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
-	int verbose, uint32_t fps, const void *vpe_port)
+	uint32_t osd_space_width, uint32_t osd_space_height,
+	int verbose, uint32_t fps, const void *vpe_port, const void *osd_port)
 {
 	OptFlowState *state = calloc(1, sizeof(*state));
 	MI_S32 ret;
@@ -986,6 +1178,8 @@ OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
 
 	state->capture_width = capture_width;
 	state->capture_height = capture_height;
+	state->osd_space_width = osd_space_width ? osd_space_width : capture_width;
+	state->osd_space_height = osd_space_height ? osd_space_height : capture_height;
 	state->verbose = verbose ? 1 : 0;
 	state->process_fps = optflow_clamp_fps(fps ? fps : OPTFLOW_DEFAULT_PROCESS_FPS);
 	state->process_interval_ms = optflow_interval_ms_from_fps(state->process_fps);
@@ -994,12 +1188,19 @@ OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
 	state->last_log_ms = state->init_ms;
 	state->last_process_ms = state->init_ms;
 	state->perf_window_start_ms = state->init_ms;
+	state->osd_calibration_anchor = -1;
+	optflow_osd_center_marker(state);
 	state->ive_handle = OPTFLOW_IVE_HANDLE;
 	state->lk_ctrl.u0q8MinEigThr = 16; //was 32
 	state->lk_ctrl.u8IterCount = 5; //was 10
 	state->lk_ctrl.u0q8Epsilon = 8; //was 4
-	if (vpe_port)
+	if (vpe_port) {
 		memcpy(&state->vpe_port, vpe_port, sizeof(state->vpe_port));
+	}
+	(void)star6e_osd_set_canvas_size(state->osd_space_width,
+		state->osd_space_height);
+	if (osd_port)
+		(void)star6e_osd_set_vpe_target(osd_port);
 
 	if (!state->runtime_ive_present)
 		goto done;
@@ -1030,12 +1231,14 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 	long long now_ms;
 	int interval_ms;
 	OptflowLkMotion lk_motion;
+	int ran_detection;
 
 	if (!state)
 		return;
 
 	state->frames_seen++;
 	state->packets_seen += pack_count;
+	ran_detection = 0;
 	now_ms = monotonic_ms();
 	interval_ms = state->verbose ? OPTFLOW_VERBOSE_INTERVAL_MS :
 		OPTFLOW_DEFAULT_INTERVAL_MS;
@@ -1052,12 +1255,20 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 	    frame_feed_ready(state) &&
 	    (now_ms - state->last_process_ms) >= (long long)state->process_interval_ms) {
 		state->last_process_ms = now_ms;
+		ran_detection = 1;
 		(void)grab_frame_and_detect(state, &lk_motion);
 		state->perf_runs++;
 		if (lk_motion.valid) {
-			printf("[optflow] lk tx=%.1f ty=%.1f rz=%.5f tracks=%u/%u frames=%" PRIu64 "\n",
+			printf("[optflow] lk tx=%.1f ty=%.1f rz=%.5f tracks=%u/%u dot=%u,%u frames=%" PRIu64 "\n",
 				lk_motion.tx, lk_motion.ty, lk_motion.rz,
 				lk_motion.points_used, lk_motion.points_found,
+				state->osd_dot_x, state->osd_dot_y,
+				state->frames_seen);
+			fflush(stdout);
+		} else if (ran_detection) {
+			printf("[optflow] lk invalid tracks=%u/%u dot=%u,%u frames=%" PRIu64 "\n",
+				lk_motion.points_used, lk_motion.points_found,
+				state->osd_dot_x, state->osd_dot_y,
 				state->frames_seen);
 			fflush(stdout);
 		}
@@ -1094,6 +1305,8 @@ void optflow_destroy(OptFlowState *state)
 	if (!state)
 		return;
 
+	if (state->osd_region_ready)
+		(void)star6e_osd_remove_dot_region();
 	release_ive_buffers(state);
 	if (state->ive_created)
 		(void)state->ive_destroy(state->ive_handle);
