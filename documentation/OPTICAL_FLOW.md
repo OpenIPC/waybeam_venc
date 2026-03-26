@@ -139,10 +139,11 @@ full-frame coordinates and rendered on the OSD as green `4x4` rectangles.
 This compensation accounts for both the center crop and the downscaled
 tracking image.
 
-Point selection can optionally use a six-region layout, but the current
-default is the original strongest-corners selector. The six-region mode is a
-static code option intended for experimentation rather than the default
-tracking behavior.
+Point selection can optionally use a corner-seeded layout. In that mode the
+selector first chooses one best-scoring corner per usable-area quadrant
+(top-left, top-right, bottom-left, bottom-right), then fills the remaining
+slots with the normal global strongest-corners path subject to the same
+minimum-spacing rule.
 
 The current LK call path is configured to submit 10 points per solve while
 the backing point and motion-vector buffers still reserve space for up to 16.

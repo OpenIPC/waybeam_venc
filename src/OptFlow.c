@@ -23,20 +23,20 @@ enum {
 	OPTFLOW_OSD_CENTER_HOLD_MS = 1000,
 	OPTFLOW_TRACK_WIDTH = 160, //was 320,
 	OPTFLOW_TRACK_PATCH_RADIUS = 6,
-	OPTFLOW_TRACK_SEARCH_RANGE = 40, // was 8
-	OPTFLOW_LK_POINT_COUNT = 16,
-	OPTFLOW_LK_CALL_POINT_COUNT = 10,
+	OPTFLOW_TRACK_SEARCH_RANGE = 20, // was 8
+	OPTFLOW_LK_POINT_COUNT = 50, // MAX buffer for features, should be > OPTFLOW_LK_CALL_POINT_COUNT
+	OPTFLOW_LK_CALL_POINT_COUNT = 14, // crashes with 16 and more!?
 	OPTFLOW_LK_MIN_SURVIVORS = 3,
-	OPTFLOW_LK_MIN_POINT_SPACING = 12,
+	OPTFLOW_LK_MIN_POINT_SPACING =24,  // was 12,
 	OPTFLOW_LK_CANDIDATE_CAPACITY = 64,
 	OPTFLOW_LK_SCAN_STEP = 2,
 	OPTFLOW_LK_DUMP_INTERVAL_MS = 1000,
 	OPTFLOW_STAGE_SLOT_COUNT = 2,
 	OPTFLOW_CRASH_TRACE_SEQ_LIMIT = 12,
 	OPTFLOW_KEEP_LAST_VALID_REFERENCE = 1,
-	OPTFLOW_USE_REGION_POINT_SELECTOR = 0,
+	OPTFLOW_USE_REGION_POINT_SELECTOR = 1,
 	OPTFLOW_LK_REGION_COLS = 2,
-	OPTFLOW_LK_REGION_ROWS = 3,
+	OPTFLOW_LK_REGION_ROWS = 2,
 	OPTFLOW_LK_REGION_COUNT =
 		OPTFLOW_LK_REGION_COLS * OPTFLOW_LK_REGION_ROWS,
 };
@@ -1325,42 +1325,6 @@ static uint32_t point_region_index(int x, int y, int min_x, int min_y,
 	return (uint32_t)(row * OPTFLOW_LK_REGION_COLS + col);
 }
 
-static int region_center_coord(int region_index, int axis_min, int axis_span,
-	int axis_regions, int use_row)
-{
-	int region_axis;
-	int numerator;
-
-	region_axis = use_row ?
-		(region_index / OPTFLOW_LK_REGION_COLS) :
-		(region_index % OPTFLOW_LK_REGION_COLS);
-	numerator = ((region_axis * 2) + 1) * axis_span;
-	return axis_min + numerator / (axis_regions * 2);
-}
-
-static void fill_region_fallback_point(OptFlowState *state,
-	OptflowCornerCandidate *selected, MI_IVE_PointS25Q7_t *points,
-	uint32_t index, int usable_min_x, int usable_min_y,
-	int usable_width, int usable_height)
-{
-	int point_x;
-	int point_y;
-
-	point_x = region_center_coord((int)index, usable_min_x, usable_width,
-		OPTFLOW_LK_REGION_COLS, 0);
-	point_y = region_center_coord((int)index, usable_min_y, usable_height,
-		OPTFLOW_LK_REGION_ROWS, 1);
-	point_x = clamp_int(point_x, usable_min_x,
-		(int)state->track_width - 1 - usable_min_x);
-	point_y = clamp_int(point_y, usable_min_y,
-		(int)state->track_height - 1 - usable_min_y);
-	selected[index].x = point_x;
-	selected[index].y = point_y;
-	selected[index].score = 0;
-	points[index].s25q7X = (MI_S25Q7)(point_x << 7);
-	points[index].s25q7Y = (MI_S25Q7)(point_y << 7);
-}
-
 static uint32_t select_lk_points(OptFlowState *state,
 	MI_IVE_PointS25Q7_t *points, uint32_t max_points)
 {
@@ -1395,23 +1359,32 @@ static uint32_t select_lk_points(OptFlowState *state,
 	usable_min_y = usable_margin_y;
 	usable_width = (int)state->track_width - (usable_margin_x * 2);
 	usable_height = (int)state->track_height - (usable_margin_y * 2);
+	memset(candidates, 0, sizeof(candidates));
+	memset(selected, 0, sizeof(selected));
+	memset(best_regions, 0, sizeof(best_regions));
+	for (y = usable_margin_y; y < (int)state->track_height - usable_margin_y;
+	     y += OPTFLOW_LK_SCAN_STEP) {
+		for (x = usable_margin_x;
+		     x < (int)state->track_width - usable_margin_x;
+		     x += OPTFLOW_LK_SCAN_STEP) {
+			uint64_t score = compute_corner_score(state->track_prev,
+				state->track_width, x, y);
 
-	if (!OPTFLOW_USE_REGION_POINT_SELECTOR) {
-		memset(candidates, 0, sizeof(candidates));
-		memset(selected, 0, sizeof(selected));
-		for (y = usable_margin_y; y < (int)state->track_height - usable_margin_y;
-		     y += OPTFLOW_LK_SCAN_STEP) {
-			for (x = usable_margin_x;
-			     x < (int)state->track_width - usable_margin_x;
-			     x += OPTFLOW_LK_SCAN_STEP) {
-				uint64_t score = compute_corner_score(state->track_prev,
-					state->track_width, x, y);
+			insert_corner_candidate(candidates, &candidate_count,
+				x, y, score);
+			if (OPTFLOW_USE_REGION_POINT_SELECTOR && score > 0) {
+				uint32_t region_index = point_region_index(x, y,
+					usable_min_x, usable_min_y,
+					usable_width, usable_height);
 
-				insert_corner_candidate(candidates, &candidate_count,
-					x, y, score);
+				if (score > best_regions[region_index].score)
+					best_regions[region_index] =
+						(OptflowCornerCandidate){x, y, score};
 			}
 		}
+	}
 
+	if (!OPTFLOW_USE_REGION_POINT_SELECTOR) {
 		for (index = 0; index < candidate_count; ++index) {
 			if (!corner_has_min_spacing(selected, selected_count,
 				candidates[index].x, candidates[index].y))
@@ -1449,48 +1422,54 @@ static uint32_t select_lk_points(OptFlowState *state,
 		return selected_count;
 	}
 
-	memset(best_regions, 0, sizeof(best_regions));
-	memset(selected, 0, sizeof(selected));
-	for (y = usable_margin_y; y < (int)state->track_height - usable_margin_y;
-	     y += OPTFLOW_LK_SCAN_STEP) {
-		for (x = usable_margin_x;
-		     x < (int)state->track_width - usable_margin_x;
-		     x += OPTFLOW_LK_SCAN_STEP) {
-			uint64_t score = compute_corner_score(state->track_prev,
-				state->track_width, x, y);
-			uint32_t region_index;
+	for (index = 0; index < OPTFLOW_LK_REGION_COUNT; ++index) {
+		if (best_regions[index].score == 0)
+			continue;
+		if (!corner_has_min_spacing(selected, selected_count,
+			best_regions[index].x, best_regions[index].y))
+			continue;
 
-			if (score == 0)
-				continue;
-			region_index = point_region_index(x, y, usable_min_x,
-				usable_min_y, usable_width, usable_height);
-			if (score <= best_regions[region_index].score)
-				continue;
-			best_regions[region_index].x = x;
-			best_regions[region_index].y = y;
-			best_regions[region_index].score = score;
-		}
+		selected[selected_count] = best_regions[index];
+		points[selected_count].s25q7X =
+			(MI_S25Q7)(best_regions[index].x << 7);
+		points[selected_count].s25q7Y =
+			(MI_S25Q7)(best_regions[index].y << 7);
+		selected_count++;
 	}
 
-	for (index = 0; index < OPTFLOW_LK_CALL_POINT_COUNT; ++index) {
-		if (best_regions[index].score > 0) {
-			selected[index] = best_regions[index];
-			points[index].s25q7X = (MI_S25Q7)(best_regions[index].x << 7);
-			points[index].s25q7Y = (MI_S25Q7)(best_regions[index].y << 7);
-		} else {
-			fill_region_fallback_point(state, selected, points, index,
-				usable_min_x, usable_min_y,
-				usable_width, usable_height);
-		}
-		sum_x += (uint64_t)(points[index].s25q7X >> 7);
-		sum_y += (uint64_t)(points[index].s25q7Y >> 7);
+	for (index = 0;
+	     index < candidate_count && selected_count < OPTFLOW_LK_CALL_POINT_COUNT;
+	     ++index) {
+		if (!corner_has_min_spacing(selected, selected_count,
+			candidates[index].x, candidates[index].y))
+			continue;
+
+		selected[selected_count] = candidates[index];
+		points[selected_count].s25q7X =
+			(MI_S25Q7)(candidates[index].x << 7);
+		points[selected_count].s25q7Y =
+			(MI_S25Q7)(candidates[index].y << 7);
+		selected_count++;
 	}
 
-	state->lk_center_x = (double)sum_x / (double)OPTFLOW_LK_CALL_POINT_COUNT;
-	state->lk_center_y = (double)sum_y / (double)OPTFLOW_LK_CALL_POINT_COUNT;
-	state->lk_center_ready = 1;
+	if (selected_count < OPTFLOW_LK_CALL_POINT_COUNT) {
+		selected_count = append_fallback_points(state, selected,
+			selected_count, points, usable_margin_x, usable_margin_y);
+	}
 
-	return OPTFLOW_LK_CALL_POINT_COUNT;
+	if (selected_count > 0) {
+		sum_x = 0;
+		sum_y = 0;
+		for (index = 0; index < selected_count; ++index) {
+			sum_x += (uint64_t)(points[index].s25q7X >> 7);
+			sum_y += (uint64_t)(points[index].s25q7Y >> 7);
+		}
+		state->lk_center_x = (double)sum_x / (double)selected_count;
+		state->lk_center_y = (double)sum_y / (double)selected_count;
+		state->lk_center_ready = 1;
+	}
+
+	return selected_count;
 }
 
 static int compute_lk_motion(OptFlowState *state, OptflowLkMotion *motion,
