@@ -40,6 +40,13 @@ Current interval:
 - default effective interval: about 200 ms
 - default effective processing rate: about 5 Hz
 
+The debug OSD overlay is controlled separately by `optflow.showOSD` in
+`venc.json`.
+
+- default value: `true`
+- when `false`, optflow tracking still runs but the Star6E RGN OSD module is
+  not configured and no marker/debug points are drawn
+
 So:
 - encoded stream rate can be around 60 fps
 - motion estimation runs at the configured `optflow.fps` rate, bounded by the

@@ -170,6 +170,7 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* optflow */
 	cfg->optflow.enabled = true;
+	cfg->optflow.show_osd = true;
 	cfg->optflow.verbose = false;
 	cfg->optflow.fps = 5;
 }
@@ -428,6 +429,7 @@ static void load_optflow(const cJSON *root, VencConfigOptflow *s)
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "optflow");
 	if (!obj) return;
 	s->enabled = json_get_bool(obj, "enabled", s->enabled);
+	s->show_osd = json_get_bool(obj, "showOSD", s->show_osd);
 	s->verbose = json_get_bool(obj, "verbose", s->verbose);
 	s->fps = (uint32_t)json_get_int(obj, "fps", (int)s->fps);
 	if (s->fps < 1) s->fps = 1;
@@ -686,6 +688,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	cJSON *optflow = cJSON_AddObjectToObject(root, "optflow");
 	if (optflow) {
 		cJSON_AddBoolToObject(optflow, "enabled", cfg->optflow.enabled);
+		cJSON_AddBoolToObject(optflow, "showOSD", cfg->optflow.show_osd);
 		cJSON_AddBoolToObject(optflow, "verbose", cfg->optflow.verbose);
 		cJSON_AddNumberToObject(optflow, "fps", cfg->optflow.fps);
 	}

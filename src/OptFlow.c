@@ -25,7 +25,7 @@ enum {
 	OPTFLOW_TRACK_PATCH_RADIUS = 6,
 	OPTFLOW_TRACK_SEARCH_RANGE = 20, // was 8
 	OPTFLOW_LK_POINT_COUNT = 50, // MAX buffer for features, should be > OPTFLOW_LK_CALL_POINT_COUNT
-	OPTFLOW_LK_CALL_POINT_COUNT = 14, // crashes with 16 and more!?
+	OPTFLOW_LK_CALL_POINT_COUNT = 14, // crashes with 16 and more!? Reduce to 10 or less if "segmentation fault"
 	OPTFLOW_LK_MIN_SURVIVORS = 3,
 	OPTFLOW_LK_MIN_POINT_SPACING =24,  // was 12,
 	OPTFLOW_LK_CANDIDATE_CAPACITY = 64,
@@ -267,6 +267,7 @@ struct OptFlowState {
 	uint32_t stage_height;
 	uint32_t stage_published_slot;
 	uint32_t stage_write_slot;
+	int show_osd;
 	int osd_calibration_anchor;
 	int osd_region_ready;
 	int osd_region_disabled;
@@ -1858,19 +1859,24 @@ static void apply_latest_motion_result(OptFlowState *state, long long now_ms)
 		return;
 	if (seq == 0 || seq == state->applied_motion_seq)
 		return;
-	(void)star6e_osd_set_track_points(motion.debug_point_x,
-		motion.debug_point_y, motion.debug_point_count);
+	if (state->show_osd) {
+		(void)star6e_osd_set_track_points(motion.debug_point_x,
+			motion.debug_point_y, motion.debug_point_count);
+	}
 
 	cycle_ms = (uint32_t)(now_ms - state->init_ms);
 	osd_color = optflow_osd_cycle_color(cycle_ms);
-	if (OPTFLOW_OSD_CALIBRATION_MODE)
-		optflow_osd_apply_calibration(state, now_ms);
-	else if (cycle_ms < OPTFLOW_OSD_CENTER_HOLD_MS)
-		optflow_osd_center_marker(state);
-	else
-		optflow_osd_apply_motion(state, &motion);
+	if (state->show_osd) {
+		if (OPTFLOW_OSD_CALIBRATION_MODE)
+			optflow_osd_apply_calibration(state, now_ms);
+		else if (cycle_ms < OPTFLOW_OSD_CENTER_HOLD_MS)
+			optflow_osd_center_marker(state);
+		else
+			optflow_osd_apply_motion(state, &motion);
+	}
 
-	if (!state->osd_region_ready && !state->osd_region_disabled) {
+	if (state->show_osd && !state->osd_region_ready &&
+	    !state->osd_region_disabled) {
 		printf("[optflow] osd: creating region on frame=%" PRIu64 "\n",
 			state->frames_seen);
 		fflush(stdout);
@@ -1889,7 +1895,7 @@ static void apply_latest_motion_result(OptFlowState *state, long long now_ms)
 		}
 	}
 
-	if (state->osd_region_ready) {
+	if (state->show_osd && state->osd_region_ready) {
 		ret = star6e_osd_move_dot_region(state->osd_dot_x,
 			state->osd_dot_y, osd_color);
 		if (ret != MI_SUCCESS) {
@@ -1990,7 +1996,8 @@ static void log_capability_summary(const OptFlowState *state, const char *phase)
 
 OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
 	uint32_t osd_space_width, uint32_t osd_space_height,
-	int verbose, uint32_t fps, const void *vpe_port, const void *osd_port)
+	int verbose, uint32_t fps, int show_osd,
+	const void *vpe_port, const void *osd_port)
 {
 	OptFlowState *state = calloc(1, sizeof(*state));
 	MI_S32 ret;
@@ -2003,6 +2010,7 @@ OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
 	state->osd_space_width = osd_space_width ? osd_space_width : capture_width;
 	state->osd_space_height = osd_space_height ? osd_space_height : capture_height;
 	state->verbose = verbose ? 1 : 0;
+	state->show_osd = show_osd ? 1 : 0;
 	state->process_fps = optflow_clamp_fps(fps ? fps : OPTFLOW_DEFAULT_PROCESS_FPS);
 	state->process_interval_ms = optflow_interval_ms_from_fps(state->process_fps);
 	state->runtime_ive_present = probe_runtime_ive_library();
@@ -2025,10 +2033,12 @@ OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
 	if (vpe_port) {
 		memcpy(&state->vpe_port, vpe_port, sizeof(state->vpe_port));
 	}
-	(void)star6e_osd_set_canvas_size(state->osd_space_width,
-		state->osd_space_height);
-	if (osd_port)
-		(void)star6e_osd_set_vpe_target(osd_port);
+	if (state->show_osd) {
+		(void)star6e_osd_set_canvas_size(state->osd_space_width,
+			state->osd_space_height);
+		if (osd_port)
+			(void)star6e_osd_set_vpe_target(osd_port);
+	}
 
 	if (!state->runtime_ive_present)
 		goto done;
@@ -2134,7 +2144,7 @@ void optflow_destroy(OptFlowState *state)
 		pthread_mutex_unlock(&state->stage_lock);
 		pthread_join(state->worker_thread, NULL);
 	}
-	if (state->osd_region_ready)
+	if (state->show_osd && state->osd_region_ready)
 		(void)star6e_osd_remove_dot_region();
 	release_ive_buffers(state);
 	if (state->ive_created)

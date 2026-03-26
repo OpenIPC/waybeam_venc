@@ -129,6 +129,7 @@ typedef struct {
 
 typedef struct {
 	bool enabled;
+	bool show_osd;
 	bool verbose;
 	uint32_t fps;
 } VencConfigOptflow;

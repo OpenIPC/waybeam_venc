@@ -75,6 +75,7 @@
   },
   "optflow": {
     "enabled": false,
+    "showOSD": true,
     "verbose": false,
     "fps": 5
   }
