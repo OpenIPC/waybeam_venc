@@ -134,15 +134,35 @@ The returned per-point LK motion vectors are then reduced into:
 - `lk ty`
 - `lk rz`
 
+The selected LK input points are also mapped back from tracking-space into
+full-frame coordinates and rendered on the OSD as green `4x4` rectangles.
+This compensation accounts for both the center crop and the downscaled
+tracking image.
+
+Point selection can optionally use a six-region layout, but the current
+default is the original strongest-corners selector. The six-region mode is a
+static code option intended for experimentation rather than the default
+tracking behavior.
+
+The current LK call path is configured to submit 10 points per solve while
+the backing point and motion-vector buffers still reserve space for up to 16.
+
 `lk rz` is an image-plane rotation proxy from the residual flow field around
 the image center. It is not a full 3D yaw/pitch/roll estimate.
 
 ### 5. Update previous-frame history
 
-After LK motion is computed, the current luma plane is copied into the
-persistent previous-frame buffer with `copy_luma_to_prev(...)`.
+The worker normally advances the previous-frame reference only after a valid
+LK result.
 
-This prepares the state for the next processing cycle.
+Current default behavior:
+- valid LK result: promote the current crop to become the next reference
+- invalid LK result: keep the last valid reference crop and try to recover on
+  the next frame using a longer-baseline comparison
+
+This avoids permanently dropping motion when an intermediate frame fails to
+produce a usable LK estimate, at the cost of making the next recovery attempt
+span a larger displacement.
 
 ### 6. Return the frame buffer
 

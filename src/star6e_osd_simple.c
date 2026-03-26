@@ -40,9 +40,13 @@ typedef struct {
 	int region_attached;
 	int target_configured;
 	int marker_drawn;
+	unsigned int trace_updates;
 	unsigned int current_color;
 	unsigned int current_x;
 	unsigned int current_y;
+	unsigned int track_point_count;
+	unsigned int track_point_x[STAR6E_OSD_TRACK_POINT_COUNT];
+	unsigned int track_point_y[STAR6E_OSD_TRACK_POINT_COUNT];
 	unsigned int canvas_width;
 	unsigned int canvas_height;
 	MI_RGN_ChnPort_t chn_port;
@@ -118,6 +122,11 @@ static void log_rgn_info(const char *message)
 	fflush(stdout);
 }
 
+static int should_trace_update(void)
+{
+	return g_star6e_osd.trace_updates < 12u;
+}
+
 static void log_rgn_error(const char *step, MI_S32 ret)
 {
 	fprintf(stderr, "[star6e_osd_simple] %s failed: ret=%d\n", step, ret);
@@ -144,9 +153,11 @@ static void draw_i4_point(uint8_t *base, MI_U32 stride,
 		*pixel = (uint8_t)((*pixel & 0xf0) | nibble);
 }
 
-static void draw_marker_square(uint8_t *base, MI_U32 stride,
+static void draw_rect(uint8_t *base, MI_U32 stride,
 	unsigned int canvas_width, unsigned int canvas_height,
-	unsigned int origin_x, unsigned int origin_y, unsigned int color)
+	unsigned int origin_x, unsigned int origin_y,
+	unsigned int rect_width, unsigned int rect_height,
+	unsigned int color)
 {
 	unsigned int x;
 	unsigned int y;
@@ -155,23 +166,41 @@ static void draw_marker_square(uint8_t *base, MI_U32 stride,
 
 	if (canvas_width == 0 || canvas_height == 0)
 		return;
-	if (canvas_width <= STAR6E_OSD_DOT_W)
+	if (canvas_width <= rect_width)
 		origin_x = 0;
 	else {
-		max_x = canvas_width - STAR6E_OSD_DOT_W;
+		max_x = canvas_width - rect_width;
 		origin_x = clamp_coord(origin_x, max_x);
 	}
-	if (canvas_height <= STAR6E_OSD_DOT_H)
+	if (canvas_height <= rect_height)
 		origin_y = 0;
 	else {
-		max_y = canvas_height - STAR6E_OSD_DOT_H;
+		max_y = canvas_height - rect_height;
 		origin_y = clamp_coord(origin_y, max_y);
 	}
 
-	for (y = 0; y < STAR6E_OSD_DOT_H && (origin_y + y) < canvas_height; ++y) {
-		for (x = 0; x < STAR6E_OSD_DOT_W && (origin_x + x) < canvas_width; ++x)
+	for (y = 0; y < rect_height && (origin_y + y) < canvas_height; ++y) {
+		for (x = 0; x < rect_width && (origin_x + x) < canvas_width; ++x)
 			draw_i4_point(base, stride, origin_x + x, origin_y + y, color);
 	}
+}
+
+static void draw_centered_rect(uint8_t *base, MI_U32 stride,
+	unsigned int canvas_width, unsigned int canvas_height,
+	unsigned int center_x, unsigned int center_y,
+	unsigned int rect_width, unsigned int rect_height,
+	unsigned int color)
+{
+	unsigned int origin_x = 0;
+	unsigned int origin_y = 0;
+
+	if (center_x > (rect_width / 2u))
+		origin_x = center_x - (rect_width / 2u);
+	if (center_y > (rect_height / 2u))
+		origin_y = center_y - (rect_height / 2u);
+
+	draw_rect(base, stride, canvas_width, canvas_height,
+		origin_x, origin_y, rect_width, rect_height, color);
 }
 
 static void clear_canvas(uint8_t *base, MI_U32 stride,
@@ -180,15 +209,19 @@ static void clear_canvas(uint8_t *base, MI_U32 stride,
 	memset(base, 0xFF, stride * canvas_height);
 }
 
-static void clear_previous_marker(uint8_t *base, MI_U32 stride,
+static void draw_track_points(uint8_t *base, MI_U32 stride,
 	unsigned int canvas_width, unsigned int canvas_height)
 {
-	if (!g_star6e_osd.marker_drawn)
-		clear_canvas(base, stride, canvas_height);
-	else
-		draw_marker_square(base, stride, canvas_width, canvas_height,
-			g_star6e_osd.current_x, g_star6e_osd.current_y,
-			STAR6E_OSD_COLOR_TRANSPARENT);
+	unsigned int index;
+
+	for (index = 0; index < g_star6e_osd.track_point_count; ++index) {
+		draw_centered_rect(base, stride, canvas_width, canvas_height,
+			g_star6e_osd.track_point_x[index],
+			g_star6e_osd.track_point_y[index],
+			STAR6E_OSD_TRACK_POINT_W,
+			STAR6E_OSD_TRACK_POINT_H,
+			STAR6E_OSD_COLOR_GREEN);
+	}
 }
 
 static MI_S32 update_dot_canvas(unsigned int x, unsigned int y,
@@ -199,29 +232,76 @@ static MI_S32 update_dot_canvas(unsigned int x, unsigned int y,
 	MI_S32 ret;
 
 	memset(&canvas_info, 0, sizeof(canvas_info));
+	if (should_trace_update()) {
+		fprintf(stdout,
+			"[star6e_osd_simple] trace update-begin x=%u y=%u color=%u\n",
+			x, y, normalize_color(color));
+		fflush(stdout);
+	}
 	ret = MI_RGN_GetCanvasInfo(STAR6E_OSD_DOT_HANDLE, &canvas_info);
 	if (ret != MI_RGN_OK) {
 		log_rgn_error("MI_RGN_GetCanvasInfo", ret);
 		return ret;
 	}
+	if (should_trace_update()) {
+		fprintf(stdout,
+			"[star6e_osd_simple] trace got-canvas stride=%u size=%ux%u addr=0x%llx\n",
+			canvas_info.u32Stride,
+			canvas_info.stSize.u32Width,
+			canvas_info.stSize.u32Height,
+			(unsigned long long)canvas_info.virtAddr);
+		fflush(stdout);
+	}
 
 	base = (uint8_t *)(uintptr_t)canvas_info.virtAddr;
-	clear_previous_marker(base, canvas_info.u32Stride,
+	clear_canvas(base, canvas_info.u32Stride, canvas_info.stSize.u32Height);
+	draw_track_points(base, canvas_info.u32Stride,
 		canvas_info.stSize.u32Width, canvas_info.stSize.u32Height);
-	draw_marker_square(base, canvas_info.u32Stride,
+	draw_rect(base, canvas_info.u32Stride,
 		canvas_info.stSize.u32Width, canvas_info.stSize.u32Height,
-		x, y, normalize_color(color));
+		x, y, STAR6E_OSD_DOT_W, STAR6E_OSD_DOT_H,
+		normalize_color(color));
 
 	ret = MI_RGN_UpdateCanvas(STAR6E_OSD_DOT_HANDLE);
 	if (ret != MI_RGN_OK) {
 		log_rgn_error("MI_RGN_UpdateCanvas", ret);
 		return ret;
 	}
+	if (should_trace_update()) {
+		fprintf(stdout,
+			"[star6e_osd_simple] trace update-end x=%u y=%u\n",
+			x, y);
+		fflush(stdout);
+	}
 
 	g_star6e_osd.current_x = x;
 	g_star6e_osd.current_y = y;
 	g_star6e_osd.current_color = normalize_color(color);
 	g_star6e_osd.marker_drawn = 1;
+	g_star6e_osd.trace_updates++;
+	return MI_RGN_OK;
+}
+
+int star6e_osd_set_track_points(const unsigned int *x_points,
+	const unsigned int *y_points, unsigned int count)
+{
+	unsigned int index;
+
+	if (!x_points || !y_points)
+		count = 0;
+	if (count > STAR6E_OSD_TRACK_POINT_COUNT)
+		count = STAR6E_OSD_TRACK_POINT_COUNT;
+
+	g_star6e_osd.track_point_count = count;
+	for (index = 0; index < count; ++index) {
+		g_star6e_osd.track_point_x[index] = x_points[index];
+		g_star6e_osd.track_point_y[index] = y_points[index];
+	}
+	for (; index < STAR6E_OSD_TRACK_POINT_COUNT; ++index) {
+		g_star6e_osd.track_point_x[index] = 0;
+		g_star6e_osd.track_point_y[index] = 0;
+	}
+
 	return MI_RGN_OK;
 }
 

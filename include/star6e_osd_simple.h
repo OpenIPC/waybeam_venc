@@ -3,6 +3,9 @@
 
 #define STAR6E_OSD_DOT_W 8u
 #define STAR6E_OSD_DOT_H 8u
+#define STAR6E_OSD_TRACK_POINT_COUNT 10u
+#define STAR6E_OSD_TRACK_POINT_W 4u
+#define STAR6E_OSD_TRACK_POINT_H 4u
 #define STAR6E_OSD_COLOR_RED 1u
 #define STAR6E_OSD_COLOR_TRANSPARENT 15u
 #define STAR6E_OSD_COLOR_WHITE 7u
@@ -21,6 +24,10 @@ int star6e_osd_add_dot_region(unsigned int x, unsigned int y,
 /** Move the Star6E optical-flow marker OSD region. */
 int star6e_osd_move_dot_region(unsigned int x, unsigned int y,
 	unsigned int color);
+
+/** Update the debug LK point overlay positions on the OSD canvas. */
+int star6e_osd_set_track_points(const unsigned int *x_points,
+	const unsigned int *y_points, unsigned int count);
 
 /** Detach and destroy the Star6E optical-flow marker OSD region. */
 int star6e_osd_remove_dot_region(void);

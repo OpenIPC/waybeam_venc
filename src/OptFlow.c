@@ -5,6 +5,7 @@
 #include <dlfcn.h>
 #include <inttypes.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,11 +21,24 @@ enum {
 	OPTFLOW_OSD_CALIBRATION_MODE = 0,
 	OPTFLOW_OSD_CALIBRATION_STEP_MS = 2000,
 	OPTFLOW_OSD_CENTER_HOLD_MS = 1000,
-	OPTFLOW_TRACK_WIDTH = 120, //was 320,
+	OPTFLOW_TRACK_WIDTH = 160, //was 320,
 	OPTFLOW_TRACK_PATCH_RADIUS = 6,
-	OPTFLOW_TRACK_SEARCH_RANGE = 8,
-	OPTFLOW_LK_POINT_COUNT = 5,
-	OPTFLOW_LK_POINT_SPACING = 18,
+	OPTFLOW_TRACK_SEARCH_RANGE = 40, // was 8
+	OPTFLOW_LK_POINT_COUNT = 16,
+	OPTFLOW_LK_CALL_POINT_COUNT = 10,
+	OPTFLOW_LK_MIN_SURVIVORS = 3,
+	OPTFLOW_LK_MIN_POINT_SPACING = 12,
+	OPTFLOW_LK_CANDIDATE_CAPACITY = 64,
+	OPTFLOW_LK_SCAN_STEP = 2,
+	OPTFLOW_LK_DUMP_INTERVAL_MS = 1000,
+	OPTFLOW_STAGE_SLOT_COUNT = 2,
+	OPTFLOW_CRASH_TRACE_SEQ_LIMIT = 12,
+	OPTFLOW_KEEP_LAST_VALID_REFERENCE = 1,
+	OPTFLOW_USE_REGION_POINT_SELECTOR = 0,
+	OPTFLOW_LK_REGION_COLS = 2,
+	OPTFLOW_LK_REGION_ROWS = 3,
+	OPTFLOW_LK_REGION_COUNT =
+		OPTFLOW_LK_REGION_COLS * OPTFLOW_LK_REGION_ROWS,
 };
 
 typedef uint64_t MI_PHY;
@@ -187,7 +201,33 @@ typedef struct {
 	double rz;
 	uint32_t points_found;
 	uint32_t points_used;
+	uint32_t debug_point_count;
+	unsigned int debug_point_x[OPTFLOW_LK_CALL_POINT_COUNT];
+	unsigned int debug_point_y[OPTFLOW_LK_CALL_POINT_COUNT];
 } OptflowLkMotion;
+
+typedef struct {
+	uint8_t *data;
+	uint64_t seq;
+	int ready;
+} OptflowCropSlot;
+
+typedef struct {
+	int x;
+	int y;
+	uint64_t score;
+} OptflowCornerCandidate;
+
+typedef enum {
+	OPTFLOW_LK_FAIL_NONE = 0,
+	OPTFLOW_LK_FAIL_NO_RUNTIME,
+	OPTFLOW_LK_FAIL_NO_IMAGES,
+	OPTFLOW_LK_FAIL_NO_BUFFERS,
+	OPTFLOW_LK_FAIL_NO_POINTS,
+	OPTFLOW_LK_FAIL_TOO_FEW_POINTS,
+	OPTFLOW_LK_FAIL_LK_CALL,
+	OPTFLOW_LK_FAIL_TOO_FEW_TRACKS,
+} OptflowLkFailureReason;
 
 struct OptFlowState {
 	uint32_t capture_width;
@@ -211,6 +251,7 @@ struct OptFlowState {
 	uint64_t frames_seen;
 	uint64_t packets_seen;
 	long long init_ms;
+	long long last_lk_dump_ms;
 	long long last_log_ms;
 	long long last_process_ms;
 	long long perf_window_start_ms;
@@ -222,16 +263,22 @@ struct OptFlowState {
 	uint32_t perf_runs;
 	uint32_t osd_dot_x;
 	uint32_t osd_dot_y;
+	uint32_t stage_stride;
+	uint32_t stage_height;
+	uint32_t stage_published_slot;
+	uint32_t stage_write_slot;
 	int osd_calibration_anchor;
 	int osd_region_ready;
 	int osd_region_disabled;
+	int worker_running;
+	int worker_started;
+	int worker_have_prev_crop;
 	MI_IVE_HANDLE ive_handle;
 	void *ive_library;
 	OptflowIveCreateFn ive_create;
 	OptflowIveDestroyFn ive_destroy;
 	OptflowIveLkOpticalFlowFn ive_lk_optical_flow;
 	MI_IVE_LkOpticalFlowCtrl_t lk_ctrl;
-	MI_IVE_Image_t prev_frame;
 	MI_IVE_Image_t lk_prev_frame;
 	MI_IVE_Image_t lk_curr_frame;
 	MI_IVE_MemInfo_t lk_points;
@@ -239,8 +286,20 @@ struct OptFlowState {
 	double lk_center_x;
 	double lk_center_y;
 	int lk_center_ready;
+	uint64_t stage_next_seq;
+	uint64_t stage_published_seq;
+	uint64_t applied_motion_seq;
+	uint64_t latest_motion_seq;
 	uint8_t *track_prev;
 	uint8_t *track_curr;
+	uint8_t *worker_prev_crop;
+	uint8_t *worker_curr_crop;
+	OptflowCropSlot stage_slots[OPTFLOW_STAGE_SLOT_COUNT];
+	OptflowLkMotion latest_motion;
+	pthread_t worker_thread;
+	pthread_mutex_t stage_lock;
+	pthread_cond_t stage_cond;
+	pthread_mutex_t result_lock;
 	MI_SYS_ChnPort_t vpe_port;
 };
 
@@ -261,6 +320,228 @@ static long long monotonic_ms(void)
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	return (long long)now.tv_sec * 1000LL +
 		(long long)now.tv_nsec / 1000000LL;
+}
+
+static void swap_buffers(uint8_t **left, uint8_t **right)
+{
+	uint8_t *tmp = *left;
+
+	*left = *right;
+	*right = tmp;
+}
+
+static void write_u16le(FILE *file, uint16_t value)
+{
+	unsigned char bytes[2];
+
+	bytes[0] = (unsigned char)(value & 0xffu);
+	bytes[1] = (unsigned char)((value >> 8) & 0xffu);
+	(void)fwrite(bytes, sizeof(bytes), 1, file);
+}
+
+static void write_u32le(FILE *file, uint32_t value)
+{
+	unsigned char bytes[4];
+
+	bytes[0] = (unsigned char)(value & 0xffu);
+	bytes[1] = (unsigned char)((value >> 8) & 0xffu);
+	bytes[2] = (unsigned char)((value >> 16) & 0xffu);
+	bytes[3] = (unsigned char)((value >> 24) & 0xffu);
+	(void)fwrite(bytes, sizeof(bytes), 1, file);
+}
+
+static int write_grayscale_bmp(const char *path, const MI_IVE_Image_t *image)
+{
+	enum {
+		bmp_file_header_size = 14,
+		bmp_info_header_size = 40,
+		bmp_palette_entries = 256,
+		bmp_palette_size = bmp_palette_entries * 4,
+		bmp_pixel_offset = bmp_file_header_size + bmp_info_header_size +
+			bmp_palette_size,
+	};
+	FILE *file;
+	uint32_t row_stride;
+	uint32_t pixel_array_size;
+	uint32_t file_size;
+	unsigned char padding[3] = {0, 0, 0};
+	uint32_t row;
+	uint32_t palette_index;
+
+	if (!path || !image || !image->apu8VirAddr[0])
+		return -1;
+
+	row_stride = (uint32_t)(((uint32_t)image->u16Width + 3u) & ~3u);
+	pixel_array_size = row_stride * image->u16Height;
+	file_size = bmp_pixel_offset + pixel_array_size;
+
+	file = fopen(path, "wb");
+	if (!file)
+		return -1;
+
+	if (fputc('B', file) == EOF || fputc('M', file) == EOF)
+		goto fail;
+	write_u32le(file, file_size);
+	write_u16le(file, 0);
+	write_u16le(file, 0);
+	write_u32le(file, bmp_pixel_offset);
+
+	write_u32le(file, bmp_info_header_size);
+	write_u32le(file, image->u16Width);
+	write_u32le(file, image->u16Height);
+	write_u16le(file, 1);
+	write_u16le(file, 8);
+	write_u32le(file, 0);
+	write_u32le(file, pixel_array_size);
+	write_u32le(file, 0);
+	write_u32le(file, 0);
+	write_u32le(file, bmp_palette_entries);
+	write_u32le(file, bmp_palette_entries);
+
+	for (palette_index = 0; palette_index < bmp_palette_entries; ++palette_index) {
+		unsigned char entry[4];
+
+		entry[0] = (unsigned char)palette_index;
+		entry[1] = (unsigned char)palette_index;
+		entry[2] = (unsigned char)palette_index;
+		entry[3] = 0;
+		if (fwrite(entry, sizeof(entry), 1, file) != 1)
+			goto fail;
+	}
+
+	for (row = image->u16Height; row > 0; --row) {
+		const unsigned char *src_row =
+			image->apu8VirAddr[0] + (row - 1u) * image->azu16Stride[0];
+		uint32_t padding_size = row_stride - image->u16Width;
+
+		if (fwrite(src_row, image->u16Width, 1, file) != 1)
+			goto fail;
+		if (padding_size > 0 &&
+		    fwrite(padding, padding_size, 1, file) != 1)
+			goto fail;
+	}
+
+	if (fclose(file) != 0)
+		return -1;
+	return 0;
+
+fail:
+	(void)fclose(file);
+	return -1;
+}
+
+static void maybe_dump_lk_inputs(OptFlowState *state)
+{
+	if (!state)
+		return;
+	if (!state->lk_prev_frame.apu8VirAddr[0] || !state->lk_curr_frame.apu8VirAddr[0])
+		return;
+
+	if (write_grayscale_bmp("/tmp/optflow_lk_prev.bmp",
+			&state->lk_prev_frame) != 0) {
+		fprintf(stderr,
+			"[optflow] failed to write /tmp/optflow_lk_prev.bmp\n");
+		fflush(stderr);
+		return;
+	}
+	if (write_grayscale_bmp("/tmp/optflow_lk_curr.bmp",
+			&state->lk_curr_frame) != 0) {
+		fprintf(stderr,
+			"[optflow] failed to write /tmp/optflow_lk_curr.bmp\n");
+		fflush(stderr);
+		return;
+	}
+}
+
+static const char *optflow_lk_failure_name(OptflowLkFailureReason reason)
+{
+	switch (reason) {
+	case OPTFLOW_LK_FAIL_NONE:
+		return "none";
+	case OPTFLOW_LK_FAIL_NO_RUNTIME:
+		return "no-runtime";
+	case OPTFLOW_LK_FAIL_NO_IMAGES:
+		return "no-images";
+	case OPTFLOW_LK_FAIL_NO_BUFFERS:
+		return "no-buffers";
+	case OPTFLOW_LK_FAIL_NO_POINTS:
+		return "no-points";
+	case OPTFLOW_LK_FAIL_TOO_FEW_POINTS:
+		return "too-few-points";
+	case OPTFLOW_LK_FAIL_LK_CALL:
+		return "lk-call";
+	case OPTFLOW_LK_FAIL_TOO_FEW_TRACKS:
+		return "too-few-tracks";
+	default:
+		return "unknown";
+	}
+}
+
+static int should_trace_crash_debug(uint64_t seq)
+{
+	return seq > 0 && seq <= OPTFLOW_CRASH_TRACE_SEQ_LIMIT;
+}
+
+static void log_worker_trace(uint64_t seq, const char *phase)
+{
+	if (!should_trace_crash_debug(seq))
+		return;
+
+	printf("[optflow] trace seq=%" PRIu64 " %s\n", seq, phase);
+	fflush(stdout);
+}
+
+static void format_point_statuses(char *buffer, size_t buffer_size,
+	const MI_S32 *point_statuses, uint32_t point_count)
+{
+	size_t used = 0;
+	uint32_t index;
+
+	if (!buffer || buffer_size == 0)
+		return;
+
+	buffer[0] = '\0';
+	for (index = 0; index < point_count; ++index) {
+		int written = snprintf(buffer + used, buffer_size - used,
+			index == 0 ? "%d" : ",%d", point_statuses[index]);
+
+		if (written < 0)
+			break;
+		if ((size_t)written >= buffer_size - used) {
+			used = buffer_size - 1;
+			break;
+		}
+		used += (size_t)written;
+	}
+}
+
+static void log_lk_failure(const OptFlowState *state, uint64_t seq,
+	uint64_t dropped_samples, OptflowLkFailureReason reason,
+	const OptflowLkMotion *motion, uint32_t corner_count,
+	uint64_t lk_elapsed_ms, const MI_S32 *point_statuses)
+{
+	char status_buffer[192];
+
+	format_point_statuses(status_buffer, sizeof(status_buffer),
+		point_statuses, corner_count);
+	printf("[optflow] lk-debug reason=%s seq=%" PRIu64
+		" dropped=%" PRIu64 " found=%u used=%u corners=%u lk_ms=%" PRIu64
+		" track=%ux%u crop=%ux%u center=%.1f,%.1f status=%s\n",
+		optflow_lk_failure_name(reason),
+		seq,
+		dropped_samples,
+		motion->points_found,
+		motion->points_used,
+		corner_count,
+		lk_elapsed_ms,
+		state->track_width,
+		state->track_height,
+		state->track_crop_width,
+		state->process_height,
+		state->lk_center_x,
+		state->lk_center_y,
+		status_buffer);
+	fflush(stdout);
 }
 
 static int probe_runtime_ive_library(void)
@@ -488,6 +769,63 @@ static void free_mem_info(MI_IVE_MemInfo_t *mem)
 	if (mem->phyPhyAddr)
 		(void)MI_SYS_MMA_Free(mem->phyPhyAddr);
 	memset(mem, 0, sizeof(*mem));
+}
+
+static int prepare_crop_staging_buffers(OptFlowState *state)
+{
+	uint32_t crop_bytes;
+	uint32_t index;
+
+	state->stage_stride = state->track_crop_width;
+	state->stage_height = state->process_height;
+	crop_bytes = state->stage_stride * state->stage_height;
+	for (index = 0; index < OPTFLOW_STAGE_SLOT_COUNT; ++index) {
+		state->stage_slots[index].data = calloc(crop_bytes, 1);
+		if (!state->stage_slots[index].data)
+			goto fail;
+	}
+	state->worker_prev_crop = calloc(crop_bytes, 1);
+	if (!state->worker_prev_crop)
+		goto fail;
+	state->worker_curr_crop = calloc(crop_bytes, 1);
+	if (!state->worker_curr_crop)
+		goto fail;
+	return 0;
+
+fail:
+	free(state->worker_curr_crop);
+	state->worker_curr_crop = NULL;
+	free(state->worker_prev_crop);
+	state->worker_prev_crop = NULL;
+	for (index = 0; index < OPTFLOW_STAGE_SLOT_COUNT; ++index) {
+		free(state->stage_slots[index].data);
+		state->stage_slots[index].data = NULL;
+		state->stage_slots[index].seq = 0;
+		state->stage_slots[index].ready = 0;
+	}
+	state->stage_stride = 0;
+	state->stage_height = 0;
+	return -1;
+}
+
+static void release_crop_staging_buffers(OptFlowState *state)
+{
+	uint32_t index;
+
+	free(state->worker_curr_crop);
+	free(state->worker_prev_crop);
+	state->worker_curr_crop = NULL;
+	state->worker_prev_crop = NULL;
+	for (index = 0; index < OPTFLOW_STAGE_SLOT_COUNT; ++index) {
+		free(state->stage_slots[index].data);
+		state->stage_slots[index].data = NULL;
+		state->stage_slots[index].seq = 0;
+		state->stage_slots[index].ready = 0;
+	}
+	state->stage_stride = 0;
+	state->stage_height = 0;
+	state->stage_write_slot = 0;
+	state->worker_have_prev_crop = 0;
 }
 
 static int prepare_tracking_buffers(OptFlowState *state)
@@ -744,40 +1082,308 @@ static void copy_tracking_buffer_to_image(MI_IVE_Image_t *image,
 	}
 }
 
-static void update_tracking_buffers(OptFlowState *state,
-	const MI_SYS_BufInfo_t *buf_info)
+static void update_tracking_buffers_from_crops(OptFlowState *state,
+	const uint8_t *prev_crop, const uint8_t *curr_crop)
 {
 	downsample_luma(state->track_prev, state->track_width,
 		state->track_height, state->track_width,
-		state->prev_frame.apu8VirAddr[0] + state->track_crop_x,
-		state->prev_stride, state->track_crop_width,
+		prev_crop, state->stage_stride, state->track_crop_width,
 		state->process_height);
 	downsample_luma(state->track_curr, state->track_width,
 		state->track_height, state->track_width,
-		buf_info->stFrameData.pVirAddr[0] + state->track_crop_x,
-		buf_info->stFrameData.u32Stride[0], state->track_crop_width,
+		curr_crop, state->stage_stride, state->track_crop_width,
 		state->process_height);
+}
+
+static unsigned int map_track_x_to_process_x(const OptFlowState *state,
+	double track_x)
+{
+	int process_x;
+
+	process_x = (int)lround(track_x *
+		((double)state->track_crop_width / (double)state->track_width));
+	process_x += (int)state->track_crop_x;
+	return (unsigned int)clamp_int(process_x, 0,
+		(int)state->process_width - 1);
+}
+
+static unsigned int map_track_y_to_process_y(const OptFlowState *state,
+	double track_y)
+{
+	int process_y;
+
+	process_y = (int)lround(track_y *
+		((double)state->process_height / (double)state->track_height));
+	return (unsigned int)clamp_int(process_y, 0,
+		(int)state->process_height - 1);
+}
+
+static void fill_motion_debug_points(OptFlowState *state,
+	OptflowLkMotion *motion, const MI_IVE_PointS25Q7_t *points,
+	uint32_t point_count)
+{
+	uint32_t index;
+
+	if (point_count > OPTFLOW_LK_CALL_POINT_COUNT)
+		point_count = OPTFLOW_LK_CALL_POINT_COUNT;
+	motion->debug_point_count = point_count;
+	for (index = 0; index < point_count; ++index) {
+		double track_x = (double)points[index].s25q7X / 128.0;
+		double track_y = (double)points[index].s25q7Y / 128.0;
+
+		motion->debug_point_x[index] =
+			map_track_x_to_process_x(state, track_x);
+		motion->debug_point_y[index] =
+			map_track_y_to_process_y(state, track_y);
+	}
+	for (; index < OPTFLOW_LK_CALL_POINT_COUNT; ++index) {
+		motion->debug_point_x[index] = 0;
+		motion->debug_point_y[index] = 0;
+	}
+}
+
+static uint64_t compute_corner_score(const uint8_t *image, uint32_t stride,
+	int x, int y)
+{
+	uint64_t sum_xx = 0;
+	uint64_t sum_yy = 0;
+	int64_t sum_xy = 0;
+	int64_t det;
+	int64_t trace;
+	int64_t trace_penalty;
+	int64_t response;
+	int window_y;
+	int window_x;
+
+	for (window_y = -2; window_y <= 2; ++window_y) {
+		const uint8_t *row_prev = image + (y + window_y - 1) * stride;
+		const uint8_t *row_curr = image + (y + window_y) * stride;
+		const uint8_t *row_next = image + (y + window_y + 1) * stride;
+
+		for (window_x = -2; window_x <= 2; ++window_x) {
+			int sample_x = x + window_x;
+			int gx = (int)row_curr[sample_x + 1] -
+				(int)row_curr[sample_x - 1];
+			int gy = (int)row_next[sample_x] -
+				(int)row_prev[sample_x];
+
+			sum_xx += (uint64_t)(gx * gx);
+			sum_yy += (uint64_t)(gy * gy);
+			sum_xy += (int64_t)gx * gy;
+		}
+	}
+
+	trace = (int64_t)(sum_xx + sum_yy);
+	det = (int64_t)(sum_xx * sum_yy) - (sum_xy * sum_xy);
+	trace_penalty = (trace * trace) / 16;
+	response = det - trace_penalty;
+	if (response <= 0)
+		return 0;
+	return (uint64_t)response;
+}
+
+static void insert_corner_candidate(OptflowCornerCandidate *candidates,
+	uint32_t *candidate_count, int x, int y, uint64_t score)
+{
+	uint32_t limit = OPTFLOW_LK_CANDIDATE_CAPACITY;
+	uint32_t insert_index;
+
+	if (score == 0)
+		return;
+
+	if (*candidate_count < limit) {
+		insert_index = *candidate_count;
+		(*candidate_count)++;
+	} else {
+		insert_index = limit - 1u;
+		if (score <= candidates[insert_index].score)
+			return;
+	}
+
+	candidates[insert_index].x = x;
+	candidates[insert_index].y = y;
+	candidates[insert_index].score = score;
+	while (insert_index > 0 &&
+	       candidates[insert_index].score > candidates[insert_index - 1u].score) {
+		OptflowCornerCandidate tmp = candidates[insert_index - 1u];
+
+		candidates[insert_index - 1u] = candidates[insert_index];
+		candidates[insert_index] = tmp;
+		insert_index--;
+	}
+}
+
+static int corner_has_min_spacing(const OptflowCornerCandidate *selected,
+	uint32_t selected_count, int x, int y)
+{
+	uint32_t index;
+	int min_distance_sq = OPTFLOW_LK_MIN_POINT_SPACING *
+		OPTFLOW_LK_MIN_POINT_SPACING;
+
+	for (index = 0; index < selected_count; ++index) {
+		int dx = x - selected[index].x;
+		int dy = y - selected[index].y;
+
+		if ((dx * dx) + (dy * dy) < min_distance_sq)
+			return 0;
+	}
+
+	return 1;
+}
+
+static int corner_is_distinct(const OptflowCornerCandidate *selected,
+	uint32_t selected_count, int x, int y, int min_distance)
+{
+	uint32_t index;
+	int min_distance_sq = min_distance * min_distance;
+
+	for (index = 0; index < selected_count; ++index) {
+		int dx = x - selected[index].x;
+		int dy = y - selected[index].y;
+
+		if ((dx * dx) + (dy * dy) < min_distance_sq)
+			return 0;
+	}
+
+	return 1;
+}
+
+static uint32_t append_fallback_points(OptFlowState *state,
+	OptflowCornerCandidate *selected, uint32_t selected_count,
+	MI_IVE_PointS25Q7_t *points, int usable_margin_x, int usable_margin_y)
+{
+	static const int fallback_offsets[][2] = {
+		{0, 0},
+		{-12, 0},
+		{12, 0},
+		{0, -12},
+		{0, 12},
+		{-12, -12},
+		{12, -12},
+		{-12, 12},
+		{12, 12},
+	};
+	uint32_t index;
+	int center_x;
+	int center_y;
+
+	if (selected_count > 0) {
+		uint64_t sum_x = 0;
+		uint64_t sum_y = 0;
+
+		for (index = 0; index < selected_count; ++index) {
+			sum_x += (uint64_t)selected[index].x;
+			sum_y += (uint64_t)selected[index].y;
+		}
+		center_x = (int)(sum_x / selected_count);
+		center_y = (int)(sum_y / selected_count);
+	} else if (state->lk_center_ready) {
+		center_x = (int)(state->lk_center_x + 0.5);
+		center_y = (int)(state->lk_center_y + 0.5);
+	} else {
+		center_x = (int)state->track_width / 2;
+		center_y = (int)state->track_height / 2;
+	}
+
+	for (index = 0;
+	     index < (sizeof(fallback_offsets) / sizeof(fallback_offsets[0]));
+	     ++index) {
+		int point_x = clamp_int(center_x + fallback_offsets[index][0],
+			usable_margin_x,
+			(int)state->track_width - 1 - usable_margin_x);
+		int point_y = clamp_int(center_y + fallback_offsets[index][1],
+			usable_margin_y,
+			(int)state->track_height - 1 - usable_margin_y);
+
+		if (!corner_is_distinct(selected, selected_count,
+			point_x, point_y, 4))
+			continue;
+
+		selected[selected_count].x = point_x;
+		selected[selected_count].y = point_y;
+		selected[selected_count].score = 0;
+		points[selected_count].s25q7X = (MI_S25Q7)(point_x << 7);
+		points[selected_count].s25q7Y = (MI_S25Q7)(point_y << 7);
+		selected_count++;
+		if (selected_count == OPTFLOW_LK_CALL_POINT_COUNT)
+			break;
+	}
+
+	return selected_count;
+}
+
+static uint32_t point_region_index(int x, int y, int min_x, int min_y,
+	int usable_width, int usable_height)
+{
+	int col;
+	int row;
+
+	col = ((x - min_x) * OPTFLOW_LK_REGION_COLS) / usable_width;
+	row = ((y - min_y) * OPTFLOW_LK_REGION_ROWS) / usable_height;
+	col = clamp_int(col, 0, OPTFLOW_LK_REGION_COLS - 1);
+	row = clamp_int(row, 0, OPTFLOW_LK_REGION_ROWS - 1);
+	return (uint32_t)(row * OPTFLOW_LK_REGION_COLS + col);
+}
+
+static int region_center_coord(int region_index, int axis_min, int axis_span,
+	int axis_regions, int use_row)
+{
+	int region_axis;
+	int numerator;
+
+	region_axis = use_row ?
+		(region_index / OPTFLOW_LK_REGION_COLS) :
+		(region_index % OPTFLOW_LK_REGION_COLS);
+	numerator = ((region_axis * 2) + 1) * axis_span;
+	return axis_min + numerator / (axis_regions * 2);
+}
+
+static void fill_region_fallback_point(OptFlowState *state,
+	OptflowCornerCandidate *selected, MI_IVE_PointS25Q7_t *points,
+	uint32_t index, int usable_min_x, int usable_min_y,
+	int usable_width, int usable_height)
+{
+	int point_x;
+	int point_y;
+
+	point_x = region_center_coord((int)index, usable_min_x, usable_width,
+		OPTFLOW_LK_REGION_COLS, 0);
+	point_y = region_center_coord((int)index, usable_min_y, usable_height,
+		OPTFLOW_LK_REGION_ROWS, 1);
+	point_x = clamp_int(point_x, usable_min_x,
+		(int)state->track_width - 1 - usable_min_x);
+	point_y = clamp_int(point_y, usable_min_y,
+		(int)state->track_height - 1 - usable_min_y);
+	selected[index].x = point_x;
+	selected[index].y = point_y;
+	selected[index].score = 0;
+	points[index].s25q7X = (MI_S25Q7)(point_x << 7);
+	points[index].s25q7Y = (MI_S25Q7)(point_y << 7);
 }
 
 static uint32_t select_lk_points(OptFlowState *state,
 	MI_IVE_PointS25Q7_t *points, uint32_t max_points)
 {
-	static const int offsets[OPTFLOW_LK_POINT_COUNT][2] = {
-		{0, 0},
-		{-OPTFLOW_LK_POINT_SPACING, 0},
-		{OPTFLOW_LK_POINT_SPACING, 0},
-		{0, -OPTFLOW_LK_POINT_SPACING},
-		{0, OPTFLOW_LK_POINT_SPACING},
-	};
+	OptflowCornerCandidate candidates[OPTFLOW_LK_CANDIDATE_CAPACITY];
+	OptflowCornerCandidate best_regions[OPTFLOW_LK_REGION_COUNT];
+	OptflowCornerCandidate selected[OPTFLOW_LK_CALL_POINT_COUNT];
 	int usable_margin_x;
 	int usable_margin_y;
-	int center_x;
-	int center_y;
+	int usable_min_x;
+	int usable_min_y;
+	int usable_width;
+	int usable_height;
+	uint64_t sum_x = 0;
+	uint64_t sum_y = 0;
+	uint32_t candidate_count = 0;
+	uint32_t selected_count = 0;
 	uint32_t index;
+	int y;
+	int x;
 
 	if (!state->track_prev || state->track_width == 0 || state->track_height == 0)
 		return 0;
-	if (max_points < OPTFLOW_LK_POINT_COUNT)
+	if (max_points < OPTFLOW_LK_CALL_POINT_COUNT)
 		return 0;
 
 	usable_margin_x = OPTFLOW_TRACK_PATCH_RADIUS + OPTFLOW_TRACK_SEARCH_RANGE + 1;
@@ -785,36 +1391,113 @@ static uint32_t select_lk_points(OptFlowState *state,
 	if ((int)state->track_width <= usable_margin_x * 2 ||
 	    (int)state->track_height <= usable_margin_y * 2)
 		return 0;
+	usable_min_x = usable_margin_x;
+	usable_min_y = usable_margin_y;
+	usable_width = (int)state->track_width - (usable_margin_x * 2);
+	usable_height = (int)state->track_height - (usable_margin_y * 2);
 
-	if (!state->lk_center_ready) {
-		state->lk_center_x = (double)state->track_width * 0.5;
-		state->lk_center_y = (double)state->track_height * 0.5;
-		state->lk_center_ready = 1;
+	if (!OPTFLOW_USE_REGION_POINT_SELECTOR) {
+		memset(candidates, 0, sizeof(candidates));
+		memset(selected, 0, sizeof(selected));
+		for (y = usable_margin_y; y < (int)state->track_height - usable_margin_y;
+		     y += OPTFLOW_LK_SCAN_STEP) {
+			for (x = usable_margin_x;
+			     x < (int)state->track_width - usable_margin_x;
+			     x += OPTFLOW_LK_SCAN_STEP) {
+				uint64_t score = compute_corner_score(state->track_prev,
+					state->track_width, x, y);
+
+				insert_corner_candidate(candidates, &candidate_count,
+					x, y, score);
+			}
+		}
+
+		for (index = 0; index < candidate_count; ++index) {
+			if (!corner_has_min_spacing(selected, selected_count,
+				candidates[index].x, candidates[index].y))
+				continue;
+
+			selected[selected_count] = candidates[index];
+			sum_x += (uint64_t)candidates[index].x;
+			sum_y += (uint64_t)candidates[index].y;
+			points[selected_count].s25q7X =
+				(MI_S25Q7)(candidates[index].x << 7);
+			points[selected_count].s25q7Y =
+				(MI_S25Q7)(candidates[index].y << 7);
+			selected_count++;
+			if (selected_count == OPTFLOW_LK_CALL_POINT_COUNT)
+				break;
+		}
+
+		if (selected_count < OPTFLOW_LK_CALL_POINT_COUNT) {
+			selected_count = append_fallback_points(state, selected,
+				selected_count, points, usable_margin_x, usable_margin_y);
+		}
+
+		if (selected_count > 0) {
+			sum_x = 0;
+			sum_y = 0;
+			for (index = 0; index < selected_count; ++index) {
+				sum_x += (uint64_t)(points[index].s25q7X >> 7);
+				sum_y += (uint64_t)(points[index].s25q7Y >> 7);
+			}
+			state->lk_center_x = (double)sum_x / (double)selected_count;
+			state->lk_center_y = (double)sum_y / (double)selected_count;
+			state->lk_center_ready = 1;
+		}
+
+		return selected_count;
 	}
 
-	center_x = clamp_int((int)(state->lk_center_x + 0.5),
-		usable_margin_x,
-		(int)state->track_width - 1 - usable_margin_x);
-	center_y = clamp_int((int)(state->lk_center_y + 0.5),
-		usable_margin_y,
-		(int)state->track_height - 1 - usable_margin_y);
+	memset(best_regions, 0, sizeof(best_regions));
+	memset(selected, 0, sizeof(selected));
+	for (y = usable_margin_y; y < (int)state->track_height - usable_margin_y;
+	     y += OPTFLOW_LK_SCAN_STEP) {
+		for (x = usable_margin_x;
+		     x < (int)state->track_width - usable_margin_x;
+		     x += OPTFLOW_LK_SCAN_STEP) {
+			uint64_t score = compute_corner_score(state->track_prev,
+				state->track_width, x, y);
+			uint32_t region_index;
 
-	for (index = 0; index < OPTFLOW_LK_POINT_COUNT; ++index) {
-		int point_x = clamp_int(center_x + offsets[index][0],
-			usable_margin_x,
-			(int)state->track_width - 1 - usable_margin_x);
-		int point_y = clamp_int(center_y + offsets[index][1],
-			usable_margin_y,
-			(int)state->track_height - 1 - usable_margin_y);
-
-		points[index].s25q7X = (MI_S25Q7)(point_x << 7);
-		points[index].s25q7Y = (MI_S25Q7)(point_y << 7);
+			if (score == 0)
+				continue;
+			region_index = point_region_index(x, y, usable_min_x,
+				usable_min_y, usable_width, usable_height);
+			if (score <= best_regions[region_index].score)
+				continue;
+			best_regions[region_index].x = x;
+			best_regions[region_index].y = y;
+			best_regions[region_index].score = score;
+		}
 	}
 
-	return OPTFLOW_LK_POINT_COUNT;
+	for (index = 0; index < OPTFLOW_LK_CALL_POINT_COUNT; ++index) {
+		if (best_regions[index].score > 0) {
+			selected[index] = best_regions[index];
+			points[index].s25q7X = (MI_S25Q7)(best_regions[index].x << 7);
+			points[index].s25q7Y = (MI_S25Q7)(best_regions[index].y << 7);
+		} else {
+			fill_region_fallback_point(state, selected, points, index,
+				usable_min_x, usable_min_y,
+				usable_width, usable_height);
+		}
+		sum_x += (uint64_t)(points[index].s25q7X >> 7);
+		sum_y += (uint64_t)(points[index].s25q7Y >> 7);
+	}
+
+	state->lk_center_x = (double)sum_x / (double)OPTFLOW_LK_CALL_POINT_COUNT;
+	state->lk_center_y = (double)sum_y / (double)OPTFLOW_LK_CALL_POINT_COUNT;
+	state->lk_center_ready = 1;
+
+	return OPTFLOW_LK_CALL_POINT_COUNT;
 }
 
-static int compute_lk_motion(OptFlowState *state, OptflowLkMotion *motion)
+static int compute_lk_motion(OptFlowState *state, OptflowLkMotion *motion,
+	uint64_t seq,
+	uint64_t *lk_elapsed_ms, uint32_t *corner_count,
+	OptflowLkFailureReason *failure_reason,
+	MI_S32 *point_statuses)
 {
 	MI_IVE_PointS25Q7_t *points;
 	MI_IVE_MvS9Q7_t *vectors;
@@ -828,12 +1511,31 @@ static int compute_lk_motion(OptFlowState *state, OptflowLkMotion *motion)
 	MI_S32 ret;
 
 	memset(motion, 0, sizeof(*motion));
-	if (!state->ive_lk_optical_flow)
+	if (failure_reason)
+		*failure_reason = OPTFLOW_LK_FAIL_NONE;
+	if (point_statuses) {
+		for (index = 0; index < OPTFLOW_LK_POINT_COUNT; ++index)
+			point_statuses[index] = -999;
+	}
+	if (lk_elapsed_ms)
+		*lk_elapsed_ms = 0;
+	if (corner_count)
+		*corner_count = 0;
+	if (!state->ive_lk_optical_flow) {
+		if (failure_reason)
+			*failure_reason = OPTFLOW_LK_FAIL_NO_RUNTIME;
 		return 0;
-	if (!state->lk_prev_frame.apu8VirAddr[0] || !state->lk_curr_frame.apu8VirAddr[0])
+	}
+	if (!state->lk_prev_frame.apu8VirAddr[0] || !state->lk_curr_frame.apu8VirAddr[0]) {
+		if (failure_reason)
+			*failure_reason = OPTFLOW_LK_FAIL_NO_IMAGES;
 		return 0;
-	if (!state->lk_points.pu8VirAddr || !state->lk_motion_vectors.pu8VirAddr)
+	}
+	if (!state->lk_points.pu8VirAddr || !state->lk_motion_vectors.pu8VirAddr) {
+		if (failure_reason)
+			*failure_reason = OPTFLOW_LK_FAIL_NO_BUFFERS;
 		return 0;
+	}
 
 	copy_tracking_buffer_to_image(&state->lk_prev_frame, state->track_prev,
 		state->track_width, state->track_height);
@@ -845,22 +1547,52 @@ static int compute_lk_motion(OptFlowState *state, OptflowLkMotion *motion)
 	memset(points, 0, state->lk_points.u32Size);
 	memset(vectors, 0, state->lk_motion_vectors.u32Size);
 
+	log_worker_trace(seq, "compute:select-begin");
 	point_count = select_lk_points(state, points,
 		state->lk_points.u32Size / sizeof(points[0]));
+	if (should_trace_crash_debug(seq)) {
+		printf("[optflow] trace seq=%" PRIu64
+			" compute:select-end count=%u center=%.1f,%.1f\n",
+			seq, point_count, state->lk_center_x, state->lk_center_y);
+		fflush(stdout);
+	}
 	motion->points_found = point_count;
-	if (point_count < 4)
+	fill_motion_debug_points(state, motion, points, point_count);
+	if (corner_count)
+		*corner_count = point_count;
+	if (point_count < OPTFLOW_LK_MIN_SURVIVORS) {
+		if (failure_reason) {
+			*failure_reason = point_count == 0 ?
+				OPTFLOW_LK_FAIL_NO_POINTS :
+				OPTFLOW_LK_FAIL_TOO_FEW_POINTS;
+		}
 		return 0;
+	}
 
 	state->lk_ctrl.u16CornerNum = (MI_U16)point_count;
-	state->perf_corner_sum += state->lk_ctrl.u16CornerNum;
 	lk_start_ms = monotonic_ms();
+	log_worker_trace(seq, "compute:lk-begin");
 	ret = state->ive_lk_optical_flow(state->ive_handle,
 		&state->lk_prev_frame, &state->lk_curr_frame,
 		&state->lk_points, &state->lk_motion_vectors,
 		&state->lk_ctrl, 0);
-	state->perf_lk_ms += (uint64_t)(monotonic_ms() - lk_start_ms);
-	if (ret != MI_SUCCESS)
+	if (should_trace_crash_debug(seq)) {
+		printf("[optflow] trace seq=%" PRIu64
+			" compute:lk-end ret=%d\n",
+			seq, ret);
+		fflush(stdout);
+	}
+	if (lk_elapsed_ms)
+		*lk_elapsed_ms = (uint64_t)(monotonic_ms() - lk_start_ms);
+	if (point_statuses) {
+		for (index = 0; index < point_count; ++index)
+			point_statuses[index] = vectors[index].s32Status;
+	}
+	if (ret != MI_SUCCESS) {
+		if (failure_reason)
+			*failure_reason = OPTFLOW_LK_FAIL_LK_CALL;
 		return 0;
+	}
 
 	for (index = 0; index < point_count; ++index) {
 		double dx;
@@ -877,8 +1609,11 @@ static int compute_lk_motion(OptFlowState *state, OptflowLkMotion *motion)
 	}
 
 	motion->points_used = used_count;
-	if (used_count < 4)
+	if (used_count < OPTFLOW_LK_MIN_SURVIVORS) {
+		if (failure_reason)
+			*failure_reason = OPTFLOW_LK_FAIL_TOO_FEW_TRACKS;
 		return 0;
+	}
 
 	average_x /= used_count;
 	average_y /= used_count;
@@ -930,15 +1665,9 @@ static int prepare_ive_buffers(OptFlowState *state)
 	if (state->process_width < 64 || state->process_height < 64)
 		return -1;
 
-	state->prev_stride = align_up_u16((uint16_t)state->process_width, 16);
-
-	if (allocate_image(&state->prev_frame, E_MI_IVE_IMAGE_TYPE_U8C1,
-			(uint16_t)state->prev_stride,
-			(uint16_t)state->process_width,
-			(uint16_t)state->process_height) != 0)
-		return -1;
-
 	if (prepare_tracking_buffers(state) != 0)
+		return -1;
+	if (prepare_crop_staging_buffers(state) != 0)
 		goto fail;
 
 	if (state->ive_lk_optical_flow) {
@@ -971,8 +1700,8 @@ fail:
 	free_mem_info(&state->lk_points);
 	free_image(&state->lk_curr_frame);
 	free_image(&state->lk_prev_frame);
+	release_crop_staging_buffers(state);
 	release_tracking_buffers(state);
-	free_image(&state->prev_frame);
 	return -1;
 }
 
@@ -982,25 +1711,24 @@ static void release_ive_buffers(OptFlowState *state)
 	free_mem_info(&state->lk_points);
 	free_image(&state->lk_curr_frame);
 	free_image(&state->lk_prev_frame);
+	release_crop_staging_buffers(state);
 	release_tracking_buffers(state);
-	free_image(&state->prev_frame);
 }
 
-static void copy_luma_to_prev(OptFlowState *state, const MI_SYS_BufInfo_t *buf_info)
+static void copy_tracking_crop(uint8_t *dst, const OptFlowState *state,
+	const MI_SYS_BufInfo_t *buf_info)
 {
 	uint32_t row;
 	const uint8_t *src = buf_info->stFrameData.pVirAddr[0];
-	uint8_t *dst = state->prev_frame.apu8VirAddr[0];
 	uint32_t src_stride = buf_info->stFrameData.u32Stride[0];
 
-	for (row = 0; row < state->process_height; ++row) {
-		memcpy(dst + row * state->prev_stride,
-			src + row * src_stride,
-			state->process_width);
-	}
+	for (row = 0; row < state->process_height; ++row)
+		memcpy(dst + row * state->stage_stride,
+			src + row * src_stride + state->track_crop_x,
+			state->track_crop_width);
 }
 
-static int grab_frame_and_detect(OptFlowState *state, OptflowLkMotion *lk_motion)
+static int stage_tracking_crop(OptFlowState *state)
 {
 	union {
 		MI_SYS_BufInfo_t info;
@@ -1008,17 +1736,15 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowLkMotion *lk_motion
 	} buf_storage;
 	MI_SYS_BufInfo_t *buf_info = &buf_storage.info;
 	MI_SYS_BUF_HANDLE buf_handle = 0;
-	long long frame_start_ms;
-	long long scale_start_ms;
-	uint32_t cycle_ms;
-	unsigned int osd_color;
+	uint32_t slot_index;
+	uint8_t *slot_data;
 	MI_S32 ret;
 
 	memset(&buf_storage, 0, sizeof(buf_storage));
-	memset(lk_motion, 0, sizeof(*lk_motion));
-	frame_start_ms = monotonic_ms();
-	cycle_ms = (uint32_t)(frame_start_ms - state->init_ms);
-	osd_color = optflow_osd_cycle_color(cycle_ms);
+	slot_index = state->stage_write_slot;
+	slot_data = state->stage_slots[slot_index].data;
+	if (!slot_data)
+		return -1;
 
 	ret = MI_SYS_ChnOutputPortGetBuf(&state->vpe_port, buf_info, &buf_handle);
 	if (ret != MI_SUCCESS)
@@ -1031,37 +1757,141 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowLkMotion *lk_motion
 		return -1;
 	}
 
-	if (!state->have_prev_frame) {
-		if (should_trace_frame_debug(state)) {
-			printf("[optflow] debug copy-prev-start frame=%" PRIu64 "\n",
-				state->frames_seen);
-			fflush(stdout);
+	copy_tracking_crop(slot_data, state, buf_info);
+	(void)MI_SYS_ChnOutputPortPutBuf(buf_handle);
+
+	pthread_mutex_lock(&state->stage_lock);
+	state->stage_next_seq++;
+	state->stage_slots[slot_index].seq = state->stage_next_seq;
+	state->stage_slots[slot_index].ready = 1;
+	state->stage_published_slot = slot_index;
+	state->stage_published_seq = state->stage_slots[slot_index].seq;
+	state->stage_write_slot = (slot_index + 1u) % OPTFLOW_STAGE_SLOT_COUNT;
+	pthread_cond_signal(&state->stage_cond);
+	pthread_mutex_unlock(&state->stage_lock);
+	return 0;
+}
+
+static int fetch_latest_motion(OptFlowState *state, OptflowLkMotion *motion,
+	uint64_t *seq)
+{
+	if (!state || !motion || !seq)
+		return -1;
+
+	pthread_mutex_lock(&state->result_lock);
+	*motion = state->latest_motion;
+	*seq = state->latest_motion_seq;
+	pthread_mutex_unlock(&state->result_lock);
+	return 0;
+}
+
+static void publish_motion_result(OptFlowState *state,
+	const OptflowLkMotion *motion, uint64_t seq, uint64_t scale_ms,
+	uint64_t lk_ms, uint32_t corners)
+{
+	pthread_mutex_lock(&state->result_lock);
+	state->latest_motion = *motion;
+	state->latest_motion_seq = seq;
+	state->perf_runs++;
+	state->perf_scale_ms += scale_ms;
+	state->perf_lk_ms += lk_ms;
+	state->perf_total_ms += scale_ms + lk_ms;
+	state->perf_corner_sum += corners;
+	pthread_mutex_unlock(&state->result_lock);
+}
+
+static void *optflow_worker_thread(void *arg)
+{
+	OptFlowState *state = arg;
+	uint64_t consumed_seq = 0;
+
+	while (1) {
+		uint64_t seq;
+		uint64_t dropped_samples;
+		uint32_t slot;
+		uint64_t scale_ms;
+		uint64_t lk_ms;
+		uint32_t corners;
+		OptflowLkMotion motion;
+		OptflowLkFailureReason failure_reason;
+		long long scale_start_ms;
+		int valid;
+		MI_S32 point_statuses[OPTFLOW_LK_POINT_COUNT];
+
+		pthread_mutex_lock(&state->stage_lock);
+		while (state->worker_running &&
+		       state->stage_published_seq == consumed_seq)
+			pthread_cond_wait(&state->stage_cond, &state->stage_lock);
+		if (!state->worker_running) {
+			pthread_mutex_unlock(&state->stage_lock);
+			break;
 		}
-		copy_luma_to_prev(state, buf_info);
-		if (should_trace_frame_debug(state)) {
-			printf("[optflow] debug copy-prev-done frame=%" PRIu64 "\n",
-				state->frames_seen);
-			fflush(stdout);
+		seq = state->stage_published_seq;
+		dropped_samples = seq > consumed_seq ? seq - consumed_seq - 1u : 0u;
+		slot = state->stage_published_slot;
+		memcpy(state->worker_curr_crop, state->stage_slots[slot].data,
+			state->stage_stride * state->stage_height);
+		pthread_mutex_unlock(&state->stage_lock);
+
+		consumed_seq = seq;
+		if (!state->worker_have_prev_crop) {
+			memcpy(state->worker_prev_crop, state->worker_curr_crop,
+				state->stage_stride * state->stage_height);
+			state->worker_have_prev_crop = 1;
+			continue;
 		}
-		state->have_prev_frame = 1;
-		if (should_trace_frame_debug(state)) {
-			printf("[optflow] debug putbuf-first frame=%" PRIu64 "\n",
-				state->frames_seen);
-			fflush(stdout);
+
+		scale_start_ms = monotonic_ms();
+		log_worker_trace(seq, "worker:scale-begin");
+		update_tracking_buffers_from_crops(state,
+			state->worker_prev_crop, state->worker_curr_crop);
+		log_worker_trace(seq, "worker:scale-end");
+		scale_ms = (uint64_t)(monotonic_ms() - scale_start_ms);
+		log_worker_trace(seq, "worker:compute-begin");
+		valid = compute_lk_motion(state, &motion, seq, &lk_ms, &corners,
+			&failure_reason, point_statuses);
+		log_worker_trace(seq, "worker:compute-end");
+		if (!valid) {
+			maybe_dump_lk_inputs(state);
+			log_lk_failure(state, seq, dropped_samples, failure_reason,
+				&motion, corners, lk_ms, point_statuses);
 		}
-		(void)MI_SYS_ChnOutputPortPutBuf(buf_handle);
-		state->perf_total_ms += (uint64_t)(monotonic_ms() - frame_start_ms);
-		return 0;
+		log_worker_trace(seq, "worker:publish-begin");
+		publish_motion_result(state, &motion, seq, scale_ms, lk_ms, corners);
+		log_worker_trace(seq, "worker:publish-end");
+		if (valid || !OPTFLOW_KEEP_LAST_VALID_REFERENCE)
+			swap_buffers(&state->worker_prev_crop, &state->worker_curr_crop);
+		log_worker_trace(seq, "worker:swap-end");
 	}
 
-	if (!state->osd_region_ready && !state->osd_region_disabled) {
-		if (OPTFLOW_OSD_CALIBRATION_MODE)
-			optflow_osd_apply_calibration(state, frame_start_ms);
-		else if (cycle_ms < OPTFLOW_OSD_CENTER_HOLD_MS)
-			optflow_osd_center_marker(state);
-		else
-			optflow_osd_apply_motion(state, lk_motion);
+	return NULL;
+}
 
+static void apply_latest_motion_result(OptFlowState *state, long long now_ms)
+{
+	OptflowLkMotion motion;
+	uint64_t seq;
+	uint32_t cycle_ms;
+	unsigned int osd_color;
+	MI_S32 ret;
+
+	if (fetch_latest_motion(state, &motion, &seq) != 0)
+		return;
+	if (seq == 0 || seq == state->applied_motion_seq)
+		return;
+	(void)star6e_osd_set_track_points(motion.debug_point_x,
+		motion.debug_point_y, motion.debug_point_count);
+
+	cycle_ms = (uint32_t)(now_ms - state->init_ms);
+	osd_color = optflow_osd_cycle_color(cycle_ms);
+	if (OPTFLOW_OSD_CALIBRATION_MODE)
+		optflow_osd_apply_calibration(state, now_ms);
+	else if (cycle_ms < OPTFLOW_OSD_CENTER_HOLD_MS)
+		optflow_osd_center_marker(state);
+	else
+		optflow_osd_apply_motion(state, &motion);
+
+	if (!state->osd_region_ready && !state->osd_region_disabled) {
 		printf("[optflow] osd: creating region on frame=%" PRIu64 "\n",
 			state->frames_seen);
 		fflush(stdout);
@@ -1080,18 +1910,7 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowLkMotion *lk_motion
 		}
 	}
 
-	scale_start_ms = monotonic_ms();
-	update_tracking_buffers(state, buf_info);
-	state->perf_scale_ms += (uint64_t)(monotonic_ms() - scale_start_ms);
-	ret = compute_lk_motion(state, lk_motion);
 	if (state->osd_region_ready) {
-		if (OPTFLOW_OSD_CALIBRATION_MODE)
-			optflow_osd_apply_calibration(state, frame_start_ms);
-		else if (cycle_ms < OPTFLOW_OSD_CENTER_HOLD_MS)
-			optflow_osd_center_marker(state);
-		else
-			optflow_osd_apply_motion(state, lk_motion);
-
 		ret = star6e_osd_move_dot_region(state->osd_dot_x,
 			state->osd_dot_y, osd_color);
 		if (ret != MI_SUCCESS) {
@@ -1104,10 +1923,22 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowLkMotion *lk_motion
 			state->osd_region_disabled = 1;
 		}
 	}
-	copy_luma_to_prev(state, buf_info);
-	(void)MI_SYS_ChnOutputPortPutBuf(buf_handle);
-	state->perf_total_ms += (uint64_t)(monotonic_ms() - frame_start_ms);
-	return ret;
+
+	state->applied_motion_seq = seq;
+	if (motion.valid) {
+		printf("[optflow] lk tx=%.1f ty=%.1f rz=%.5f tracks=%u/%u dot=%u,%u frames=%" PRIu64 "\n",
+			motion.tx, motion.ty, motion.rz,
+			motion.points_used, motion.points_found,
+			state->osd_dot_x, state->osd_dot_y,
+			state->frames_seen);
+		fflush(stdout);
+	} else {
+		printf("[optflow] lk invalid tracks=%u/%u dot=%u,%u frames=%" PRIu64 "\n",
+			motion.points_used, motion.points_found,
+			state->osd_dot_x, state->osd_dot_y,
+			state->frames_seen);
+		fflush(stdout);
+	}
 }
 
 static void log_perf_summary(OptFlowState *state, long long now_ms)
@@ -1115,31 +1946,43 @@ static void log_perf_summary(OptFlowState *state, long long now_ms)
 	long long window_ms;
 	double avg_corners;
 	double rate_hz;
+	uint64_t perf_scale_ms;
+	uint64_t perf_lk_ms;
+	uint64_t perf_total_ms;
+	uint64_t perf_corner_sum;
+	uint32_t perf_runs;
 
 	window_ms = now_ms - state->perf_window_start_ms;
 	if (window_ms <= 0)
 		window_ms = 1;
-	avg_corners = state->perf_runs ?
-		(double)state->perf_corner_sum / (double)state->perf_runs : 0.0;
-	rate_hz = ((double)state->perf_runs * 1000.0) / (double)window_ms;
-
-	printf("[optflow] perf: window_ms=%lld runs=%u rate_hz=%.2f scale_ms=%" PRIu64
-		" lk_ms=%" PRIu64 " total_ms=%" PRIu64 " avg_corners=%.2f\n",
-		window_ms,
-		state->perf_runs,
-		rate_hz,
-		state->perf_scale_ms,
-		state->perf_lk_ms,
-		state->perf_total_ms,
-		avg_corners);
-	fflush(stdout);
-
-	state->perf_window_start_ms = now_ms;
+	pthread_mutex_lock(&state->result_lock);
+	perf_runs = state->perf_runs;
+	perf_scale_ms = state->perf_scale_ms;
+	perf_lk_ms = state->perf_lk_ms;
+	perf_total_ms = state->perf_total_ms;
+	perf_corner_sum = state->perf_corner_sum;
 	state->perf_corner_sum = 0;
 	state->perf_scale_ms = 0;
 	state->perf_lk_ms = 0;
 	state->perf_total_ms = 0;
 	state->perf_runs = 0;
+	pthread_mutex_unlock(&state->result_lock);
+	avg_corners = perf_runs ?
+		(double)perf_corner_sum / (double)perf_runs : 0.0;
+	rate_hz = ((double)perf_runs * 1000.0) / (double)window_ms;
+
+	printf("[optflow] perf: window_ms=%lld runs=%u rate_hz=%.2f scale_ms=%" PRIu64
+		" lk_ms=%" PRIu64 " total_ms=%" PRIu64 " avg_corners=%.2f\n",
+		window_ms,
+		perf_runs,
+		rate_hz,
+		perf_scale_ms,
+		perf_lk_ms,
+		perf_total_ms,
+		avg_corners);
+	fflush(stdout);
+
+	state->perf_window_start_ms = now_ms;
 }
 
 static void log_capability_summary(const OptFlowState *state, const char *phase)
@@ -1191,9 +2034,15 @@ OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
 	state->osd_calibration_anchor = -1;
 	optflow_osd_center_marker(state);
 	state->ive_handle = OPTFLOW_IVE_HANDLE;
-	state->lk_ctrl.u0q8MinEigThr = 16; //was 32
-	state->lk_ctrl.u8IterCount = 5; //was 10
-	state->lk_ctrl.u0q8Epsilon = 8; //was 4
+	if (pthread_mutex_init(&state->stage_lock, NULL) != 0 ||
+	    pthread_cond_init(&state->stage_cond, NULL) != 0 ||
+	    pthread_mutex_init(&state->result_lock, NULL) != 0) {
+		fprintf(stderr, "[optflow] ERROR: pthread init failed\n");
+		state->runtime_ive_present = 0;
+	}
+	state->lk_ctrl.u0q8MinEigThr = 8; //was 32
+	state->lk_ctrl.u8IterCount = 20; //was 10
+	state->lk_ctrl.u0q8Epsilon = 4; //was 4
 	if (vpe_port) {
 		memcpy(&state->vpe_port, vpe_port, sizeof(state->vpe_port));
 	}
@@ -1219,6 +2068,18 @@ OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
 	ret = MI_SYS_SetChnOutputPortDepth(&state->vpe_port, 2, 6);
 	if (ret == MI_SUCCESS)
 		state->frame_feed_ready = 1;
+	if (state->frame_feed_ready) {
+		state->worker_running = 1;
+		if (pthread_create(&state->worker_thread, NULL,
+		    optflow_worker_thread, state) == 0) {
+			state->worker_started = 1;
+		} else {
+			fprintf(stderr,
+				"[optflow] ERROR: worker pthread_create failed\n");
+			state->worker_running = 0;
+			state->frame_feed_ready = 0;
+		}
+	}
 
 done:
 
@@ -1230,15 +2091,12 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 {
 	long long now_ms;
 	int interval_ms;
-	OptflowLkMotion lk_motion;
-	int ran_detection;
 
 	if (!state)
 		return;
 
 	state->frames_seen++;
 	state->packets_seen += pack_count;
-	ran_detection = 0;
 	now_ms = monotonic_ms();
 	interval_ms = state->verbose ? OPTFLOW_VERBOSE_INTERVAL_MS :
 		OPTFLOW_DEFAULT_INTERVAL_MS;
@@ -1255,24 +2113,9 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 	    frame_feed_ready(state) &&
 	    (now_ms - state->last_process_ms) >= (long long)state->process_interval_ms) {
 		state->last_process_ms = now_ms;
-		ran_detection = 1;
-		(void)grab_frame_and_detect(state, &lk_motion);
-		state->perf_runs++;
-		if (lk_motion.valid) {
-			printf("[optflow] lk tx=%.1f ty=%.1f rz=%.5f tracks=%u/%u dot=%u,%u frames=%" PRIu64 "\n",
-				lk_motion.tx, lk_motion.ty, lk_motion.rz,
-				lk_motion.points_used, lk_motion.points_found,
-				state->osd_dot_x, state->osd_dot_y,
-				state->frames_seen);
-			fflush(stdout);
-		} else if (ran_detection) {
-			printf("[optflow] lk invalid tracks=%u/%u dot=%u,%u frames=%" PRIu64 "\n",
-				lk_motion.points_used, lk_motion.points_found,
-				state->osd_dot_x, state->osd_dot_y,
-				state->frames_seen);
-			fflush(stdout);
-		}
+		(void)stage_tracking_crop(state);
 	}
+	apply_latest_motion_result(state, now_ms);
 
 	if ((now_ms - state->last_log_ms) < interval_ms)
 		return;
@@ -1305,6 +2148,13 @@ void optflow_destroy(OptFlowState *state)
 	if (!state)
 		return;
 
+	if (state->worker_started) {
+		pthread_mutex_lock(&state->stage_lock);
+		state->worker_running = 0;
+		pthread_cond_signal(&state->stage_cond);
+		pthread_mutex_unlock(&state->stage_lock);
+		pthread_join(state->worker_thread, NULL);
+	}
 	if (state->osd_region_ready)
 		(void)star6e_osd_remove_dot_region();
 	release_ive_buffers(state);
@@ -1312,6 +2162,9 @@ void optflow_destroy(OptFlowState *state)
 		(void)state->ive_destroy(state->ive_handle);
 	if (state->ive_library)
 		dlclose(state->ive_library);
+	pthread_mutex_destroy(&state->result_lock);
+	pthread_cond_destroy(&state->stage_cond);
+	pthread_mutex_destroy(&state->stage_lock);
 
 	printf("[optflow] stop: uptime_ms=%lld encoded_frames=%" PRIu64
 		" packets=%" PRIu64 "\n",
