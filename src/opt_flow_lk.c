@@ -1,5 +1,7 @@
 #include "OptFlow.h"
 
+#include "opt_flow_impl.h"
+
 #include "star6e_osd_simple.h"
 
 #include <dlfcn.h>
@@ -11,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#define OPTFLOW_LOG_PREFIX "[optflow][LK]"
 
 enum {
 	OPTFLOW_HAVE_IVE_BINDINGS = 1,
@@ -441,14 +445,14 @@ static void maybe_dump_lk_inputs(OptFlowState *state)
 	if (write_grayscale_bmp("/tmp/optflow_lk_prev.bmp",
 			&state->lk_prev_frame) != 0) {
 		fprintf(stderr,
-			"[optflow] failed to write /tmp/optflow_lk_prev.bmp\n");
+			OPTFLOW_LOG_PREFIX " failed to write /tmp/optflow_lk_prev.bmp\n");
 		fflush(stderr);
 		return;
 	}
 	if (write_grayscale_bmp("/tmp/optflow_lk_curr.bmp",
 			&state->lk_curr_frame) != 0) {
 		fprintf(stderr,
-			"[optflow] failed to write /tmp/optflow_lk_curr.bmp\n");
+			OPTFLOW_LOG_PREFIX " failed to write /tmp/optflow_lk_curr.bmp\n");
 		fflush(stderr);
 		return;
 	}
@@ -488,7 +492,7 @@ static void log_worker_trace(uint64_t seq, const char *phase)
 	if (!should_trace_crash_debug(seq))
 		return;
 
-	printf("[optflow] trace seq=%" PRIu64 " %s\n", seq, phase);
+	printf(OPTFLOW_LOG_PREFIX " trace seq=%" PRIu64 " %s\n", seq, phase);
 	fflush(stdout);
 }
 
@@ -525,7 +529,7 @@ static void log_lk_failure(const OptFlowState *state, uint64_t seq,
 
 	format_point_statuses(status_buffer, sizeof(status_buffer),
 		point_statuses, corner_count);
-	printf("[optflow] lk-debug reason=%s seq=%" PRIu64
+	printf(OPTFLOW_LOG_PREFIX " lk-debug reason=%s seq=%" PRIu64
 		" dropped=%" PRIu64 " found=%u used=%u corners=%u lk_ms=%" PRIu64
 		" track=%ux%u crop=%ux%u center=%.1f,%.1f status=%s\n",
 		optflow_lk_failure_name(reason),
@@ -638,7 +642,7 @@ static void trace_frame_debug(const OptFlowState *state, const char *phase,
 	if (!should_trace_frame_debug(state))
 		return;
 
-	printf("[optflow] debug %s frame=%" PRIu64
+	printf(OPTFLOW_LOG_PREFIX " debug %s frame=%" PRIu64
 		" type=%u layout=%u pix=%u wh=%ux%u stride=%u vir0=%p phy0=0x%llx handle=%d\n",
 		phase,
 		state->frames_seen,
@@ -998,7 +1002,7 @@ static void optflow_osd_apply_calibration(OptFlowState *state,
 	norm_y = state->osd_space_height > STAR6E_OSD_DOT_H ?
 		(double)state->osd_dot_y /
 		(double)(state->osd_space_height - STAR6E_OSD_DOT_H) : 0.0;
-	printf("[optflow] osd-cal anchor=%s req=%u,%u max=%u,%u norm=%.3f,%.3f\n",
+	printf(OPTFLOW_LOG_PREFIX " osd-cal anchor=%s req=%u,%u max=%u,%u norm=%.3f,%.3f\n",
 		optflow_osd_anchor_name(anchor),
 		state->osd_dot_x, state->osd_dot_y,
 		optflow_osd_max_x(state), optflow_osd_max_y(state),
@@ -1531,7 +1535,7 @@ static int compute_lk_motion(OptFlowState *state, OptflowLkMotion *motion,
 	point_count = select_lk_points(state, points,
 		state->lk_points.u32Size / sizeof(points[0]));
 	if (should_trace_crash_debug(seq)) {
-		printf("[optflow] trace seq=%" PRIu64
+		printf(OPTFLOW_LOG_PREFIX " trace seq=%" PRIu64
 			" compute:select-end count=%u center=%.1f,%.1f\n",
 			seq, point_count, state->lk_center_x, state->lk_center_y);
 		fflush(stdout);
@@ -1557,7 +1561,7 @@ static int compute_lk_motion(OptFlowState *state, OptflowLkMotion *motion,
 		&state->lk_points, &state->lk_motion_vectors,
 		&state->lk_ctrl, 0);
 	if (should_trace_crash_debug(seq)) {
-		printf("[optflow] trace seq=%" PRIu64
+		printf(OPTFLOW_LOG_PREFIX " trace seq=%" PRIu64
 			" compute:lk-end ret=%d\n",
 			seq, ret);
 		fflush(stdout);
@@ -1877,19 +1881,19 @@ static void apply_latest_motion_result(OptFlowState *state, long long now_ms)
 
 	if (state->show_osd && !state->osd_region_ready &&
 	    !state->osd_region_disabled) {
-		printf("[optflow] osd: creating region on frame=%" PRIu64 "\n",
+		printf(OPTFLOW_LOG_PREFIX " osd: creating region on frame=%" PRIu64 "\n",
 			state->frames_seen);
 		fflush(stdout);
 		ret = star6e_osd_add_dot_region(state->osd_dot_x,
 			state->osd_dot_y, osd_color);
 		if (ret == MI_SUCCESS) {
 			state->osd_region_ready = 1;
-			printf("[optflow] osd: region ready\n");
+			printf(OPTFLOW_LOG_PREFIX " osd: region ready\n");
 			fflush(stdout);
 		} else {
 			state->osd_region_disabled = 1;
 			fprintf(stderr,
-				"[optflow] osd: disabling region after create failure ret=%d\n",
+				OPTFLOW_LOG_PREFIX " osd: disabling region after create failure ret=%d\n",
 				ret);
 			fflush(stderr);
 		}
@@ -1900,7 +1904,7 @@ static void apply_latest_motion_result(OptFlowState *state, long long now_ms)
 			state->osd_dot_y, osd_color);
 		if (ret != MI_SUCCESS) {
 			fprintf(stderr,
-				"[optflow] osd: move failed ret=%d frame=%" PRIu64
+				OPTFLOW_LOG_PREFIX " osd: move failed ret=%d frame=%" PRIu64
 				" x=%u y=%u\n",
 				ret, state->frames_seen, state->osd_dot_x, state->osd_dot_y);
 			fflush(stderr);
@@ -1911,14 +1915,14 @@ static void apply_latest_motion_result(OptFlowState *state, long long now_ms)
 
 	state->applied_motion_seq = seq;
 	if (motion.valid) {
-		printf("[optflow] lk tx=%.1f ty=%.1f rz=%.5f tracks=%u/%u dot=%u,%u frames=%" PRIu64 "\n",
+		printf(OPTFLOW_LOG_PREFIX " lk tx=%.1f ty=%.1f rz=%.5f tracks=%u/%u dot=%u,%u frames=%" PRIu64 "\n",
 			motion.tx, motion.ty, motion.rz,
 			motion.points_used, motion.points_found,
 			state->osd_dot_x, state->osd_dot_y,
 			state->frames_seen);
 		fflush(stdout);
 	} else {
-		printf("[optflow] lk invalid tracks=%u/%u dot=%u,%u frames=%" PRIu64 "\n",
+		printf(OPTFLOW_LOG_PREFIX " lk invalid tracks=%u/%u dot=%u,%u frames=%" PRIu64 "\n",
 			motion.points_used, motion.points_found,
 			state->osd_dot_x, state->osd_dot_y,
 			state->frames_seen);
@@ -1956,7 +1960,7 @@ static void log_perf_summary(OptFlowState *state, long long now_ms)
 		(double)perf_corner_sum / (double)perf_runs : 0.0;
 	rate_hz = ((double)perf_runs * 1000.0) / (double)window_ms;
 
-	printf("[optflow] perf: window_ms=%lld runs=%u rate_hz=%.2f scale_ms=%" PRIu64
+	printf(OPTFLOW_LOG_PREFIX " perf: window_ms=%lld runs=%u rate_hz=%.2f scale_ms=%" PRIu64
 		" lk_ms=%" PRIu64 " total_ms=%" PRIu64 " avg_corners=%.2f\n",
 		window_ms,
 		perf_runs,
@@ -1972,7 +1976,7 @@ static void log_perf_summary(OptFlowState *state, long long now_ms)
 
 static void log_capability_summary(const OptFlowState *state, const char *phase)
 {
-	printf("[optflow] %s: capture=%ux%u build_ive=%s runtime_ive=%s frame_feed=%s\n",
+	printf(OPTFLOW_LOG_PREFIX " %s: capture=%ux%u build_ive=%s runtime_ive=%s frame_feed=%s\n",
 		phase,
 		state->capture_width,
 		state->capture_height,
@@ -1982,10 +1986,10 @@ static void log_capability_summary(const OptFlowState *state, const char *phase)
 
 	if (!OPTFLOW_HAVE_IVE_BINDINGS || !state->runtime_ive_present ||
 	    !frame_feed_ready(state)) {
-		printf("[optflow] disabled: IVE tracking is not available in this build/runtime yet"
+		printf(OPTFLOW_LOG_PREFIX " disabled: IVE tracking is not available in this build/runtime yet"
 			" (missing bindings, runtime library, or raw-frame feed path)\n");
 	} else {
-		printf("[optflow] lk: tx/ty are image-space pixels; osd-space=%ux%u"
+		printf(OPTFLOW_LOG_PREFIX " lk: tx/ty are image-space pixels; osd-space=%ux%u"
 			" track=%ux%u fps=%u\n",
 			state->osd_space_width, state->osd_space_height,
 			state->track_width, state->track_height, state->process_fps);
@@ -1994,7 +1998,7 @@ static void log_capability_summary(const OptFlowState *state, const char *phase)
 	fflush(stdout);
 }
 
-OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
+void *optflow_lk_create_impl(uint32_t capture_width, uint32_t capture_height,
 	uint32_t osd_space_width, uint32_t osd_space_height,
 	int verbose, uint32_t fps, int show_osd,
 	const void *vpe_port, const void *osd_port)
@@ -2024,7 +2028,7 @@ OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
 	if (pthread_mutex_init(&state->stage_lock, NULL) != 0 ||
 	    pthread_cond_init(&state->stage_cond, NULL) != 0 ||
 	    pthread_mutex_init(&state->result_lock, NULL) != 0) {
-		fprintf(stderr, "[optflow] ERROR: pthread init failed\n");
+		fprintf(stderr, OPTFLOW_LOG_PREFIX " ERROR: pthread init failed\n");
 		state->runtime_ive_present = 0;
 	}
 	state->lk_ctrl.u0q8MinEigThr = 8; //was 32
@@ -2064,7 +2068,7 @@ OptFlowState *optflow_create(uint32_t capture_width, uint32_t capture_height,
 			state->worker_started = 1;
 		} else {
 			fprintf(stderr,
-				"[optflow] ERROR: worker pthread_create failed\n");
+				OPTFLOW_LOG_PREFIX " ERROR: worker pthread_create failed\n");
 			state->worker_running = 0;
 			state->frame_feed_ready = 0;
 		}
@@ -2076,10 +2080,11 @@ done:
 	return state;
 }
 
-void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
+void optflow_lk_on_stream_impl(void *opaque_state, uint32_t pack_count)
 {
 	long long now_ms;
 	int interval_ms;
+	OptFlowState *state = opaque_state;
 
 	if (!state)
 		return;
@@ -2091,7 +2096,7 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 		OPTFLOW_DEFAULT_INTERVAL_MS;
 
 	if (!state->first_frame_logged) {
-		printf("[optflow] stream-online: first encoded frame observed; tracker state=%s\n",
+		printf(OPTFLOW_LOG_PREFIX " stream-online: first encoded frame observed; tracker state=%s\n",
 			(OPTFLOW_HAVE_IVE_BINDINGS && state->runtime_ive_present &&
 			 frame_feed_ready(state)) ? "active" : "standby");
 		fflush(stdout);
@@ -2113,7 +2118,7 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 
 	if (OPTFLOW_HAVE_IVE_BINDINGS && state->runtime_ive_present &&
 	    frame_feed_ready(state)) {
-		printf("[optflow] active: encoded_frames=%" PRIu64 " packets=%" PRIu64
+		printf(OPTFLOW_LOG_PREFIX " active: encoded_frames=%" PRIu64 " packets=%" PRIu64
 			" track=%ux%u lk=%s\n",
 			state->frames_seen,
 			state->packets_seen,
@@ -2122,7 +2127,7 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 			state->ive_lk_optical_flow ? "yes" : "no");
 		log_perf_summary(state, now_ms);
 	} else {
-		printf("[optflow] standby: encoded_frames=%" PRIu64 " packets=%" PRIu64
+		printf(OPTFLOW_LOG_PREFIX " standby: encoded_frames=%" PRIu64 " packets=%" PRIu64
 			" 6dof=unavailable\n",
 			state->frames_seen,
 			state->packets_seen);
@@ -2132,8 +2137,10 @@ void optflow_on_stream(OptFlowState *state, uint32_t pack_count)
 	fflush(stdout);
 }
 
-void optflow_destroy(OptFlowState *state)
+void optflow_lk_destroy_impl(void *opaque_state)
 {
+	OptFlowState *state = opaque_state;
+
 	if (!state)
 		return;
 
@@ -2155,7 +2162,7 @@ void optflow_destroy(OptFlowState *state)
 	pthread_cond_destroy(&state->stage_cond);
 	pthread_mutex_destroy(&state->stage_lock);
 
-	printf("[optflow] stop: uptime_ms=%lld encoded_frames=%" PRIu64
+	printf(OPTFLOW_LOG_PREFIX " stop: uptime_ms=%lld encoded_frames=%" PRIu64
 		" packets=%" PRIu64 "\n",
 		monotonic_ms() - state->init_ms,
 		state->frames_seen,

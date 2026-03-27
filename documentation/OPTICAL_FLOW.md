@@ -12,6 +12,11 @@ It currently produces one motion output:
   - `lk ty`: vertical image translation in full-frame pixels
   - `lk rz`: image-plane rotation proxy derived from tracked feature motion
 
+The implementation is selected by `optflow.mode` in `venc.json`.
+
+- `"lk"` (default): vendor LK tracking on a downsampled image pair
+- `"sad"`: legacy SAD-based motion ROI plus planar translation/scale estimate
+
 This is not a full 6-DoF visual odometry system and it is not a strict sparse
 Lucas-Kanade implementation. The current hardcoded mode disables the older SAD
 ROI path and the CPU planar estimator and keeps only the vendor LK optical
@@ -40,12 +45,20 @@ Current interval:
 - default effective interval: about 200 ms
 - default effective processing rate: about 5 Hz
 
+Current mode:
+- configured by `optflow.mode` in `venc.json`
+- default value: `"lk"`
+
 The debug OSD overlay is controlled separately by `optflow.showOSD` in
 `venc.json`.
 
 - default value: `true`
 - when `false`, optflow tracking still runs but the Star6E RGN OSD module is
   not configured and no marker/debug points are drawn
+- for `optflow.mode = "lk"`, the overlay is a red marker plus green tracked
+  feature points
+- for `optflow.mode = "sad"`, the overlay is a red marker moved by SAD
+  `tx`/`ty`; the LK green debug points are not used
 
 So:
 - encoded stream rate can be around 60 fps
@@ -219,6 +232,23 @@ Meaning:
 
 These are aggregated millisecond-resolution timings for the current logging
 window, not per-frame microbenchmarks.
+
+SAD emits a similar aggregated perf log. Its fields summarize the SAD path
+over a rolling window of about 3 seconds or 100 SAD executions, whichever
+comes first.
+
+Example shape:
+- `[optflow][SAD] perf: window_ms=... runs=... rate_hz=... getbuf_ms=... sad_ms=... box_ms=... planar_ms=... copy_prev_ms=... osd_ms=... total_ms=... avg_tracks=used/found`
+
+Meaning:
+- `getbuf_ms`: total time spent borrowing SYS/VPE buffers
+- `sad_ms`: total time spent inside `MI_IVE_Sad(...)`
+- `box_ms`: total time spent deriving the motion ROI from the threshold map
+- `planar_ms`: total time spent in the CPU planar tracking and reduction path
+- `copy_prev_ms`: total time spent updating the persistent previous-frame buffer
+- `osd_ms`: total time spent updating the red RGN marker
+- `total_ms`: total time spent in the processed SAD path
+- `avg_tracks=used/found`: average inlier/initial tracked sample counts over the window
 
 ### 3. Motion outputs
 

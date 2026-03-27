@@ -170,9 +170,19 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* optflow */
 	cfg->optflow.enabled = true;
+	safe_strcpy(cfg->optflow.mode, sizeof(cfg->optflow.mode), "lk");
 	cfg->optflow.show_osd = true;
 	cfg->optflow.verbose = false;
 	cfg->optflow.fps = 5;
+}
+
+static void normalize_optflow_mode(VencConfigOptflow *s)
+{
+	if (strcmp(s->mode, "lk") == 0)
+		return;
+	if (strcmp(s->mode, "sad") == 0)
+		return;
+	safe_strcpy(s->mode, sizeof(s->mode), "lk");
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -429,6 +439,9 @@ static void load_optflow(const cJSON *root, VencConfigOptflow *s)
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "optflow");
 	if (!obj) return;
 	s->enabled = json_get_bool(obj, "enabled", s->enabled);
+	safe_strcpy(s->mode, sizeof(s->mode),
+		json_get_string(obj, "mode", s->mode));
+	normalize_optflow_mode(s);
 	s->show_osd = json_get_bool(obj, "showOSD", s->show_osd);
 	s->verbose = json_get_bool(obj, "verbose", s->verbose);
 	s->fps = (uint32_t)json_get_int(obj, "fps", (int)s->fps);
@@ -688,6 +701,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	cJSON *optflow = cJSON_AddObjectToObject(root, "optflow");
 	if (optflow) {
 		cJSON_AddBoolToObject(optflow, "enabled", cfg->optflow.enabled);
+		cJSON_AddStringToObject(optflow, "mode", cfg->optflow.mode);
 		cJSON_AddBoolToObject(optflow, "showOSD", cfg->optflow.show_osd);
 		cJSON_AddBoolToObject(optflow, "verbose", cfg->optflow.verbose);
 		cJSON_AddNumberToObject(optflow, "fps", cfg->optflow.fps);

@@ -129,6 +129,7 @@ typedef struct {
 
 typedef struct {
 	bool enabled;
+	char mode[16];          /* "lk" or "sad" */
 	bool show_osd;
 	bool verbose;
 	uint32_t fps;

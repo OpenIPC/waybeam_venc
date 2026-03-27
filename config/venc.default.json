@@ -75,6 +75,7 @@
   },
   "optflow": {
     "enabled": false,
+    "mode": "lk",
     "showOSD": true,
     "verbose": false,
     "fps": 5

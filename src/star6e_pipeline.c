@@ -1039,6 +1039,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 			state->image_height,
 			vcfg->optflow.verbose ? 1 : 0,
 			vcfg->optflow.fps,
+			vcfg->optflow.mode,
 			vcfg->optflow.show_osd ? 1 : 0,
 			&state->vpe_port,
 			&state->vpe_port);
