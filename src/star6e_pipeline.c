@@ -1,6 +1,6 @@
 #include "star6e_pipeline.h"
 
-#include "OptFlow.h"
+#include "opt_flow.h"
 #include "codec_config.h"
 #include "codec_types.h"
 #include "eis.h"

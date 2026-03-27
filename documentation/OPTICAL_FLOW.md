@@ -12,15 +12,21 @@ It currently produces one motion output:
   - `lk ty`: vertical image translation in full-frame pixels
   - `lk rz`: image-plane rotation proxy derived from tracked feature motion
 
+2. A SAD-based planar estimate:
+  - `tx`: horizontal image translation in full-frame pixels
+  - `ty`: vertical image translation in full-frame pixels
+  - `tz`: relative image-plane scale proxy derived from the residual flow field
+
 The implementation is selected by `optflow.mode` in `venc.json`.
 
 - `"lk"` (default): vendor LK tracking on a downsampled image pair
-- `"sad"`: legacy SAD-based motion ROI plus planar translation/scale estimate
+- `"sad"`: hardware SAD ROI detection plus CPU planar translation/scale estimate
 
 This is not a full 6-DoF visual odometry system and it is not a strict sparse
-Lucas-Kanade implementation. The current hardcoded mode disables the older SAD
-ROI path and the CPU planar estimator and keeps only the vendor LK optical
-flow path on a downsampled `U8C1` image pair.
+Lucas-Kanade implementation. Both modes are available at runtime through
+`optflow.mode`. LK uses SigmaStar vendor optical flow on a reduced luma pair.
+SAD uses `MI_IVE_Sad(...)` for same-position motion energy plus a CPU matcher
+that reduces selected patch displacements into planar `tx`, `ty`, and `tz`.
 
 ## Where It Runs
 
@@ -101,35 +107,45 @@ If validation fails:
 If there is no previous frame yet:
 - `copy_luma_to_prev(...)` copies the current luma plane into the persistent
   previous-frame buffer
+- the SAD path also seeds its downsampled previous tracking buffer from the
+  same frame
 - `have_prev_frame` is set
 - the buffer is returned immediately
-- no LK motion is emitted for this first frame
+- no LK or SAD motion is emitted for this first frame
 
-This is required because the LK path compares the current frame against the
+This is required because both LK and SAD compare the current frame against the
 previous frame.
 
-### 3. Downsample previous and current luma
+### 3. Prepare the tracking images
 
-Both frames are downsampled into persistent tracking buffers.
+Both modes keep a reduced luma representation for CPU-side tracking work.
 
-Current implementation:
+Current LK implementation:
 - center-crop the source frame to exactly half of the full frame width
 - keep the full frame height
 - then scale that cropped image to a target width up to 160 pixels
 - height scaled to preserve the cropped aspect ratio
 - minimum size clamped to avoid degenerate cases
 
-The goal is to reduce CPU cost while keeping enough structure for LK tracking.
+Current SAD implementation:
+- scales the full processing luma plane into a persistent tracking image up to
+  `OPTFLOW_TRACK_WIDTH` pixels wide
+- preserves aspect ratio
+- seeds the previous tracking buffer once, then only downsamples the current
+  frame on subsequent solves and promotes it after processing
+
+The goal is to reduce CPU cost while keeping enough structure for stable
+matching and reduction.
 
 Example:
 - `1920x1080` source frame
 - centered crop to `960x1080`
 - scaled tracking image to `160x180`
 
-### 4. Run LK optical flow
+### 4. Run the selected motion solver
 
-If the runtime exports `MI_IVE_LkOpticalFlow(...)`, the tracker runs the LK
-path on the downsampled luma pair.
+If `optflow.mode = "lk"` and the runtime exports `MI_IVE_LkOpticalFlow(...)`,
+the tracker runs the LK path on the reduced luma pair.
 
 Important implementation constraints from the SigmaStar SDK:
 - LK input size must stay within `64x64` to `720x576`
@@ -171,19 +187,38 @@ the backing point and motion-vector buffers still reserve space for up to 16.
 `lk rz` is an image-plane rotation proxy from the residual flow field around
 the image center. It is not a full 3D yaw/pitch/roll estimate.
 
+If `optflow.mode = "sad"`, the tracker runs two stages:
+
+1. Hardware SAD stage:
+  - `MI_IVE_Sad(...)` compares the previous full-resolution luma plane against
+    the current one at the same coordinates
+  - the threshold output is reduced into a motion ROI for debugging/logging
+
+2. CPU planar stage:
+  - a set of candidate tracking patches is evaluated on the reduced tracking
+    images
+  - candidates are ranked by texture strength
+  - the selected points prefer strong texture, quadrant coverage, and minimum
+    spacing between points
+  - each selected patch is matched with a coarse-to-fine local search
+  - the inner patch SAD loop uses an early-exit cutoff and a Star6E NEON fast
+    path when available
+  - the winning integer offset is refined with sub-pixel interpolation
+  - the resulting displacements are reduced into planar `tx`, `ty`, and `tz`
+    using confidence weighting and adaptive outlier rejection
+
+`tx` and `ty` are full-frame image-plane translation estimates. `tz` is a
+relative scale proxy derived from how the residual flow expands or contracts
+with radius from the image center.
+
 ### 5. Update previous-frame history
 
-The worker normally advances the previous-frame reference only after a valid
-LK result.
+The worker advances the persistent previous full-resolution luma frame after
+each processed solve. The SAD path also promotes the current downsampled track
+image so the next solve can reuse it directly.
 
-Current default behavior:
-- valid LK result: promote the current crop to become the next reference
-- invalid LK result: keep the last valid reference crop and try to recover on
-  the next frame using a longer-baseline comparison
-
-This avoids permanently dropping motion when an intermediate frame fails to
-produce a usable LK estimate, at the cost of making the next recovery attempt
-span a larger displacement.
+This keeps the next comparison aligned with the most recent processed frame and
+avoids repeatedly re-downsampling the previous tracking image on the SAD path.
 
 ### 6. Return the frame buffer
 
@@ -263,6 +298,72 @@ Meaning:
 - `found`: candidate textured points passed to LK
 - `used`: LK tracks with successful status used in reduction
 
+#### SAD log
+
+Example shape:
+- `[optflow][SAD] planar tx=... ty=... tz=... tracks=used/found ...`
+
+Meaning:
+- `tx`, `ty`: SAD-derived image-plane translation
+- `tz`: SAD-derived relative scale proxy
+- `found`: selected candidate patches passed into the planar reduction
+- `used`: inlier matches that survived adaptive outlier rejection and were used
+  in the weighted reduction
+
+## SAD Tuning Knobs
+
+The main SAD tuning constants currently live near the top of
+`src/opt_flow_sad.c`.
+
+The most important ones are:
+
+- `OPTFLOW_TRACK_WIDTH`
+  - target width of the reduced SAD tracking image
+  - higher values keep more detail and can improve accuracy
+  - lower values reduce CPU cost
+
+- `OPTFLOW_TRACK_CANDIDATE_COLS`
+- `OPTFLOW_TRACK_CANDIDATE_ROWS`
+  - size of the dense candidate grid used before feature selection
+  - higher values search more possible feature locations and can improve point
+    quality and coverage
+  - higher values also increase `planar_ms`
+
+- `OPTFLOW_TRACK_SELECT_COUNT`
+  - maximum number of selected candidate patches passed into the matcher
+  - higher values can improve robustness when the scene is rich in texture
+  - lower values reduce cost and can reduce contamination from weak features
+
+- `OPTFLOW_TRACK_PATCH_RADIUS`
+  - half-size of each local SAD patch
+  - larger patches are often more stable on noisy or weak-texture scenes
+  - smaller patches can react better to fine local structure and reduce cost
+
+- `OPTFLOW_TRACK_SEARCH_RANGE`
+  - maximum per-axis local displacement searched for each patch
+  - larger values help when frame-to-frame motion is bigger
+  - smaller values reduce cost and reduce false matches in quiet scenes
+
+- `OPTFLOW_TRACK_MIN_TEXTURE`
+  - minimum patch texture score required before a candidate can be selected
+  - raising it filters weak or flat patches more aggressively
+  - lowering it increases point count in low-detail scenes but can reduce match quality
+
+- `OPTFLOW_TRACK_MIN_SPACING`
+  - minimum spacing between selected candidate patches
+  - larger values improve spatial diversity and reduce clustering
+  - smaller values allow denser sampling in locally textured regions
+
+- `OPTFLOW_TRACK_MAX_RESIDUAL_SQ`
+  - retained as a hard residual clamp on top of the adaptive inlier logic
+  - acts as a safety bound against obviously bad matches
+
+Practical tuning order:
+
+1. Start with `OPTFLOW_TRACK_MIN_TEXTURE` and `OPTFLOW_TRACK_MIN_SPACING`
+2. Then tune `OPTFLOW_TRACK_CANDIDATE_COLS`, `OPTFLOW_TRACK_CANDIDATE_ROWS`, and `OPTFLOW_TRACK_SELECT_COUNT`
+3. Only after that adjust `OPTFLOW_TRACK_PATCH_RADIUS`, `OPTFLOW_TRACK_SEARCH_RANGE`, or `OPTFLOW_TRACK_WIDTH`
+
 ## Current Limitations
 
 The current implementation is intentionally simple.
@@ -277,6 +378,10 @@ Known limits:
 - no explicit moving-object segmentation
 - configured processing cadence is clamped to the supported range
 - `lk rz` is only an image-plane rotation proxy, not full 3D attitude
+- `tz` is only a relative image-plane scale proxy, not metric depth
+- the SAD matcher still uses local patch matching, not a full homography or
+  dense optical-flow solve
+- the SAD sub-pixel refinement is axis-wise, not a full 2D quadratic surface fit
 
 Because of that, the current output should be interpreted as:
 - a useful relative image-motion signal
@@ -287,12 +392,13 @@ Because of that, the current output should be interpreted as:
 After a frame is retrieved from the VPE output port, the current logic does:
 
 1. validate the buffer
-2. bootstrap previous frame if needed
-3. downsample previous and current luma into tracking buffers
-4. run LK optical flow on the reduced image pair
-5. derive `lk tx`, `lk ty`, and `lk rz`
-6. copy current luma into previous-frame state
-7. return the SYS buffer
+2. bootstrap previous-frame state if needed
+3. prepare the reduced tracking image for the selected mode
+4. run either LK vendor optical flow or the SAD ROI plus CPU planar matcher
+5. derive either `lk tx`/`lk ty`/`lk rz` or `tx`/`ty`/`tz`
+6. update previous-frame state and optional SAD tracking buffers
+7. update the optional OSD marker
+8. return the SYS buffer
 
 This gives the project a low-cost relative motion signal that is already useful
 for debugging and future stabilization or guidance work, while staying within

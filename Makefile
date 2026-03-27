@@ -49,6 +49,7 @@ CC := $(MARUKO_CC)
 SRC := src/main.c src/backend_maruko.c $(MARUKO_ONLY_SRC) $(HELPER_SRC) $(CONFIG_SRC)
 DRV := $(MARUKO_MI_LIB_DIR)
 DRV_EXTRA := $(MARUKO_COMMON_LIB_DIR)
+SOC_CFLAGS :=
 ifeq ($(abspath $(DRV_EXTRA)),$(abspath $(DRV)))
 DRV_EXTRA :=
 endif
@@ -66,6 +67,7 @@ CC := $(STAR6E_CC)
 SRC := src/main.c src/backend_star6e.c $(STAR6E_ONLY_SRC) $(HELPER_SRC) $(CONFIG_SRC)
 DRV := $(STAR6E_DRV)
 DRV_EXTRA :=
+SOC_CFLAGS := -mfpu=neon-vfpv4
 SOC_DEFS := -DPLATFORM_STAR6E -DHAVE_BACKEND_STAR6E=1
 SOC_LDFLAGS := -Wl,-rpath-link,$(DRV) -Wl,--unresolved-symbols=ignore-in-shared-libs -Wl,-E
 SOC_LIBS := -lmi_rgn -lm
@@ -76,7 +78,7 @@ else
 $(error Unsupported SOC_BUILD '$(SOC_BUILD)'; expected 'star6e' or 'maruko')
 endif
 
-CFLAGS += $(COMMON_CFLAGS) $(SOC_DEFS)
+CFLAGS += $(COMMON_CFLAGS) $(SOC_CFLAGS) $(SOC_DEFS)
 LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
 
 .PHONY: help all build lint stage clean toolchain toolchain-maruko remote-test verify pre-pr \
@@ -128,7 +130,7 @@ check:
 lint: $(TOOLCHAIN_TARGET) check
 	$(CC) $(CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -Wno-old-style-declaration -fsyntax-only $(SRC)
 
-$(TARGET): $(SRC) include/OptFlow.h include/backend.h include/codec_config.h include/codec_types.h include/file_util.h include/h26x_param_sets.h include/h26x_util.h include/isp_runtime.h include/maruko_bindings.h include/maruko_config.h include/maruko_controls.h include/maruko_output.h include/maruko_pipeline.h include/maruko_runtime.h include/maruko_video.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/sdk_quiet.h include/star6e_audio.h include/star6e_controls.h include/star6e_cus3a.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_pipeline.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_runtime.h include/star6e_video.h include/stream_metrics.h include/venc_config.h include/venc_httpd.h include/venc_api.h include/sensor_select.h include/venc_ring.h include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h include/imu_bmi270.h include/eis.h include/eis_ring.h include/eis_gyroglide.h $(if $(filter 1,$(BUILD_MARUKO_SHIM)),$(MARUKO_SHIM_SO),)
+$(TARGET): $(SRC) include/opt_flow.h include/backend.h include/codec_config.h include/codec_types.h include/file_util.h include/h26x_param_sets.h include/h26x_util.h include/isp_runtime.h include/maruko_bindings.h include/maruko_config.h include/maruko_controls.h include/maruko_output.h include/maruko_pipeline.h include/maruko_runtime.h include/maruko_video.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/sdk_quiet.h include/star6e_audio.h include/star6e_controls.h include/star6e_cus3a.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_pipeline.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_runtime.h include/star6e_video.h include/stream_metrics.h include/venc_config.h include/venc_httpd.h include/venc_api.h include/sensor_select.h include/venc_ring.h include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h include/imu_bmi270.h include/eis.h include/eis_ring.h include/eis_gyroglide.h $(if $(filter 1,$(BUILD_MARUKO_SHIM)),$(MARUKO_SHIM_SO),)
 	$(CC) $(CFLAGS) $(LDFLAGS) $(SRC) -L$(DRV) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) -Ltools $(BASE_LIBS) $(SOC_LIBS) -o $@
 
 $(TEST_TARGET): $(TEST_SRC) include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h

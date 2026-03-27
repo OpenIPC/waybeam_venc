@@ -1,4 +1,4 @@
-#include "OptFlow.h"
+#include "opt_flow.h"
 
 #include "opt_flow_impl.h"
 
@@ -12,6 +12,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 #define OPTFLOW_LOG_PREFIX "[optflow][SAD]"
 
@@ -28,9 +32,14 @@ enum {
 	OPTFLOW_TRACK_WIDTH = 320,
 	OPTFLOW_TRACK_GRID_COLS = 8,
 	OPTFLOW_TRACK_GRID_ROWS = 5,
+	OPTFLOW_TRACK_SELECT_COUNT =
+		 OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS,
+	OPTFLOW_TRACK_CANDIDATE_COLS = 12,
+	OPTFLOW_TRACK_CANDIDATE_ROWS = 8,
 	OPTFLOW_TRACK_PATCH_RADIUS = 6,
 	OPTFLOW_TRACK_SEARCH_RANGE = 8,
 	OPTFLOW_TRACK_MIN_TEXTURE = 450,
+	OPTFLOW_TRACK_MIN_SPACING = 18,
 	OPTFLOW_TRACK_MAX_RESIDUAL_SQ = 9 * 9,
 };
 
@@ -205,6 +214,12 @@ typedef struct {
 	uint64_t copy_prev_ms;
 	uint64_t total_ms;
 } OptflowSadPerfSample;
+
+typedef struct {
+	int center_x;
+	int center_y;
+	int texture_score;
+} OptflowTrackCandidate;
 
 struct OptFlowState {
 	uint32_t capture_width;
@@ -555,6 +570,28 @@ static void downsample_luma(uint8_t *dst, uint32_t dst_width,
 	}
 }
 
+static void downsample_track_frame(uint8_t *dst, const OptFlowState *state,
+	const uint8_t *src, uint32_t src_stride)
+{
+	if (!dst || state->track_width == 0 || state->track_height == 0)
+		return;
+
+	downsample_luma(dst, state->track_width, state->track_height,
+		src, src_stride, state->process_width, state->process_height);
+}
+
+static void promote_current_track_frame(OptFlowState *state)
+{
+	uint8_t *tmp;
+
+	if (!state->track_prev || !state->track_curr)
+		return;
+
+	tmp = state->track_prev;
+	state->track_prev = state->track_curr;
+	state->track_curr = tmp;
+}
+
 static int patch_texture_score(const uint8_t *image, uint32_t stride,
 	int center_x, int center_y, int patch_radius)
 {
@@ -579,26 +616,141 @@ static int patch_texture_score(const uint8_t *image, uint32_t stride,
 
 static uint32_t patch_sad_score(const uint8_t *prev_image,
 	const uint8_t *curr_image, uint32_t stride, int prev_center_x,
-	int prev_center_y, int curr_center_x, int curr_center_y, int patch_radius)
+	int prev_center_y, int curr_center_x, int curr_center_y, int patch_radius,
+	uint32_t cutoff)
 {
+	const int patch_diameter = patch_radius * 2 + 1;
 	uint32_t score = 0;
 	int sample_y;
 
 	for (sample_y = -patch_radius; sample_y <= patch_radius; ++sample_y) {
 		const uint8_t *prev_line = prev_image +
-			(prev_center_y + sample_y) * (int)stride;
+			(prev_center_y + sample_y) * (int)stride +
+			(prev_center_x - patch_radius);
 		const uint8_t *curr_line = curr_image +
-			(curr_center_y + sample_y) * (int)stride;
-		int sample_x;
+			(curr_center_y + sample_y) * (int)stride +
+			(curr_center_x - patch_radius);
+		int sample_x = 0;
 
-		for (sample_x = -patch_radius; sample_x <= patch_radius; ++sample_x) {
+#if defined(__ARM_NEON)
+		for (; sample_x + 8 <= patch_diameter; sample_x += 8) {
+			uint8x8_t prev_pixels = vld1_u8(prev_line + sample_x);
+			uint8x8_t curr_pixels = vld1_u8(curr_line + sample_x);
+			uint8x8_t abs_diff = vabd_u8(prev_pixels, curr_pixels);
+			uint16x4_t pair_sum_u16 = vpaddl_u8(abs_diff);
+			uint32x2_t pair_sum_u32 = vpaddl_u16(pair_sum_u16);
+
+			score += vget_lane_u32(pair_sum_u32, 0);
+			score += vget_lane_u32(pair_sum_u32, 1);
+			if (score >= cutoff)
+				return score;
+		}
+#endif
+
+		for (; sample_x < patch_diameter; ++sample_x) {
 			score += (uint32_t)abs_int(
-				(int)prev_line[prev_center_x + sample_x] -
-				(int)curr_line[curr_center_x + sample_x]);
+				(int)prev_line[sample_x] -
+				(int)curr_line[sample_x]);
+			if (score >= cutoff)
+				return score;
 		}
 	}
 
 	return score;
+}
+
+static uint32_t find_best_patch_offset(const uint8_t *prev_image,
+	const uint8_t *curr_image, uint32_t stride, int center_x, int center_y,
+	int patch_radius, int min_dx, int max_dx, int min_dy, int max_dy,
+	int step, int *best_dx, int *best_dy, uint32_t best_score)
+{
+	int search_y;
+
+	for (search_y = min_dy; search_y <= max_dy; search_y += step) {
+		int search_x;
+
+		for (search_x = min_dx; search_x <= max_dx; search_x += step) {
+			uint32_t score = patch_sad_score(prev_image, curr_image, stride,
+				center_x, center_y,
+				center_x + search_x,
+				center_y + search_y,
+				patch_radius,
+				best_score);
+
+			if (score < best_score) {
+				best_score = score;
+				*best_dx = search_x;
+				*best_dy = search_y;
+			}
+		}
+	}
+
+	return best_score;
+}
+
+static double quadratic_subpixel_offset(uint32_t minus_score,
+	uint32_t center_score, uint32_t plus_score)
+{
+	double denominator;
+	double offset;
+
+	if (center_score > minus_score || center_score > plus_score)
+		return 0.0;
+
+	denominator = (double)minus_score - (2.0 * (double)center_score) +
+		(double)plus_score;
+	if (denominator <= 0.0)
+		return 0.0;
+
+	offset = 0.5 * ((double)minus_score - (double)plus_score) / denominator;
+	if (offset < -1.0)
+		return -1.0;
+	if (offset > 1.0)
+		return 1.0;
+	return offset;
+}
+
+static double refine_subpixel_axis(const uint8_t *prev_image,
+	const uint8_t *curr_image, uint32_t stride, int center_x, int center_y,
+	int patch_radius, int best_dx, int best_dy, uint32_t center_score,
+	int axis_is_x, int search_range)
+{
+	uint32_t minus_score;
+	uint32_t plus_score;
+
+	if (axis_is_x) {
+		if (best_dx <= -search_range || best_dx >= search_range)
+			return 0.0;
+		minus_score = patch_sad_score(prev_image, curr_image, stride,
+			center_x, center_y,
+			center_x + best_dx - 1,
+			center_y + best_dy,
+			patch_radius,
+			UINT32_MAX);
+		plus_score = patch_sad_score(prev_image, curr_image, stride,
+			center_x, center_y,
+			center_x + best_dx + 1,
+			center_y + best_dy,
+			patch_radius,
+			UINT32_MAX);
+	} else {
+		if (best_dy <= -search_range || best_dy >= search_range)
+			return 0.0;
+		minus_score = patch_sad_score(prev_image, curr_image, stride,
+			center_x, center_y,
+			center_x + best_dx,
+			center_y + best_dy - 1,
+			patch_radius,
+			UINT32_MAX);
+		plus_score = patch_sad_score(prev_image, curr_image, stride,
+			center_x, center_y,
+			center_x + best_dx,
+			center_y + best_dy + 1,
+			patch_radius,
+			UINT32_MAX);
+	}
+
+	return quadratic_subpixel_offset(minus_score, center_score, plus_score);
 }
 
 static int compare_double_values(const void *lhs, const void *rhs)
@@ -613,12 +765,155 @@ static int compare_double_values(const void *lhs, const void *rhs)
 	return 0;
 }
 
+static int compare_track_candidates_desc(const void *lhs, const void *rhs)
+{
+	const OptflowTrackCandidate *left = lhs;
+	const OptflowTrackCandidate *right = rhs;
+
+	if (left->texture_score > right->texture_score)
+		return -1;
+	if (left->texture_score < right->texture_score)
+		return 1;
+	return 0;
+}
+
 static double median_double(double *values, uint32_t count)
 {
 	qsort(values, count, sizeof(values[0]), compare_double_values);
 	if (count & 1u)
 		return values[count / 2];
 	return (values[(count / 2) - 1] + values[count / 2]) * 0.5;
+}
+
+static int point_is_far_enough(const int *selected_x, const int *selected_y,
+	uint32_t selected_count, int center_x, int center_y, int min_spacing_sq)
+{
+	uint32_t index;
+
+	for (index = 0; index < selected_count; ++index) {
+		int delta_x = selected_x[index] - center_x;
+		int delta_y = selected_y[index] - center_y;
+
+		if ((delta_x * delta_x) + (delta_y * delta_y) < min_spacing_sq)
+			return 0;
+	}
+
+	return 1;
+}
+
+static int candidate_quadrant(const OptFlowState *state, int center_x, int center_y)
+{
+	int mid_x = (int)state->track_width / 2;
+	int mid_y = (int)state->track_height / 2;
+	int right = center_x >= mid_x;
+	int bottom = center_y >= mid_y;
+
+	return bottom * 2 + right;
+}
+
+static uint32_t select_tracking_points(const OptFlowState *state,
+	int usable_margin_x, int usable_margin_y, int *selected_x,
+	int *selected_y, int *selected_texture, uint32_t max_points)
+{
+	OptflowTrackCandidate candidates[
+		OPTFLOW_TRACK_CANDIDATE_COLS * OPTFLOW_TRACK_CANDIDATE_ROWS];
+	uint32_t candidate_count = 0;
+	uint32_t selected_count = 0;
+	int min_spacing_sq = OPTFLOW_TRACK_MIN_SPACING * OPTFLOW_TRACK_MIN_SPACING;
+	int quadrant_used[4] = { 0, 0, 0, 0 };
+	uint32_t row_index;
+
+	for (row_index = 0; row_index < OPTFLOW_TRACK_CANDIDATE_ROWS; ++row_index) {
+		int center_y;
+		uint32_t col_index;
+
+		if (OPTFLOW_TRACK_CANDIDATE_ROWS == 1) {
+			center_y = (int)state->track_height / 2;
+		} else {
+			center_y = usable_margin_y + (int)((((uint64_t)row_index) *
+				(state->track_height - 1 -
+				(uint32_t)(usable_margin_y * 2))) /
+				(OPTFLOW_TRACK_CANDIDATE_ROWS - 1));
+		}
+
+		for (col_index = 0; col_index < OPTFLOW_TRACK_CANDIDATE_COLS; ++col_index) {
+			int center_x;
+			int texture_score;
+
+			if (OPTFLOW_TRACK_CANDIDATE_COLS == 1) {
+				center_x = (int)state->track_width / 2;
+			} else {
+				center_x = usable_margin_x + (int)((((uint64_t)col_index) *
+					(state->track_width - 1 -
+					(uint32_t)(usable_margin_x * 2))) /
+					(OPTFLOW_TRACK_CANDIDATE_COLS - 1));
+			}
+
+			texture_score = patch_texture_score(state->track_prev,
+				state->track_width, center_x, center_y,
+				OPTFLOW_TRACK_PATCH_RADIUS);
+			if (texture_score < OPTFLOW_TRACK_MIN_TEXTURE)
+				continue;
+
+			candidates[candidate_count].center_x = center_x;
+			candidates[candidate_count].center_y = center_y;
+			candidates[candidate_count].texture_score = texture_score;
+			candidate_count++;
+		}
+	}
+
+	qsort(candidates, candidate_count, sizeof(candidates[0]),
+		compare_track_candidates_desc);
+
+	for (row_index = 0; row_index < candidate_count && selected_count < max_points;
+	     ++row_index) {
+		int quadrant = candidate_quadrant(state,
+			candidates[row_index].center_x,
+			candidates[row_index].center_y);
+
+		if (quadrant_used[quadrant])
+			continue;
+		if (!point_is_far_enough(selected_x, selected_y, selected_count,
+				candidates[row_index].center_x,
+				candidates[row_index].center_y,
+				min_spacing_sq))
+			continue;
+
+		selected_x[selected_count] = candidates[row_index].center_x;
+		selected_y[selected_count] = candidates[row_index].center_y;
+		selected_texture[selected_count] = candidates[row_index].texture_score;
+		quadrant_used[quadrant] = 1;
+		selected_count++;
+	}
+
+	for (row_index = 0; row_index < candidate_count && selected_count < max_points;
+	     ++row_index) {
+		if (!point_is_far_enough(selected_x, selected_y, selected_count,
+				candidates[row_index].center_x,
+				candidates[row_index].center_y,
+				min_spacing_sq))
+			continue;
+
+		selected_x[selected_count] = candidates[row_index].center_x;
+		selected_y[selected_count] = candidates[row_index].center_y;
+		selected_texture[selected_count] = candidates[row_index].texture_score;
+		selected_count++;
+	}
+
+	for (row_index = 0; row_index < candidate_count && selected_count < max_points;
+	     ++row_index) {
+		selected_x[selected_count] = candidates[row_index].center_x;
+		selected_y[selected_count] = candidates[row_index].center_y;
+		selected_texture[selected_count] = candidates[row_index].texture_score;
+		selected_count++;
+	}
+
+	return selected_count;
+}
+
+static double compute_sample_weight(int texture_score, uint32_t match_score)
+{
+	return ((double)texture_score + 1.0) / ((double)match_score + 64.0);
 }
 
 static uint32_t optflow_osd_max_x(const OptFlowState *state)
@@ -780,23 +1075,32 @@ static void maybe_log_perf_summary(OptFlowState *state, long long now_ms)
 	state->perf_window_start_ms = now_ms;
 }
 
-static int compute_planar_motion(OptFlowState *state,
-	const MI_SYS_BufInfo_t *buf_info, OptflowPlanarMotion *motion)
+static int compute_planar_motion(OptFlowState *state, OptflowPlanarMotion *motion)
 {
-	double delta_x_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
-	double delta_y_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
-	double median_x_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
-	double median_y_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
-	double sample_x_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
-	double sample_y_values[OPTFLOW_TRACK_GRID_COLS * OPTFLOW_TRACK_GRID_ROWS];
+	double delta_x_values[OPTFLOW_TRACK_SELECT_COUNT];
+	double delta_y_values[OPTFLOW_TRACK_SELECT_COUNT];
+	double median_x_values[OPTFLOW_TRACK_SELECT_COUNT];
+	double median_y_values[OPTFLOW_TRACK_SELECT_COUNT];
+	double sample_x_values[OPTFLOW_TRACK_SELECT_COUNT];
+	double sample_y_values[OPTFLOW_TRACK_SELECT_COUNT];
+	double sample_residual_values[OPTFLOW_TRACK_SELECT_COUNT];
+	double sample_weights[OPTFLOW_TRACK_SELECT_COUNT];
+	int selected_x[OPTFLOW_TRACK_SELECT_COUNT];
+	int selected_y[OPTFLOW_TRACK_SELECT_COUNT];
+	int selected_texture[OPTFLOW_TRACK_SELECT_COUNT];
 	uint32_t sample_count = 0;
+	uint32_t selected_count = 0;
 	uint32_t used_count = 0;
 	double median_x;
 	double median_y;
+	double median_residual;
+	double inlier_threshold;
+	double inlier_threshold_sq;
 	double average_x = 0.0;
 	double average_y = 0.0;
+	double weight_sum = 0.0;
 	double scale_sum = 0.0;
-	uint32_t scale_count = 0;
+	double scale_weight_sum = 0.0;
 	int usable_margin_x;
 	int usable_margin_y;
 	uint32_t row_index;
@@ -806,79 +1110,70 @@ static int compute_planar_motion(OptFlowState *state,
 	    state->track_width == 0 || state->track_height == 0)
 		return 0;
 
-	downsample_luma(state->track_prev, state->track_width,
-		state->track_height, state->prev_frame.apu8VirAddr[0],
-		state->prev_stride, state->process_width, state->process_height);
-	downsample_luma(state->track_curr, state->track_width,
-		state->track_height, buf_info->stFrameData.pVirAddr[0],
-		buf_info->stFrameData.u32Stride[0], state->process_width,
-		state->process_height);
-
 	usable_margin_x = OPTFLOW_TRACK_PATCH_RADIUS + OPTFLOW_TRACK_SEARCH_RANGE + 1;
 	usable_margin_y = OPTFLOW_TRACK_PATCH_RADIUS + OPTFLOW_TRACK_SEARCH_RANGE + 1;
 	if ((int)state->track_width <= usable_margin_x * 2 ||
 	    (int)state->track_height <= usable_margin_y * 2)
 		return 0;
 
-	for (row_index = 0; row_index < OPTFLOW_TRACK_GRID_ROWS; ++row_index) {
-		int center_y;
-		uint32_t col_index;
+	selected_count = select_tracking_points(state, usable_margin_x,
+		usable_margin_y, selected_x, selected_y, selected_texture,
+		OPTFLOW_TRACK_SELECT_COUNT);
 
-		if (OPTFLOW_TRACK_GRID_ROWS == 1) {
-			center_y = (int)state->track_height / 2;
-		} else {
-			center_y = usable_margin_y + (int)((((uint64_t)row_index) *
-				(state->track_height - 1 - (uint32_t)(usable_margin_y * 2))) /
-				(OPTFLOW_TRACK_GRID_ROWS - 1));
-		}
-
-		for (col_index = 0; col_index < OPTFLOW_TRACK_GRID_COLS; ++col_index) {
-			int center_x;
+	for (row_index = 0; row_index < selected_count; ++row_index) {
+		int center_x = selected_x[row_index];
+		int center_y = selected_y[row_index];
 			uint32_t best_score = UINT32_MAX;
 			int best_dx = 0;
 			int best_dy = 0;
-			int search_y;
+			double refined_dx;
+			double refined_dy;
 
-			if (OPTFLOW_TRACK_GRID_COLS == 1) {
-				center_x = (int)state->track_width / 2;
-			} else {
-				center_x = usable_margin_x + (int)((((uint64_t)col_index) *
-					(state->track_width - 1 - (uint32_t)(usable_margin_x * 2))) /
-					(OPTFLOW_TRACK_GRID_COLS - 1));
-			}
+			best_score = find_best_patch_offset(state->track_prev,
+				state->track_curr, state->track_width,
+				center_x, center_y,
+				OPTFLOW_TRACK_PATCH_RADIUS,
+				-OPTFLOW_TRACK_SEARCH_RANGE,
+				OPTFLOW_TRACK_SEARCH_RANGE,
+				-OPTFLOW_TRACK_SEARCH_RANGE,
+				OPTFLOW_TRACK_SEARCH_RANGE,
+				2,
+				&best_dx, &best_dy,
+				best_score);
+			best_score = find_best_patch_offset(state->track_prev,
+				state->track_curr, state->track_width,
+				center_x, center_y,
+				OPTFLOW_TRACK_PATCH_RADIUS,
+				clamp_int(best_dx - 1, -OPTFLOW_TRACK_SEARCH_RANGE,
+					OPTFLOW_TRACK_SEARCH_RANGE),
+				clamp_int(best_dx + 1, -OPTFLOW_TRACK_SEARCH_RANGE,
+					OPTFLOW_TRACK_SEARCH_RANGE),
+				clamp_int(best_dy - 1, -OPTFLOW_TRACK_SEARCH_RANGE,
+					OPTFLOW_TRACK_SEARCH_RANGE),
+				clamp_int(best_dy + 1, -OPTFLOW_TRACK_SEARCH_RANGE,
+					OPTFLOW_TRACK_SEARCH_RANGE),
+				1,
+				&best_dx, &best_dy,
+				best_score);
 
-			if (patch_texture_score(state->track_prev, state->track_width,
-					center_x, center_y,
-					OPTFLOW_TRACK_PATCH_RADIUS) < OPTFLOW_TRACK_MIN_TEXTURE)
-				continue;
+			refined_dx = (double)best_dx + refine_subpixel_axis(
+				state->track_prev, state->track_curr, state->track_width,
+				center_x, center_y, OPTFLOW_TRACK_PATCH_RADIUS,
+				best_dx, best_dy, best_score, 1,
+				OPTFLOW_TRACK_SEARCH_RANGE);
+			refined_dy = (double)best_dy + refine_subpixel_axis(
+				state->track_prev, state->track_curr, state->track_width,
+				center_x, center_y, OPTFLOW_TRACK_PATCH_RADIUS,
+				best_dx, best_dy, best_score, 0,
+				OPTFLOW_TRACK_SEARCH_RANGE);
 
-			for (search_y = -OPTFLOW_TRACK_SEARCH_RANGE;
-			     search_y <= OPTFLOW_TRACK_SEARCH_RANGE; ++search_y) {
-				int search_x;
-
-				for (search_x = -OPTFLOW_TRACK_SEARCH_RANGE;
-				     search_x <= OPTFLOW_TRACK_SEARCH_RANGE; ++search_x) {
-					uint32_t score = patch_sad_score(state->track_prev,
-						state->track_curr, state->track_width,
-						center_x, center_y,
-						center_x + search_x,
-						center_y + search_y,
-						OPTFLOW_TRACK_PATCH_RADIUS);
-
-					if (score < best_score) {
-						best_score = score;
-						best_dx = search_x;
-						best_dy = search_y;
-					}
-				}
-			}
-
-			delta_x_values[sample_count] = (double)best_dx;
-			delta_y_values[sample_count] = (double)best_dy;
+			sample_weights[sample_count] = compute_sample_weight(
+				selected_texture[row_index], best_score);
+			delta_x_values[sample_count] = refined_dx;
+			delta_y_values[sample_count] = refined_dy;
 			sample_x_values[sample_count] = (double)center_x;
 			sample_y_values[sample_count] = (double)center_y;
 			sample_count++;
-		}
 	}
 
 	motion->points_found = sample_count;
@@ -891,26 +1186,43 @@ static int compute_planar_motion(OptFlowState *state,
 		sample_count * sizeof(delta_y_values[0]));
 	median_x = median_double(median_x_values, sample_count);
 	median_y = median_double(median_y_values, sample_count);
+	for (row_index = 0; row_index < sample_count; ++row_index) {
+		double residual_x = delta_x_values[row_index] - median_x;
+		double residual_y = delta_y_values[row_index] - median_y;
+
+		sample_residual_values[row_index] = sqrt((residual_x * residual_x) +
+			(residual_y * residual_y));
+	}
+	median_residual = median_double(sample_residual_values, sample_count);
+	inlier_threshold = (median_residual * 2.5) + 0.5;
+	if (inlier_threshold < 1.0)
+		inlier_threshold = 1.0;
+	if (inlier_threshold > 9.0)
+		inlier_threshold = 9.0;
+	inlier_threshold_sq = inlier_threshold * inlier_threshold;
 
 	for (row_index = 0; row_index < sample_count; ++row_index) {
 		double residual_x = delta_x_values[row_index] - median_x;
 		double residual_y = delta_y_values[row_index] - median_y;
 		double residual_sq = residual_x * residual_x + residual_y * residual_y;
+		double weight;
 
-		if (residual_sq > OPTFLOW_TRACK_MAX_RESIDUAL_SQ)
+		if (residual_sq > inlier_threshold_sq)
 			continue;
 
-		average_x += delta_x_values[row_index];
-		average_y += delta_y_values[row_index];
+		weight = sample_weights[row_index];
+		average_x += delta_x_values[row_index] * weight;
+		average_y += delta_y_values[row_index] * weight;
+		weight_sum += weight;
 		used_count++;
 	}
 
 	motion->points_used = used_count;
-	if (used_count < 4)
+	if (used_count < 4 || weight_sum <= 0.0)
 		return 0;
 
-	average_x /= used_count;
-	average_y /= used_count;
+	average_x /= weight_sum;
+	average_y /= weight_sum;
 
 	for (row_index = 0; row_index < sample_count; ++row_index) {
 		double residual_x = delta_x_values[row_index] - average_x;
@@ -918,12 +1230,13 @@ static int compute_planar_motion(OptFlowState *state,
 		double radius_x;
 		double radius_y;
 		double radius_sq;
+		double weight;
 
 		if (((delta_x_values[row_index] - median_x) *
 			 (delta_x_values[row_index] - median_x)) +
 		    ((delta_y_values[row_index] - median_y) *
 			 (delta_y_values[row_index] - median_y)) >
-		    OPTFLOW_TRACK_MAX_RESIDUAL_SQ)
+		    inlier_threshold_sq)
 			continue;
 
 		radius_x = sample_x_values[row_index] -
@@ -934,15 +1247,16 @@ static int compute_planar_motion(OptFlowState *state,
 		if (radius_sq < 100.0)
 			continue;
 
-		scale_sum += (residual_x * radius_x + residual_y * radius_y) /
-			radius_sq;
-		scale_count++;
+		weight = sample_weights[row_index];
+		scale_sum += weight *
+			((residual_x * radius_x + residual_y * radius_y) / radius_sq);
+		scale_weight_sum += weight;
 	}
 
 	motion->valid = 1;
 	motion->tx = average_x * ((double)state->process_width / state->track_width);
 	motion->ty = average_y * ((double)state->process_height / state->track_height);
-	motion->tz = scale_count ? (scale_sum / scale_count) : 0.0;
+	motion->tz = scale_weight_sum > 0.0 ? (scale_sum / scale_weight_sum) : 0.0;
 	return 1;
 }
 
@@ -1119,6 +1433,11 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowMotionBox *box,
 		step_start_ms = monotonic_ms();
 		copy_luma_to_prev(state, buf_info);
 		perf->copy_prev_ms += (uint64_t)(monotonic_ms() - step_start_ms);
+		step_start_ms = monotonic_ms();
+		downsample_track_frame(state->track_prev, state,
+			buf_info->stFrameData.pVirAddr[0],
+			buf_info->stFrameData.u32Stride[0]);
+		perf->planar_ms += (uint64_t)(monotonic_ms() - step_start_ms);
 		if (should_trace_frame_debug(state)) {
 			printf(OPTFLOW_LOG_PREFIX " debug copy-prev-done frame=%" PRIu64 "\n",
 				state->frames_seen);
@@ -1140,6 +1459,12 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowMotionBox *box,
 	}
 
 	step_start_ms = monotonic_ms();
+	downsample_track_frame(state->track_curr, state,
+		buf_info->stFrameData.pVirAddr[0],
+		buf_info->stFrameData.u32Stride[0]);
+	perf->planar_ms += (uint64_t)(monotonic_ms() - step_start_ms);
+
+	step_start_ms = monotonic_ms();
 	ret = state->ive_sad(state->ive_handle, &state->prev_frame, &current_frame,
 		&state->sad_result, &state->thr_result, &state->sad_ctrl, 0);
 	perf->sad_ms += (uint64_t)(monotonic_ms() - step_start_ms);
@@ -1147,6 +1472,7 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowMotionBox *box,
 		step_start_ms = monotonic_ms();
 		copy_luma_to_prev(state, buf_info);
 		perf->copy_prev_ms += (uint64_t)(monotonic_ms() - step_start_ms);
+		promote_current_track_frame(state);
 		(void)MI_SYS_ChnOutputPortPutBuf(buf_handle);
 		ret = -1;
 		goto out;
@@ -1157,12 +1483,13 @@ static int grab_frame_and_detect(OptFlowState *state, OptflowMotionBox *box,
 	perf->box_ms += (uint64_t)(monotonic_ms() - step_start_ms);
 	if (ret >= 0) {
 		step_start_ms = monotonic_ms();
-		(void)compute_planar_motion(state, buf_info, motion);
+		(void)compute_planar_motion(state, motion);
 		perf->planar_ms += (uint64_t)(monotonic_ms() - step_start_ms);
 	}
 	step_start_ms = monotonic_ms();
 	copy_luma_to_prev(state, buf_info);
 	perf->copy_prev_ms += (uint64_t)(monotonic_ms() - step_start_ms);
+	promote_current_track_frame(state);
 	(void)MI_SYS_ChnOutputPortPutBuf(buf_handle);
 
 out:

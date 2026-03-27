@@ -1,6 +1,6 @@
 #include "star6e_runtime.h"
 
-#include "OptFlow.h"
+#include "opt_flow.h"
 #include "eis.h"
 #include "imu_bmi270.h"
 #include "sdk_quiet.h"
