@@ -192,6 +192,8 @@ static void gyroglide_compute(GyroglideState *st, struct timespec t_now,
 	/* ── Step 1: Timestamp-based gyro integration ── */
 	float delta_x = 0.0f, delta_y = 0.0f;
 
+	/* Scalar loop: NEON benchmarked at 0.5x (slower) on Cortex-A7 due to
+	 * gather-load overhead from non-contiguous EisMotionSample struct. */
 	for (uint32_t i = 0; i < n; i++) {
 		float dt_i;
 		if (i == 0)

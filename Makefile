@@ -52,6 +52,7 @@ DRV_EXTRA := $(MARUKO_COMMON_LIB_DIR)
 ifeq ($(abspath $(DRV_EXTRA)),$(abspath $(DRV)))
 DRV_EXTRA :=
 endif
+SOC_CFLAGS :=
 SOC_DEFS := -DPLATFORM_STAR6E -DPLATFORM_MARUKO -DHAVE_BACKEND_MARUKO=1
 SOC_LDFLAGS := -Wl,-rpath-link,$(DRV) -Wl,--unresolved-symbols=ignore-in-shared-libs -Wl,-rpath-link,tools
 ifneq ($(strip $(DRV_EXTRA)),)
@@ -66,6 +67,7 @@ CC := $(STAR6E_CC)
 SRC := src/main.c src/backend_star6e.c $(STAR6E_ONLY_SRC) $(HELPER_SRC) $(CONFIG_SRC)
 DRV := $(STAR6E_DRV)
 DRV_EXTRA :=
+SOC_CFLAGS := -mfpu=neon-vfpv4 -mfloat-abi=hard -ftree-vectorize
 SOC_DEFS := -DPLATFORM_STAR6E -DHAVE_BACKEND_STAR6E=1
 SOC_LDFLAGS := -Wl,-rpath-link,$(DRV)
 SOC_LIBS := -lm
@@ -76,7 +78,7 @@ else
 $(error Unsupported SOC_BUILD '$(SOC_BUILD)'; expected 'star6e' or 'maruko')
 endif
 
-CFLAGS += $(COMMON_CFLAGS) $(SOC_DEFS)
+CFLAGS += $(COMMON_CFLAGS) $(SOC_CFLAGS) $(SOC_DEFS)
 LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
 
 .PHONY: help all build lint stage clean toolchain toolchain-maruko remote-test verify pre-pr \
