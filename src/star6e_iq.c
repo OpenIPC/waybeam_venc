@@ -605,6 +605,19 @@ int star6e_iq_set(const char *param, const char *value)
 		goto out;
 	}
 
+	/* Virtual "enabled" field: <param>.enabled=0|1 */
+	if (field_name && strcmp(field_name, "enabled") == 0) {
+		if (target->vtype == VT_BOOL) {
+			fprintf(stderr, "[iq] %s: use value directly for bool params\n",
+				param_name);
+			rc = -1;
+			goto out;
+		}
+		uint32_t en = (uint32_t)atoi(value);
+		write_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32, en ? 1 : 0);
+		goto apply;
+	}
+
 	/* Field-level set via dot-notation */
 	if (field_name && target->fields) {
 		const IqFieldDesc *fd = NULL;
@@ -667,6 +680,7 @@ int star6e_iq_set(const char *param, const char *value)
 		}
 	}
 
+apply:
 	ret = target->fn_set(0, iq_buf);
 	if (ret != 0) {
 		fprintf(stderr, "[iq] %s: Set failed: 0x%08x\n",
@@ -709,6 +723,18 @@ int star6e_iq_import(const char *json_str)
 		const char *pname = item->string;
 		if (!pname || pname[0] == '_')
 			continue;  /* skip _diag */
+
+		/* Apply enabled toggle if present */
+		cJSON *en_item = cJSON_GetObjectItemCaseSensitive(item, "enabled");
+		if (en_item && cJSON_IsBool(en_item)) {
+			char en_key[128];
+			snprintf(en_key, sizeof(en_key), "%s.enabled", pname);
+			const char *en_val = cJSON_IsTrue(en_item) ? "1" : "0";
+			if (star6e_iq_set(en_key, en_val) == 0)
+				applied++;
+			else
+				failed++;
+		}
 
 		/* Handle fields object for multi-field params */
 		fields_obj = cJSON_GetObjectItemCaseSensitive(item, "fields");

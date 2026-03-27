@@ -494,7 +494,8 @@ Error `501` if backend doesn't support IQ (Maruko):
 Set a single IQ parameter. The parameter is switched to manual mode (for
 auto/manual params) and the value is written to the primary manual field.
 
-Supports dot-notation for multi-field params and comma-separated arrays:
+Supports dot-notation for multi-field params, comma-separated arrays, and
+enable/disable toggling via the `.enabled` virtual field:
 
 ```bash
 # Simple scalar
@@ -505,6 +506,10 @@ curl "http://192.168.2.10/api/v1/iq/set?colortrans.y_ofst=200"
 
 # Array value (comma-separated)
 curl "http://192.168.2.10/api/v1/iq/set?colortrans.matrix=23,45,9,1005,987,56,56,977,1015"
+
+# Enable/disable toggle (non-bool params only)
+curl "http://192.168.2.10/api/v1/iq/set?colortrans.enabled=0"
+curl "http://192.168.2.10/api/v1/iq/set?crosstalk.enabled=1"
 
 # Bool toggle
 curl "http://192.168.2.10/api/v1/iq/set?color_to_gray=1"
@@ -520,6 +525,8 @@ Response `200`:
 
 Import IQ parameters from a JSON body (output of `GET /api/v1/iq`).
 Partial imports are supported — only parameters present in the JSON are applied.
+The `enabled` field is respected during import — parameters with `"enabled":false`
+will be disabled on the ISP.
 
 ```bash
 # Full import from exported file
