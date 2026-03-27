@@ -67,6 +67,11 @@ void pipeline_common_clamp_image_size(const char *prefix, uint32_t max_width,
 	}
 }
 
+/* Permissive gain ceiling used when the ISP has not yet populated its
+ * exposure limits on cold boot.  High enough that AE can compensate
+ * for the capped shutter; cus3a / ISP bin will tighten later. */
+#define SYNTHETIC_MAX_GAIN 500000
+
 /* ISP exposure limit structure — matches SigmaStar SDK ABI. */
 typedef struct {
 	unsigned int minShutterUs;
@@ -147,12 +152,20 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
 				break;
 		}
 		if (config.maxShutterUs == 0 && config.maxSensorGain == 0) {
+			/* ISP never populated — use synthetic limits so the
+			 * shutter cap is still applied.  Permissive gain
+			 * defaults let AE compensate; cus3a or ISP bin will
+			 * tighten them once initialised. */
 			fprintf(stderr,
-				"WARNING: ISP exposure limits not populated after 500 ms\n");
-			dlclose(handle);
-			return 0;
+				"WARNING: ISP exposure limits not populated "
+				"after 500 ms, using synthetic defaults\n");
+			config.maxShutterUs = 1000000;  /* 1 s — will be capped below */
+			config.maxSensorGain = SYNTHETIC_MAX_GAIN;
+			config.maxIspGain = SYNTHETIC_MAX_GAIN;
+		} else {
+			printf("> ISP exposure limits populated after %d ms\n",
+				waited_ms);
 		}
-		printf("> ISP exposure limits populated after %d ms\n", waited_ms);
 	}
 
 	if (user_cap_us > 0) {
