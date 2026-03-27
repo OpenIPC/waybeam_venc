@@ -1,5 +1,21 @@
 # History
 
+## [0.4.1] - 2026-03-27
+
+- Fix IMU webui fields invisible: rename config keys `sampleRate` →
+  `sampleRateHz`, `gyroRange` → `gyroRangeDps` to match dashboard SECTIONS.
+- Add 5 missing default config keys: `eis.mode`, `record.bitrate`,
+  `record.fps`, `record.gopSize`, `record.server`.
+- Fix camelCase capabilities lookup for `swapXY` and `maxMB` in webui.
+- Remove legacy `sendFeedback` outgoing config alias.
+- Document config/webui/API four-layer sync rules in AGENTS.md.
+- Fix cold-boot sensor framerate lock: poll ISP exposure limits up to 500 ms
+  instead of skipping the shutter cap when struct is all-zero. Apply synthetic
+  gain defaults as fallback so AE cannot converge on exposure > frame period.
+- Add IQ enable/disable toggle: virtual `.enabled` field for non-bool params
+  (e.g. `colortrans.enabled=0`). Import respects `enabled` JSON field.
+  Dashboard shows toggle switch in expanded form for applicable params.
+
 ## [0.4.0] - 2026-03-22
 
 - Add built-in web dashboard at `/` with Settings, API Reference, and
