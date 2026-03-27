@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 uint32_t pipeline_common_gop_frames(double gop_seconds, uint32_t fps)
 {
@@ -126,13 +127,32 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
 		return ret;
 	}
 
-	/* If GET returned all-zero limits (some i6c ISP versions don't
-	 * populate the struct immediately), skip the SET to avoid passing
-	 * invalid gain/aperture values that the ISP would reject. */
+	/* Poll until ISP populates exposure limits (up to 500 ms).
+	 * On cold boot the ISP AE has not processed enough frames yet,
+	 * so the struct comes back as all zeros.  Without the shutter
+	 * cap the AE converges on an exposure time that exceeds the
+	 * frame period, locking the pipeline at a lower framerate. */
 	if (config.maxShutterUs == 0 && config.maxSensorGain == 0) {
-		printf("> Exposure cap skipped: ISP exposure limits not yet populated\n");
-		dlclose(handle);
-		return 0;
+		int waited_ms;
+
+		for (waited_ms = 0; waited_ms < 500; waited_ms += 10) {
+			usleep(10 * 1000);
+			memset(&config, 0, sizeof(config));
+			ret = ISP_AE_CALL(fn_get, &config);
+			if (ret != 0) {
+				dlclose(handle);
+				return ret;
+			}
+			if (config.maxShutterUs != 0 || config.maxSensorGain != 0)
+				break;
+		}
+		if (config.maxShutterUs == 0 && config.maxSensorGain == 0) {
+			fprintf(stderr,
+				"WARNING: ISP exposure limits not populated after 500 ms\n");
+			dlclose(handle);
+			return 0;
+		}
+		printf("> ISP exposure limits populated after %d ms\n", waited_ms);
 	}
 
 	if (user_cap_us > 0) {
