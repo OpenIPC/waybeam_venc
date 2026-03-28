@@ -2,6 +2,7 @@
 #include "sdk_quiet.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static SdkQuietState g_sensor_sdk_quiet = SDK_QUIET_STATE_INIT;
@@ -206,6 +207,93 @@ void sensor_list_modes(int forced_pad, int selected_pad, int selected_mode)
 			printf("\n");
 		}
 	}
+}
+
+/* Ensure buf has at least `need` bytes free. Returns 0 on success, -1 on OOM. */
+static int modes_json_grow(char **buf, size_t *cap, size_t off, size_t need)
+{
+	while (*cap - off < need) {
+		size_t nc = *cap * 2;
+		char *nb = realloc(*buf, nc);
+		if (!nb) return -1;
+		*buf = nb;
+		*cap = nc;
+	}
+	return 0;
+}
+
+/* Append a JSON-escaped string (escapes " and \ and control chars). */
+static size_t json_escape_into(char *dst, size_t dst_sz, const char *src)
+{
+	size_t w = 0;
+	for (; *src && w + 2 < dst_sz; src++) {
+		unsigned char c = (unsigned char)*src;
+		if (c == '"' || c == '\\') { dst[w++] = '\\'; dst[w++] = (char)c; }
+		else if (c < 0x20) { /* skip control chars */ }
+		else { dst[w++] = (char)c; }
+	}
+	dst[w] = '\0';
+	return w;
+}
+
+char *sensor_modes_json(int forced_pad, int selected_pad, int selected_mode)
+{
+	size_t cap = 4096;
+	char *buf = malloc(cap);
+	if (!buf) return NULL;
+	size_t off = 0;
+
+	int n = snprintf(buf, cap,
+		"{\"ok\":true,\"data\":{\"selected_pad\":%d,\"selected_mode\":%d,\"pads\":[",
+		selected_pad, selected_mode);
+	if (n > 0) off = (size_t)n < cap ? (size_t)n : cap - 1;
+
+	int pad_start = 0, pad_end = 3;
+	if (forced_pad >= 0 && forced_pad <= 3) { pad_start = forced_pad; pad_end = forced_pad; }
+
+	int first_pad = 1;
+	for (int p = pad_start; p <= pad_end; ++p) {
+		MI_U32 count = 0;
+		MI_S32 ret = MI_SNR_QueryResCount((MI_SNR_PAD_ID_e)p, &count);
+		if (ret != 0) continue;
+
+		if (modes_json_grow(&buf, &cap, off, 64)) { free(buf); return NULL; }
+		if (!first_pad) buf[off++] = ',';
+		first_pad = 0;
+		n = snprintf(buf + off, cap - off, "{\"pad\":%d,\"modes\":[", p);
+		if (n > 0) off += (size_t)n;
+
+		int first_mode = 1;
+		for (MI_U32 idx = 0; idx < count; ++idx) {
+			MI_SNR_Res_t res = {0};
+			ret = MI_SNR_GetRes((MI_SNR_PAD_ID_e)p, idx, &res);
+			if (ret != 0) continue;
+
+			if (modes_json_grow(&buf, &cap, off, 512)) { free(buf); return NULL; }
+			if (!first_mode) buf[off++] = ',';
+			first_mode = 0;
+			int selected = (p == selected_pad && (int)idx == selected_mode);
+			char desc_escaped[96];
+			json_escape_into(desc_escaped, sizeof(desc_escaped), res.desc);
+			n = snprintf(buf + off, cap - off,
+				"{\"index\":%u,\"width\":%u,\"height\":%u,"
+				"\"min_fps\":%u,\"max_fps\":%u,"
+				"\"desc\":\"%s\",\"selected\":%s}",
+				idx, res.crop.width, res.crop.height,
+				res.minFps, res.maxFps,
+				desc_escaped, selected ? "true" : "false");
+			if (n > 0) off += (size_t)n;
+		}
+
+		if (modes_json_grow(&buf, &cap, off, 8)) { free(buf); return NULL; }
+		n = snprintf(buf + off, cap - off, "]}");
+		if (n > 0) off += (size_t)n;
+	}
+
+	if (modes_json_grow(&buf, &cap, off, 8)) { free(buf); return NULL; }
+	n = snprintf(buf + off, cap - off, "]}}");
+	if (n > 0) off += (size_t)n;
+	return buf;
 }
 
 /* ── Core selection ──────────────────────────────────────────────────── */

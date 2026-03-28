@@ -1,5 +1,6 @@
 #include "venc_api.h"
 #include "pipeline_common.h"
+#include "sensor_select.h"
 #include "star6e_recorder.h"
 #include "venc_httpd.h"
 #include "venc_webui.h"
@@ -22,6 +23,21 @@ static char g_backend[32];
  * streaming thread reads config fields concurrently.  This mutex
  * serializes field reads/writes to prevent torn values on ARM. */
 static pthread_mutex_t g_cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* ── Sensor info (set by backend after sensor_select) ─────────────────── */
+
+static int g_sensor_pad = -1;
+static int g_sensor_mode = -1;
+static int g_sensor_forced_pad = -1;
+
+void venc_api_set_sensor_info(int pad, int mode_index, int forced_pad)
+{
+	pthread_mutex_lock(&g_cfg_mutex);
+	g_sensor_pad = pad;
+	g_sensor_mode = mode_index;
+	g_sensor_forced_pad = forced_pad;
+	pthread_mutex_unlock(&g_cfg_mutex);
+}
 
 /* ── Reinit flag (shared with backend via accessors) ─────────────────── */
 
@@ -1236,6 +1252,22 @@ static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_json(fd, 200, "{\"ok\":true,\"data\":{\"idr\":true}}");
 }
 
+/* ── Sensor modes ────────────────────────────────────────────────────── */
+
+static int handle_modes(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+	pthread_mutex_lock(&g_cfg_mutex);
+	int pad = g_sensor_pad, mode = g_sensor_mode, forced = g_sensor_forced_pad;
+	pthread_mutex_unlock(&g_cfg_mutex);
+	char *json = sensor_modes_json(forced, pad, mode);
+	if (!json)
+		return httpd_send_error(fd, 500, "modes_failed", "Failed to query sensor modes");
+	int rc = httpd_send_json(fd, 200, json);
+	free(json);
+	return rc;
+}
+
 /* ── Registration ────────────────────────────────────────────────────── */
 
 int venc_api_register(VencConfig *cfg, const char *backend_name,
@@ -1260,6 +1292,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/iq/set",       handle_iq_set, NULL);
 	r |= venc_httpd_route("POST", "/api/v1/iq/import",  handle_iq_import, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/iq",           handle_iq, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/modes",        handle_modes, NULL);
 	r |= venc_httpd_route("GET", "/metrics/isp",         handle_isp_metrics, NULL);
 	r |= venc_httpd_route("GET", "/request/idr",         handle_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/record/start",  handle_record_start, NULL);

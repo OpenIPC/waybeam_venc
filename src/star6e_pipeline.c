@@ -807,6 +807,10 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	if (ret != 0)
 		return ret;
 
+	/* Expose sensor info to HTTP API for /api/v1/modes */
+	venc_api_set_sensor_info((int)state->sensor.pad_id,
+		state->sensor.mode_index, pconf->sensor_cfg.forced_pad);
+
 	sensor_width  = state->sensor.plane.capt.width;
 	sensor_height = state->sensor.plane.capt.height;
 	if (state->sensor.mode.output.width > 0 &&

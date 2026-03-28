@@ -71,6 +71,9 @@ void venc_api_dual_register(int channel, uint32_t bitrate, uint32_t fps,
 	uint32_t gop, bool frame_lost);
 void venc_api_dual_unregister(void);
 
+/* Sensor info — set by backend after sensor_select() to expose via /api/v1/modes. */
+void venc_api_set_sensor_info(int pad, int mode_index, int forced_pad);
+
 /* Record status callback — set by backend to expose status to HTTP API. */
 typedef struct {
 	int active;
