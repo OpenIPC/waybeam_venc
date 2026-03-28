@@ -1,5 +1,6 @@
 #include "venc_api.h"
 #include "pipeline_common.h"
+#include "sensor_select.h"
 #include "star6e_recorder.h"
 #include "venc_httpd.h"
 #include "venc_webui.h"
@@ -31,9 +32,11 @@ static int g_sensor_forced_pad = -1;
 
 void venc_api_set_sensor_info(int pad, int mode_index, int forced_pad)
 {
+	pthread_mutex_lock(&g_cfg_mutex);
 	g_sensor_pad = pad;
 	g_sensor_mode = mode_index;
 	g_sensor_forced_pad = forced_pad;
+	pthread_mutex_unlock(&g_cfg_mutex);
 }
 
 /* ── Reinit flag (shared with backend via accessors) ─────────────────── */
@@ -1254,8 +1257,10 @@ static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
-	extern char *sensor_modes_json(int forced_pad, int selected_pad, int selected_mode);
-	char *json = sensor_modes_json(g_sensor_forced_pad, g_sensor_pad, g_sensor_mode);
+	pthread_mutex_lock(&g_cfg_mutex);
+	int pad = g_sensor_pad, mode = g_sensor_mode, forced = g_sensor_forced_pad;
+	pthread_mutex_unlock(&g_cfg_mutex);
+	char *json = sensor_modes_json(forced, pad, mode);
 	if (!json)
 		return httpd_send_error(fd, 500, "modes_failed", "Failed to query sensor modes");
 	int rc = httpd_send_json(fd, 200, json);
