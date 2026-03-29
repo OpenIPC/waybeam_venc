@@ -762,7 +762,17 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 		return -1;
 	}
 
-	pconf->exposure_cap_us = vcfg->isp.exposure * 1000;
+	/* When legacyAe is active and no explicit exposure cap is set, the
+	 * ISP bin's built-in AE ignores SetExposureLimit for the physical
+	 * sensor register.  Auto-derive a cap from the sensor fps so the
+	 * shutter never exceeds the frame period.  Without this, the AE
+	 * converges on a long exposure that locks fps below the target. */
+	if (vcfg->isp.exposure > 0)
+		pconf->exposure_cap_us = vcfg->isp.exposure * 1000;
+	else if (vcfg->isp.legacy_ae && pconf->sensor_framerate > 0)
+		pconf->exposure_cap_us = 1000000 / pconf->sensor_framerate;
+	else
+		pconf->exposure_cap_us = 0;
 	pconf->image_mirror    = vcfg->image.mirror ? 1 : 0;
 	pconf->image_flip      = vcfg->image.flip   ? 1 : 0;
 	pconf->vpe_level_3dnr  = vcfg->fpv.noise_level;

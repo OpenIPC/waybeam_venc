@@ -175,11 +175,14 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
 	} else {
 		target_us = 1000000 / fps;
 		if (config.maxShutterUs <= target_us) {
-			dlclose(handle);
-			return 0;
+			/* Limit looks OK but the sensor register may disagree
+			 * on cold boot — fall through to set + poll. */
+			printf("> Exposure cap: maxShutter %uus (already <= %uus for %u fps), enforcing\n",
+				config.maxShutterUs, target_us, fps);
+		} else {
+			printf("> Exposure cap: maxShutter %uus -> %uus (for %u fps)\n",
+				config.maxShutterUs, target_us, fps);
 		}
-		printf("> Exposure cap: maxShutter %uus -> %uus (for %u fps)\n",
-			config.maxShutterUs, target_us, fps);
 	}
 
 	config.maxShutterUs = target_us;

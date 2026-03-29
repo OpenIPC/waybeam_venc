@@ -1,4 +1,5 @@
 #include "star6e_cus3a.h"
+#include "star6e.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -69,6 +70,11 @@ typedef int (*fn_ae_get_exposure_limit_t)(int channel,
 typedef int (*fn_ae_set_exposure_limit_t)(int channel,
 	Cus3aIspExposureLimit *limit);
 
+/* MI_SNR_GetPlaneInfo reads the actual sensor register values (shutter,
+ * gain) which may differ from the ISP AE limit/target on cold boot. */
+typedef int (*fn_snr_get_plane_info_t)(int pad, int plane_id, void *info);
+typedef int (*fn_snr_set_fps_t)(int pad, unsigned int fps);
+
 /* ── Module state ────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -98,6 +104,9 @@ typedef struct {
 	fn_cus3a_close_frame_sync_t fn_close_sync;
 	fn_ae_get_exposure_limit_t  fn_get_exposure_limit;
 	fn_ae_set_exposure_limit_t  fn_set_exposure_limit;
+	fn_snr_get_plane_info_t     fn_get_plane_info;
+	fn_snr_set_fps_t            fn_set_fps;
+	void                       *h_sensor;
 } Cus3aState;
 
 static Cus3aState g_cus3a;
@@ -153,6 +162,16 @@ static int resolve_symbols(Cus3aState *s)
 	s->fn_set_exposure_limit = (fn_ae_set_exposure_limit_t)dlsym(
 		s->h_isp, "MI_ISP_AE_SetExposureLimit");
 
+	/* MI_SNR_GetPlaneInfo — read actual sensor register (shutter/gain).
+	 * Optional: only used for cold-boot enforcement. */
+	s->h_sensor = dlopen("libmi_sensor.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (s->h_sensor) {
+		s->fn_get_plane_info = (fn_snr_get_plane_info_t)dlsym(
+			s->h_sensor, "MI_SNR_GetPlaneInfo");
+		s->fn_set_fps = (fn_snr_set_fps_t)dlsym(
+			s->h_sensor, "MI_SNR_SetFps");
+	}
+
 	if (!s->fn_get_hw_stats || !s->fn_get_ae_status) {
 		fprintf(stderr, "[cus3a] missing required AE symbols\n");
 		return -1;
@@ -169,10 +188,13 @@ static int resolve_symbols(Cus3aState *s)
 
 static void release_symbols(Cus3aState *s)
 {
+	if (s->h_sensor)
+		dlclose(s->h_sensor);
 	if (s->h_cus3a)
 		dlclose(s->h_cus3a);
 	if (s->h_isp)
 		dlclose(s->h_isp);
+	s->h_sensor = NULL;
 	s->h_isp = NULL;
 	s->h_cus3a = NULL;
 }
@@ -192,6 +214,7 @@ static void *cus3a_thread(void *arg)
 	unsigned long last_log_ms = 0;
 	uint32_t applied_shutter_max = 0;
 	uint32_t applied_gain_max = 0;
+	int fps_kick_done = 0;
 
 	ae_hw = malloc(sizeof(Cus3aAeHwStats));
 	if (!ae_hw) {
@@ -222,31 +245,33 @@ static void *cus3a_thread(void *arg)
 	memset(&cur_limit, 0, sizeof(cur_limit));
 	s->fn_get_exposure_limit(0, &cur_limit);
 
-	/* Apply initial constraints — tighten ISP bin limits if configured */
+	/* Apply initial constraints — always write the limit on startup.
+	 * On cold boot the ISP bin AE may have set the sensor register to
+	 * a shutter longer than the frame period.  SetExposureLimit was
+	 * already called by pipeline init but the ISP bin AE ignores it
+	 * for the physical sensor register.  Force a re-write here so the
+	 * ISP AE re-evaluates with the correct limit on its next cycle. */
 	{
 		uint32_t want_shutter = compute_max_shutter(s);
 		uint32_t want_gain = s->gain_max;  /* 0 = use bin default */
-		int changed = 0;
 
 		if (want_shutter > 0 &&
-		    want_shutter < cur_limit.maxShutterUs) {
+		    want_shutter <= cur_limit.maxShutterUs)
 			cur_limit.maxShutterUs = want_shutter;
-			changed = 1;
-		}
 		if (want_gain > 0 &&
-		    want_gain < cur_limit.maxSensorGain) {
+		    want_gain <= cur_limit.maxSensorGain)
 			cur_limit.maxSensorGain = want_gain;
-			changed = 1;
-		}
-		if (changed) {
-			s->fn_set_exposure_limit(0, &cur_limit);
-			limit_writes++;
-			if (s->cfg.verbose)
-				printf("[cus3a] initial limits: "
-					"maxShutter=%uus maxGain=%u\n",
-					cur_limit.maxShutterUs,
-					cur_limit.maxSensorGain);
-		}
+
+		/* Always write — even if the limit value matches, the sensor
+		 * register may not comply after a cold boot ISP bin load. */
+		s->fn_set_exposure_limit(0, &cur_limit);
+		limit_writes++;
+		if (s->cfg.verbose)
+			printf("[cus3a] initial limits enforced: "
+				"maxShutter=%uus maxGain=%u\n",
+				cur_limit.maxShutterUs,
+				cur_limit.maxSensorGain);
+
 		applied_shutter_max = cur_limit.maxShutterUs;
 		applied_gain_max = cur_limit.maxSensorGain;
 	}
@@ -309,10 +334,49 @@ static void *cus3a_thread(void *arg)
 				changed = 1;
 			}
 
+			/* Cold-boot fix: the ISP bin AE may initialize
+			 * the sensor at a shutter above our cap.
+			 * SetExposureLimit alone does not force the
+			 * physical sensor register on cold boot.
+			 * After 15 ticks (~1s), if still stuck, call
+			 * MI_SNR_SetFps to force the sensor driver to
+			 * reconfigure its timing registers, then re-set
+			 * the exposure limit.  Only fires once. */
+			if (frames > 0 && frames <= 15 &&
+			    !fps_kick_done &&
+			    s->fn_get_plane_info &&
+			    applied_shutter_max > 0) {
+				MI_SNR_PlaneInfo_t pi;
+				memset(&pi, 0, sizeof(pi));
+				if (s->fn_get_plane_info(0, 0,
+				    &pi) == 0 &&
+				    pi.shutter >
+				    applied_shutter_max) {
+					cur_limit.maxShutterUs =
+						applied_shutter_max;
+					changed = 1;
+					if (frames == 15 &&
+					    s->fn_set_fps &&
+					    s->cfg.sensor_fps > 0) {
+						printf("[cus3a] sensor "
+						    "shutter %uus stuck "
+						    "above %uus, "
+						    "kicking via "
+						    "SetFps(%u)\n",
+						    pi.shutter,
+						    applied_shutter_max,
+						    s->cfg.sensor_fps);
+						s->fn_set_fps(0,
+						    s->cfg.sensor_fps);
+						fps_kick_done = 1;
+					}
+				}
+			}
+
 			if (changed) {
 				s->fn_set_exposure_limit(0, &cur_limit);
 				limit_writes++;
-				if (s->cfg.verbose)
+				if (s->cfg.verbose && frames >= 15)
 					printf("[cus3a] limits updated: "
 						"maxShutter=%uus "
 						"maxGain=%u\n",
