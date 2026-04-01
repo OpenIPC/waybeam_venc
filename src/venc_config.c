@@ -167,6 +167,9 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->record.fps = 0;
 	cfg->record.gop_size = 0;
 	cfg->record.server[0] = '\0';
+
+	/* debug */
+	cfg->debug.show_osd = false;
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -474,6 +477,12 @@ int venc_config_load(const char *path, VencConfig *cfg)
 	load_imu(root, &cfg->imu);
 	load_eis(root, &cfg->eis);
 	load_record(root, &cfg->record);
+	{
+		const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "debug");
+		if (obj)
+			cfg->debug.show_osd = json_get_bool(obj, "showOsd",
+				cfg->debug.show_osd);
+	}
 
 	cJSON_Delete(root);
 	fprintf(stderr, "[venc_config] Loaded config from %s\n", path);
@@ -663,6 +672,11 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(rec, "gopSize", cfg->record.gop_size);
 		cJSON_AddStringToObject(rec, "server", cfg->record.server);
 	}
+
+	/* debug */
+	cJSON *dbg = cJSON_AddObjectToObject(root, "debug");
+	if (dbg)
+		cJSON_AddBoolToObject(dbg, "showOsd", cfg->debug.show_osd);
 
 	return root;
 }

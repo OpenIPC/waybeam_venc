@@ -77,5 +77,8 @@
     "fps": 0,
     "gopSize": 0,
     "server": ""
+  },
+  "debug": {
+    "showOsd": false
   }
 }

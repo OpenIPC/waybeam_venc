@@ -1,5 +1,6 @@
 #include "star6e_runtime.h"
 
+#include "debug_osd.h"
 #include "eis.h"
 #include "imu_bmi270.h"
 #include "sdk_quiet.h"
@@ -709,6 +710,70 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			fflush(stdout);
 			g_imu_eis_verbose_last = imu_eis_now;
 		}
+	}
+
+	/* Debug OSD overlay */
+	if (ps->debug_osd) {
+		static unsigned int osd_prev_frame;
+		static struct timespec osd_prev_ts;
+		static unsigned int osd_fps;
+		struct timespec osd_now;
+
+		debug_osd_begin_frame(ps->debug_osd);
+		debug_osd_sample_cpu(ps->debug_osd);
+
+		/* Compute fps from frame counter delta */
+		clock_gettime(CLOCK_MONOTONIC, &osd_now);
+		long osd_ms = (osd_now.tv_sec - osd_prev_ts.tv_sec) * 1000 +
+			(osd_now.tv_nsec - osd_prev_ts.tv_nsec) / 1000000;
+		if (osd_ms >= 1000) {
+			unsigned int df = ps->video.frame_counter - osd_prev_frame;
+			osd_fps = (unsigned int)(df * 1000 / (unsigned long)osd_ms);
+			osd_prev_frame = ps->video.frame_counter;
+			osd_prev_ts = osd_now;
+		}
+
+		debug_osd_text(ps->debug_osd, 0, "fps", "%u", osd_fps);
+		debug_osd_text(ps->debug_osd, 1, "cpu", "%d%%",
+			debug_osd_get_cpu(ps->debug_osd));
+
+		if (ps->eis) {
+			EisStatus est;
+			eis_get_status(ps->eis, &est);
+
+			/* 1/3 scale miniature in bottom-right corner */
+			uint16_t iw = (uint16_t)(ps->image_width / 3);
+			uint16_t ih = (uint16_t)(ps->image_height / 3);
+			uint16_t ox = (uint16_t)(ps->image_width - iw - 8);
+			uint16_t oy = (uint16_t)(ps->image_height - ih - 8);
+
+			/* Outer: full sensor area */
+			debug_osd_rect(ps->debug_osd, ox, oy, iw, ih,
+				DEBUG_OSD_WHITE, 0);
+			/* Middle: margin boundary */
+			debug_osd_rect(ps->debug_osd,
+				(uint16_t)(ox + est.margin_x / 3),
+				(uint16_t)(oy + est.margin_y / 3),
+				(uint16_t)(iw - 2 * est.margin_x / 3),
+				(uint16_t)(ih - 2 * est.margin_y / 3),
+				DEBUG_OSD_YELLOW, 0);
+			/* Inner: current crop window */
+			debug_osd_rect(ps->debug_osd,
+				(uint16_t)(ox + est.crop_x / 3),
+				(uint16_t)(oy + est.crop_y / 3),
+				(uint16_t)(est.crop_w / 3),
+				(uint16_t)(est.crop_h / 3),
+				DEBUG_OSD_SEMITRANS_GREEN, 1);
+
+			debug_osd_text(ps->debug_osd, 3, "crop", "%u,%u",
+				est.crop_x, est.crop_y);
+			debug_osd_text(ps->debug_osd, 4, "off", "%.1f,%.1f",
+				est.offset_x, est.offset_y);
+			debug_osd_text(ps->debug_osd, 5, "margin", "%ux%u",
+				est.margin_x, est.margin_y);
+		}
+
+		debug_osd_end_frame(ps->debug_osd);
 	}
 
 	MI_VENC_ReleaseStream(ps->venc_channel, &stream);

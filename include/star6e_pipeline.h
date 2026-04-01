@@ -16,7 +16,8 @@
 #include <signal.h>
 #include <time.h>
 
-struct EisState;  /* forward declaration — see eis.h */
+struct EisState;      /* forward declaration — see eis.h */
+struct DebugOsdState; /* forward declaration — see debug_osd.h */
 
 typedef struct {
 	SensorSelectResult sensor;
@@ -42,6 +43,7 @@ typedef struct {
 	uint32_t stream_packs_cap;
 	/* Dual VENC (gemini mode) — heap-allocated, NULL when inactive */
 	struct Star6eDualVenc *dual;
+	struct DebugOsdState *debug_osd;  /* NULL if debug OSD disabled */
 } Star6ePipelineState;
 
 /** Dual VENC channel state. Heap-allocated to avoid changing

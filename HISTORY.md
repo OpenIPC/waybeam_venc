@@ -1,5 +1,21 @@
 # History
 
+## [0.5.0] - 2026-04-01
+
+- Add debug OSD overlay for encoder diagnostics and EIS crop visualization.
+  Disabled by default (`debug.showOsd`), zero runtime cost when off.
+  - MI_RGN canvas overlay via dlopen — ARGB4444 pixel format, full-frame canvas
+    with dirty-rect tracking (only clears/draws changed areas per frame).
+  - Stats panel (top-left): fps counter, CPU% from /proc/stat, 3x scaled 8x8
+    bitmap font with semi-transparent background.
+  - EIS crop visualization (bottom-right): 1/3 scale miniature showing sensor
+    area (white), margin boundary (yellow), and moving crop window (green fill).
+  - NEON-accelerated row fill (vst1q_u16, 8 pixels per store, 2.4x vs naive).
+  - Mutually exclusive with waybeam-hub `mod_osd_render` — both use MI_RGN
+    global state on VPE channel 0.
+  - Config: `"debug": { "showOsd": true }`, API: `debug.show_osd` (MUT_RESTART).
+  - New files: `include/debug_osd.h`, `src/debug_osd.c`.
+
 ## [0.4.1] - 2026-03-27
 
 - Fix IMU webui fields invisible: rename config keys `sampleRate` →

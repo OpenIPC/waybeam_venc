@@ -2,6 +2,7 @@
 
 #include "codec_config.h"
 #include "codec_types.h"
+#include "debug_osd.h"
 #include "eis.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
@@ -1054,6 +1055,14 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 	}
 
+	/* Debug OSD */
+	if (vcfg->debug.show_osd) {
+		state->debug_osd = debug_osd_create(
+			state->image_width, state->image_height, &state->vpe_port);
+		if (!state->debug_osd)
+			fprintf(stderr, "WARNING: debug OSD requested but MI_RGN unavailable\n");
+	}
+
 	return 0;
 }
 
@@ -1129,6 +1138,10 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	if (state->imu) {
 		imu_destroy(state->imu);
 		state->imu = NULL;
+	}
+	if (state->debug_osd) {
+		debug_osd_destroy(state->debug_osd);
+		state->debug_osd = NULL;
 	}
 
 	star6e_audio_teardown(&state->audio);
@@ -1213,6 +1226,10 @@ static void star6e_pipeline_stop_venc_level(Star6ePipelineState *state)
 	if (state->imu) {
 		imu_destroy(state->imu);
 		state->imu = NULL;
+	}
+	if (state->debug_osd) {
+		debug_osd_destroy(state->debug_osd);
+		state->debug_osd = NULL;
 	}
 
 	star6e_audio_teardown(&state->audio);

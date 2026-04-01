@@ -23,6 +23,9 @@ This folder is the canonical place for waybeam_venc project documentation.
 - `documentation/LIVE_FPS_CONTROL.md`
   - Live FPS control via hardware bind decimation (MI_SYS_BindChnPort2).
   - Covers clamping behavior, mode selection, tested configurations, and mode switching limitation.
+- `documentation/DEBUG_OSD_PLAN.md`
+  - Debug OSD overlay API reference. Covers enabling, drawing primitives (text,
+    rect, point, line), color constants, and how to add debug output from new modules.
 - `documentation/OPTFLOW_FUSION_ROADMAP.md`
   - Optical flow + IMU fusion implementation roadmap.
   - Covers derotation, flight controller integration (MAVLink/MSP), degraded modes,

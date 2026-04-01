@@ -221,6 +221,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, fps,         FT_UINT,   MUT_RESTART),
 	FIELD(record, gop_size,    FT_DOUBLE, MUT_RESTART),
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
+	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -286,6 +287,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
+	{ "debug.showOsd", "debug.show_osd" },
 };
 
 static const char *canonicalize_field_key(const char *key)
