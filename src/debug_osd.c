@@ -533,7 +533,7 @@ void debug_osd_text(DebugOsdState *osd, int row, const char *label,
 	int row_h = char_h + 2 * s;  /* glyph height + gap */
 	int char_w = 6 * s;          /* 5px glyph + 1px gap, scaled */
 	uint16_t y = (uint16_t)(PANEL_Y + row * row_h);
-	if (y + char_h > osd->height) return;
+	if ((uint32_t)y + (uint32_t)char_h > osd->height) return;
 
 	char line[LINE_MAX];
 	int len = snprintf(line, sizeof(line), "%s: %s", label, value);
