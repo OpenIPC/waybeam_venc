@@ -1,5 +1,26 @@
 # History
 
+## [0.6.0] - 2026-04-02
+
+- Add adaptive encoder control module (`enc-ctrl/`) with per-frame encoder
+  feedback, scene-aware variable GOP, and external control API.
+  - Lock-free SPSC ring buffer for frame stats history (512 slots).
+  - Scene complexity estimator using EMA of frame sizes with hysteresis-based
+    scene change detection (configurable threshold + holdoff).
+  - Variable GOP state machine: NORMAL / IDR_READY / IDR_DEFERRED / FORCED_IDR
+    with min/max GOP length enforcement and external defer/clear signals.
+  - IDR size control via temporary QP boost (Star6E only; no-op on Maruko).
+  - Clean `enc_ctrl_*` C API for future link controller integration.
+  - Passthrough mode (`enable_variable_gop=0`): stats collection only, no GOP
+    manipulation — zero-risk default.
+  - MI_VENC SDK interface isolated in `venc_sdk.c` with mock support for
+    off-target testing.
+  - Binary telemetry ring (600 frames) + optional text debug log.
+  - SDK capability matrix documenting available per-frame fields, control APIs,
+    and platform differences (Star6E vs Maruko).
+  - 247 unit tests covering ring buffer, scene estimator, GOP state machine,
+    and full API integration. All pass under ASAN and TSAN.
+
 ## [0.5.0] - 2026-04-01
 
 - Add debug OSD overlay for encoder diagnostics and EIS crop visualization.
