@@ -168,6 +168,16 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->record.gop_size = 0;
 	cfg->record.server[0] = '\0';
 
+	/* encCtrl */
+	cfg->enc_ctrl.enabled = false;
+	cfg->enc_ctrl.max_gop_size = 10.0;
+	cfg->enc_ctrl.min_gop_size = 0.25;
+	cfg->enc_ctrl.defer_timeout_frames = 60;
+	cfg->enc_ctrl.scene_change_threshold = 325;
+	cfg->enc_ctrl.scene_change_holdoff = 2;
+	cfg->enc_ctrl.idr_qp_boost = 4;
+	cfg->enc_ctrl.text_log = false;
+
 	/* debug */
 	cfg->debug.show_osd = false;
 }
@@ -420,6 +430,34 @@ static void load_record(const cJSON *root, VencConfigRecord *s)
 		json_get_string(obj, "server", s->server));
 }
 
+static void load_enc_ctrl(const cJSON *root, VencConfigEncCtrl *s)
+{
+	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "encCtrl");
+	if (!obj) return;
+
+	s->enabled = json_get_bool(obj, "enabled", s->enabled);
+	s->max_gop_size = json_get_double(obj, "maxGopSize",
+		s->max_gop_size);
+	s->min_gop_size = json_get_double(obj, "minGopSize",
+		s->min_gop_size);
+	s->defer_timeout_frames = (uint16_t)json_get_int(obj,
+		"deferTimeoutFrames", s->defer_timeout_frames);
+	s->scene_change_threshold = (uint16_t)json_get_int(obj,
+		"sceneChangeThreshold", s->scene_change_threshold);
+	s->scene_change_holdoff = (uint8_t)json_get_int(obj,
+		"sceneChangeHoldoff", s->scene_change_holdoff);
+	s->idr_qp_boost = (uint8_t)json_get_int(obj, "idrQpBoost",
+		s->idr_qp_boost);
+	s->text_log = json_get_bool(obj, "textLog", s->text_log);
+
+	if (s->max_gop_size <= 0.0)
+		s->max_gop_size = 0.001;
+	if (s->min_gop_size < 0.0)
+		s->min_gop_size = 0.0;
+	if (s->min_gop_size > s->max_gop_size)
+		s->min_gop_size = s->max_gop_size;
+}
+
 static void load_fpv(const cJSON *root, VencConfigFpv *s)
 {
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "fpv");
@@ -477,6 +515,7 @@ int venc_config_load(const char *path, VencConfig *cfg)
 	load_imu(root, &cfg->imu);
 	load_eis(root, &cfg->eis);
 	load_record(root, &cfg->record);
+	load_enc_ctrl(root, &cfg->enc_ctrl);
 	{
 		const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "debug");
 		if (obj)
@@ -717,6 +756,25 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(rec, "fps", cfg->record.fps);
 		cJSON_AddNumberToObject(rec, "gopSize", cfg->record.gop_size);
 		cJSON_AddStringToObject(rec, "server", cfg->record.server);
+	}
+
+	/* encCtrl */
+	cJSON *enc = cJSON_AddObjectToObject(root, "encCtrl");
+	if (enc) {
+		cJSON_AddBoolToObject(enc, "enabled", cfg->enc_ctrl.enabled);
+		cJSON_AddNumberToObject(enc, "maxGopSize",
+			cfg->enc_ctrl.max_gop_size);
+		cJSON_AddNumberToObject(enc, "minGopSize",
+			cfg->enc_ctrl.min_gop_size);
+		cJSON_AddNumberToObject(enc, "deferTimeoutFrames",
+			cfg->enc_ctrl.defer_timeout_frames);
+		cJSON_AddNumberToObject(enc, "sceneChangeThreshold",
+			cfg->enc_ctrl.scene_change_threshold);
+		cJSON_AddNumberToObject(enc, "sceneChangeHoldoff",
+			cfg->enc_ctrl.scene_change_holdoff);
+		cJSON_AddNumberToObject(enc, "idrQpBoost",
+			cfg->enc_ctrl.idr_qp_boost);
+		cJSON_AddBoolToObject(enc, "textLog", cfg->enc_ctrl.text_log);
 	}
 
 	/* debug */

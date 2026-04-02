@@ -70,9 +70,27 @@ When connected devices are available, run targeted deployment tests after
 **Operational Defaults → Deployment Targets** are tested; blank rows are
 skipped automatically.
 
-For each row that has a host, first probe sensor capabilities with
-`--list-sensor-modes`, then test **every listed sensor mode** at its reported
-max FPS. This catches per-mode regressions and cold-boot unlock failures.
+For `venc` on the current Star6E bench (`root@192.168.1.13` / imx335), prefer
+the direct JSON-config helper first:
+
+```bash
+scripts/star6e_direct_deploy.sh cycle
+```
+
+This validates the production `/etc/venc.json` path, daemon startup, HTTP API,
+and `/tmp/venc.log` capture.
+
+Use `make remote-test` for bounded CLI validation:
+
+- sensor capability discovery (`--list-sensor-modes`)
+- max-FPS sweeps across reported modes
+- auxiliary test binaries such as `snr_toggle_test` and `snr_sequence_probe`
+- Maruko runtime deployment runs that still depend on `/tmp` staging
+
+For each host row that uses `remote-test`, first probe sensor capabilities
+with `--list-sensor-modes`, then test **every listed sensor mode** at its
+reported max FPS. This catches per-mode regressions and cold-boot unlock
+failures.
 
 ```
 # 1) List sensor modes
@@ -82,14 +100,15 @@ make remote-test ARGS='--host root@<HOST> --soc-build <backend> --run-bin venc -
 make remote-test ARGS='--host root@<HOST> --soc-build <backend> --run-bin venc -- --sensor-index <idx> --sensor-mode <M> -f <MAX_FPS> [--isp-bin <path>]'
 ```
 
-**Example** — Star6E / imx415 at `192.168.2.10`, where `--list-sensor-modes`
-reports modes 0 (30fps), 2 (90fps), and 3 (120fps):
+**Example** — Star6E / imx335 at `192.168.1.13`, where `--list-sensor-modes`
+reports modes 0 (30fps), 1 (60fps), 2 (90fps), and 3 (120fps):
 
 ```
-make remote-test ARGS='--host root@192.168.2.10 --soc-build star6e --run-bin venc -- --list-sensor-modes --sensor-index 0'
-make remote-test ARGS='--host root@192.168.2.10 --soc-build star6e --run-bin venc -- --sensor-index 0 --sensor-mode 0 -f 30'
-make remote-test ARGS='--host root@192.168.2.10 --soc-build star6e --run-bin venc -- --sensor-index 0 --sensor-mode 2 -f 90'
-make remote-test ARGS='--host root@192.168.2.10 --soc-build star6e --run-bin venc -- --sensor-index 0 --sensor-mode 3 -f 120'
+make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin venc -- --list-sensor-modes --sensor-index 0'
+make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin venc -- --sensor-index 0 --sensor-mode 0 -f 30'
+make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin venc -- --sensor-index 0 --sensor-mode 1 -f 60'
+make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin venc -- --sensor-index 0 --sensor-mode 2 -f 90'
+make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin venc -- --sensor-index 0 --sensor-mode 3 -f 120'
 ```
 
 Substitute `<HOST>`, `<backend>`, `<idx>`, and `--isp-bin` from the
@@ -108,12 +127,12 @@ For a full pre-PR check (version bump, changelog, build):
 make pre-pr
 ```
 
-## Deployment Test Interpretation
+## Remote-Test Interpretation
 
 After `make verify` passes and devices are available, deployment tests are the
 primary feedback mechanism for validating changes on real hardware.
-`remote_test.sh` emits strict exit codes and an optional JSON summary that
-agents MUST use to drive the edit-build-test loop.
+The `remote_test.sh` workflow emits strict exit codes and an optional JSON
+summary that agents MUST use to drive the edit-build-test loop.
 
 ### Exit Code Reference
 
@@ -130,7 +149,7 @@ When `--json-summary` is passed, `remote_test.sh` emits a single JSON line
 after all output. This is the preferred way for agents to consume results:
 
 ```json
-{"status":"success","exit_code":0,"device_alive":true,"dmesg_hits":0,"duration_sec":12,"run_bin":"venc","soc_build":"star6e","host":"root@192.168.2.10"}
+{"status":"success","exit_code":0,"device_alive":true,"dmesg_hits":0,"duration_sec":12,"run_bin":"venc","soc_build":"star6e","host":"root@192.168.1.13"}
 ```
 
 | Field | Type | Description |
@@ -161,14 +180,14 @@ Typical fast iteration cycle:
 
 ```bash
 # First run: full build + deploy
-make remote-test ARGS='--json-summary --host root@192.168.2.10 -- --sensor-index 0 -f 30'
+make remote-test ARGS='--json-summary --host root@192.168.1.13 -- --sensor-index 0 -f 30'
 
 # After editing venc source: rebuild locally, deploy the binary
 make build SOC_BUILD=star6e
-make remote-test ARGS='--json-summary --skip-build --host root@192.168.2.10 -- --sensor-index 0 -f 30'
+make remote-test ARGS='--json-summary --skip-build --host root@192.168.1.13 -- --sensor-index 0 -f 30'
 
 # Same binary, different args: skip everything, just re-run
-make remote-test ARGS='--json-summary --skip-build --skip-deploy --host root@192.168.2.10 -- --sensor-index 0 -f 60'
+make remote-test ARGS='--json-summary --skip-build --skip-deploy --host root@192.168.1.13 -- --sensor-index 0 -f 60'
 ```
 
 ### Interpreting dmesg Hits
@@ -225,6 +244,15 @@ quoted JSON strings: `'"hello"'` (shell single-quotes around JSON double-quotes)
 Booleans and numbers are bare: `true`, `false`, `42`.
 
 ### Quick cycle
+
+For the current Star6E bench (`root@192.168.1.13`), prefer the helper script:
+
+```bash
+scripts/star6e_direct_deploy.sh cycle
+```
+
+It wraps the production `/etc/venc.json` flow: config backup, `/usr/bin/venc`
+deploy, daemon start, HTTP readiness wait, endpoint checks, and log capture.
 
 ```bash
 # 1. Build
@@ -412,6 +440,7 @@ Read these before working on related areas:
 | Sensor unlock / high-FPS | `documentation/SENSOR_UNLOCK_IMX415_IMX335.md` |
 | Current priorities | `documentation/CURRENT_STATUS_AND_NEXT_STEPS.md` |
 | Implementation timeline | `documentation/IMPLEMENTATION_PHASES.md` |
+| Star6E direct deploy helper | `scripts/star6e_direct_deploy.sh` |
 | Remote testing | `documentation/REMOTE_TEST_WORKFLOW.md` |
 | HTTP API contract | `documentation/HTTP_API_CONTRACT.md` |
 | Precrop / aspect ratio | `documentation/PRECROP_ASPECT_RATIO.md` |
@@ -505,7 +534,8 @@ reference). Key rules summarized here:
 | `make clean` | Clean build outputs |
 | `make verify` | Build both backends + verify binaries (Maruko first, Star6E last) |
 | `make pre-pr` | Full pre-PR checklist |
-| `make remote-test ARGS='...'` | Run remote test |
+| `make remote-test ARGS='...'` | Run bounded remote CLI/test-binary workflow |
+| `scripts/star6e_direct_deploy.sh cycle` | Preferred Star6E `venc` deploy + HTTP smoke test |
 
 ### Output Layout
 

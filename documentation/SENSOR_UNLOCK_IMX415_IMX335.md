@@ -71,16 +71,19 @@ MI_S32 init_sensor_unlock_then_mode(MI_SNR_PAD_ID_e pad, MI_U32 mode, MI_U32 fps
 
 ## Standalone `venc` Integration
 
-The standalone binary now includes this pre-step by default, with tunable CLI options:
+The current runtime path exposes the unlock settings through `/etc/venc.json`
+and the live config model:
 
-- `--sensor-unlock-off`
-- `--sensor-unlock-cmd <x>` (default `0x23`)
-- `--sensor-unlock-reg <x>` (default `0x300a`)
-- `--sensor-unlock-value <x>` (default `0x80`)
-- `--sensor-unlock-dir <0|1>` (default `0`, driver direction)
+- `sensor.unlockEnabled`
+- `sensor.unlockCmd` (default `0x23`)
+- `sensor.unlockReg` (default `0x300a`)
+- `sensor.unlockValue` (default `0x80`)
+- `sensor.unlockDir` (default `0`, driver direction)
 
 Recommended default:
 - Keep defaults for IMX415 cold-boot operation.
+
+Low-level probe binaries still use their CLI flags for unlock experiments.
 
 ## Reproducible Test Procedure (Cold State)
 
@@ -119,26 +122,35 @@ Expected:
 
 ### 2) End-to-end `venc` verification
 
+Current runtime path: update `/etc/venc.json`, then restart through the
+direct helper.
+
 `120fps` mode:
 
 ```bash
-./venc -m rtp -c 265cbr -h 10.6.0.1 -p 5600 \
-  --sensor-index 0 --sensor-mode 3 -f 120 -s 1472x816 \
-  --isp-bin /etc/sensors/imx415_greg_fpvXVIII-gpt200.bin
+scripts/star6e_direct_deploy.sh config-set .sensor.index 0
+scripts/star6e_direct_deploy.sh config-set .sensor.mode 3
+scripts/star6e_direct_deploy.sh config-set .video0.fps 120
+scripts/star6e_direct_deploy.sh config-set .video0.size '"1472x816"'
+scripts/star6e_direct_deploy.sh config-set .isp.sensorBin '"/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin"'
+scripts/star6e_direct_deploy.sh cycle
 ```
 
 `90fps` mode:
 
 ```bash
-./venc -m rtp -c 265cbr -h 10.6.0.1 -p 5600 \
-  --sensor-index 0 --sensor-mode 2 -f 90 -s 1280x720 \
-  --isp-bin /etc/sensors/imx415_greg_fpvXVIII-gpt200.bin
+scripts/star6e_direct_deploy.sh config-set .sensor.index 0
+scripts/star6e_direct_deploy.sh config-set .sensor.mode 2
+scripts/star6e_direct_deploy.sh config-set .video0.fps 90
+scripts/star6e_direct_deploy.sh config-set .video0.size '"1280x720"'
+scripts/star6e_direct_deploy.sh config-set .isp.sensorBin '"/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin"'
+scripts/star6e_direct_deploy.sh cycle
 ```
 
 Expected:
 - Sensor mode readback matches requested mode.
 - FPS no longer forced to 30 on cold boot.
-- Stream stays stable.
+- HTTP API becomes reachable and the stream stays stable.
 
 ## Troubleshooting
 

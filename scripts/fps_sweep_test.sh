@@ -5,7 +5,7 @@ set -euo pipefail
 # Discovers all sensor modes and sweeps FPS values to detect anomalies
 # (e.g., requested 120 but got 70).
 
-HOST="${HOST:-root@192.168.2.10}"
+HOST="${HOST:-root@192.168.1.13}"
 REMOTE_DIR="${REMOTE_DIR:-/tmp/waybeam_venc_test}"
 SENSOR_INDEX=0
 FPS_LIST="25,30,50,60,90,120,144"
@@ -16,7 +16,7 @@ REBOOT_BETWEEN=0
 SSH_CONNECT_TIMEOUT="${SSH_CONNECT_TIMEOUT:-3}"
 SSH_PROBE_TIMEOUT="${SSH_PROBE_TIMEOUT:-5}"
 STREAM_HOST="192.168.1.2"
-ISP_BIN="/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin"
+ISP_BIN="/etc/sensors/imx335_greg_fpvVII-gpt200.bin"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,15 +35,15 @@ while [[ $# -gt 0 ]]; do
 Usage: fps_sweep_test.sh [OPTIONS]
 
 Options:
-  --host HOST             SSH target (default: root@192.168.2.10)
+  --host HOST             SSH target (default: root@192.168.1.13)
   --sensor-index N        Sensor index (default: 0)
   --fps-list "F1,F2,..."  Comma-separated FPS values (default: 25,30,50,60,90,120,144)
-  --timeout-per-run SECS  Timeout per venc run (default: 10)
+  --timeout-per-run SECS  Timeout per venc run (default: 15)
   --skip-build            Reuse already-deployed binary
   --codec CODEC           Codec string (default: 265cbr)
   --reboot-between        Reboot device between sensor mode changes
   --stream-host IP        Stream destination IP (default: 192.168.1.2)
-  --isp-bin PATH          ISP bin on device (default: /etc/sensors/imx415_greg_fpvXVIII-gpt200.bin)
+  --isp-bin PATH          ISP bin on device (default: /etc/sensors/imx335_greg_fpvVII-gpt200.bin)
   --no-isp-bin            Run without ISP bin
   --help                  Show this help
 USAGE

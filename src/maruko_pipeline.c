@@ -1170,10 +1170,10 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 				&ctx->cfg);
 		}
 
-		rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
-			seq_before,
-			(uint16_t)(rtp_state.seq - seq_before),
-			capture_us, ready_us);
+			rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
+				seq_before,
+				(uint16_t)(rtp_state.seq - seq_before),
+				capture_us, ready_us, NULL);
 
 		if (ctx->cfg.verbose) {
 			StreamMetricsSample sample;

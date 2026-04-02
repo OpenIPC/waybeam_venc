@@ -44,6 +44,9 @@ void telemetry_record(TelemetryState *ts, const EncoderFrameStats *stats,
 /** Dump recent telemetry to stderr (last N entries). */
 void telemetry_dump(const TelemetryState *ts, uint32_t last_n);
 
+/** Get the latest telemetry record without consuming it. */
+int telemetry_get_latest(const TelemetryState *ts, TelemetryRecord *out);
+
 /** Get total record count. */
 uint32_t telemetry_count(const TelemetryState *ts);
 

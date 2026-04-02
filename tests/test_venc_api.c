@@ -30,6 +30,84 @@ MI_S32 MI_VENC_RequestIdr(MI_VENC_CHN chn, MI_BOOL instant)
 	(void)chn; (void)instant; return -1;
 }
 
+/* Whitebox test hook from venc_api.c */
+extern int venc_api_apply_set_query_for_test(const char *query,
+	int *http_status, char *response_buf, size_t response_buf_size);
+extern void venc_api_bind_for_test(VencConfig *cfg, const char *backend_name,
+	const VencApplyCallbacks *cb);
+
+typedef struct {
+	int apply_bitrate_calls;
+	int apply_fps_calls;
+	int apply_gop_calls;
+	int apply_qp_delta_calls;
+	int apply_verbose_calls;
+	int apply_awb_mode_calls;
+
+	uint32_t last_bitrate;
+	uint32_t last_fps;
+	uint32_t last_gop;
+	int last_qp_delta;
+	bool last_verbose;
+	int last_awb_mode;
+	uint32_t last_awb_ct;
+
+	int fail_bitrate;
+	int fail_verbose;
+	int fail_fps;
+	int fail_gop;
+} ApiCallbackState;
+
+static ApiCallbackState g_api_cb_state;
+
+static void reset_api_cb_state(void)
+{
+	memset(&g_api_cb_state, 0, sizeof(g_api_cb_state));
+}
+
+static int test_apply_bitrate(uint32_t kbps)
+{
+	g_api_cb_state.apply_bitrate_calls++;
+	g_api_cb_state.last_bitrate = kbps;
+	return g_api_cb_state.fail_bitrate ? -1 : 0;
+}
+
+static int test_apply_fps(uint32_t fps)
+{
+	g_api_cb_state.apply_fps_calls++;
+	g_api_cb_state.last_fps = fps;
+	return g_api_cb_state.fail_fps ? -1 : 0;
+}
+
+static int test_apply_gop(uint32_t gop_size)
+{
+	g_api_cb_state.apply_gop_calls++;
+	g_api_cb_state.last_gop = gop_size;
+	return g_api_cb_state.fail_gop ? -1 : 0;
+}
+
+static int test_apply_qp_delta(int delta)
+{
+	g_api_cb_state.apply_qp_delta_calls++;
+	g_api_cb_state.last_qp_delta = delta;
+	return 0;
+}
+
+static int test_apply_verbose(bool on)
+{
+	g_api_cb_state.apply_verbose_calls++;
+	g_api_cb_state.last_verbose = on;
+	return g_api_cb_state.fail_verbose ? -1 : 0;
+}
+
+static int test_apply_awb_mode(int mode, uint32_t ct)
+{
+	g_api_cb_state.apply_awb_mode_calls++;
+	g_api_cb_state.last_awb_mode = mode;
+	g_api_cb_state.last_awb_ct = ct;
+	return 0;
+}
+
 /* Whitebox access to internal functions via extern declarations.
  * These are static in venc_api.c — we re-declare them here for testing.
  * This pattern matches the waybeam-hub test approach. */
@@ -71,6 +149,285 @@ static int test_register_with_callbacks(void)
 	return failures;
 }
 
+static int test_field_support_by_backend(void)
+{
+	int failures = 0;
+
+	CHECK("enc_ctrl supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"enc_ctrl.enabled") == 1);
+	CHECK("enc_ctrl alias supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"encCtrl.maxGopSize") == 1);
+	CHECK("enc_ctrl unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"enc_ctrl.enabled") == 0);
+	CHECK("enc_ctrl unsupported unknown",
+		venc_api_field_supported_for_backend("test",
+			"encCtrl.sceneChangeThreshold") == 0);
+	CHECK("regular field supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"video0.bitrate") == 1);
+
+	return failures;
+}
+
+static int test_multi_set_live_success(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_bitrate = test_apply_bitrate;
+	cb.apply_verbose = test_apply_verbose;
+
+	venc_api_bind_for_test(&cfg, "star6e", &cb);
+	CHECK("multi set apply ok",
+		venc_api_apply_set_query_for_test(
+			"video0.bitrate=4096&system.verbose=true",
+			&status, response, sizeof(response)) == 0);
+	CHECK("multi set status 200", status == 200);
+	CHECK("multi set bitrate cfg", cfg.video0.bitrate == 4096);
+	CHECK("multi set verbose cfg", cfg.system.verbose == true);
+	CHECK("multi set bitrate applied once", g_api_cb_state.apply_bitrate_calls == 1);
+	CHECK("multi set verbose applied once", g_api_cb_state.apply_verbose_calls == 1);
+	CHECK("multi set bitrate value", g_api_cb_state.last_bitrate == 4096);
+	CHECK("multi set verbose value", g_api_cb_state.last_verbose == true);
+	CHECK("multi set response array", strstr(response, "\"applied\"") != NULL);
+
+	return failures;
+}
+
+static int test_multi_set_awb_grouped_apply(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_awb_mode = test_apply_awb_mode;
+
+	venc_api_bind_for_test(&cfg, "star6e", &cb);
+	CHECK("multi awb apply ok",
+		venc_api_apply_set_query_for_test(
+			"isp.awbMode=ct_manual&isp.awbCt=6000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("multi awb status 200", status == 200);
+	CHECK("multi awb mode cfg", strcmp(cfg.isp.awb_mode, "ct_manual") == 0);
+	CHECK("multi awb ct cfg", cfg.isp.awb_ct == 6000);
+	CHECK("multi awb grouped once", g_api_cb_state.apply_awb_mode_calls == 1);
+	CHECK("multi awb mode value", g_api_cb_state.last_awb_mode == 1);
+	CHECK("multi awb ct value", g_api_cb_state.last_awb_ct == 6000);
+	CHECK("multi awb response alias", strstr(response, "isp.awbMode") != NULL);
+
+	return failures;
+}
+
+static int test_multi_set_video_timing_grouped_apply(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_fps = test_apply_fps;
+	cb.apply_gop = test_apply_gop;
+
+	venc_api_bind_for_test(&cfg, "star6e", &cb);
+	CHECK("multi timing apply ok",
+		venc_api_apply_set_query_for_test(
+			"video0.fps=30&video0.gopSize=1.0",
+			&status, response, sizeof(response)) == 0);
+	CHECK("multi timing status 200", status == 200);
+	CHECK("multi timing fps cfg", cfg.video0.fps == 30);
+	CHECK("multi timing gop cfg", cfg.video0.gop_size == 1.0);
+	CHECK("multi timing fps once", g_api_cb_state.apply_fps_calls == 1);
+	CHECK("multi timing gop once", g_api_cb_state.apply_gop_calls == 1);
+	CHECK("multi timing fps value", g_api_cb_state.last_fps == 30);
+	CHECK("multi timing gop value", g_api_cb_state.last_gop == 30);
+	CHECK("multi timing response alias", strstr(response, "video0.gopSize") != NULL);
+
+	return failures;
+}
+
+static int test_multi_set_rejects_restart_fields(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+	uint32_t old_bitrate;
+	uint32_t old_width;
+	uint32_t old_height;
+
+	venc_config_defaults(&cfg);
+	old_bitrate = cfg.video0.bitrate;
+	old_width = cfg.video0.width;
+	old_height = cfg.video0.height;
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_bitrate = test_apply_bitrate;
+
+	venc_api_bind_for_test(&cfg, "star6e", &cb);
+	CHECK("multi reject restart rc",
+		venc_api_apply_set_query_for_test(
+			"video0.bitrate=4096&video0.size=1280x720",
+			&status, response, sizeof(response)) == 0);
+	CHECK("multi reject restart status", status == 400);
+	CHECK("multi reject restart error",
+		strstr(response, "multi-set only supports live fields") != NULL);
+	CHECK("multi reject restart bitrate unchanged", cfg.video0.bitrate == old_bitrate);
+	CHECK("multi reject restart width unchanged", cfg.video0.width == old_width);
+	CHECK("multi reject restart height unchanged", cfg.video0.height == old_height);
+	CHECK("multi reject restart no callbacks", g_api_cb_state.apply_bitrate_calls == 0);
+
+	return failures;
+}
+
+static int test_multi_set_rejects_duplicate_fields(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_qp_delta = test_apply_qp_delta;
+
+	venc_api_bind_for_test(&cfg, "star6e", &cb);
+	CHECK("multi dup rc",
+		venc_api_apply_set_query_for_test(
+			"video0.qp_delta=1&video0.qpDelta=2",
+			&status, response, sizeof(response)) == 0);
+	CHECK("multi dup status", status == 400);
+	CHECK("multi dup error", strstr(response, "duplicate field") != NULL);
+	CHECK("multi dup qp unchanged", cfg.video0.qp_delta == -4);
+	CHECK("multi dup no apply", g_api_cb_state.apply_qp_delta_calls == 0);
+
+	return failures;
+}
+
+static int test_multi_set_preflights_missing_callback(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_bitrate = test_apply_bitrate;
+
+	venc_api_bind_for_test(&cfg, "star6e", &cb);
+	CHECK("multi preflight rc",
+		venc_api_apply_set_query_for_test(
+			"video0.bitrate=4096&system.verbose=true",
+			&status, response, sizeof(response)) == 0);
+	CHECK("multi preflight status", status == 501);
+	CHECK("multi preflight error",
+		strstr(response, "apply callback not available") != NULL);
+	CHECK("multi preflight bitrate unchanged", cfg.video0.bitrate == 8192);
+	CHECK("multi preflight verbose unchanged", cfg.system.verbose == false);
+	CHECK("multi preflight no side effects", g_api_cb_state.apply_bitrate_calls == 0);
+
+	return failures;
+}
+
+static int test_multi_set_rolls_back_on_apply_failure(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_bitrate = test_apply_bitrate;
+	cb.apply_verbose = test_apply_verbose;
+	g_api_cb_state.fail_verbose = 1;
+
+	venc_api_bind_for_test(&cfg, "star6e", &cb);
+	CHECK("multi rollback rc",
+		venc_api_apply_set_query_for_test(
+			"video0.bitrate=4096&system.verbose=true",
+			&status, response, sizeof(response)) == 0);
+	CHECK("multi rollback status", status == 500);
+	CHECK("multi rollback error",
+		strstr(response, "failed to apply live field group") != NULL);
+	CHECK("multi rollback bitrate restored", cfg.video0.bitrate == 8192);
+	CHECK("multi rollback verbose restored", cfg.system.verbose == false);
+	CHECK("multi rollback bitrate forward+rollback",
+		g_api_cb_state.apply_bitrate_calls == 2);
+	CHECK("multi rollback verbose attempted+rollback",
+		g_api_cb_state.apply_verbose_calls == 2);
+	CHECK("multi rollback bitrate restored value",
+		g_api_cb_state.last_bitrate == 8192);
+	CHECK("multi rollback verbose restored value",
+		g_api_cb_state.last_verbose == false);
+
+	return failures;
+}
+
+static int test_single_set_runtime_apply_failure(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+	uint32_t old_fps;
+	double old_gop_size;
+
+	venc_config_defaults(&cfg);
+	old_fps = cfg.video0.fps;
+	old_gop_size = cfg.video0.gop_size;
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_fps = test_apply_fps;
+	cb.apply_gop = test_apply_gop;
+	g_api_cb_state.fail_gop = 1;
+
+	venc_api_bind_for_test(&cfg, "star6e", &cb);
+	CHECK("single failure rc",
+		venc_api_apply_set_query_for_test(
+			"video0.fps=30", &status, response,
+			sizeof(response)) == 0);
+	CHECK("single failure status", status == 500);
+	CHECK("single failure error",
+		strstr(response, "failed to apply live field group") != NULL);
+	CHECK("single failure fps restored", cfg.video0.fps == old_fps);
+	CHECK("single failure gop restored", cfg.video0.gop_size == old_gop_size);
+	CHECK("single failure fps forward+rollback",
+		g_api_cb_state.apply_fps_calls == 2);
+	CHECK("single failure gop attempted+rollback",
+		g_api_cb_state.apply_gop_calls == 2);
+	CHECK("single failure fps restored value",
+		g_api_cb_state.last_fps == old_fps);
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_api(void)
@@ -78,5 +435,14 @@ int test_venc_api(void)
 	int failures = 0;
 	failures += test_register();
 	failures += test_register_with_callbacks();
+	failures += test_field_support_by_backend();
+	failures += test_multi_set_live_success();
+	failures += test_multi_set_awb_grouped_apply();
+	failures += test_multi_set_video_timing_grouped_apply();
+	failures += test_multi_set_rejects_restart_fields();
+	failures += test_multi_set_rejects_duplicate_fields();
+	failures += test_multi_set_preflights_missing_callback();
+	failures += test_multi_set_rolls_back_on_apply_failure();
+	failures += test_single_set_runtime_apply_failure();
 	return failures;
 }

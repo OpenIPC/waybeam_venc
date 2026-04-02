@@ -40,39 +40,46 @@ struct VencSdkContext {
 	int                chn;
 	int                codec;     /* 0 = H.264, 1 = H.265 */
 	const VencSdkOps  *ops;      /* bound ops table */
+	uint32_t           mock_bitrate_bps;
+	uint8_t            mock_qp_min;
+	uint8_t            mock_qp_max;
+	uint32_t           mock_idr_requests;
 };
 
 /* ── Mock implementation ────────────────────────────────────────────── */
 
 static int mock_request_idr(VencSdkContext *ctx, int instant)
 {
-	(void)ctx;
 	(void)instant;
+	if (ctx)
+		ctx->mock_idr_requests++;
 	return 0;
 }
 
 static int mock_set_bitrate(VencSdkContext *ctx, uint32_t bitrate_bps)
 {
-	(void)ctx;
-	(void)bitrate_bps;
+	if (ctx)
+		ctx->mock_bitrate_bps = bitrate_bps;
 	return 0;
 }
 
 static int mock_set_qp_range(VencSdkContext *ctx, uint8_t qp_min,
 	uint8_t qp_max)
 {
-	(void)ctx;
-	(void)qp_min;
-	(void)qp_max;
+	if (ctx) {
+		ctx->mock_qp_min = qp_min;
+		ctx->mock_qp_max = qp_max;
+	}
 	return 0;
 }
 
 static int mock_get_qp_range(VencSdkContext *ctx, uint8_t *qp_min,
 	uint8_t *qp_max)
 {
-	(void)ctx;
-	if (qp_min) *qp_min = 10;
-	if (qp_max) *qp_max = 48;
+	if (qp_min)
+		*qp_min = ctx ? ctx->mock_qp_min : 10;
+	if (qp_max)
+		*qp_max = ctx ? ctx->mock_qp_max : 48;
 	return 0;
 }
 
@@ -114,6 +121,88 @@ static int real_request_idr(VencSdkContext *ctx, int instant)
 	return MI_VENC_RequestIdr(ctx->chn, instant ? 1 : 0);
 }
 
+static int set_qp_range_for_mode(const MI_VENC_ChnAttr_t *attr,
+	MI_VENC_RcParam_t *param, uint8_t qp_min, uint8_t qp_max)
+{
+	if (!attr || !param)
+		return -1;
+
+	switch (attr->rate.mode) {
+	case I6_VENC_RATEMODE_H264CBR:
+		param->stParamH264Cbr.u32MinQp = qp_min;
+		param->stParamH264Cbr.u32MaxQp = qp_max;
+		param->stParamH264Cbr.u32MinIQp = qp_min;
+		param->stParamH264Cbr.u32MaxIQp = qp_max;
+		return 0;
+	case I6_VENC_RATEMODE_H264VBR:
+		param->stParamH264VBR.u32MinIQP = qp_min;
+		param->stParamH264VBR.u32MaxIQp = qp_max;
+		return 0;
+	case I6_VENC_RATEMODE_H264AVBR:
+		param->stParamH264Avbr.u32MinIQp = qp_min;
+		param->stParamH264Avbr.u32MaxIQp = qp_max;
+		return 0;
+	case I6_VENC_RATEMODE_H265CBR:
+		param->stParamH265Cbr.u32MinQp = qp_min;
+		param->stParamH265Cbr.u32MaxQp = qp_max;
+		param->stParamH265Cbr.u32MinIQp = qp_min;
+		param->stParamH265Cbr.u32MaxIQp = qp_max;
+		return 0;
+	case I6_VENC_RATEMODE_H265VBR:
+		param->stParamH265Vbr.u32MinIQP = qp_min;
+		param->stParamH265Vbr.u32MaxIQp = qp_max;
+		return 0;
+	case I6_VENC_RATEMODE_H265AVBR:
+		param->stParamH265Avbr.u32MinIQp = qp_min;
+		param->stParamH265Avbr.u32MaxIQp = qp_max;
+		return 0;
+	default:
+		fprintf(stderr,
+			"[enc_ctrl] unsupported rate mode %d for QP range set\n",
+			attr->rate.mode);
+		return -1;
+	}
+}
+
+static int get_qp_range_for_mode(const MI_VENC_ChnAttr_t *attr,
+	const MI_VENC_RcParam_t *param, uint8_t *qp_min, uint8_t *qp_max)
+{
+	if (!attr || !param)
+		return -1;
+
+	switch (attr->rate.mode) {
+	case I6_VENC_RATEMODE_H264CBR:
+		if (qp_min) *qp_min = (uint8_t)param->stParamH264Cbr.u32MinQp;
+		if (qp_max) *qp_max = (uint8_t)param->stParamH264Cbr.u32MaxQp;
+		return 0;
+	case I6_VENC_RATEMODE_H264VBR:
+		if (qp_min) *qp_min = (uint8_t)param->stParamH264VBR.u32MinIQP;
+		if (qp_max) *qp_max = (uint8_t)param->stParamH264VBR.u32MaxIQp;
+		return 0;
+	case I6_VENC_RATEMODE_H264AVBR:
+		if (qp_min) *qp_min = (uint8_t)param->stParamH264Avbr.u32MinIQp;
+		if (qp_max) *qp_max = (uint8_t)param->stParamH264Avbr.u32MaxIQp;
+		return 0;
+	case I6_VENC_RATEMODE_H265CBR:
+		if (qp_min) *qp_min = (uint8_t)param->stParamH265Cbr.u32MinQp;
+		if (qp_max) *qp_max = (uint8_t)param->stParamH265Cbr.u32MaxQp;
+		return 0;
+	case I6_VENC_RATEMODE_H265VBR:
+		if (qp_min) *qp_min = (uint8_t)param->stParamH265Vbr.u32MinIQP;
+		if (qp_max) *qp_max = (uint8_t)param->stParamH265Vbr.u32MaxIQp;
+		return 0;
+	case I6_VENC_RATEMODE_H265AVBR:
+		if (qp_min) *qp_min = (uint8_t)param->stParamH265Avbr.u32MinIQp;
+		if (qp_max) *qp_max = (uint8_t)param->stParamH265Avbr.u32MaxIQp;
+		return 0;
+	default:
+		fprintf(stderr,
+			"[enc_ctrl] unsupported rate mode %d for QP range get\n",
+			attr->rate.mode);
+		return -1;
+	}
+}
+
 static int real_set_bitrate(VencSdkContext *ctx, uint32_t bitrate_bps)
 {
 	MI_VENC_ChnAttr_t attr;
@@ -132,26 +221,26 @@ static int real_set_bitrate(VencSdkContext *ctx, uint32_t bitrate_bps)
 	/* Update bitrate in the rate control union based on mode.
 	 * Mode values from i6c_venc_ratemode enum. */
 	{
-		unsigned int kbps = bitrate_bps / 1024;
+		MI_U32 bits = bitrate_bps;
 
 		switch (attr.rate.mode) {
-		case 1:  /* H264 CBR */
-			attr.rate.h264Cbr.bitrate = kbps;
+		case I6_VENC_RATEMODE_H264CBR:
+			attr.rate.h264Cbr.bitrate = bits;
 			break;
-		case 2:  /* H264 VBR */
-			attr.rate.h264Vbr.maxBitrate = kbps;
+		case I6_VENC_RATEMODE_H264VBR:
+			attr.rate.h264Vbr.maxBitrate = bits;
 			break;
-		case 5:  /* H264 AVBR */
-			attr.rate.h264Avbr.maxBitrate = kbps;
+		case I6_VENC_RATEMODE_H264AVBR:
+			attr.rate.h264Avbr.maxBitrate = bits;
 			break;
-		case 9:  /* H265 CBR */
-			attr.rate.h265Cbr.bitrate = kbps;
+		case I6_VENC_RATEMODE_H265CBR:
+			attr.rate.h265Cbr.bitrate = bits;
 			break;
-		case 10: /* H265 VBR */
-			attr.rate.h265Vbr.maxBitrate = kbps;
+		case I6_VENC_RATEMODE_H265VBR:
+			attr.rate.h265Vbr.maxBitrate = bits;
 			break;
-		case 12: /* H265 AVBR */
-			attr.rate.h265Avbr.maxBitrate = kbps;
+		case I6_VENC_RATEMODE_H265AVBR:
+			attr.rate.h265Avbr.maxBitrate = bits;
 			break;
 		default:
 			fprintf(stderr,
@@ -174,28 +263,30 @@ static int real_set_qp_range(VencSdkContext *ctx, uint8_t qp_min,
 	uint8_t qp_max)
 {
 #if !defined(PLATFORM_MARUKO)
+	MI_VENC_ChnAttr_t attr;
 	MI_VENC_RcParam_t param;
 	int rc;
 
 	if (!ctx)
 		return -1;
 
+	memset(&attr, 0, sizeof(attr));
 	memset(&param, 0, sizeof(param));
-	rc = MI_VENC_GetRcParam(ctx->chn, &param);
-	if (rc != 0)
-		return -1;
 
-	if (ctx->codec == 0) {
-		param.stParamH264Cbr.u32MinQp = qp_min;
-		param.stParamH264Cbr.u32MaxQp = qp_max;
-		param.stParamH264Cbr.u32MinIQp = qp_min;
-		param.stParamH264Cbr.u32MaxIQp = qp_max;
-	} else {
-		param.stParamH265Cbr.u32MinQp = qp_min;
-		param.stParamH265Cbr.u32MaxQp = qp_max;
-		param.stParamH265Cbr.u32MinIQp = qp_min;
-		param.stParamH265Cbr.u32MaxIQp = qp_max;
+	rc = MI_VENC_GetChnAttr(ctx->chn, &attr);
+	if (rc != 0) {
+		fprintf(stderr, "[enc_ctrl] GetChnAttr failed: %d\n", rc);
+		return -1;
 	}
+
+	rc = MI_VENC_GetRcParam(ctx->chn, &param);
+	if (rc != 0) {
+		fprintf(stderr, "[enc_ctrl] GetRcParam failed: %d\n", rc);
+		return -1;
+	}
+
+	if (set_qp_range_for_mode(&attr, &param, qp_min, qp_max) != 0)
+		return -1;
 
 	return MI_VENC_SetRcParam(ctx->chn, &param);
 #else
@@ -210,26 +301,29 @@ static int real_get_qp_range(VencSdkContext *ctx, uint8_t *qp_min,
 	uint8_t *qp_max)
 {
 #if !defined(PLATFORM_MARUKO)
+	MI_VENC_ChnAttr_t attr;
 	MI_VENC_RcParam_t param;
 	int rc;
 
 	if (!ctx)
 		return -1;
 
+	memset(&attr, 0, sizeof(attr));
 	memset(&param, 0, sizeof(param));
-	rc = MI_VENC_GetRcParam(ctx->chn, &param);
-	if (rc != 0)
-		return -1;
 
-	if (ctx->codec == 0) {
-		if (qp_min) *qp_min = (uint8_t)param.stParamH264Cbr.u32MinQp;
-		if (qp_max) *qp_max = (uint8_t)param.stParamH264Cbr.u32MaxQp;
-	} else {
-		if (qp_min) *qp_min = (uint8_t)param.stParamH265Cbr.u32MinQp;
-		if (qp_max) *qp_max = (uint8_t)param.stParamH265Cbr.u32MaxQp;
+	rc = MI_VENC_GetChnAttr(ctx->chn, &attr);
+	if (rc != 0) {
+		fprintf(stderr, "[enc_ctrl] GetChnAttr failed: %d\n", rc);
+		return -1;
 	}
 
-	return 0;
+	rc = MI_VENC_GetRcParam(ctx->chn, &param);
+	if (rc != 0) {
+		fprintf(stderr, "[enc_ctrl] GetRcParam failed: %d\n", rc);
+		return -1;
+	}
+
+	return get_qp_range_for_mode(&attr, &param, qp_min, qp_max);
 #else
 	(void)ctx;
 	if (qp_min) *qp_min = 0;
@@ -350,6 +444,8 @@ VencSdkContext *venc_sdk_create(int chn, int codec)
 
 	ctx->chn = chn;
 	ctx->codec = codec;
+	ctx->mock_qp_min = 10;
+	ctx->mock_qp_max = 48;
 #if defined(PLATFORM_STAR6E) || defined(PLATFORM_MARUKO)
 	ctx->ops = &g_real_ops;
 #else
@@ -376,6 +472,8 @@ VencSdkContext *venc_sdk_create_mock(void)
 	if (!ctx)
 		return NULL;
 
+	ctx->mock_qp_min = 10;
+	ctx->mock_qp_max = 48;
 	ctx->ops = &g_mock_ops;
 	return ctx;
 }

@@ -3,16 +3,15 @@
 ## Goal
 - Replace ad-hoc CLI option parsing with a single JSON configuration source.
 - Keep runtime invocation minimal:
-  - `venc --config /etc/venc.json`
-  - `venc --help`
-- Add a local HTTP control API for live setting updates.
+  - `venc` (loads `/etc/venc.json`)
+- Keep the local HTTP control API for live setting updates coherent with the config model.
 - Keep API behavior versioned and documented in:
   - `documentation/HTTP_API_CONTRACT.md`
 
 ## Current State
-- JSON runtime wiring is **not active** in the current codebase.
-- A previous JSON runtime attempt was rolled back after Star6E stream regressions.
-- Postmortem and guardrails:
+- JSON runtime wiring is active in the current codebase.
+- The primary runtime path is `/etc/venc.json` plus the HTTP API.
+- Historical rollback postmortem and guardrails remain in:
   - `documentation/JSON_CONFIG_ROLLBACK_NOTES.md`
 
 ## Config Model
@@ -137,16 +136,17 @@ Contract requirement:
   until parity is complete.
 
 ## Implementation Phases
-1. Attempted (rolled back):
-   - JSON runtime integration in main startup path.
+1. Completed foundation:
+   - JSON runtime integration in the main startup path.
+   - HTTP server with read-only and write/apply endpoints.
+   - live vs restart-required setting classes wired into the runtime.
 2. Next:
-   - parser + in-memory config mapping only (no graph/runtime behavior changes).
+   - harden schema validation and document strict vs compatible handling.
+   - keep `/etc/venc.json`, helper scripts, and HTTP contract examples synchronized.
 3. Then:
-   - runtime wiring with strict Star6E parity gates versus CLI baseline.
+   - expand automated coverage for live-field, restart-required, and error-path behavior.
 4. Then:
-   - add HTTP server with read-only endpoints.
+   - tighten Star6E and Maruko parity checks around config/runtime mutations.
 5. Then:
-   - add write/apply endpoints for live-safe fields.
-6. Then:
-   - extend to restart-required/rebind fields with transactional apply and rollback
-     (including `video.precrop`).
+   - extend transactional apply/rollback where richer multi-field changes need it
+     (including `video.precrop` and more complex output reconfiguration).

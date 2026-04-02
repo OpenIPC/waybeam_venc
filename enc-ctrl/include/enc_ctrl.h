@@ -8,13 +8,14 @@
  * and external control. A future link controller or coordinator
  * integrates against this surface.
  *
- * All calls are non-blocking.
  * Thread safety: encoder thread writes via enc_ctrl_on_frame();
  *   external threads read state and issue requests via the rest.
- *   Lock-free ring buffer for stats, atomic flags for IDR requests.
+ *   Shared state is serialized internally; stats history remains
+ *   lock-free inside the ring buffer implementation.
  */
 
 #include "enc_types.h"
+#include "telemetry.h"
 
 #include <stdint.h>
 
@@ -60,6 +61,9 @@ uint16_t enc_ctrl_get_history(EncoderFrameStats *buf, uint16_t max_frames);
 /** Get latest single frame stats. */
 int enc_ctrl_get_latest(EncoderFrameStats *out);
 
+/** Get latest single telemetry record. */
+int enc_ctrl_get_latest_telemetry(TelemetryRecord *out);
+
 /* ── External control (any thread) ──────────────────────────────────── */
 
 /** Request IDR insertion on next eligible frame. */
@@ -73,6 +77,12 @@ int enc_ctrl_clear_defer(void);
 
 /** Set target bitrate (passthrough to MI_VENC, updates budget calc). */
 int enc_ctrl_set_bitrate(uint32_t bitrate_bps);
+
+/** Update target FPS and the derived GOP frame limits.
+ *  max_gop_length/min_gop_length must already be converted to frames
+ *  for the new FPS. */
+int enc_ctrl_set_fps(uint32_t fps, uint16_t max_gop_length,
+	uint16_t min_gop_length);
 
 /** Set QP bounds (passthrough to MI_VENC). */
 int enc_ctrl_set_qp_range(uint8_t qp_min, uint8_t qp_max);

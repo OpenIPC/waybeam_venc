@@ -46,6 +46,12 @@ typedef struct {
 int venc_api_register(VencConfig *cfg, const char *backend_name,
 	const VencApplyCallbacks *cb);
 
+/* Return 1 if a config field is supported on the named backend.
+ * field_key may be canonical (enc_ctrl.enabled) or an accepted alias
+ * (encCtrl.enabled). */
+int venc_api_field_supported_for_backend(const char *backend_name,
+	const char *field_key);
+
 /* Pipeline reinit request flag (shared between API and backend).
  *   0 = no reinit pending
  *   1 = reload config from disk + reinit pipeline (SIGHUP / /api/v1/restart)

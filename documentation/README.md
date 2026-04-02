@@ -7,11 +7,11 @@ This folder is the canonical place for waybeam_venc project documentation.
   - Current architecture/implementation plan for Star6E + Maruko targeted builds.
   - Tracks only remaining implementation steps from the current stable baseline.
 - `documentation/CONFIG_HTTP_API_ROADMAP.md`
-  - JSON config migration plan (`/etc/venc.json`) and HTTP runtime-control API scope.
+  - JSON config/runtime hardening roadmap (`/etc/venc.json`) and HTTP runtime-control API scope.
   - Contains full settings inventory and mutability classes.
 - `documentation/JSON_CONFIG_ROLLBACK_NOTES.md`
-  - Postmortem notes from the rolled-back JSON runtime attempt.
-  - Captures regression signatures and guardrails for the next implementation attempt.
+  - Historical postmortem notes from the earlier rolled-back JSON runtime attempt.
+  - Captures regression signatures and guardrails that still matter for current hardening work.
 - `documentation/HTTP_API_CONTRACT.md`
   - Canonical HTTP API contract (endpoints, payloads, status codes, mutability semantics).
   - Must be updated in the same PR as any HTTP API behavior change.
@@ -31,7 +31,7 @@ This folder is the canonical place for waybeam_venc project documentation.
   - Covers derotation, flight controller integration (MAVLink/MSP), degraded modes,
     performance budget, and phased implementation plan.
 - `documentation/REMOTE_TEST_WORKFLOW.md`
-  - Standard remote build/upload/run workflow, cold-state rules, and hang handling.
+  - Bounded remote CLI/test-binary workflow, cold-state rules, and hang handling.
 - `documentation/CRASH_LOG.md`
   - Incident log for SoC crashes/hangs. Three-strike rule triggers deeper investigation.
 - `documentation/IMPLEMENTATION_PHASES.md`

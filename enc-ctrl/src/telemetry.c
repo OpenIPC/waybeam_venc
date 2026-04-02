@@ -99,6 +99,18 @@ void telemetry_dump(const TelemetryState *ts, uint32_t last_n)
 	}
 }
 
+int telemetry_get_latest(const TelemetryState *ts, TelemetryRecord *out)
+{
+	uint32_t idx;
+
+	if (!ts || !out || ts->count == 0)
+		return -1;
+
+	idx = (ts->write_idx + TELEMETRY_RING_SLOTS - 1) % TELEMETRY_RING_SLOTS;
+	*out = ts->records[idx];
+	return 0;
+}
+
 uint32_t telemetry_count(const TelemetryState *ts)
 {
 	if (!ts)

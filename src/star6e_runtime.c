@@ -1,8 +1,10 @@
 #include "star6e_runtime.h"
 
 #include "debug_osd.h"
+#include "enc_ctrl.h"
 #include "eis.h"
 #include "imu_bmi270.h"
+#include "pipeline_common.h"
 #include "sdk_quiet.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
@@ -191,7 +193,98 @@ static int runtime_request_idr(void)
 {
 	if (!g_runner_ctx)
 		return -1;
+
+	if (enc_ctrl_is_active())
+		return enc_ctrl_request_idr(
+			g_runner_ctx->vcfg.enc_ctrl.idr_qp_boost);
+
 	return MI_VENC_RequestIdr(g_runner_ctx->ps.venc_channel, 1) == 0 ? 0 : -1;
+}
+
+static int runtime_sidecar_enc_info(RtpSidecarEncInfo *out)
+{
+	TelemetryRecord rec;
+
+	if (!out || !enc_ctrl_is_active())
+		return 0;
+	if (enc_ctrl_get_latest_telemetry(&rec) != 0)
+		return 0;
+
+	memset(out, 0, sizeof(*out));
+	out->frame_size_bytes = rec.frame_size;
+	out->frame_type = rec.frame_type;
+	out->qp = rec.qp;
+	out->complexity = rec.complexity;
+	out->scene_change = rec.scene_change;
+	out->gop_state = rec.gop_state;
+	out->idr_inserted = rec.idr_inserted;
+	out->frames_since_idr = rec.frames_since_idr;
+	return 1;
+}
+
+static int runtime_enc_ctrl_codec(const VencConfig *vcfg)
+{
+	if (vcfg && strcmp(vcfg->video0.codec, "h264") == 0)
+		return 0;
+	return 1;
+}
+
+static void runtime_enc_ctrl_config(const VencConfig *vcfg, GopConfig *cfg)
+{
+	uint32_t fps;
+
+	gop_config_defaults(cfg);
+	if (!vcfg)
+		return;
+
+	fps = vcfg->video0.fps;
+	cfg->enable_variable_gop = vcfg->enc_ctrl.enabled ? 1 : 0;
+	cfg->max_gop_length = pipeline_common_gop_frames(
+		vcfg->enc_ctrl.max_gop_size, fps);
+	cfg->min_gop_length = pipeline_common_gop_frames(
+		vcfg->enc_ctrl.min_gop_size, fps);
+	cfg->defer_timeout_frames = vcfg->enc_ctrl.defer_timeout_frames;
+	cfg->scene_change_threshold = vcfg->enc_ctrl.scene_change_threshold;
+	cfg->scene_change_holdoff = vcfg->enc_ctrl.scene_change_holdoff;
+	cfg->idr_qp_boost = vcfg->enc_ctrl.idr_qp_boost;
+
+	if (cfg->max_gop_length == 0)
+		cfg->max_gop_length = 1;
+	if (cfg->min_gop_length > cfg->max_gop_length)
+		cfg->min_gop_length = cfg->max_gop_length;
+}
+
+static void runtime_enc_ctrl_shutdown(void)
+{
+	if (enc_ctrl_is_active())
+		enc_ctrl_shutdown();
+}
+
+static int runtime_enc_ctrl_init(Star6eRunnerContext *ctx)
+{
+	GopConfig cfg;
+	uint32_t bitrate_bps;
+	const VencApplyCallbacks *cb;
+
+	if (!ctx->vcfg.enc_ctrl.enabled)
+		return 0;
+
+	runtime_enc_ctrl_config(&ctx->vcfg, &cfg);
+	cb = star6e_controls_callbacks();
+	if (!cb || !cb->apply_gop || cb->apply_gop(cfg.max_gop_length) != 0) {
+		fprintf(stderr, "ERROR: failed to set Star6E GOP for encCtrl\n");
+		return -1;
+	}
+
+	bitrate_bps = ctx->vcfg.video0.bitrate * 1024U;
+	if (enc_ctrl_init(&cfg, ctx->ps.venc_channel,
+	    runtime_enc_ctrl_codec(&ctx->vcfg), bitrate_bps,
+	    ctx->vcfg.video0.fps, ctx->vcfg.enc_ctrl.text_log) != 0) {
+		fprintf(stderr, "ERROR: encCtrl init failed\n");
+		return -1;
+	}
+
+	return 0;
 }
 
 static void start_custom_ae(const Star6ePipelineState *ps,
@@ -309,17 +402,17 @@ static void *dual_rec_thread_fn(void *arg)
 			continue;
 		}
 
-		/* Skip slow SD writes during shutdown — keep draining
-		 * to prevent VPE backpressure while pipeline tears down. */
-		if (g_running) {
-			if (d->is_dual_stream) {
-				(void)star6e_video_send_frame(&d->video,
-					&d->output, &stream, 1, 0);
-			} else if (d->ts_recorder) {
-				star6e_ts_recorder_write_stream(
-					d->ts_recorder, &stream);
+			/* Skip slow SD writes during shutdown — keep draining
+			 * to prevent VPE backpressure while pipeline tears down. */
+			if (g_running) {
+				if (d->is_dual_stream) {
+					(void)star6e_video_send_frame(&d->video,
+						&d->output, &stream, 1, 0, NULL);
+				} else if (d->ts_recorder) {
+					star6e_ts_recorder_write_stream(
+						d->ts_recorder, &stream);
+				}
 			}
-		}
 
 		MI_VENC_ReleaseStream(d->channel, &stream);
 		total_count++;
@@ -383,7 +476,7 @@ static void dual_rec_thread_start(Star6eDualVenc *d)
 	printf("> Dual recording thread started (mode: %s)\n", d->mode);
 }
 
-static void star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
+static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 {
 	Star6ePipelineState *ps = &ctx->ps;
 	VencConfig *vcfg = &ctx->vcfg;
@@ -393,6 +486,9 @@ static void star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	star6e_iq_init();
 	venc_api_register(vcfg, "star6e", star6e_controls_callbacks());
 	venc_api_set_record_status_fn(record_status_callback);
+
+	if (runtime_enc_ctrl_init(ctx) != 0)
+		return -1;
 
 	if (!vcfg->isp.legacy_ae)
 		start_custom_ae(ps, vcfg);
@@ -477,6 +573,8 @@ static void star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 				vcfg->audio.enabled ? &ps->audio_ring : NULL);
 		}
 	}
+
+	return 0;
 }
 
 static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
@@ -489,6 +587,7 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 	uint32_t prev_max_fps = ps->sensor.mode.maxFps;
 
 	star6e_cus3a_request_stop();
+	runtime_enc_ctrl_shutdown();
 
 	star6e_controls_reset();
 	star6e_pipeline_cus3a_reset();
@@ -529,6 +628,9 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 
 	star6e_controls_bind(ps, vcfg);
 	install_signal_handlers();
+
+	if (runtime_enc_ctrl_init(ctx) != 0)
+		return -1;
 
 	if (!vcfg->isp.legacy_ae)
 		start_custom_ae(ps, vcfg);
@@ -646,8 +748,19 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		return ret;
 	}
 
-	(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
-		ps->output_enabled, vcfg->system.verbose);
+	if (enc_ctrl_is_active())
+		(void)enc_ctrl_on_frame(&stream);
+
+	{
+		RtpSidecarEncInfo enc_info;
+		const RtpSidecarEncInfo *enc_ptr = NULL;
+
+		if (runtime_sidecar_enc_info(&enc_info))
+			enc_ptr = &enc_info;
+
+		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
+			ps->output_enabled, vcfg->system.verbose, enc_ptr);
+	}
 
 	/* In dual/dual-stream mode, ch1 handles recording (see below).
 	 * In mirror/off mode, ch0 feeds the recorder directly. */
@@ -676,7 +789,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 					vcfg->audio.enabled ? &ps->audio_ring : NULL);
 			}
 			/* Request IDR so the recording starts with a keyframe */
-			MI_VENC_RequestIdr(ps->venc_channel, 1);
+			runtime_request_idr();
 		}
 		if (venc_api_get_record_stop()) {
 			star6e_recorder_stop(&ps->recorder);
@@ -820,7 +933,9 @@ static int star6e_runner_init(void *opaque)
 	}
 	ctx->pipeline_started = 1;
 
-	star6e_runtime_apply_startup_controls(ctx);
+	ret = star6e_runtime_apply_startup_controls(ctx);
+	if (ret != 0)
+		return ret;
 	install_signal_handlers();
 	return 0;
 }
@@ -933,6 +1048,7 @@ static void star6e_runner_teardown(void *opaque)
 	 * open until StopRecvPic completes.  The thread skips SD writes
 	 * when g_running==0 (already set by the signal handler). */
 	if (ctx->pipeline_started) {
+		runtime_enc_ctrl_shutdown();
 		star6e_iq_cleanup();
 		star6e_controls_reset();
 		star6e_pipeline_stop(&ctx->ps);

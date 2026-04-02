@@ -50,14 +50,14 @@ Recording can also be started and stopped at runtime without editing the config:
 
 ```bash
 # Start recording (uses config dir, or override with ?dir=)
-wget -q -O- "http://<device>:8888/api/v1/record/start"
-wget -q -O- "http://<device>:8888/api/v1/record/start?dir=/mnt/mmcblk0p1"
+wget -q -O- "http://<device>:<port>/api/v1/record/start"
+wget -q -O- "http://<device>:<port>/api/v1/record/start?dir=/mnt/mmcblk0p1"
 
 # Stop recording
-wget -q -O- "http://<device>:8888/api/v1/record/stop"
+wget -q -O- "http://<device>:<port>/api/v1/record/stop"
 
 # Check status
-wget -q -O- "http://<device>:8888/api/v1/record/status"
+wget -q -O- "http://<device>:<port>/api/v1/record/status"
 ```
 
 Status response:
@@ -310,16 +310,16 @@ The secondary VENC channel can be controlled at runtime in dual-stream mode:
 
 ```bash
 # Query ch1 status (bitrate, fps, gop, active state)
-wget -q -O- "http://<device>:8888/api/v1/dual/status"
+wget -q -O- "http://<device>:<port>/api/v1/dual/status"
 
 # Change ch1 bitrate
-wget -q -O- "http://<device>:8888/api/v1/dual/set?bitrate=10000"
+wget -q -O- "http://<device>:<port>/api/v1/dual/set?bitrate=10000"
 
 # Change ch1 GOP (in seconds)
-wget -q -O- "http://<device>:8888/api/v1/dual/set?gop=1.0"
+wget -q -O- "http://<device>:<port>/api/v1/dual/set?gop=1.0"
 
 # Request IDR on ch1
-wget -q -O- "http://<device>:8888/api/v1/dual/idr"
+wget -q -O- "http://<device>:<port>/api/v1/dual/idr"
 ```
 
 All endpoints return 404 when dual VENC is not active. See
