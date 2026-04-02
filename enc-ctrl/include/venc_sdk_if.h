@@ -42,8 +42,9 @@ typedef struct {
  *  Returns NULL on failure. */
 VencSdkContext *venc_sdk_create(int chn, int codec);
 
-/** Get the operations table for a real SDK context. */
-const VencSdkOps *venc_sdk_ops(void);
+/** Get the operations table bound to this context.
+ *  Mock contexts always return mock ops, real contexts return real ops. */
+const VencSdkOps *venc_sdk_get_ops(const VencSdkContext *ctx);
 
 /** Destroy SDK context. */
 void venc_sdk_destroy(VencSdkContext *ctx);

@@ -37,10 +37,9 @@
  */
 
 struct VencSdkContext {
-	int      chn;
-	int      codec;     /* 0 = H.264, 1 = H.265 */
-	uint8_t  is_mock;
-	uint8_t  _pad[3];
+	int                chn;
+	int                codec;     /* 0 = H.264, 1 = H.265 */
+	const VencSdkOps  *ops;      /* bound ops table */
 };
 
 /* ── Mock implementation ────────────────────────────────────────────── */
@@ -130,24 +129,36 @@ static int real_set_bitrate(VencSdkContext *ctx, uint32_t bitrate_bps)
 		return -1;
 	}
 
-	/* Update bitrate in the rate control union based on mode */
-	switch (attr.rate.mode) {
-	case 1:  /* H264 CBR */
-		attr.rate.h264Cbr.bitrate = bitrate_bps / 1024;
-		break;
-	case 2:  /* H264 VBR */
-		attr.rate.h264Vbr.maxBitrate = bitrate_bps / 1024;
-		break;
-	case 9:  /* H265 CBR */
-		attr.rate.h265Cbr.bitrate = bitrate_bps / 1024;
-		break;
-	case 10: /* H265 VBR */
-		attr.rate.h265Vbr.maxBitrate = bitrate_bps / 1024;
-		break;
-	default:
-		fprintf(stderr, "[enc_ctrl] unsupported rate mode %d for bitrate set\n",
-			attr.rate.mode);
-		return -1;
+	/* Update bitrate in the rate control union based on mode.
+	 * Mode values from i6c_venc_ratemode enum. */
+	{
+		unsigned int kbps = bitrate_bps / 1024;
+
+		switch (attr.rate.mode) {
+		case 1:  /* H264 CBR */
+			attr.rate.h264Cbr.bitrate = kbps;
+			break;
+		case 2:  /* H264 VBR */
+			attr.rate.h264Vbr.maxBitrate = kbps;
+			break;
+		case 5:  /* H264 AVBR */
+			attr.rate.h264Avbr.maxBitrate = kbps;
+			break;
+		case 9:  /* H265 CBR */
+			attr.rate.h265Cbr.bitrate = kbps;
+			break;
+		case 10: /* H265 VBR */
+			attr.rate.h265Vbr.maxBitrate = kbps;
+			break;
+		case 12: /* H265 AVBR */
+			attr.rate.h265Avbr.maxBitrate = kbps;
+			break;
+		default:
+			fprintf(stderr,
+				"[enc_ctrl] unsupported rate mode %d for bitrate set\n",
+				attr.rate.mode);
+			return -1;
+		}
 	}
 
 	rc = MI_VENC_SetChnAttr(ctx->chn, &attr);
@@ -227,13 +238,64 @@ static int real_get_qp_range(VencSdkContext *ctx, uint8_t *qp_min,
 #endif
 }
 
+static uint8_t detect_frame_type(const MI_VENC_Stream_t *stream, int codec)
+{
+	unsigned int i;
+
+	if (!stream->packet)
+		return ENC_FRAME_P;
+
+	/* Iterate all packs and their packetInfo[] entries to find
+	 * the slice NAL.  The first pack is often SPS/PPS, not the
+	 * slice itself — checking only packet[0].naluType would
+	 * misclassify most I-frames. */
+	for (i = 0; i < stream->count; i++) {
+		const MI_VENC_Pack_t *pack = &stream->packet[i];
+		unsigned int k;
+		unsigned int nal_count = pack->packNum;
+
+		if (nal_count > 8)
+			nal_count = 8;
+
+		if (nal_count > 0) {
+			for (k = 0; k < nal_count; k++) {
+				if (codec == 0) {
+					int nt = pack->packetInfo[k].packType.h264Nalu;
+					if (nt == 5) /* ISLICE */
+						return ENC_FRAME_IDR;
+					if (nt == 9) /* IPSLICE */
+						return ENC_FRAME_I;
+				} else {
+					int nt = pack->packetInfo[k].packType.h265Nalu;
+					if (nt == 19) /* ISLICE / IDR_W_RADL */
+						return ENC_FRAME_IDR;
+				}
+			}
+		} else {
+			/* Fallback: single-NAL pack, use top-level naluType */
+			if (codec == 0) {
+				int nt = pack->naluType.h264Nalu;
+				if (nt == 5)
+					return ENC_FRAME_IDR;
+				if (nt == 9)
+					return ENC_FRAME_I;
+			} else {
+				int nt = pack->naluType.h265Nalu;
+				if (nt == 19)
+					return ENC_FRAME_IDR;
+			}
+		}
+	}
+
+	return ENC_FRAME_P;
+}
+
 static int real_extract_frame_stats(VencSdkContext *ctx,
 	const void *stream_ptr, uint32_t frame_seq,
 	EncoderFrameStats *out)
 {
 	const MI_VENC_Stream_t *stream = (const MI_VENC_Stream_t *)stream_ptr;
 	uint32_t total_size = 0;
-	uint8_t frame_type = ENC_FRAME_P;
 	uint8_t qp = 0;
 	unsigned int i;
 
@@ -254,23 +316,8 @@ static int real_extract_frame_stats(VencSdkContext *ctx,
 	if (stream->count > 0 && stream->packet)
 		out->timestamp_us = stream->packet[0].timestamp;
 
-	/* Frame type from NAL type */
-	if (stream->count > 0 && stream->packet) {
-		if (ctx->codec == 0) {
-			/* H.264: check naluType.h264Nalu */
-			int nalu = stream->packet[0].naluType.h264Nalu;
-			if (nalu == 5) /* I6C_VENC_NALU_H264_ISLICE */
-				frame_type = ENC_FRAME_IDR;
-			else if (nalu == 9) /* IPSLICE */
-				frame_type = ENC_FRAME_I;
-		} else {
-			/* H.265: check naluType.h265Nalu */
-			int nalu = stream->packet[0].naluType.h265Nalu;
-			if (nalu == 19) /* I6C_VENC_NALU_H265_ISLICE */
-				frame_type = ENC_FRAME_IDR;
-		}
-	}
-	out->frame_type = frame_type;
+	/* Frame type: iterate packs/packetInfo to find slice NAL */
+	out->frame_type = detect_frame_type(stream, ctx->codec);
 
 	/* QP from stream info — startQual is the closest available */
 	if (ctx->codec == 0)
@@ -303,17 +350,19 @@ VencSdkContext *venc_sdk_create(int chn, int codec)
 
 	ctx->chn = chn;
 	ctx->codec = codec;
-	ctx->is_mock = 0;
+#if defined(PLATFORM_STAR6E) || defined(PLATFORM_MARUKO)
+	ctx->ops = &g_real_ops;
+#else
+	ctx->ops = &g_mock_ops;
+#endif
 	return ctx;
 }
 
-const VencSdkOps *venc_sdk_ops(void)
+const VencSdkOps *venc_sdk_get_ops(const VencSdkContext *ctx)
 {
-#if defined(PLATFORM_STAR6E) || defined(PLATFORM_MARUKO)
-	return &g_real_ops;
-#else
-	return &g_mock_ops;
-#endif
+	if (!ctx)
+		return &g_mock_ops;
+	return ctx->ops;
 }
 
 void venc_sdk_destroy(VencSdkContext *ctx)
@@ -327,6 +376,6 @@ VencSdkContext *venc_sdk_create_mock(void)
 	if (!ctx)
 		return NULL;
 
-	ctx->is_mock = 1;
+	ctx->ops = &g_mock_ops;
 	return ctx;
 }

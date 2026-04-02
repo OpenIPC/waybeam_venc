@@ -39,6 +39,13 @@ void scene_est_update(SceneEstimatorState *state,
 		return;
 
 	size = stats->frame_size_bytes;
+
+	/* Clamp before shifting to prevent uint32_t overflow.
+	 * 16 MB << 8 = 4 GB which wraps.  Cap at ~16 MB.
+	 * Also prevents size * 1000 overflow in budget_ratio. */
+	if (size > (UINT32_MAX / 1000))
+		size = (UINT32_MAX / 1000);  /* prevent overflow in * 1000 and << 8 */
+
 	size_fp8 = size << 8;
 	qp_fp8 = (uint32_t)stats->qp_avg << 8;
 

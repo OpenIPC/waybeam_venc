@@ -125,6 +125,54 @@ static int test_ring_batch_read(void)
 	return failures;
 }
 
+static int test_ring_snapshot(void)
+{
+	EncoderFrameStats slots[8];
+	EncRingBuffer rb;
+	EncoderFrameStats stats;
+	EncoderFrameStats snap[16];
+	int failures = 0;
+	uint16_t count;
+	uint32_t i;
+
+	enc_ring_init(&rb, slots, 8);
+
+	for (i = 0; i < 5; i++) {
+		memset(&stats, 0, sizeof(stats));
+		stats.frame_seq = i + 10;
+		enc_ring_write(&rb, &stats);
+	}
+
+	count = enc_ring_snapshot(&rb, snap, 16);
+	CHECK("snapshot count", count == 5);
+	CHECK("snapshot oldest", snap[0].frame_seq == 10);
+	CHECK("snapshot newest", snap[4].frame_seq == 14);
+
+	/* Non-destructive: second call returns same data */
+	count = enc_ring_snapshot(&rb, snap, 16);
+	CHECK("snapshot repeat count", count == 5);
+	CHECK("snapshot repeat oldest", snap[0].frame_seq == 10);
+
+	/* Available unchanged (not consumed) */
+	CHECK("snapshot no consume", enc_ring_available(&rb) == 5);
+
+	/* Snapshot with wrap: write 10 entries into 8-slot ring */
+	enc_ring_init(&rb, slots, 8);
+	for (i = 0; i < 10; i++) {
+		memset(&stats, 0, sizeof(stats));
+		stats.frame_seq = i;
+		enc_ring_write(&rb, &stats);
+	}
+
+	count = enc_ring_snapshot(&rb, snap, 4);
+	CHECK("snapshot wrap count", count == 4);
+	/* Most recent 4: seq 6, 7, 8, 9 */
+	CHECK("snapshot wrap oldest", snap[0].frame_seq == 6);
+	CHECK("snapshot wrap newest", snap[3].frame_seq == 9);
+
+	return failures;
+}
+
 int test_ring_buffer(void)
 {
 	int failures = 0;
@@ -133,6 +181,7 @@ int test_ring_buffer(void)
 	failures += test_ring_wrap();
 	failures += test_ring_peek_latest();
 	failures += test_ring_batch_read();
+	failures += test_ring_snapshot();
 
 	return failures;
 }

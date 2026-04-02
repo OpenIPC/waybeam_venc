@@ -122,6 +122,11 @@ static int test_enc_ctrl_history(void)
 	CHECK("history first size", buf[0].frame_size_bytes == 1000);
 	CHECK("history last size", buf[19].frame_size_bytes == 20000);
 
+	/* Snapshot is non-destructive: second call returns same data */
+	count = enc_ctrl_get_history(buf, 32);
+	CHECK("history non-destructive", count == 20);
+	CHECK("history repeat first", buf[0].frame_size_bytes == 1000);
+
 	enc_ctrl_shutdown();
 
 	return failures;

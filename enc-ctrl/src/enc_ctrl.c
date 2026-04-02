@@ -40,8 +40,8 @@ typedef struct {
 	/* Saved QP range for IDR boost restore */
 	uint8_t              base_qp_min;
 	uint8_t              base_qp_max;
-	uint8_t              qp_boosted;  /* 1 if QP is currently boosted */
-	uint8_t              _pad0;
+	uint8_t              qp_boosted;       /* 1 if QP is currently boosted */
+	uint8_t              idr_boost_pending; /* frames remaining to wait for boosted IDR */
 } EncCtrlState;
 
 static EncCtrlState g_enc_ctrl;
@@ -97,7 +97,7 @@ int enc_ctrl_init(const GopConfig *config, int venc_chn, int codec,
 		return -1;
 	}
 
-	g_enc_ctrl.sdk_ops = venc_sdk_ops();
+	g_enc_ctrl.sdk_ops = venc_sdk_get_ops(g_enc_ctrl.sdk_ctx);
 
 	/* Read initial QP range */
 	g_enc_ctrl.sdk_ops->get_qp_range(g_enc_ctrl.sdk_ctx,
@@ -158,13 +158,28 @@ static void process_frame(EncoderFrameStats *stats)
 	scene_est_update(&g_enc_ctrl.scene, stats);
 	scene_est_get(&g_enc_ctrl.scene, &scene);
 
-	/* Restore QP if previously boosted and this was the IDR frame */
-	if (g_enc_ctrl.qp_boosted &&
-	    (stats->frame_type == ENC_FRAME_IDR ||
-	     stats->frame_type == ENC_FRAME_I)) {
-		g_enc_ctrl.sdk_ops->set_qp_range(g_enc_ctrl.sdk_ctx,
-			g_enc_ctrl.base_qp_min, g_enc_ctrl.base_qp_max);
-		g_enc_ctrl.qp_boosted = 0;
+	/* Restore QP if we boosted it for an IDR we requested.
+	 * Only restore when we see that IDR arrive, or if the
+	 * pending counter expires (IDR took too long). */
+	if (g_enc_ctrl.qp_boosted) {
+		if (stats->frame_type == ENC_FRAME_IDR ||
+		    stats->frame_type == ENC_FRAME_I) {
+			g_enc_ctrl.sdk_ops->set_qp_range(g_enc_ctrl.sdk_ctx,
+				g_enc_ctrl.base_qp_min,
+				g_enc_ctrl.base_qp_max);
+			g_enc_ctrl.qp_boosted = 0;
+			g_enc_ctrl.idr_boost_pending = 0;
+		} else if (g_enc_ctrl.idr_boost_pending > 0) {
+			g_enc_ctrl.idr_boost_pending--;
+			if (g_enc_ctrl.idr_boost_pending == 0) {
+				/* Timeout: IDR never arrived, restore QP */
+				g_enc_ctrl.sdk_ops->set_qp_range(
+					g_enc_ctrl.sdk_ctx,
+					g_enc_ctrl.base_qp_min,
+					g_enc_ctrl.base_qp_max);
+				g_enc_ctrl.qp_boosted = 0;
+			}
+		}
 	}
 
 	/* Notify GOP controller if an IDR was received */
@@ -197,6 +212,9 @@ static void process_frame(EncoderFrameStats *stats)
 			g_enc_ctrl.sdk_ops->set_qp_range(g_enc_ctrl.sdk_ctx,
 				boosted_min, boosted_max);
 			g_enc_ctrl.qp_boosted = 1;
+			/* Allow up to 10 frames for the IDR to arrive;
+			 * restore QP if it doesn't (avoids stuck boost). */
+			g_enc_ctrl.idr_boost_pending = 10;
 		}
 
 		g_enc_ctrl.sdk_ops->request_idr(g_enc_ctrl.sdk_ctx, 1);
@@ -263,7 +281,7 @@ uint16_t enc_ctrl_get_history(EncoderFrameStats *buf, uint16_t max_frames)
 	if (!g_enc_ctrl.active || !buf)
 		return 0;
 
-	return enc_ring_read_batch(&g_enc_ctrl.ring, buf, max_frames);
+	return enc_ring_snapshot(&g_enc_ctrl.ring, buf, max_frames);
 }
 
 int enc_ctrl_get_latest(EncoderFrameStats *out)

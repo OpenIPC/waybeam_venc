@@ -117,3 +117,35 @@ int enc_ring_peek_latest(const EncRingBuffer *rb, EncoderFrameStats *out)
 	*out = rb->slots[idx];
 	return 0;
 }
+
+uint16_t enc_ring_snapshot(const EncRingBuffer *rb, EncoderFrameStats *buf,
+	uint16_t max_count)
+{
+	uint64_t w;
+	uint64_t rd;
+	uint32_t avail;
+	uint32_t count;
+	uint32_t i;
+	uint64_t start;
+
+	if (!rb || !buf || max_count == 0)
+		return 0;
+
+	w = __atomic_load_n(&rb->write_idx, __ATOMIC_ACQUIRE);
+	rd = __atomic_load_n(&rb->read_idx, __ATOMIC_RELAXED);
+
+	if (w <= rd)
+		return 0;
+
+	avail = (uint32_t)(w - rd);
+	count = avail < (uint32_t)max_count ? avail : (uint32_t)max_count;
+
+	/* Copy the most recent 'count' entries, oldest first */
+	start = w - count;
+	for (i = 0; i < count; i++) {
+		uint32_t idx = (uint32_t)((start + i) & rb->slot_mask);
+		buf[i] = rb->slots[idx];
+	}
+
+	return (uint16_t)count;
+}

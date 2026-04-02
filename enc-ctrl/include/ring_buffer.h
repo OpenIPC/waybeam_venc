@@ -21,8 +21,8 @@ typedef struct {
 	EncoderFrameStats *slots;
 	uint32_t           slot_count;      /* must be power of 2 */
 	uint32_t           slot_mask;       /* slot_count - 1 */
-	volatile uint64_t  write_idx;
-	volatile uint64_t  read_idx;
+	uint64_t           write_idx;  /* accessed via __atomic builtins only */
+	uint64_t           read_idx;   /* accessed via __atomic builtins only */
 	uint64_t           total_writes;
 	uint64_t           total_overwrites;
 } EncRingBuffer;
@@ -53,5 +53,11 @@ uint32_t enc_ring_available(const EncRingBuffer *rb);
 /** Peek at the most recently written entry without consuming.
  *  Returns 0 on success, -1 if ring has no data. */
 int enc_ring_peek_latest(const EncRingBuffer *rb, EncoderFrameStats *out);
+
+/** Snapshot: copy up to max_count of the most recent entries without
+ *  consuming them.  Entries are ordered oldest-first.
+ *  Returns number of entries copied. */
+uint16_t enc_ring_snapshot(const EncRingBuffer *rb, EncoderFrameStats *buf,
+	uint16_t max_count);
 
 #endif /* ENC_RING_BUFFER_H */
