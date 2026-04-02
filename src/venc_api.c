@@ -17,6 +17,7 @@
 static VencConfig *g_cfg;
 static const VencApplyCallbacks *g_cb;
 static char g_backend[32];
+static int g_api_routes_registered = 0;
 
 /* Mutex protecting g_cfg field access from the httpd thread.
  * All handle_set/handle_get calls run on the httpd pthread; the main
@@ -228,7 +229,6 @@ static const FieldDesc g_fields[] = {
 	FIELD(enc_ctrl, scene_change_threshold, FT_UINT16, MUT_RESTART),
 	FIELD(enc_ctrl, scene_change_holdoff,  FT_UINT8,  MUT_RESTART),
 	FIELD(enc_ctrl, idr_qp_boost,          FT_UINT8,  MUT_RESTART),
-	FIELD(enc_ctrl, text_log,              FT_BOOL,   MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -299,7 +299,6 @@ static const FieldAlias g_field_aliases[] = {
 	{ "encCtrl.sceneChangeThreshold", "enc_ctrl.scene_change_threshold" },
 	{ "encCtrl.sceneChangeHoldoff", "enc_ctrl.scene_change_holdoff" },
 	{ "encCtrl.idrQpBoost", "enc_ctrl.idr_qp_boost" },
-	{ "encCtrl.textLog", "enc_ctrl.text_log" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -1312,39 +1311,6 @@ static int process_set_query(const char *query, int *status_code,
 	return process_single_set_query(query, status_code, response_json);
 }
 
-#ifdef VENC_API_TEST
-int venc_api_apply_set_query_for_test(const char *query, int *http_status,
-	char *response_buf, size_t response_buf_size)
-{
-	char *json = NULL;
-	int status = 500;
-	int rc;
-
-	rc = process_set_query(query, &status, &json);
-	if (http_status)
-		*http_status = status;
-	if (response_buf && response_buf_size > 0) {
-		if (json)
-			snprintf(response_buf, response_buf_size, "%s", json);
-		else
-			response_buf[0] = '\0';
-	}
-	free(json);
-	return rc;
-}
-
-void venc_api_bind_for_test(VencConfig *cfg, const char *backend_name,
-	const VencApplyCallbacks *cb)
-{
-	pthread_mutex_lock(&g_cfg_mutex);
-	g_cfg = cfg;
-	g_cb = cb;
-	snprintf(g_backend, sizeof(g_backend), "%s",
-		backend_name ? backend_name : "unknown");
-	pthread_mutex_unlock(&g_cfg_mutex);
-}
-#endif
-
 /* ── Route handlers ──────────────────────────────────────────────────── */
 
 static int handle_version(int fd, const HttpRequest *req, void *ctx)
@@ -1982,11 +1948,20 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 int venc_api_register(VencConfig *cfg, const char *backend_name,
 	const VencApplyCallbacks *cb)
 {
+	int r = 0;
+
+	pthread_mutex_lock(&g_cfg_mutex);
 	g_cfg = cfg;
 	g_cb = cb;
-	snprintf(g_backend, sizeof(g_backend), "%s", backend_name ? backend_name : "unknown");
+	snprintf(g_backend, sizeof(g_backend), "%s",
+		backend_name ? backend_name : "unknown");
+	if (g_api_routes_registered) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return 0;
+	}
+	g_api_routes_registered = 1;
+	pthread_mutex_unlock(&g_cfg_mutex);
 
-	int r = 0;
 	r |= venc_httpd_route("GET", "/api/v1/version",      handle_version, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config",       handle_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config.json",  handle_config, NULL);
@@ -2012,6 +1987,9 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
 	r |= venc_webui_register();
 	if (r != 0) {
+		pthread_mutex_lock(&g_cfg_mutex);
+		g_api_routes_registered = 0;
+		pthread_mutex_unlock(&g_cfg_mutex);
 		fprintf(stderr, "[api] ERROR: failed to register one or more routes\n");
 		return -1;
 	}

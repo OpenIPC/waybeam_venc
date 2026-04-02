@@ -5,9 +5,14 @@
  * field serialization/deserialization.
  */
 
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include "venc_config.h"
 #include "venc_api.h"
@@ -29,12 +34,6 @@ MI_S32 MI_VENC_RequestIdr(MI_VENC_CHN chn, MI_BOOL instant)
 {
 	(void)chn; (void)instant; return -1;
 }
-
-/* Whitebox test hook from venc_api.c */
-extern int venc_api_apply_set_query_for_test(const char *query,
-	int *http_status, char *response_buf, size_t response_buf_size);
-extern void venc_api_bind_for_test(VencConfig *cfg, const char *backend_name,
-	const VencApplyCallbacks *cb);
 
 typedef struct {
 	int apply_bitrate_calls;
@@ -59,10 +58,177 @@ typedef struct {
 } ApiCallbackState;
 
 static ApiCallbackState g_api_cb_state;
+static uint16_t g_api_test_port;
+static int g_api_test_server_started;
 
 static void reset_api_cb_state(void)
 {
 	memset(&g_api_cb_state, 0, sizeof(g_api_cb_state));
+}
+
+static uint16_t reserve_test_port(void)
+{
+	struct sockaddr_in addr;
+	socklen_t addr_len = sizeof(addr);
+	uint16_t port = 0;
+	int fd;
+
+	fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0)
+		return 0;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = htons(0);
+
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
+	    getsockname(fd, (struct sockaddr *)&addr, &addr_len) == 0) {
+		port = ntohs(addr.sin_port);
+	}
+
+	close(fd);
+	return port;
+}
+
+static int ensure_api_test_server(void)
+{
+	if (g_api_test_server_started)
+		return 0;
+
+	g_api_test_port = reserve_test_port();
+	if (g_api_test_port == 0)
+		return -1;
+	if (venc_httpd_start(g_api_test_port) != 0) {
+		g_api_test_port = 0;
+		return -1;
+	}
+
+	g_api_test_server_started = 1;
+	return 0;
+}
+
+static void stop_api_test_server(void)
+{
+	if (!g_api_test_server_started)
+		return;
+
+	venc_httpd_stop();
+	g_api_test_server_started = 0;
+	g_api_test_port = 0;
+}
+
+static int connect_api_test_socket(void)
+{
+	struct sockaddr_in addr;
+	int fd;
+	int attempt;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = htons(g_api_test_port);
+
+	for (attempt = 0; attempt < 50; attempt++) {
+		fd = socket(AF_INET, SOCK_STREAM, 0);
+		if (fd < 0)
+			return -1;
+
+		if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0)
+			return fd;
+
+		close(fd);
+		if (errno != ECONNREFUSED && errno != ENOENT)
+			break;
+		usleep(10000);
+	}
+
+	return -1;
+}
+
+static int read_http_response(int fd, int *http_status, char *response_buf,
+	size_t response_buf_size)
+{
+	char raw[8192];
+	char *body;
+	size_t used = 0;
+	ssize_t n;
+
+	while (used < sizeof(raw) - 1) {
+		n = read(fd, raw + used, sizeof(raw) - 1 - used);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			break;
+		used += (size_t)n;
+	}
+	raw[used] = '\0';
+
+	if (http_status) {
+		int status = 0;
+		if (sscanf(raw, "HTTP/%*u.%*u %d", &status) != 1)
+			return -1;
+		*http_status = status;
+	}
+
+	if (response_buf && response_buf_size > 0) {
+		body = strstr(raw, "\r\n\r\n");
+		if (!body)
+			return -1;
+		snprintf(response_buf, response_buf_size, "%s", body + 4);
+	}
+
+	return 0;
+}
+
+static int apply_set_query_http(VencConfig *cfg, const char *backend_name,
+	const VencApplyCallbacks *cb, const char *query, int *http_status,
+	char *response_buf, size_t response_buf_size)
+{
+	char request[1024];
+	int fd;
+	size_t sent = 0;
+	size_t req_len;
+
+	if (venc_api_register(cfg, backend_name, cb) != 0)
+		return -1;
+	if (ensure_api_test_server() != 0)
+		return -1;
+
+	fd = connect_api_test_socket();
+	if (fd < 0)
+		return -1;
+
+	req_len = (size_t)snprintf(request, sizeof(request),
+		"GET /api/v1/set?%s HTTP/1.0\r\n"
+		"Host: 127.0.0.1\r\n"
+		"\r\n",
+		query ? query : "");
+	if (req_len >= sizeof(request)) {
+		close(fd);
+		return -1;
+	}
+
+	while (sent < req_len) {
+		ssize_t nwrite = write(fd, request + sent, req_len - sent);
+		if (nwrite < 0 && errno == EINTR)
+			continue;
+		if (nwrite <= 0) {
+			close(fd);
+			return -1;
+		}
+		sent += (size_t)nwrite;
+	}
+
+	shutdown(fd, SHUT_WR);
+	if (read_http_response(fd, http_status, response_buf,
+	    response_buf_size) != 0) {
+		close(fd);
+		return -1;
+	}
+
+	close(fd);
+	return 0;
 }
 
 static int test_apply_bitrate(uint32_t kbps)
@@ -186,9 +352,8 @@ static int test_multi_set_live_success(void)
 	cb.apply_bitrate = test_apply_bitrate;
 	cb.apply_verbose = test_apply_verbose;
 
-	venc_api_bind_for_test(&cfg, "star6e", &cb);
 	CHECK("multi set apply ok",
-		venc_api_apply_set_query_for_test(
+		apply_set_query_http(&cfg, "star6e", &cb,
 			"video0.bitrate=4096&system.verbose=true",
 			&status, response, sizeof(response)) == 0);
 	CHECK("multi set status 200", status == 200);
@@ -216,9 +381,8 @@ static int test_multi_set_awb_grouped_apply(void)
 	memset(&cb, 0, sizeof(cb));
 	cb.apply_awb_mode = test_apply_awb_mode;
 
-	venc_api_bind_for_test(&cfg, "star6e", &cb);
 	CHECK("multi awb apply ok",
-		venc_api_apply_set_query_for_test(
+		apply_set_query_http(&cfg, "star6e", &cb,
 			"isp.awbMode=ct_manual&isp.awbCt=6000",
 			&status, response, sizeof(response)) == 0);
 	CHECK("multi awb status 200", status == 200);
@@ -246,9 +410,8 @@ static int test_multi_set_video_timing_grouped_apply(void)
 	cb.apply_fps = test_apply_fps;
 	cb.apply_gop = test_apply_gop;
 
-	venc_api_bind_for_test(&cfg, "star6e", &cb);
 	CHECK("multi timing apply ok",
-		venc_api_apply_set_query_for_test(
+		apply_set_query_http(&cfg, "star6e", &cb,
 			"video0.fps=30&video0.gopSize=1.0",
 			&status, response, sizeof(response)) == 0);
 	CHECK("multi timing status 200", status == 200);
@@ -282,9 +445,8 @@ static int test_multi_set_rejects_restart_fields(void)
 	memset(&cb, 0, sizeof(cb));
 	cb.apply_bitrate = test_apply_bitrate;
 
-	venc_api_bind_for_test(&cfg, "star6e", &cb);
 	CHECK("multi reject restart rc",
-		venc_api_apply_set_query_for_test(
+		apply_set_query_http(&cfg, "star6e", &cb,
 			"video0.bitrate=4096&video0.size=1280x720",
 			&status, response, sizeof(response)) == 0);
 	CHECK("multi reject restart status", status == 400);
@@ -311,9 +473,8 @@ static int test_multi_set_rejects_duplicate_fields(void)
 	memset(&cb, 0, sizeof(cb));
 	cb.apply_qp_delta = test_apply_qp_delta;
 
-	venc_api_bind_for_test(&cfg, "star6e", &cb);
 	CHECK("multi dup rc",
-		venc_api_apply_set_query_for_test(
+		apply_set_query_http(&cfg, "star6e", &cb,
 			"video0.qp_delta=1&video0.qpDelta=2",
 			&status, response, sizeof(response)) == 0);
 	CHECK("multi dup status", status == 400);
@@ -337,9 +498,8 @@ static int test_multi_set_preflights_missing_callback(void)
 	memset(&cb, 0, sizeof(cb));
 	cb.apply_bitrate = test_apply_bitrate;
 
-	venc_api_bind_for_test(&cfg, "star6e", &cb);
 	CHECK("multi preflight rc",
-		venc_api_apply_set_query_for_test(
+		apply_set_query_http(&cfg, "star6e", &cb,
 			"video0.bitrate=4096&system.verbose=true",
 			&status, response, sizeof(response)) == 0);
 	CHECK("multi preflight status", status == 501);
@@ -367,9 +527,8 @@ static int test_multi_set_rolls_back_on_apply_failure(void)
 	cb.apply_verbose = test_apply_verbose;
 	g_api_cb_state.fail_verbose = 1;
 
-	venc_api_bind_for_test(&cfg, "star6e", &cb);
 	CHECK("multi rollback rc",
-		venc_api_apply_set_query_for_test(
+		apply_set_query_http(&cfg, "star6e", &cb,
 			"video0.bitrate=4096&system.verbose=true",
 			&status, response, sizeof(response)) == 0);
 	CHECK("multi rollback status", status == 500);
@@ -408,9 +567,8 @@ static int test_single_set_runtime_apply_failure(void)
 	cb.apply_gop = test_apply_gop;
 	g_api_cb_state.fail_gop = 1;
 
-	venc_api_bind_for_test(&cfg, "star6e", &cb);
 	CHECK("single failure rc",
-		venc_api_apply_set_query_for_test(
+		apply_set_query_http(&cfg, "star6e", &cb,
 			"video0.fps=30", &status, response,
 			sizeof(response)) == 0);
 	CHECK("single failure status", status == 500);
@@ -444,5 +602,6 @@ int test_venc_api(void)
 	failures += test_multi_set_preflights_missing_callback();
 	failures += test_multi_set_rolls_back_on_apply_failure();
 	failures += test_single_set_runtime_apply_failure();
+	stop_api_test_server();
 	return failures;
 }

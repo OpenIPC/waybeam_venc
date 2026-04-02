@@ -379,7 +379,6 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 | `enc_ctrl.scene_change_threshold` | uint16 | restart | Scene spike threshold ratio x100 |
 | `enc_ctrl.scene_change_holdoff` | uint8 | restart | Consecutive spike frames required |
 | `enc_ctrl.idr_qp_boost` | uint8 | restart | Pre-IDR minimum-QP boost |
-| `enc_ctrl.text_log` | bool | restart | Per-frame controller telemetry to stderr |
 
 When adaptive control is enabled, the controller owns GOP timing and live
 `video0.gop_size` writes are rejected until `enc_ctrl.enabled` is turned off.

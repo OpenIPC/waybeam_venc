@@ -85,8 +85,7 @@
     "deferTimeoutFrames": 60,
     "sceneChangeThreshold": 325,
     "sceneChangeHoldoff": 2,
-    "idrQpBoost": 4,
-    "textLog": false
+    "idrQpBoost": 4
   },
   "debug": {
     "showOsd": false

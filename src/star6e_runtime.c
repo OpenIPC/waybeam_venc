@@ -279,7 +279,7 @@ static int runtime_enc_ctrl_init(Star6eRunnerContext *ctx)
 	bitrate_bps = ctx->vcfg.video0.bitrate * 1024U;
 	if (enc_ctrl_init(&cfg, ctx->ps.venc_channel,
 	    runtime_enc_ctrl_codec(&ctx->vcfg), bitrate_bps,
-	    ctx->vcfg.video0.fps, ctx->vcfg.enc_ctrl.text_log) != 0) {
+	    ctx->vcfg.video0.fps) != 0) {
 		fprintf(stderr, "ERROR: encCtrl init failed\n");
 		return -1;
 	}

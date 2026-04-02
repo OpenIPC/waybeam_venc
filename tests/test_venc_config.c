@@ -79,7 +79,6 @@ static int test_defaults(void)
 	CHECK("defaults_enc_ctrl_min_gop", cfg.enc_ctrl.min_gop_size == 0.25);
 	CHECK("defaults_enc_ctrl_threshold", cfg.enc_ctrl.scene_change_threshold == 325);
 	CHECK("defaults_enc_ctrl_holdoff", cfg.enc_ctrl.scene_change_holdoff == 2);
-	CHECK("defaults_enc_ctrl_text_log", cfg.enc_ctrl.text_log == false);
 
 	return failures;
 }
@@ -98,7 +97,7 @@ static int test_load_full_json(void)
 		"    \"frameLost\": false },"
 		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false },"
 		"  \"fpv\": { \"roiEnabled\": true, \"roiQp\": -18, \"roiSteps\": 2, \"noiseLevel\": 5 },"
-		"  \"encCtrl\": { \"enabled\": true, \"maxGopSize\": 4.0, \"minGopSize\": 0.5, \"textLog\": true }"
+		"  \"encCtrl\": { \"enabled\": true, \"maxGopSize\": 4.0, \"minGopSize\": 0.5 }"
 		"}";
 
 	char *path = write_temp_json(json);
@@ -143,7 +142,6 @@ static int test_load_full_json(void)
 	CHECK("load_enc_ctrl_enabled", cfg.enc_ctrl.enabled == true);
 	CHECK("load_enc_ctrl_max_gop", cfg.enc_ctrl.max_gop_size == 4.0);
 	CHECK("load_enc_ctrl_min_gop", cfg.enc_ctrl.min_gop_size == 0.5);
-	CHECK("load_enc_ctrl_text_log", cfg.enc_ctrl.text_log == true);
 
 	return failures;
 }
@@ -272,7 +270,6 @@ static int test_roundtrip(void)
 	cfg.enc_ctrl.enabled = true;
 	cfg.enc_ctrl.max_gop_size = 2.0;
 	cfg.enc_ctrl.min_gop_size = 0.5;
-	cfg.enc_ctrl.text_log = true;
 
 	char *json = venc_config_to_json_string(&cfg);
 	CHECK("serialize_ok", json != NULL);
@@ -298,7 +295,6 @@ static int test_roundtrip(void)
 	CHECK("roundtrip_enc_ctrl_enabled", cfg2.enc_ctrl.enabled == true);
 	CHECK("roundtrip_enc_ctrl_max_gop", cfg2.enc_ctrl.max_gop_size == 2.0);
 	CHECK("roundtrip_enc_ctrl_min_gop", cfg2.enc_ctrl.min_gop_size == 0.5);
-	CHECK("roundtrip_enc_ctrl_text_log", cfg2.enc_ctrl.text_log == true);
 	/* Unchanged fields preserved */
 	CHECK("roundtrip_codec", strcmp(cfg2.video0.codec, "h265") == 0);
 	CHECK("roundtrip_gop", cfg2.video0.gop_size == 1.0);

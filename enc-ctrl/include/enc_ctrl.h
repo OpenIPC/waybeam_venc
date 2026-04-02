@@ -27,10 +27,9 @@
  *  codec: 0 = H.264, 1 = H.265.
  *  bitrate_bps: initial target bitrate for budget ratio calculation.
  *  fps: frames per second for target frame size calculation.
- *  text_log: enable human-readable telemetry on stderr.
  *  Returns 0 on success, -1 on failure. */
 int enc_ctrl_init(const GopConfig *config, int venc_chn, int codec,
-	uint32_t bitrate_bps, uint32_t fps, int text_log);
+	uint32_t bitrate_bps, uint32_t fps);
 
 /** Shutdown and free resources. */
 void enc_ctrl_shutdown(void);
@@ -88,9 +87,6 @@ int enc_ctrl_set_fps(uint32_t fps, uint16_t max_gop_length,
 int enc_ctrl_set_qp_range(uint8_t qp_min, uint8_t qp_max);
 
 /* ── Diagnostics ────────────────────────────────────────────────────── */
-
-/** Dump recent telemetry to stderr. */
-void enc_ctrl_dump_telemetry(uint32_t last_n);
 
 /** Get total frames processed. */
 uint32_t enc_ctrl_frame_count(void);

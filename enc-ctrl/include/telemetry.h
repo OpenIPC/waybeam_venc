@@ -1,10 +1,7 @@
 #ifndef ENC_TELEMETRY_H
 #define ENC_TELEMETRY_H
 
-/*
- * Telemetry: binary ring buffer (always on) + optional text debug log.
- * Binary log is overwrite-oldest, zero-allocation steady state.
- */
+/* Telemetry: binary ring buffer, overwrite-oldest and zero-allocation. */
 
 #include "enc_types.h"
 
@@ -29,20 +26,15 @@ typedef struct {
 	TelemetryRecord records[TELEMETRY_RING_SLOTS];
 	uint32_t write_idx;
 	uint32_t count;            /* total records written */
-	uint8_t  text_log_enabled;
-	uint8_t  _pad[3];
 } TelemetryState;
 
-/** Initialize telemetry. text_log: enable human-readable stderr output. */
-void telemetry_init(TelemetryState *ts, int text_log);
+/** Initialize telemetry. */
+void telemetry_init(TelemetryState *ts);
 
 /** Record one frame's telemetry. */
 void telemetry_record(TelemetryState *ts, const EncoderFrameStats *stats,
 	const SceneEstimate *scene, GopState gop_state,
 	uint16_t frames_since_idr, int idr_inserted);
-
-/** Dump recent telemetry to stderr (last N entries). */
-void telemetry_dump(const TelemetryState *ts, uint32_t last_n);
 
 /** Get the latest telemetry record without consuming it. */
 int telemetry_get_latest(const TelemetryState *ts, TelemetryRecord *out);

@@ -176,7 +176,6 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->enc_ctrl.scene_change_threshold = 325;
 	cfg->enc_ctrl.scene_change_holdoff = 2;
 	cfg->enc_ctrl.idr_qp_boost = 4;
-	cfg->enc_ctrl.text_log = false;
 
 	/* debug */
 	cfg->debug.show_osd = false;
@@ -448,7 +447,6 @@ static void load_enc_ctrl(const cJSON *root, VencConfigEncCtrl *s)
 		"sceneChangeHoldoff", s->scene_change_holdoff);
 	s->idr_qp_boost = (uint8_t)json_get_int(obj, "idrQpBoost",
 		s->idr_qp_boost);
-	s->text_log = json_get_bool(obj, "textLog", s->text_log);
 
 	if (s->max_gop_size <= 0.0)
 		s->max_gop_size = 0.001;
@@ -774,7 +772,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 			cfg->enc_ctrl.scene_change_holdoff);
 		cJSON_AddNumberToObject(enc, "idrQpBoost",
 			cfg->enc_ctrl.idr_qp_boost);
-		cJSON_AddBoolToObject(enc, "textLog", cfg->enc_ctrl.text_log);
 	}
 
 	/* debug */

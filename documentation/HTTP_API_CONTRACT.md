@@ -105,7 +105,7 @@ Response `200`:
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
-      "encCtrl": { "enabled": false, "maxGopSize": 10.0, "minGopSize": 0.25, "deferTimeoutFrames": 60, "sceneChangeThreshold": 325, "sceneChangeHoldoff": 2, "idrQpBoost": 4, "textLog": false },
+      "encCtrl": { "enabled": false, "maxGopSize": 10.0, "minGopSize": 0.25, "deferTimeoutFrames": 60, "sceneChangeThreshold": 325, "sceneChangeHoldoff": 2, "idrQpBoost": 4 },
       "debug": { "showOsd": false }
     }
   }
@@ -207,7 +207,7 @@ including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
 `encCtrl.enabled`, `encCtrl.maxGopSize`, `encCtrl.minGopSize`,
 `encCtrl.deferTimeoutFrames`, `encCtrl.sceneChangeThreshold`,
-`encCtrl.sceneChangeHoldoff`, `encCtrl.idrQpBoost`, `encCtrl.textLog`,
+`encCtrl.sceneChangeHoldoff`, `encCtrl.idrQpBoost`,
 `outgoing.maxPayloadSize`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
 

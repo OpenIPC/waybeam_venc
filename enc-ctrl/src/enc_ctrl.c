@@ -88,7 +88,7 @@ static int stats_is_idr_frame(const EncoderFrameStats *stats)
 /* ── Public API ─────────────────────────────────────────────────────── */
 
 int enc_ctrl_init(const GopConfig *config, int venc_chn, int codec,
-	uint32_t bitrate_bps, uint32_t fps, int text_log)
+	uint32_t bitrate_bps, uint32_t fps)
 {
 	GopConfig cfg;
 	uint32_t target_frame_size;
@@ -152,7 +152,7 @@ int enc_ctrl_init(const GopConfig *config, int venc_chn, int codec,
 	}
 
 	/* Telemetry */
-	telemetry_init(&g_enc_ctrl.telemetry, text_log);
+	telemetry_init(&g_enc_ctrl.telemetry);
 
 	g_enc_ctrl.active = 1;
 
@@ -511,16 +511,6 @@ int enc_ctrl_set_qp_range(uint8_t qp_min, uint8_t qp_max)
 
 	pthread_mutex_unlock(&g_enc_ctrl_lock);
 	return rc;
-}
-
-void enc_ctrl_dump_telemetry(uint32_t last_n)
-{
-	pthread_mutex_lock(&g_enc_ctrl_lock);
-
-	if (g_enc_ctrl.active)
-		telemetry_dump(&g_enc_ctrl.telemetry, last_n);
-
-	pthread_mutex_unlock(&g_enc_ctrl_lock);
 }
 
 uint32_t enc_ctrl_frame_count(void)

@@ -136,7 +136,6 @@ typedef struct {
 	uint16_t scene_change_threshold; /* ratio * 100 */
 	uint8_t scene_change_holdoff; /* consecutive frames above threshold */
 	uint8_t idr_qp_boost;         /* min-QP boost applied before requested IDR */
-	bool text_log;                /* verbose per-frame telemetry to stderr */
 } VencConfigEncCtrl;
 
 typedef struct {

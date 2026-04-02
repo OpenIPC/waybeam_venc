@@ -12,9 +12,9 @@ static int test_enc_ctrl_init_shutdown(void)
 
 	gop_config_defaults(&cfg);
 
-	CHECK("init ok", enc_ctrl_init(&cfg, -1, 0, 4000000, 60, 0) == 0);
+	CHECK("init ok", enc_ctrl_init(&cfg, -1, 0, 4000000, 60) == 0);
 	CHECK("is active", enc_ctrl_is_active() == 1);
-	CHECK("double init fails", enc_ctrl_init(&cfg, -1, 0, 4000000, 60, 0) == -1);
+	CHECK("double init fails", enc_ctrl_init(&cfg, -1, 0, 4000000, 60) == -1);
 
 	enc_ctrl_shutdown();
 	CHECK("not active after shutdown", enc_ctrl_is_active() == 0);
@@ -31,7 +31,7 @@ static int test_enc_ctrl_frame_flow(void)
 	uint32_t i;
 
 	gop_config_defaults(&cfg);
-	enc_ctrl_init(&cfg, -1, 0, 4000000, 60, 0);
+	enc_ctrl_init(&cfg, -1, 0, 4000000, 60);
 
 	/* Feed frames */
 	for (i = 0; i < 10; i++) {
@@ -73,7 +73,7 @@ static int test_enc_ctrl_idr_request(void)
 	cfg.enable_variable_gop = 1;
 	cfg.min_gop_length = 5;
 	cfg.max_gop_length = 300;
-	enc_ctrl_init(&cfg, -1, 0, 4000000, 60, 0);
+	enc_ctrl_init(&cfg, -1, 0, 4000000, 60);
 
 	/* Feed enough frames to pass min_gop */
 	for (i = 0; i < 10; i++) {
@@ -112,7 +112,7 @@ static int test_enc_ctrl_idr_waits_for_min_gop(void)
 	cfg.enable_variable_gop = 1;
 	cfg.min_gop_length = 5;
 	cfg.max_gop_length = 300;
-	enc_ctrl_init(&cfg, -1, 0, 4000000, 60, 0);
+	enc_ctrl_init(&cfg, -1, 0, 4000000, 60);
 
 	for (i = 0; i < 2; i++) {
 		memset(&stats, 0, sizeof(stats));
@@ -160,7 +160,7 @@ static int test_enc_ctrl_history(void)
 	uint32_t i;
 
 	gop_config_defaults(&cfg);
-	enc_ctrl_init(&cfg, -1, 0, 4000000, 60, 0);
+	enc_ctrl_init(&cfg, -1, 0, 4000000, 60);
 
 	for (i = 0; i < 20; i++) {
 		memset(&stats, 0, sizeof(stats));
@@ -199,7 +199,7 @@ static int test_enc_ctrl_fps_updates_gop_lengths(void)
 	cfg.enable_variable_gop = 1;
 	cfg.min_gop_length = 30;
 	cfg.max_gop_length = 120;
-	CHECK("fps update init ok", enc_ctrl_init(&cfg, -1, 0, 4000000, 60, 0) == 0);
+	CHECK("fps update init ok", enc_ctrl_init(&cfg, -1, 0, 4000000, 60) == 0);
 
 	for (i = 0; i < 90; i++) {
 		memset(&stats, 0, sizeof(stats));
@@ -287,7 +287,7 @@ static int test_enc_ctrl_thread_safety(void)
 	cfg.enable_variable_gop = 1;
 	cfg.min_gop_length = 5;
 	cfg.max_gop_length = 120;
-	CHECK("thread init ok", enc_ctrl_init(&cfg, -1, 0, 4000000, 60, 0) == 0);
+	CHECK("thread init ok", enc_ctrl_init(&cfg, -1, 0, 4000000, 60) == 0);
 
 	if (pthread_create(&worker, NULL, enc_ctrl_control_thread, NULL) != 0) {
 		enc_ctrl_shutdown();
