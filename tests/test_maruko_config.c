@@ -2,7 +2,6 @@
 #include "test_helpers.h"
 #include "venc_config.h"
 
-#include <arpa/inet.h>
 #include <string.h>
 
 int test_maruko_config(void)
@@ -54,9 +53,10 @@ int test_maruko_config(void)
 	CHECK("maruko config gop", cfg.venc_gop_size == 135);
 	CHECK("maruko config gop seconds", cfg.venc_gop_seconds == 1.5);
 	CHECK("maruko config payload", cfg.rtp_payload_size == 900);
-	CHECK("maruko config sink ip",
-		cfg.udp_sink_ip == inet_addr("192.168.2.20"));
-	CHECK("maruko config sink port", cfg.udp_sink_port == 5602);
+	CHECK("maruko config uri type", cfg.output_uri.type == VENC_OUTPUT_URI_UDP);
+	CHECK("maruko config sink host",
+		strcmp(cfg.output_uri.host, "192.168.2.20") == 0);
+	CHECK("maruko config sink port", cfg.output_uri.port == 5602);
 	CHECK("maruko config codec", cfg.rc_codec == PT_H264);
 	CHECK("maruko config rc mode", cfg.rc_mode == 2);
 	CHECK("maruko config stream mode", cfg.stream_mode == MARUKO_STREAM_COMPACT);
@@ -68,6 +68,18 @@ int test_maruko_config(void)
 
 	strcpy(vcfg.outgoing.server, "bad://server");
 	CHECK("maruko config bad uri fails", maruko_config_from_venc(&vcfg, &cfg) != 0);
+
+	strcpy(vcfg.outgoing.server, "unix://waybeam_maruko");
+	CHECK("maruko config unix uri ok", maruko_config_from_venc(&vcfg, &cfg) == 0);
+	CHECK("maruko config unix uri type", cfg.output_uri.type == VENC_OUTPUT_URI_UNIX);
+	CHECK("maruko config unix uri name",
+		strcmp(cfg.output_uri.endpoint, "waybeam_maruko") == 0);
+
+	strcpy(vcfg.outgoing.server, "shm://maruko_ring");
+	CHECK("maruko config shm uri ok", maruko_config_from_venc(&vcfg, &cfg) == 0);
+	CHECK("maruko config shm uri type", cfg.output_uri.type == VENC_OUTPUT_URI_SHM);
+	CHECK("maruko config shm uri name",
+		strcmp(cfg.output_uri.endpoint, "maruko_ring") == 0);
 
 	strcpy(vcfg.outgoing.server, "udp://192.168.2.20:5602");
 	strcpy(vcfg.video0.codec, "jpeg");

@@ -1,33 +1,26 @@
 #include "maruko_output.h"
 
-#include "venc_config.h"
+#include "output_socket.h"
 
-#include <arpa/inet.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
-int maruko_output_init(MarukoOutput *output, uint32_t sink_ip,
-	uint16_t sink_port)
+int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri)
 {
 	if (!output)
+		return -1;
+	if (!uri || uri->type == VENC_OUTPUT_URI_SHM)
 		return -1;
 
 	output->socket_handle = -1;
 	output->ring = NULL;
+	output->dst_len = 0;
+	output->transport = VENC_OUTPUT_URI_UDP;
 	memset(&output->dst, 0, sizeof(output->dst));
 
-	output->socket_handle = socket(AF_INET, SOCK_DGRAM, 0);
-	if (output->socket_handle < 0) {
-		fprintf(stderr, "ERROR: [maruko] unable to create UDP socket\n");
-		return -1;
-	}
-
-	output->dst.sin_family = AF_INET;
-	output->dst.sin_port = htons(sink_port);
-	output->dst.sin_addr.s_addr = sink_ip;
-	return 0;
+	return output_socket_configure(&output->socket_handle, &output->dst,
+		&output->dst_len, &output->transport, uri, 0, NULL);
 }
 
 int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
@@ -40,6 +33,8 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
 
 	output->socket_handle = -1;
 	output->ring = NULL;
+	output->dst_len = 0;
+	output->transport = VENC_OUTPUT_URI_UDP;
 	memset(&output->dst, 0, sizeof(output->dst));
 
 	slot_data = (uint32_t)max_payload + 12;
@@ -57,8 +52,7 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
 
 int maruko_output_apply_server(MarukoOutput *output, const char *uri)
 {
-	char host[128];
-	uint16_t port;
+	VencOutputUri parsed;
 
 	if (!output || !uri)
 		return -1;
@@ -69,23 +63,15 @@ int maruko_output_apply_server(MarukoOutput *output, const char *uri)
 		return -1;
 	}
 
-	if (venc_config_parse_server_uri(uri, host, sizeof(host), &port) != 0)
+	if (venc_config_parse_output_uri(uri, &parsed) != 0)
 		return -1;
-
-	/* Create socket on first use (startup with outgoing.enabled=false
-	 * skips socket creation; the API may set a server later). */
-	if (output->socket_handle < 0) {
-		output->socket_handle = socket(AF_INET, SOCK_DGRAM, 0);
-		if (output->socket_handle < 0) {
-			fprintf(stderr, "ERROR: [maruko] Unable to create UDP socket\n");
-			return -1;
-		}
+	if (parsed.type == VENC_OUTPUT_URI_SHM) {
+		fprintf(stderr, "ERROR: [maruko] cannot change server to shm:// live\n");
+		return -1;
 	}
 
-	output->dst.sin_family = AF_INET;
-	output->dst.sin_port = htons(port);
-	output->dst.sin_addr.s_addr = inet_addr(host);
-	return 0;
+	return output_socket_configure(&output->socket_handle, &output->dst,
+		&output->dst_len, &output->transport, &parsed, 0, NULL);
 }
 
 void maruko_output_teardown(MarukoOutput *output)
@@ -102,4 +88,6 @@ void maruko_output_teardown(MarukoOutput *output)
 		output->socket_handle = -1;
 	}
 	memset(&output->dst, 0, sizeof(output->dst));
+	output->dst_len = 0;
+	output->transport = VENC_OUTPUT_URI_UDP;
 }

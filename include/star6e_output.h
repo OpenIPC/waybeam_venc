@@ -1,12 +1,13 @@
 #ifndef STAR6E_OUTPUT_H
 #define STAR6E_OUTPUT_H
 
-#include <netinet/in.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/socket.h>
 
 #include "rtp_packetizer.h"
 #include "star6e.h"
+#include "venc_config.h"
 #include "venc_ring.h"
 
 typedef enum {
@@ -14,28 +15,22 @@ typedef enum {
 	STAR6E_STREAM_MODE_RTP = 1,
 } Star6eStreamMode;
 
-typedef enum {
-	STAR6E_OUTPUT_TRANSPORT_UDP = 0,
-	STAR6E_OUTPUT_TRANSPORT_SHM = 1,
-} Star6eOutputTransport;
-
 typedef struct {
 	Star6eStreamMode stream_mode;
-	Star6eOutputTransport transport;
-	int connected_udp;
+	VencOutputUri uri;
+	int requested_connected_udp;
 	int has_server;
 	uint16_t max_frame_size;
-	char host[128];
-	uint16_t port;
-	char shm_name[128];
 } Star6eOutputSetup;
 
 typedef struct {
 	Star6eStreamMode stream_mode;
-	Star6eOutputTransport transport;
+	VencOutputUriType transport;
 	int socket_handle;
-	struct sockaddr_in dst;
+	struct sockaddr_storage dst;
+	socklen_t dst_len;
 	int connected_udp;
+	int requested_connected_udp;
 	venc_ring_t *ring;
 	uint32_t send_errors;
 } Star6eOutput;
@@ -43,6 +38,8 @@ typedef struct {
 typedef struct {
 	const Star6eOutput *video_output;
 	int socket_handle;
+	struct sockaddr_storage fallback_dst;
+	socklen_t fallback_dst_len;
 	uint16_t port_override;
 	uint16_t max_payload_size;
 } Star6eAudioOutput;
@@ -101,12 +98,15 @@ void star6e_output_teardown(Star6eOutput *output);
 /** Reset audio output state to uninitialized. */
 void star6e_audio_output_reset(Star6eAudioOutput *audio_output);
 
-/** Initialize audio output sharing the video socket on a different port. */
+/** Initialize audio output.
+ *  port_override=0 shares the active video destination.
+ *  port_override!=0 uses dedicated UDP audio, following the video host for
+ *  udp:// output and falling back to 127.0.0.1 for unix:// or shm:// video. */
 int star6e_audio_output_init(Star6eAudioOutput *audio_output,
 	const Star6eOutput *video_output, uint16_t port_override,
 	uint16_t max_payload_size);
 
-/** Return the UDP port used for audio RTP transmission. */
+/** Return the configured UDP audio port, or the shared UDP video port. */
 uint16_t star6e_audio_output_port(const Star6eAudioOutput *audio_output);
 
 /** Send audio frame as RTP packets. */

@@ -1012,17 +1012,16 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	pipeline_common_cap_exposure_for_fps(ctx->sensor.fps,
 		ctx->cfg.exposure_cap_us);
 
-	if (ctx->cfg.shm_name[0]) {
+	if (ctx->cfg.output_uri.type == VENC_OUTPUT_URI_SHM) {
 		if (ctx->cfg.stream_mode != MARUKO_STREAM_RTP) {
 			fprintf(stderr, "ERROR: [maruko] shm:// requires RTP mode\n");
 			return -1;
 		}
-		if (maruko_output_init_shm(&ctx->output, ctx->cfg.shm_name,
+		if (maruko_output_init_shm(&ctx->output, ctx->cfg.output_uri.endpoint,
 		    ctx->cfg.rtp_payload_size) != 0)
 			return -1;
 	} else {
-		if (maruko_output_init(&ctx->output, ctx->cfg.udp_sink_ip,
-		    ctx->cfg.udp_sink_port) != 0)
+		if (maruko_output_init(&ctx->output, &ctx->cfg.output_uri) != 0)
 			return -1;
 	}
 

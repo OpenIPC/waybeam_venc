@@ -759,7 +759,7 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 		fprintf(stderr,
 			"ERROR: RTP mode on star6e currently supports H.265 only.\n");
 		fprintf(stderr,
-			"       Set video0.codec to h265 or outgoing.server to udp://.\n");
+			"       Set video0.codec to h265 or use compact mode / non-RTP output.\n");
 		return -1;
 	}
 
@@ -1000,7 +1000,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 
 	if (star6e_output_is_shm(&state->output) &&
 	    vcfg->outgoing.audio_port == 0) {
-		printf("[audio] Disabled in SHM mode (audioPort=0 has no UDP socket to share)\n");
+		printf("[audio] Disabled in SHM mode (audioPort=0 has no socket to share)\n");
 	} else {
 		star6e_audio_init(&state->audio, vcfg, &state->output);
 	}

@@ -197,6 +197,7 @@ static int test_uri_parsing(void)
 	int failures = 0;
 	char host[64];
 	uint16_t port;
+	VencOutputUri parsed;
 
 	/* UDP URI */
 	int ret = venc_config_parse_server_uri("udp://10.0.0.1:6000",
@@ -204,6 +205,23 @@ static int test_uri_parsing(void)
 	CHECK("udp_ok", ret == 0);
 	CHECK("udp_host", strcmp(host, "10.0.0.1") == 0);
 	CHECK("udp_port", port == 6000);
+
+	ret = venc_config_parse_output_uri("udp://10.0.0.1:6000", &parsed);
+	CHECK("udp_output_uri_ok", ret == 0);
+	CHECK("udp_output_uri_type", parsed.type == VENC_OUTPUT_URI_UDP);
+	CHECK("udp_output_uri_host", strcmp(parsed.host, "10.0.0.1") == 0);
+	CHECK("udp_output_uri_port", parsed.port == 6000);
+
+	ret = venc_config_parse_output_uri("unix://waybeam_venc", &parsed);
+	CHECK("unix_output_uri_ok", ret == 0);
+	CHECK("unix_output_uri_type", parsed.type == VENC_OUTPUT_URI_UNIX);
+	CHECK("unix_output_uri_name",
+		strcmp(parsed.endpoint, "waybeam_venc") == 0);
+
+	ret = venc_config_parse_output_uri("shm://venc_ring", &parsed);
+	CHECK("shm_output_uri_ok", ret == 0);
+	CHECK("shm_output_uri_type", parsed.type == VENC_OUTPUT_URI_SHM);
+	CHECK("shm_output_uri_name", strcmp(parsed.endpoint, "venc_ring") == 0);
 
 	/* Bad scheme */
 	ret = venc_config_parse_server_uri("http://bad:80",
@@ -219,6 +237,10 @@ static int test_uri_parsing(void)
 	ret = venc_config_parse_server_uri("udp://host",
 		host, sizeof(host), &port);
 	CHECK("missing_port_fails", ret == -1);
+
+	ret = venc_config_parse_server_uri("unix://waybeam_venc",
+		host, sizeof(host), &port);
+	CHECK("unix_server_uri_rejected", ret == -1);
 
 	/* NULL args */
 	ret = venc_config_parse_server_uri(NULL, host, sizeof(host), &port);

@@ -1,15 +1,21 @@
 #include "star6e_output.h"
 
+#include "output_socket.h"
 #include "venc_config.h"
 
 #include <arpa/inet.h>
-#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #define STAR6E_RTP_HEADER_SIZE 12
+
+typedef struct {
+	int socket_handle;
+	struct sockaddr_storage dst;
+	socklen_t dst_len;
+} Star6eAudioSendTarget;
 
 static uint16_t star6e_read_be16(const uint8_t *data)
 {
@@ -36,68 +42,72 @@ static void star6e_write_be32(uint8_t *data, uint32_t value)
 	data[3] = (uint8_t)(value & 0xff);
 }
 
-static int star6e_output_send_udp_parts(int socket_handle,
-	const struct sockaddr_in *dst, const uint8_t *header, size_t header_len,
-	const uint8_t *payload1, size_t payload1_len,
-	const uint8_t *payload2, size_t payload2_len)
+static int resolve_shared_audio_target(const Star6eAudioOutput *audio_output,
+	Star6eAudioSendTarget *target)
 {
-	struct iovec vec[3];
-	struct msghdr msg;
-	ssize_t sent;
-	int iovcnt;
+	if (!audio_output || !audio_output->video_output || !target)
+		return -1;
 
-	if (socket_handle < 0 || !dst || !header || !payload1 ||
-	    header_len == 0 || payload1_len == 0) {
+	if (audio_output->video_output->socket_handle < 0 ||
+	    audio_output->video_output->ring ||
+	    audio_output->video_output->dst_len == 0) {
 		return -1;
 	}
 
-	vec[0].iov_base = (void *)header;
-	vec[0].iov_len = header_len;
-	vec[1].iov_base = (void *)payload1;
-	vec[1].iov_len = payload1_len;
-	iovcnt = 2;
-	if (payload2 && payload2_len > 0) {
-		vec[2].iov_base = (void *)payload2;
-		vec[2].iov_len = payload2_len;
-		iovcnt = 3;
-	}
-
-	memset(&msg, 0, sizeof(msg));
-	msg.msg_name = (void *)dst;
-	msg.msg_namelen = sizeof(*dst);
-	msg.msg_iov = vec;
-	msg.msg_iovlen = iovcnt;
-	sent = sendmsg(socket_handle, &msg, 0);
-	return sent < 0 ? -1 : 0;
-}
-
-static int star6e_audio_output_resolve_destination(
-	const Star6eAudioOutput *audio_output, struct sockaddr_in *dst)
-{
-	if (!audio_output || !audio_output->video_output || !dst)
-		return -1;
-
-	*dst = audio_output->video_output->dst;
-	if (audio_output->port_override != 0)
-		dst->sin_port = htons(audio_output->port_override);
+	target->socket_handle = audio_output->video_output->socket_handle;
+	memcpy(&target->dst, &audio_output->video_output->dst, sizeof(target->dst));
+	target->dst_len = audio_output->video_output->dst_len;
 	return 0;
 }
 
-static int star6e_audio_output_write_rtp(const uint8_t *header,
-	size_t header_len, const uint8_t *payload1, size_t payload1_len,
-	const uint8_t *payload2, size_t payload2_len, void *opaque)
+static int resolve_dedicated_audio_target(const Star6eAudioOutput *audio_output,
+	Star6eAudioSendTarget *target)
 {
-	const Star6eAudioOutput *audio_output = opaque;
-	struct sockaddr_in dst;
+	struct sockaddr_in *udp_dst;
 
-	if (!audio_output ||
-	    star6e_audio_output_resolve_destination(audio_output, &dst) != 0) {
+	if (!audio_output || !audio_output->video_output || !target ||
+	    audio_output->socket_handle < 0) {
 		return -1;
 	}
 
-	return star6e_output_send_udp_parts(audio_output->socket_handle, &dst,
-		header, header_len, payload1, payload1_len,
-		payload2, payload2_len);
+	target->socket_handle = audio_output->socket_handle;
+	if (audio_output->video_output->transport == VENC_OUTPUT_URI_UDP &&
+	    audio_output->video_output->dst_len == sizeof(struct sockaddr_in)) {
+		memcpy(&target->dst, &audio_output->video_output->dst,
+			sizeof(target->dst));
+		target->dst_len = audio_output->video_output->dst_len;
+		udp_dst = (struct sockaddr_in *)&target->dst;
+		udp_dst->sin_port = htons(audio_output->port_override);
+		return 0;
+	}
+
+	memcpy(&target->dst, &audio_output->fallback_dst, sizeof(target->dst));
+	target->dst_len = audio_output->fallback_dst_len;
+	return 0;
+}
+
+static int resolve_audio_target(const Star6eAudioOutput *audio_output,
+	Star6eAudioSendTarget *target)
+{
+	if (!audio_output || !target)
+		return -1;
+	if (audio_output->port_override == 0)
+		return resolve_shared_audio_target(audio_output, target);
+	return resolve_dedicated_audio_target(audio_output, target);
+}
+
+static int send_audio_rtp(const uint8_t *header,
+	size_t header_len, const uint8_t *payload1, size_t payload1_len,
+	const uint8_t *payload2, size_t payload2_len, void *opaque)
+{
+	const Star6eAudioSendTarget *target = opaque;
+
+	if (!target)
+		return -1;
+
+	return output_socket_send_parts(target->socket_handle, &target->dst,
+		target->dst_len, header,
+		header_len, payload1, payload1_len, payload2, payload2_len);
 }
 
 static void star6e_output_setup_reset(Star6eOutputSetup *setup)
@@ -106,7 +116,7 @@ static void star6e_output_setup_reset(Star6eOutputSetup *setup)
 		return;
 
 	memset(setup, 0, sizeof(*setup));
-	setup->transport = STAR6E_OUTPUT_TRANSPORT_UDP;
+	setup->uri.type = VENC_OUTPUT_URI_UDP;
 }
 
 void star6e_output_reset(Star6eOutput *output)
@@ -116,7 +126,7 @@ void star6e_output_reset(Star6eOutput *output)
 
 	memset(output, 0, sizeof(*output));
 	output->socket_handle = -1;
-	output->transport = STAR6E_OUTPUT_TRANSPORT_UDP;
+	output->transport = VENC_OUTPUT_URI_UDP;
 }
 
 static Star6eStreamMode star6e_output_stream_mode_from_name(
@@ -136,31 +146,21 @@ int star6e_output_prepare(Star6eOutputSetup *setup, const char *server_uri,
 
 	star6e_output_setup_reset(setup);
 	setup->stream_mode = star6e_output_stream_mode_from_name(stream_mode_name);
-	setup->connected_udp = connected_udp ? 1 : 0;
+	setup->requested_connected_udp = connected_udp ? 1 : 0;
 	setup->max_frame_size = max_frame_size;
 
 	if (!server_uri || !server_uri[0])
 		return 0;
 
 	setup->has_server = 1;
-	if (strncmp(server_uri, "shm://", 6) == 0) {
+	if (venc_config_parse_output_uri(server_uri, &setup->uri) != 0)
+		return -1;
+	if (setup->uri.type == VENC_OUTPUT_URI_SHM) {
 		if (setup->stream_mode != STAR6E_STREAM_MODE_RTP) {
 			fprintf(stderr, "ERROR: shm:// output requires RTP stream mode.\n");
 			return -1;
 		}
-		snprintf(setup->shm_name, sizeof(setup->shm_name), "%s",
-			server_uri + 6);
-		if (!setup->shm_name[0]) {
-			fprintf(stderr, "ERROR: shm:// URI missing name\n");
-			return -1;
-		}
-		setup->transport = STAR6E_OUTPUT_TRANSPORT_SHM;
 		return 0;
-	}
-
-	if (venc_config_parse_server_uri(server_uri, setup->host,
-	    sizeof(setup->host), &setup->port) != 0) {
-		return -1;
 	}
 
 	return 0;
@@ -183,47 +183,29 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 		return -1;
 
 	output->stream_mode = setup->stream_mode;
-	output->connected_udp = setup->connected_udp;
+	output->requested_connected_udp = setup->requested_connected_udp;
 	if (!setup->has_server)
 		return 0;
 
-	if (setup->transport == STAR6E_OUTPUT_TRANSPORT_SHM) {
+	if (setup->uri.type == VENC_OUTPUT_URI_SHM) {
 		slot_data = (uint32_t)setup->max_frame_size + 12;
-		output->ring = venc_ring_create(setup->shm_name, 512, slot_data);
+		output->ring = venc_ring_create(setup->uri.endpoint, 512, slot_data);
 		if (!output->ring) {
 			fprintf(stderr, "ERROR: venc_ring_create(%s) failed\n",
-				setup->shm_name);
+				setup->uri.endpoint);
 			return -1;
 		}
 
-		output->transport = STAR6E_OUTPUT_TRANSPORT_SHM;
+		output->transport = VENC_OUTPUT_URI_SHM;
 		memset(&output->dst, 0, sizeof(output->dst));
-		output->dst.sin_family = AF_INET;
-		output->dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		output->dst_len = 0;
 		output->connected_udp = 0;
 		return 0;
 	}
 
-	output->socket_handle = socket(AF_INET, SOCK_DGRAM, 0);
-	if (output->socket_handle < 0) {
-		fprintf(stderr, "ERROR: Unable to create UDP socket\n");
-		return -1;
-	}
-
-	memset(&output->dst, 0, sizeof(output->dst));
-	output->dst.sin_family = AF_INET;
-	output->dst.sin_port = htons(setup->port);
-	output->dst.sin_addr.s_addr = inet_addr(setup->host);
-	if (output->connected_udp && output->dst.sin_addr.s_addr != 0) {
-		if (connect(output->socket_handle, (struct sockaddr *)&output->dst,
-		    sizeof(output->dst)) != 0) {
-			fprintf(stderr, "WARNING: UDP connect() failed (%d), using unconnected\n",
-				errno);
-			output->connected_udp = 0;
-		}
-	}
-
-	return 0;
+	return output_socket_configure(&output->socket_handle, &output->dst,
+		&output->dst_len, &output->transport, &setup->uri,
+		output->requested_connected_udp, &output->connected_udp);
 }
 
 int star6e_output_is_rtp(const Star6eOutput *output)
@@ -233,7 +215,7 @@ int star6e_output_is_rtp(const Star6eOutput *output)
 
 int star6e_output_is_shm(const Star6eOutput *output)
 {
-	return output && output->transport == STAR6E_OUTPUT_TRANSPORT_SHM;
+	return output && output->transport == VENC_OUTPUT_URI_SHM;
 }
 
 uint32_t star6e_output_drain_send_errors(Star6eOutput *output)
@@ -272,8 +254,8 @@ int star6e_output_send_rtp_parts(const Star6eOutput *output,
 			payload1, (uint16_t)payload1_len);
 	}
 
-	if (star6e_output_send_udp_parts(output->socket_handle, &output->dst,
-	    header, header_len, payload1, payload1_len,
+	if (output_socket_send_parts(output->socket_handle, &output->dst,
+	    output->dst_len, header, header_len, payload1, payload1_len,
 	    payload2, payload2_len) != 0) {
 		((Star6eOutput *)output)->send_errors++;
 		return -1;
@@ -294,15 +276,22 @@ int star6e_output_send_compact_packet(const Star6eOutput *output,
 	uint32_t ssrc_id;
 	uint32_t max_fragment;
 
+	const struct sockaddr *dst = (const struct sockaddr *)&output->dst;
+
 	if (!output || output->socket_handle < 0 ||
-	    output->transport != STAR6E_OUTPUT_TRANSPORT_UDP ||
+	    output->transport == VENC_OUTPUT_URI_SHM ||
 	    !packet || packet_size == 0) {
 		return -1;
 	}
 
 	if (packet_size <= max_size) {
-		(void)sendto(output->socket_handle, packet, packet_size, 0,
-			(const struct sockaddr *)&output->dst, sizeof(output->dst));
+		ssize_t sent = sendto(output->socket_handle, packet, packet_size, 0,
+			dst, output->dst_len);
+
+		if (sent < 0) {
+			((Star6eOutput *)output)->send_errors++;
+			return -1;
+		}
 		return 0;
 	}
 
@@ -339,12 +328,14 @@ int star6e_output_send_compact_packet(const Star6eOutput *output,
 		vec[1].iov_len = fragment_size;
 
 		memset(&msg, 0, sizeof(msg));
-		msg.msg_name = (void *)&output->dst;
-		msg.msg_namelen = sizeof(output->dst);
+		msg.msg_name = (void *)dst;
+		msg.msg_namelen = output->dst_len;
 		msg.msg_iov = vec;
 		msg.msg_iovlen = 2;
-
-		(void)sendmsg(output->socket_handle, &msg, 0);
+		if (sendmsg(output->socket_handle, &msg, 0) < 0) {
+			((Star6eOutput *)output)->send_errors++;
+			return -1;
+		}
 		offset += fragment_size;
 	}
 
@@ -421,37 +412,20 @@ size_t star6e_output_send_frame(const Star6eOutput *output,
 
 int star6e_output_apply_server(Star6eOutput *output, const char *uri)
 {
-	char host[128];
-	uint16_t port;
+	VencOutputUri parsed;
 
-	if (!output || output->transport != STAR6E_OUTPUT_TRANSPORT_UDP || !uri)
+	if (!output || output->ring || !uri)
 		return -1;
-
-	if (venc_config_parse_server_uri(uri, host, sizeof(host), &port) != 0)
+	if (venc_config_parse_output_uri(uri, &parsed) != 0)
 		return -1;
-
-	/* Create socket on first use (startup with outgoing.enabled=false
-	 * skips socket creation; the API may set a server later). */
-	if (output->socket_handle < 0) {
-		output->socket_handle = socket(AF_INET, SOCK_DGRAM, 0);
-		if (output->socket_handle < 0) {
-			fprintf(stderr, "ERROR: Unable to create UDP socket\n");
-			return -1;
-		}
+	if (parsed.type == VENC_OUTPUT_URI_SHM) {
+		fprintf(stderr, "ERROR: live switch to shm:// is not supported\n");
+		return -1;
 	}
 
-	output->dst.sin_family = AF_INET;
-	output->dst.sin_port = htons(port);
-	output->dst.sin_addr.s_addr = inet_addr(host);
-	if (output->connected_udp) {
-		if (connect(output->socket_handle, (struct sockaddr *)&output->dst,
-		    sizeof(output->dst)) != 0) {
-			fprintf(stderr, "WARNING: UDP connect to %s:%u failed (%d)\n",
-				host, port, errno);
-		}
-	}
-
-	return 0;
+	return output_socket_configure(&output->socket_handle, &output->dst,
+		&output->dst_len, &output->transport, &parsed,
+		output->requested_connected_udp, &output->connected_udp);
 }
 
 void star6e_output_teardown(Star6eOutput *output)
@@ -469,8 +443,10 @@ void star6e_output_teardown(Star6eOutput *output)
 	}
 
 	memset(&output->dst, 0, sizeof(output->dst));
+	output->dst_len = 0;
 	output->connected_udp = 0;
-	output->transport = STAR6E_OUTPUT_TRANSPORT_UDP;
+	output->requested_connected_udp = 0;
+	output->transport = VENC_OUTPUT_URI_UDP;
 }
 
 void star6e_audio_output_reset(Star6eAudioOutput *audio_output)
@@ -497,7 +473,6 @@ int star6e_audio_output_init(Star6eAudioOutput *audio_output,
 	audio_output->port_override = port_override;
 	audio_output->max_payload_size = max_payload_size;
 	if (port_override == 0) {
-		audio_output->socket_handle = video_output->socket_handle;
 		return 0;
 	}
 
@@ -507,30 +482,47 @@ int star6e_audio_output_init(Star6eAudioOutput *audio_output,
 		return -1;
 	}
 
+	if (output_socket_fill_udp_destination("127.0.0.1", port_override,
+	    &audio_output->fallback_dst, &audio_output->fallback_dst_len) != 0) {
+		close(audio_output->socket_handle);
+		audio_output->socket_handle = -1;
+		return -1;
+	}
+
 	return 0;
 }
 
 uint16_t star6e_audio_output_port(const Star6eAudioOutput *audio_output)
 {
-	struct sockaddr_in dst;
+	const struct sockaddr_in *dst;
 
-	if (!audio_output ||
-	    star6e_audio_output_resolve_destination(audio_output, &dst) != 0) {
+	if (!audio_output)
+		return 0;
+	if (audio_output->port_override != 0)
+		return audio_output->port_override;
+	if (!audio_output->video_output ||
+	    audio_output->video_output->transport != VENC_OUTPUT_URI_UDP ||
+	    audio_output->video_output->dst_len != sizeof(*dst)) {
 		return 0;
 	}
 
-	return ntohs(dst.sin_port);
+	dst = (const struct sockaddr_in *)&audio_output->video_output->dst;
+	return ntohs(dst->sin_port);
 }
 
 int star6e_audio_output_send_rtp(const Star6eAudioOutput *audio_output,
 	const uint8_t *data, size_t len, RtpPacketizerState *rtp_state,
 	uint32_t frame_ticks)
 {
+	Star6eAudioSendTarget target;
+
 	if (!audio_output || !data || len == 0 || !rtp_state)
 		return -1;
+	if (resolve_audio_target(audio_output, &target) != 0)
+		return -1;
 
-	if (rtp_packetizer_send_packet(rtp_state, star6e_audio_output_write_rtp,
-	    (void *)audio_output, data, len, NULL, 0, 0) != 0) {
+	if (rtp_packetizer_send_packet(rtp_state, send_audio_rtp, &target,
+	    data, len, NULL, 0, 0) != 0) {
 		return -1;
 	}
 
@@ -541,12 +533,12 @@ int star6e_audio_output_send_rtp(const Star6eAudioOutput *audio_output,
 int star6e_audio_output_send_compact(const Star6eAudioOutput *audio_output,
 	const uint8_t *data, size_t len)
 {
-	struct sockaddr_in dst;
+	Star6eAudioSendTarget target;
 	uint16_t max_data;
 	size_t offset = 0;
 
-	if (!audio_output || !data || len == 0 || audio_output->socket_handle < 0 ||
-	    star6e_audio_output_resolve_destination(audio_output, &dst) != 0) {
+	if (!audio_output || !data || len == 0 ||
+	    resolve_audio_target(audio_output, &target) != 0) {
 		return -1;
 	}
 
@@ -575,11 +567,12 @@ int star6e_audio_output_send_compact(const Star6eAudioOutput *audio_output,
 		vec[1].iov_len = chunk;
 
 		memset(&msg, 0, sizeof(msg));
-		msg.msg_name = (void *)&dst;
-		msg.msg_namelen = sizeof(dst);
+		msg.msg_name = (void *)&target.dst;
+		msg.msg_namelen = target.dst_len;
 		msg.msg_iov = vec;
 		msg.msg_iovlen = 2;
-		(void)sendmsg(audio_output->socket_handle, &msg, 0);
+		if (sendmsg(target.socket_handle, &msg, 0) < 0)
+			return -1;
 		offset += chunk;
 	}
 

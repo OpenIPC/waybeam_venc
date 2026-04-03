@@ -69,7 +69,8 @@ typedef struct {
 
 typedef struct {
 	bool enabled;
-	char server[VENC_CONFIG_STRING_MAX]; /* "udp://host:port" */
+	char server[VENC_CONFIG_STRING_MAX]; /* "udp://host:port", "unix://name",
+	                                      * or "shm://name" */
 	char stream_mode[16];               /* "rtp" or "compact" */
 	uint16_t max_payload_size;
 	bool connected_udp;             /* connect() socket (skip per-packet routing) */
@@ -148,6 +149,19 @@ typedef struct {
 	VencConfigDebug debug;
 } VencConfig;
 
+typedef enum {
+	VENC_OUTPUT_URI_UDP = 0,
+	VENC_OUTPUT_URI_UNIX = 1,
+	VENC_OUTPUT_URI_SHM = 2,
+} VencOutputUriType;
+
+typedef struct {
+	VencOutputUriType type;
+	char host[128];
+	uint16_t port;
+	char endpoint[VENC_CONFIG_STRING_MAX];
+} VencOutputUri;
+
 /* Fill cfg with compiled defaults. */
 void venc_config_defaults(VencConfig *cfg);
 
@@ -160,6 +174,9 @@ int venc_config_load(const char *path, VencConfig *cfg);
  * port values.  Returns 0 on success, -1 on parse error. */
 int venc_config_parse_server_uri(const char *uri, char *host, size_t host_len,
 	uint16_t *port);
+
+/* Parse outgoing.server into a transport-aware structure. */
+int venc_config_parse_output_uri(const char *uri, VencOutputUri *out);
 
 /* Serialize config to a newly allocated JSON string.  Caller must free(). */
 char *venc_config_to_json_string(const VencConfig *cfg);

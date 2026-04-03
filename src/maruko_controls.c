@@ -893,18 +893,13 @@ static MarukoOutput *g_maruko_output_ptr;
 
 static int maruko_apply_server(const char *uri)
 {
-	char host[128];
-	uint16_t port;
-
 	if (!g_maruko_output_ptr)
-		return -1;
-	if (venc_config_parse_server_uri(uri, host, sizeof(host), &port) != 0)
 		return -1;
 	if (maruko_output_apply_server(g_maruko_output_ptr, uri) != 0)
 		return -1;
 
 	maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
-	printf("> Destination changed to %s:%u\n", host, port);
+	printf("> Destination changed to %s\n", uri);
 	return 0;
 }
 

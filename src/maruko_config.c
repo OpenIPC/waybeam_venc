@@ -4,7 +4,6 @@
 #include "pipeline_common.h"
 #include "rtp_packetizer.h"
 
-#include <arpa/inet.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -24,8 +23,10 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->venc_gop_size = 30;
 	cfg->venc_gop_seconds = 1.0;
 	cfg->max_frame_size = RTP_DEFAULT_PAYLOAD;
-	cfg->udp_sink_ip = inet_addr("127.0.0.1");
-	cfg->udp_sink_port = 5000;
+	cfg->output_uri.type = VENC_OUTPUT_URI_UDP;
+	snprintf(cfg->output_uri.host, sizeof(cfg->output_uri.host), "%s",
+		"127.0.0.1");
+	cfg->output_uri.port = 5000;
 	cfg->rc_codec = PT_H265;
 	cfg->rc_mode = 3;
 	cfg->stream_mode = MARUKO_STREAM_RTP;
@@ -38,9 +39,6 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 
 int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 {
-	char host[128];
-	uint16_t port;
-
 	if (!vcfg || !cfg) {
 		return -1;
 	}
@@ -61,23 +59,10 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->rtp_payload_size = vcfg->outgoing.max_payload_size;
 	cfg->sidecar_port = vcfg->outgoing.sidecar_port;
 
-	if (vcfg->outgoing.server[0]) {
-		if (strncmp(vcfg->outgoing.server, "shm://", 6) == 0) {
-			if (!vcfg->outgoing.server[6]) {
-				fprintf(stderr, "ERROR: shm:// URI missing name\n");
-				return -1;
-			}
-			snprintf(cfg->shm_name, sizeof(cfg->shm_name), "%s",
-				vcfg->outgoing.server + 6);
-		} else {
-			if (venc_config_parse_server_uri(vcfg->outgoing.server,
-			    host, sizeof(host), &port) != 0) {
-				return -1;
-			}
-			cfg->udp_sink_ip = inet_addr(host);
-			cfg->udp_sink_port = port;
-		}
-	}
+	if (vcfg->outgoing.server[0] &&
+	    venc_config_parse_output_uri(vcfg->outgoing.server,
+	    &cfg->output_uri) != 0)
+		return -1;
 
 	cfg->stream_mode =
 		(strcmp(vcfg->outgoing.stream_mode, "compact") == 0) ?
