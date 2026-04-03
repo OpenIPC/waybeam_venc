@@ -176,6 +176,7 @@ capture_baseline() {
 	snapshot_field BASE_OUTGOING_MAX_PAYLOAD_SIZE outgoing.max_payload_size
 	snapshot_field BASE_SYSTEM_VERBOSE system.verbose
 	snapshot_field BASE_AUDIO_MUTE audio.mute
+	snapshot_field BASE_ENC_CTRL_ENABLED enc_ctrl.enabled 2>/dev/null || BASE_ENC_CTRL_ENABLED=""
 
 	ALT_OUTGOING_SERVER="$(derive_alt_server "${BASE_OUTGOING_SERVER}")"
 	if [[ "${POST_RESTART_BITRATE}" == "${BASE_VIDEO0_BITRATE}" ]]; then
@@ -197,6 +198,9 @@ restore_live_baseline() {
 	[[ "${RESTORE_ON_EXIT}" -eq 1 ]] || return 0
 
 	printf '\n[api_test_suite] Restoring live baseline values...\n' >&2
+	if [[ "${BASE_ENC_CTRL_ENABLED}" == "true" ]]; then
+		quiet_set "enc_ctrl.enabled" "false"
+	fi
 	quiet_set "video0.bitrate" "${BASE_VIDEO0_BITRATE}"
 	quiet_set "video0.fps" "${BASE_VIDEO0_FPS}"
 	quiet_set "video0.gop_size" "${BASE_VIDEO0_GOP_SIZE}"
@@ -212,6 +216,9 @@ restore_live_baseline() {
 	quiet_set "outgoing.enabled" "${BASE_OUTGOING_ENABLED}"
 	quiet_set "system.verbose" "${BASE_SYSTEM_VERBOSE}"
 	quiet_set "audio.mute" "${BASE_AUDIO_MUTE}"
+	if [[ "${BASE_ENC_CTRL_ENABLED}" == "true" ]]; then
+		quiet_set "enc_ctrl.enabled" "true"
+	fi
 }
 
 pass() {
@@ -574,11 +581,22 @@ assert_set "video0.fps" "${BASE_VIDEO0_FPS}" "RESTORE video0.fps=${BASE_VIDEO0_F
 section "6. LIVE PARAMETER CHANGES — GOP size"
 # ════════════════════════════════════════════════════════════════════════
 
+# enc_ctrl manages gop_size when enabled — temporarily disable for manual sweep
+if [[ "${BASE_ENC_CTRL_ENABLED}" == "true" ]]; then
+	quiet_set "enc_ctrl.enabled" "false"
+	settle 1
+fi
+
 for gop in 0 0.5 1.0 2.0 5.0; do
 	assert_set "video0.gop_size" "${gop}"
 	settle 0.3
 done
 assert_set "video0.gop_size" "${BASE_VIDEO0_GOP_SIZE}" "RESTORE video0.gop_size=${BASE_VIDEO0_GOP_SIZE}"
+
+if [[ "${BASE_ENC_CTRL_ENABLED}" == "true" ]]; then
+	quiet_set "enc_ctrl.enabled" "true"
+	settle 1
+fi
 
 # ════════════════════════════════════════════════════════════════════════
 section "6a. LIVE PARAMETER CHANGES — qpDelta"
@@ -775,6 +793,11 @@ fi
 section "17. COMBINED PARAMETER CHANGES (rapid fire)"
 # ════════════════════════════════════════════════════════════════════════
 
+if [[ "${BASE_ENC_CTRL_ENABLED}" == "true" ]]; then
+	quiet_set "enc_ctrl.enabled" "false"
+	settle 1
+fi
+
 # Rapidly change multiple live parameters
 assert_set "video0.bitrate" 4000
 assert_set "video0.fps" 20
@@ -847,6 +870,11 @@ assert_set_query_fail \
 	"video0.qp_delta=1&video0.qpDelta=2" \
 	"MULTI-SET rejects duplicate canonical field"
 assert_value_is "video0.qp_delta" "${BASE_VIDEO0_QP_DELTA}" "VERIFY duplicate-key reject left qp_delta unchanged"
+
+if [[ "${BASE_ENC_CTRL_ENABLED}" == "true" ]]; then
+	quiet_set "enc_ctrl.enabled" "true"
+	settle 1
+fi
 
 # ════════════════════════════════════════════════════════════════════════
 section "19. RESTART-REQUIRED FIELDS (verify reinit_pending)"
