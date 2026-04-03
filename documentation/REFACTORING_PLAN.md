@@ -197,6 +197,19 @@ Deployment verification for this gate should prioritize Star6E transport
 parity against the baseline, including direct UDP and current SHM/WFB-related
 paths when those code paths are touched.
 
+Future transport follow-up to keep in scope during Gate 2 / Gate 3 work:
+- Review Star6E audio destination resolution for live `outgoing.server`
+  changes.
+- Current behavior is acceptable, but audio currently resolves the effective
+  send target from mutable video-output state during frame send.
+- Preferred future shape:
+  - backend-owned transport snapshot or generation counter,
+  - refresh cached audio target only when output transport changes,
+  - reuse the same backend publish path for startup, restart, and live
+    `outgoing.server` apply.
+- Do not couple this to generic HTTP API set handling; the transport boundary
+  belongs in backend/output code, not in the API layer.
+
 ---
 
 ## Gate 3: Expand Backend Abstraction Around Shared Orchestration
