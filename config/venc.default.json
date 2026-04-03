@@ -80,12 +80,8 @@
   },
   "encCtrl": {
     "enabled": false,
-    "maxGopSize": 10.0,
-    "minGopSize": 0.25,
-    "deferTimeoutFrames": 60,
-    "sceneChangeThreshold": 325,
-    "sceneChangeHoldoff": 2,
-    "idrQpBoost": 4
+    "sceneChangeThreshold": 150,
+    "sceneChangeHoldoff": 2
   },
   "debug": {
     "showOsd": false

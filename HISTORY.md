@@ -2,24 +2,23 @@
 
 ## [0.6.0] - 2026-04-02
 
-- Add adaptive encoder control module (`enc-ctrl/`) with per-frame encoder
-  feedback, scene-aware variable GOP, and external control API.
-  - Lock-free SPSC ring buffer for frame stats history (512 slots).
-  - Scene complexity estimator using EMA of frame sizes with hysteresis-based
-    scene change detection (configurable threshold + holdoff).
-  - Variable GOP state machine: NORMAL / IDR_READY / IDR_DEFERRED / FORCED_IDR
-    with min/max GOP length enforcement and external defer/clear signals.
-  - IDR size control via temporary QP boost (Star6E only; no-op on Maruko).
-  - Clean `enc_ctrl_*` C API for future link controller integration.
-  - Passthrough mode (`enable_variable_gop=0`): stats collection only, no GOP
-    manipulation — zero-risk default.
-  - MI_VENC SDK interface isolated in `venc_sdk.c` with mock support for
-    off-target testing.
-  - Binary telemetry ring (600 frames) + optional text debug log.
-  - SDK capability matrix documenting available per-frame fields, control APIs,
-    and platform differences (Star6E vs Maruko).
-  - 247 unit tests covering ring buffer, scene estimator, GOP state machine,
-    and full API integration. All pass under ASAN and TSAN.
+- Add inline scene detector in star6e_runtime.c (~150 lines) behind
+  `encCtrl.enabled` config flag.
+  - Tracks frame size EMA, computes complexity (0-255).
+  - Detects spikes above configurable threshold for holdoff consecutive frames.
+  - Waits for spike to subside before requesting IDR (when enabled=true).
+  - Three config fields: `enc_ctrl.enabled` (bool), `enc_ctrl.scene_change_threshold`
+    (uint16, default 150), `enc_ctrl.scene_change_holdoff` (uint8, default 2).
+  - Passthrough mode (`enabled=false`): no IDR injection — zero-risk default.
+- Enrich RTP timing sidecar with per-frame encoder telemetry when scene
+  detector is active: `frame_type`, `complexity`, `scene_change`,
+  `idr_inserted`, `frames_since_idr`.
+- Add multi-field set to HTTP API: `GET /api/v1/set?a=1&b=2` applies
+  multiple live fields atomically in one request.
+- Add field capabilities endpoint with backend-specific support filtering:
+  `GET /api/v1/capabilities` reports mutability and per-backend support.
+- API improvements: camelCase alias table for Majestic-compatible clients,
+  duplicate-field rejection in multi-set, mixed live/restart rejection.
 
 ## [0.5.0] - 2026-04-01
 

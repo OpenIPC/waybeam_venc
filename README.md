@@ -239,9 +239,7 @@ curl http://<device-ip>:<port>/api/v1/awb
 
 #### GET /request/idr
 
-Request an IDR keyframe from the encoder. With `encCtrl.enabled=true` on
-Star6E, the request is routed through the adaptive controller and may be
-deferred until `enc_ctrl.min_gop_size` is reached.
+Request an IDR keyframe from the encoder.
 
 ```sh
 curl http://<device-ip>:<port>/request/idr
@@ -364,71 +362,50 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 | `video0.fps` | uint | live | Output frame rate |
 | `video0.size` | WxH | restart | Encode resolution (e.g., `"1920x1080"`) |
 | `video0.bitrate` | uint | live | Target bitrate in kbps |
-| `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra, only while `encCtrl.enabled=false`) |
+| `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |
 | `video0.frame_lost` | bool | restart | Enable frame-lost safety net |
 
-#### Adaptive Encoder Control (Star6E-first)
+#### Adaptive Encoder Control (Star6E only)
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `enc_ctrl.enabled` | bool | restart | Enable adaptive GOP / IDR controller (Star6E only) |
-| `enc_ctrl.max_gop_size` | double | restart | Hard GOP ceiling in seconds between IDRs |
-| `enc_ctrl.min_gop_size` | double | restart | Earliest scene/manual IDR point in seconds |
-| `enc_ctrl.defer_timeout_frames` | uint16 | restart | Deferred-IDR timeout in frames |
-| `enc_ctrl.scene_change_threshold` | uint16 | restart | Scene spike threshold ratio x100 |
-| `enc_ctrl.scene_change_holdoff` | uint8 | restart | Consecutive spike frames required |
-| `enc_ctrl.idr_qp_boost` | uint8 | restart | Pre-IDR minimum-QP boost |
+| `enc_ctrl.enabled` | bool | restart | Request IDR after scene change spike settles (Star6E only) |
+| `enc_ctrl.scene_change_threshold` | uint16 | restart | Scene spike threshold ratio x100 (default 150) |
+| `enc_ctrl.scene_change_holdoff` | uint8 | restart | Consecutive spike frames required (default 2) |
 
-When adaptive control is enabled, the controller owns GOP timing and live
-`video0.gop_size` writes are rejected until `enc_ctrl.enabled` is turned off.
-Live `video0.fps` changes rescale the controller's GOP frame limits so the
-configured second-based `enc_ctrl` windows stay stable across FPS changes.
+When enabled, the inline scene detector tracks frame size EMA, computes
+complexity, and requests an IDR after a spike above the threshold settles.
 The JSON config section is `encCtrl`, and the HTTP API accepts both
 `enc_ctrl.*` and `encCtrl.*` field names. Use `/api/v1/capabilities` to
 check backend support before writing these fields.
 
 Typical usage:
-- Leave `encCtrl.enabled=false` when you want fixed-GOP behavior and direct
-  control through `video0.gop_size`.
-- Enable `encCtrl` for FPV/live links where long steady-state GOPs are useful
-  but you still want earlier scene/manual IDRs.
+- Leave `encCtrl.enabled=false` for fixed-GOP behavior controlled by
+  `video0.gop_size`.
+- Enable `encCtrl` for FPV/live links where scene-change-triggered IDRs
+  improve stream recovery.
 - Pair `encCtrl.enabled=true` with `outgoing.sidecar_port>0` when an external
-  controller needs per-frame `frame_size_bytes`, frame type, QP, scene-change,
-  and GOP-state telemetry on the sidecar.
+  controller needs per-frame `frame_type`, `complexity`, `scene_change`,
+  `idr_inserted`, and `frames_since_idr` telemetry on the sidecar.
 
 Current Star6E IMX335 bench starting point:
 
 ```json
 "encCtrl": {
   "enabled": true,
-  "maxGopSize": 10.0,
-  "minGopSize": 0.25,
-  "deferTimeoutFrames": 60,
-  "sceneChangeThreshold": 325,
-  "sceneChangeHoldoff": 2,
-  "idrQpBoost": 4
+  "sceneChangeThreshold": 150,
+  "sceneChangeHoldoff": 2
 }
 ```
 
-Tuning order:
-1. Set `maxGopSize` and `minGopSize` first. They define the operating envelope.
-   A common FPV starting point is `10.0 / 0.25`.
-2. Tune `sceneChangeThreshold` next. It is a size-spike ratio scaled by `100`,
-   so `325` means roughly "trigger near a 3.25x spike over the rolling baseline".
-3. Keep `sceneChangeHoldoff=2` unless threshold changes alone cannot suppress
-   false positives. Raising holdoff reduces responsiveness faster than raising
-   threshold does.
-4. Keep `idrQpBoost` small. `2..4` is a sensible range; larger values make the
-   forced/manual IDR stand out more but can waste bits.
-5. Use `deferTimeoutFrames` as a guardrail, not a tuning knob. Around one
-   nominal second is a reasonable default on this bench.
-
-Operational notes:
-- `/request/idr` is routed through the controller while enabled, so manual IDRs
-  respect `minGopSize` and can be deferred instead of firing immediately.
-- Live `video0.fps` changes keep `maxGopSize` and `minGopSize` second-based.
-  You do not need to retune them after FPS changes.
+Tuning notes:
+- `sceneChangeThreshold` is a frame-size-spike ratio scaled by `100`, so
+  `150` means roughly "trigger near a 1.5x spike over the rolling baseline".
+  Raise to reduce false positives, lower to increase sensitivity.
+- Keep `sceneChangeHoldoff=2` unless threshold changes alone cannot suppress
+  false positives. Raising holdoff reduces responsiveness faster than raising
+  threshold does.
 
 Codec note:
 - Star6E with `outgoing.stream_mode="rtp"` requires `video0.codec="h265"`.
@@ -653,7 +630,7 @@ This enables measurement of:
 - **Frame intervals** — jitter and regularity of both sender and receiver clocks
 - **RTP packet counts and gaps** — per-frame packet accounting
 - **Encoded frame size / type / QP** — when Star6E `encCtrl` telemetry is active
-- **Adaptive GOP state** — scene-change flag, GOP state, IDR decision, frames-since-IDR
+- **Scene detection state** — complexity, scene-change flag, IDR decision, frames-since-IDR
 
 ### Enabling
 
@@ -695,7 +672,7 @@ SUBSCRIBE and SYNC_REQ refresh the expiry timer.
 
 When Star6E adaptive encoder control is enabled, `FRAME` appends a 12-byte
 trailer carrying `frame_size_bytes`, `frame_type`, `qp`, `complexity`,
-`scene_change`, `gop_state`, `idr_inserted`, and `frames_since_idr`.
+`scene_change`, `idr_inserted`, and `frames_since_idr`.
 Maruko and timing-only Star6E runs keep sending the original 52-byte frame.
 
 Link-control / FEC usage:
@@ -808,9 +785,8 @@ Run the API test suite against a live device after `venc` is already running:
 ./scripts/api_test_suite.sh 192.168.1.13 80
 ```
 
-Adaptive GOP / IDR control is configured through the `encCtrl` section in
-`/etc/venc.json`. On Star6E, the shipped `venc` binary now includes that
-controller directly; leave `encCtrl.enabled=false` for baseline behavior.
+Scene-change IDR control is configured through the `encCtrl` section in
+`/etc/venc.json`. Leave `encCtrl.enabled=false` for baseline behavior.
 
 ## Web Dashboard
 
