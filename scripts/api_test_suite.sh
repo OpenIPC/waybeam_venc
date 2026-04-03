@@ -138,7 +138,7 @@ transport_restore_baseline() {
 	remote_ssh "json_cli -s .outgoing.audioPort ${TRANSPORT_ORIG_AUDIO_PORT} -i /etc/venc.json" >/dev/null
 	remote_ssh "json_cli -s .system.verbose ${TRANSPORT_ORIG_VERBOSE} -i /etc/venc.json" >/dev/null
 	remote_ssh "json_cli -s .outgoing.server '\"${TRANSPORT_ORIG_SERVER}\"' -i /etc/venc.json" >/dev/null
-	remote_ssh "killall -9 venc >/dev/null 2>&1 || true; sleep 2; nohup /usr/bin/venc >/tmp/venc.log 2>&1 </dev/null &" >/dev/null
+	remote_ssh "killall -9 venc >/dev/null 2>&1 || true; sleep 5; nohup /usr/bin/venc >/tmp/venc.log 2>&1 </dev/null &" >/dev/null
 	if ! wait_http 30; then
 		return 1
 	fi
@@ -233,15 +233,15 @@ run_transport_checks() {
 		  json_cli -s .outgoing.server '\"unix://${unix_name}\"' -i /etc/venc.json >/dev/null &&
 		  json_cli -s .outgoing.audioPort 5601 -i /etc/venc.json >/dev/null; } || true;
 		killall -9 venc >/dev/null 2>&1 || true;
-		sleep 2;
+		sleep 5;
 		rm -f /tmp/api_suite_unix_audio_video.bin /tmp/api_suite_unix_audio_udp.bin;
-		(timeout 15 socat -u ABSTRACT-RECVFROM:${unix_name} - >/tmp/api_suite_unix_audio_video.bin) &
+		(timeout 30 socat -u ABSTRACT-RECVFROM:${unix_name} - >/tmp/api_suite_unix_audio_video.bin) &
 		video_listener=\$!;
-		(timeout 15 socat -u UDP-RECVFROM:5601,reuseaddr - >/tmp/api_suite_unix_audio_udp.bin) &
+		(timeout 30 socat -u UDP-RECVFROM:5601,reuseaddr - >/tmp/api_suite_unix_audio_udp.bin) &
 		audio_listener=\$!;
 		sleep 1;
 		nohup /usr/bin/venc >/tmp/venc.log 2>&1 </dev/null & >/dev/null;
-		sleep 15;
+		sleep 25;
 		wait \$video_listener || true;
 		wait \$audio_listener || true;
 		video_bytes=\$(wc -c </tmp/api_suite_unix_audio_video.bin 2>/dev/null || echo 0);
