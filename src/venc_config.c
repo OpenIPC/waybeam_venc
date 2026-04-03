@@ -168,10 +168,9 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->record.gop_size = 0;
 	cfg->record.server[0] = '\0';
 
-	/* encCtrl */
-	cfg->enc_ctrl.enabled = false;
-	cfg->enc_ctrl.scene_change_threshold = 150;
-	cfg->enc_ctrl.scene_change_holdoff = 2;
+	/* scene detection (video0) */
+	cfg->video0.scene_threshold = 0;   /* 0 = off */
+	cfg->video0.scene_holdoff = 2;
 
 	/* debug */
 	cfg->debug.show_osd = false;
@@ -312,6 +311,11 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	if (v->qp_delta < -12) v->qp_delta = -12;
 	if (v->qp_delta > 12) v->qp_delta = 12;
 	v->frame_lost = json_get_bool(obj, "frameLost", v->frame_lost);
+	v->scene_threshold = (uint16_t)json_get_int(obj, "sceneThreshold",
+		(int)v->scene_threshold);
+	v->scene_holdoff = (uint8_t)json_get_int(obj, "sceneHoldoff",
+		(int)v->scene_holdoff);
+	if (v->scene_holdoff < 1 && v->scene_threshold > 0) v->scene_holdoff = 1;
 }
 
 static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
@@ -425,18 +429,6 @@ static void load_record(const cJSON *root, VencConfigRecord *s)
 		json_get_string(obj, "server", s->server));
 }
 
-static void load_enc_ctrl(const cJSON *root, VencConfigEncCtrl *s)
-{
-	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "encCtrl");
-	if (!obj) return;
-
-	s->enabled = json_get_bool(obj, "enabled", s->enabled);
-	s->scene_change_threshold = (uint16_t)json_get_int(obj,
-		"sceneChangeThreshold", s->scene_change_threshold);
-	s->scene_change_holdoff = (uint8_t)json_get_int(obj,
-		"sceneChangeHoldoff", s->scene_change_holdoff);
-}
-
 static void load_fpv(const cJSON *root, VencConfigFpv *s)
 {
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "fpv");
@@ -494,7 +486,6 @@ int venc_config_load(const char *path, VencConfig *cfg)
 	load_imu(root, &cfg->imu);
 	load_eis(root, &cfg->eis);
 	load_record(root, &cfg->record);
-	load_enc_ctrl(root, &cfg->enc_ctrl);
 	{
 		const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "debug");
 		if (obj)
@@ -656,6 +647,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "gopSize", cfg->video0.gop_size);
 		cJSON_AddNumberToObject(vid, "qpDelta", cfg->video0.qp_delta);
 		cJSON_AddBoolToObject(vid, "frameLost", cfg->video0.frame_lost);
+		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
+		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
 	}
 
 	/* outgoing */
@@ -735,16 +728,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(rec, "fps", cfg->record.fps);
 		cJSON_AddNumberToObject(rec, "gopSize", cfg->record.gop_size);
 		cJSON_AddStringToObject(rec, "server", cfg->record.server);
-	}
-
-	/* encCtrl */
-	cJSON *enc = cJSON_AddObjectToObject(root, "encCtrl");
-	if (enc) {
-		cJSON_AddBoolToObject(enc, "enabled", cfg->enc_ctrl.enabled);
-		cJSON_AddNumberToObject(enc, "sceneChangeThreshold",
-			cfg->enc_ctrl.scene_change_threshold);
-		cJSON_AddNumberToObject(enc, "sceneChangeHoldoff",
-			cfg->enc_ctrl.scene_change_holdoff);
 	}
 
 	/* debug */

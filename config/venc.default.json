@@ -23,7 +23,9 @@
     "bitrate": 8192,
     "gopSize": 1.0,
     "qpDelta": -4,
-    "frameLost": true
+    "frameLost": true,
+    "sceneThreshold": 0,
+    "sceneHoldoff": 2
   },
   "outgoing": {
     "enabled": false,
@@ -77,11 +79,6 @@
     "fps": 0,
     "gopSize": 0,
     "server": ""
-  },
-  "encCtrl": {
-    "enabled": false,
-    "sceneChangeThreshold": 150,
-    "sceneChangeHoldoff": 2
   },
   "debug": {
     "showOsd": false

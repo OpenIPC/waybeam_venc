@@ -319,18 +319,18 @@ static int test_field_support_by_backend(void)
 {
 	int failures = 0;
 
-	CHECK("enc_ctrl supported star6e",
+	CHECK("scene_threshold supported star6e",
 		venc_api_field_supported_for_backend("star6e",
-			"enc_ctrl.enabled") == 1);
-	CHECK("enc_ctrl alias supported star6e",
+			"video0.scene_threshold") == 1);
+	CHECK("scene_threshold alias supported star6e",
 		venc_api_field_supported_for_backend("star6e",
-			"encCtrl.sceneChangeThreshold") == 1);
-	CHECK("enc_ctrl unsupported maruko",
+			"video0.sceneThreshold") == 1);
+	CHECK("scene_threshold supported maruko",
 		venc_api_field_supported_for_backend("maruko",
-			"enc_ctrl.enabled") == 0);
-	CHECK("enc_ctrl unsupported unknown",
-		venc_api_field_supported_for_backend("test",
-			"encCtrl.sceneChangeThreshold") == 0);
+			"video0.scene_threshold") == 1);
+	CHECK("scene_holdoff supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"video0.sceneHoldoff") == 1);
 	CHECK("regular field supported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"video0.bitrate") == 1);

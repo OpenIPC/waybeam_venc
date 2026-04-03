@@ -54,8 +54,10 @@ typedef struct {
 	uint32_t height;
 	uint32_t bitrate;      /* kbps */
 	double gop_size;       /* seconds between keyframes; 0 = all-intra */
-	int qp_delta;          /* relative I/P QP delta, -12..12 */
-	bool frame_lost;       /* enable frame-lost safety net */
+	int qp_delta;              /* relative I/P QP delta, -12..12 */
+	bool frame_lost;           /* enable frame-lost safety net */
+	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
+	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
 } VencConfigVideo;
 
 typedef struct {
@@ -129,12 +131,6 @@ typedef struct {
 } VencConfigRecord;
 
 typedef struct {
-	bool enabled;                    /* request IDR after scene change spike settles */
-	uint16_t scene_change_threshold; /* frame size ratio x100 (e.g. 150 = 1.5x EMA) */
-	uint8_t scene_change_holdoff;    /* consecutive frames above threshold to trigger */
-} VencConfigEncCtrl;
-
-typedef struct {
 	bool show_osd;
 } VencConfigDebug;
 
@@ -152,7 +148,6 @@ typedef struct {
 	VencConfigImu imu;
 	VencConfigEis eis;
 	VencConfigRecord record;
-	VencConfigEncCtrl enc_ctrl;
 	VencConfigDebug debug;
 } VencConfig;
 

@@ -41,7 +41,7 @@
 
 /*
  * Frame type values carried in the optional encoder-feedback trailer.
- * These mirror enc_ctrl / enc_types.h but stay local to the sidecar ABI.
+ * These stay local to the sidecar ABI.
  */
 #define RTP_SIDECAR_FRAME_P       0
 #define RTP_SIDECAR_FRAME_I       1
@@ -100,9 +100,7 @@ typedef struct {
  * Appended immediately after RtpSidecarFrame when
  * RTP_SIDECAR_FLAG_ENC_INFO is set.
  *
- * Values come from enc_ctrl's latest per-frame telemetry on Star6E.
- * When the adaptive controller is disabled, the trailer is omitted and the
- * base RtpSidecarFrame stays unchanged.
+ * Values come from the inline scene detector's per-frame telemetry.
  */
 typedef struct {
 	uint32_t frame_size_bytes; /* encoded frame bytes                        */

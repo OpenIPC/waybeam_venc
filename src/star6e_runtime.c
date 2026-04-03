@@ -119,12 +119,12 @@ static uint8_t scene_frame_type(const MI_VENC_Stream_t *s, int codec)
 	return ENC_FRAME_P;
 }
 
-static void scene_init(SceneDetector *sd, const VencConfigEncCtrl *ec)
+static void scene_init(SceneDetector *sd, uint16_t threshold, uint8_t holdoff)
 {
 	memset(sd, 0, sizeof(*sd));
-	sd->threshold = ec->scene_change_threshold > 0 ? ec->scene_change_threshold : 150;
-	sd->holdoff = ec->scene_change_holdoff > 0 ? ec->scene_change_holdoff : 2;
-	sd->idr_enabled = ec->enabled ? 1 : 0;
+	sd->threshold = threshold > 0 ? threshold : 150;
+	sd->holdoff = holdoff > 0 ? holdoff : 2;
+	sd->idr_enabled = threshold > 0 ? 1 : 0;
 }
 
 static void scene_update(SceneDetector *sd, const MI_VENC_Stream_t *stream,
@@ -549,7 +549,8 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	venc_api_register(vcfg, "star6e", star6e_controls_callbacks());
 	venc_api_set_record_status_fn(record_status_callback);
 
-	scene_init(&ctx->scene, &ctx->vcfg.enc_ctrl);
+	scene_init(&ctx->scene, ctx->vcfg.video0.scene_threshold,
+		ctx->vcfg.video0.scene_holdoff);
 
 	if (!vcfg->isp.legacy_ae)
 		start_custom_ae(ps, vcfg);
@@ -689,7 +690,8 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 	star6e_controls_bind(ps, vcfg);
 	install_signal_handlers();
 
-	scene_init(&ctx->scene, &ctx->vcfg.enc_ctrl);
+	scene_init(&ctx->scene, ctx->vcfg.video0.scene_threshold,
+		ctx->vcfg.video0.scene_holdoff);
 
 	if (!vcfg->isp.legacy_ae)
 		start_custom_ae(ps, vcfg);

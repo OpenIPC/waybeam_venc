@@ -222,9 +222,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, fps,         FT_UINT,   MUT_RESTART),
 	FIELD(record, gop_size,    FT_DOUBLE, MUT_RESTART),
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
-	FIELD(enc_ctrl, enabled,               FT_BOOL,   MUT_RESTART),
-	FIELD(enc_ctrl, scene_change_threshold, FT_UINT16, MUT_RESTART),
-	FIELD(enc_ctrl, scene_change_holdoff,  FT_UINT8,  MUT_RESTART),
+	FIELD(video0, scene_threshold,  FT_UINT16, MUT_LIVE),
+	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_LIVE),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -288,9 +287,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.maxSeconds", "record.max_seconds" },
 	{ "record.maxMB", "record.max_mb" },
 	{ "record.gopSize", "record.gop_size" },
-	{ "encCtrl.enabled", "enc_ctrl.enabled" },
-	{ "encCtrl.sceneChangeThreshold", "enc_ctrl.scene_change_threshold" },
-	{ "encCtrl.sceneChangeHoldoff", "enc_ctrl.scene_change_holdoff" },
+	{ "video0.sceneThreshold", "video0.scene_threshold" },
+	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -315,13 +313,10 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 {
 	const char *canonical_key;
 
+	(void)backend_name;
 	canonical_key = canonicalize_field_key(field_key);
 	if (!canonical_key)
 		return 0;
-
-	if (strncmp(canonical_key, "enc_ctrl.", 9) == 0) {
-		return backend_name && strcmp(backend_name, "star6e") == 0;
-	}
 
 	return 1;
 }
@@ -498,12 +493,9 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.bitrate == 0 || cfg->video0.bitrate > 200000)
 			return "bitrate must be 1-200000 kbps";
 	}
-	if (strcmp(key, "enc_ctrl.scene_change_threshold") == 0 &&
-	    cfg->enc_ctrl.scene_change_threshold == 0)
-		return "enc_ctrl.scene_change_threshold must be >= 1";
-	if (strcmp(key, "enc_ctrl.scene_change_holdoff") == 0 &&
-	    cfg->enc_ctrl.scene_change_holdoff == 0)
-		return "enc_ctrl.scene_change_holdoff must be >= 1";
+	if (strcmp(key, "video0.scene_holdoff") == 0 &&
+	    cfg->video0.scene_holdoff == 0)
+		return "video0.scene_holdoff must be >= 1";
 	return NULL;
 }
 
@@ -881,11 +873,11 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_VIDEO_TIMING:
 		if (touched && touched->video_fps && !g_cb->apply_fps)
 			return 0;
-		if (cfg && !cfg->enc_ctrl.enabled &&
+		if (cfg && !(cfg->video0.scene_threshold > 0) &&
 		    touched && (touched->video_fps || touched->video_gop) &&
 		    !g_cb->apply_gop)
 			return 0;
-		if (cfg && cfg->enc_ctrl.enabled &&
+		if (cfg && cfg->video0.scene_threshold > 0 &&
 		    touched && touched->video_gop)
 			return 0;
 		return 1;
@@ -1014,7 +1006,7 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 			if (rc != 0)
 				return -1;
 		}
-		if (!cfg->enc_ctrl.enabled &&
+		if (!(cfg->video0.scene_threshold > 0) &&
 		    touched && (touched->video_fps || touched->video_gop)) {
 			gop_frames = pipeline_common_gop_frames(
 				cfg->video0.gop_size, cfg->video0.fps);

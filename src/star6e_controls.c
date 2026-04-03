@@ -339,7 +339,7 @@ static int apply_encoder_fps(uint32_t fps)
 		0 : -1;
 }
 
-static int apply_enc_ctrl_fps(uint32_t fps)
+static int apply_scene_fps(uint32_t fps)
 {
 	(void)fps;
 	return 0;
@@ -376,7 +376,7 @@ static int apply_fps(uint32_t fps)
 
 	if (apply_encoder_fps(fps) != 0)
 		return -1;
-	if (apply_enc_ctrl_fps(fps) != 0)
+	if (apply_scene_fps(fps) != 0)
 		return -1;
 
 	printf("> FPS changed to %u (bind %u:%u)\n", fps, sensor_fps, fps);
