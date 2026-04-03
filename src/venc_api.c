@@ -222,8 +222,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, fps,         FT_UINT,   MUT_RESTART),
 	FIELD(record, gop_size,    FT_DOUBLE, MUT_RESTART),
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
-	FIELD(video0, scene_threshold,  FT_UINT16, MUT_LIVE),
-	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_LIVE),
+	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
+	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 

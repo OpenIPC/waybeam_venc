@@ -105,10 +105,10 @@ typedef struct {
 	uint64_t         capture_us;        /* venc: encoder PTS (0=unknown)        */
 	uint64_t         frame_ready_us;    /* venc: before packetise+send          */
 	uint64_t         last_pkt_send_us;  /* venc: after final sendmsg            */
-	uint32_t         frame_size_bytes;  /* enc_ctrl telemetry (optional)        */
+	uint32_t         frame_size_bytes;  /* scene detect telemetry (optional)    */
 	uint16_t         seq_first;
 	uint16_t         seq_count;
-	uint16_t         frames_since_idr;  /* enc_ctrl telemetry (optional)        */
+	uint16_t         frames_since_idr;  /* scene detect telemetry (optional)    */
 	uint8_t          frame_type;        /* RTP_SIDECAR_FRAME_*                  */
 	uint8_t          qp;
 	uint8_t          complexity;

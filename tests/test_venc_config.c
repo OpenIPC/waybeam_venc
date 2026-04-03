@@ -135,7 +135,7 @@ static int test_load_full_json(void)
 	CHECK("load_roi_qp", cfg.fpv.roi_qp == -18);
 	CHECK("load_roi_steps", cfg.fpv.roi_steps == 2);
 	CHECK("load_noise", cfg.fpv.noise_level == 5);
-	/* encCtrl section in JSON is ignored now (migrated to video0) */
+	/* scene_threshold/scene_holdoff live in video0 section */
 
 	return failures;
 }

@@ -3,13 +3,13 @@
 ## [0.6.0] - 2026-04-02
 
 - Add inline scene detector in star6e_runtime.c (~150 lines) behind
-  `encCtrl.enabled` config flag.
+  `video0.scene_threshold` config field.
   - Tracks frame size EMA, computes complexity (0-255).
   - Detects spikes above configurable threshold for holdoff consecutive frames.
-  - Waits for spike to subside before requesting IDR (when enabled=true).
-  - Three config fields: `enc_ctrl.enabled` (bool), `enc_ctrl.scene_change_threshold`
-    (uint16, default 150), `enc_ctrl.scene_change_holdoff` (uint8, default 2).
-  - Passthrough mode (`enabled=false`): no IDR injection — zero-risk default.
+  - Waits for spike to subside before requesting IDR (when threshold>0).
+  - Two config fields: `video0.scene_threshold` (uint16, 0=off, 150=1.5x EMA
+    spike detection), `video0.scene_holdoff` (uint8, default 2).
+  - Default off (`scene_threshold=0`): no IDR injection — zero-risk default.
 - Enrich RTP timing sidecar with per-frame encoder telemetry when scene
   detector is active: `frame_type`, `complexity`, `scene_change`,
   `idr_inserted`, `frames_since_idr`.

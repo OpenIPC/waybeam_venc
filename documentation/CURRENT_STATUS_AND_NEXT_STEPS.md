@@ -47,11 +47,11 @@
   - Sensor always set to mode maxFps (avoids IMX335 intermediate fps stall).
   - FPS-aware mode selection prefers modes whose maxFps is closest to target.
   - Details: `documentation/LIVE_FPS_CONTROL.md`
-- Inline scene detector is now integrated into Star6E `venc` behind `encCtrl`:
+- Inline scene detector is now integrated into Star6E `venc` via `video0.scene_threshold`:
   - Tracks frame size EMA, computes complexity (0-255), detects scene change
     spikes above threshold, and requests IDR after the spike settles.
-  - Three config fields: `enc_ctrl.enabled` (bool), `enc_ctrl.scene_change_threshold`
-    (uint16, default 150), `enc_ctrl.scene_change_holdoff` (uint8, default 2).
+  - Two config fields: `video0.scene_threshold` (uint16, 0=off, 150=1.5x EMA
+    spike detection), `video0.scene_holdoff` (uint8, default 2).
   - Reports `frame_type`, `complexity`, `scene_change`, `idr_inserted`,
     `frames_since_idr` via RTP timing sidecar when enabled.
   - hardware-validated on `root@192.168.1.13` in `cbr`, `vbr`, and `avbr`.

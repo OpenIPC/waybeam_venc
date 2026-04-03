@@ -101,11 +101,10 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1, "unlockEnabled": true, "..." : "..." },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "exposure": 9, "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500 },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0 },
+      "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2 },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
-      "encCtrl": { "enabled": false, "sceneChangeThreshold": 150, "sceneChangeHoldoff": 2 },
       "debug": { "showOsd": false }
     }
   }
@@ -132,9 +131,8 @@ Response `200`:
       "video0.qp_delta": { "mutability": "live", "supported": true },
       "video0.codec": { "mutability": "restart_required", "supported": true },
       "video0.size": { "mutability": "restart_required", "supported": true },
-      "enc_ctrl.enabled": { "mutability": "restart_required", "supported": true },
-      "enc_ctrl.scene_change_threshold": { "mutability": "restart_required", "supported": true },
-      "enc_ctrl.scene_change_holdoff": { "mutability": "restart_required", "supported": true },
+      "video0.scene_threshold": { "mutability": "restart_required", "supported": true },
+      "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
       "system.verbose": { "mutability": "live", "supported": true },
       "isp.exposure": { "mutability": "live", "supported": true },
       "outgoing.enabled": { "mutability": "live", "supported": true },
@@ -148,7 +146,7 @@ Response `200`:
 ```
 (truncated — all fields listed in actual response)
 
-`supported` is backend-specific. On Star6E, `enc_ctrl.*` fields report
+`supported` is backend-specific. On Star6E, `video0.scene_threshold` / `video0.scene_holdoff` report
 `supported: true`; on Maruko they report `supported: false` and writes are
 rejected with `501 not_implemented`.
 
@@ -206,8 +204,7 @@ Majestic-style camelCase aliases are also accepted for selected fields,
 including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `fpv.noiseLevel`, `isp.sensorBin`, `isp.awbMode`, `isp.awbCt`,
 `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
-`encCtrl.enabled`, `encCtrl.sceneChangeThreshold`,
-`encCtrl.sceneChangeHoldoff`,
+`video0.sceneThreshold`, `video0.sceneHoldoff`,
 `outgoing.maxPayloadSize`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
 
@@ -237,8 +234,8 @@ curl "http://<device-ip>/api/v1/set?video0.bitrate=4096&system.verbose=true"
 curl "http://<device-ip>/api/v1/set?video0.fps=30&video0.gopSize=1.0"
 ```
 
-When `encCtrl.enabled=true`, the inline scene detector tracks frame size
-EMA and requests IDR after scene change spikes settle.
+When `video0.scene_threshold` is non-zero, the inline scene detector tracks
+frame size EMA and requests IDR after scene change spikes settle.
 
 If a `GET /api/v1/set` request contains multiple `key=value` pairs joined by
 `&`, every field must be live. Mixed live + restart requests are rejected.
@@ -268,7 +265,7 @@ curl "http://<device-ip>/api/v1/set?video0.size=1080p"
 curl "http://<device-ip>/api/v1/set?video0.size=4MP"
 
 # Enable Star6E scene-change IDR control
-curl "http://<device-ip>/api/v1/set?enc_ctrl.enabled=true"
+curl "http://<device-ip>/api/v1/set?video0.scene_threshold=150"
 ```
 
 Response `200` (includes `"reinit_pending": true`):
@@ -281,19 +278,18 @@ debounces reinit requests, clients should send restart-required changes one at
 a time and let each accepted write schedule the pipeline rebuild.
 
 Adaptive control usage notes:
-- Keep `encCtrl.enabled=false` for fixed-GOP workflows and drive keyframe
+- Keep `video0.scene_threshold=0` for fixed-GOP workflows and drive keyframe
   interval through `video0.gop_size`.
 - On the current Star6E IMX335 bench, a practical starting point is:
-  `encCtrl.sceneChangeThreshold=150`, `encCtrl.sceneChangeHoldoff=2`.
+  `video0.sceneThreshold=150`, `video0.sceneHoldoff=2`.
 - Tune threshold first, holdoff second. In practice, threshold changes are
   a safer first response than raising holdoff.
 
 Example Star6E tuning sequence:
 
 ```bash
-curl "http://<device-ip>/api/v1/set?encCtrl.enabled=true"
-curl "http://<device-ip>/api/v1/set?encCtrl.sceneChangeThreshold=150"
-curl "http://<device-ip>/api/v1/set?encCtrl.sceneChangeHoldoff=2"
+curl "http://<device-ip>/api/v1/set?video0.sceneThreshold=150"
+curl "http://<device-ip>/api/v1/set?video0.sceneHoldoff=2"
 ```
 
 **Validation errors** — some values are rejected before being applied:

@@ -173,7 +173,8 @@ curl http://<device-ip>:<port>/api/v1/config
 
 Returns every field with its mutability (`live` or `restart_required`)
 and support status. Support is backend-specific; for example, Star6E
-reports `enc_ctrl.*` fields as supported, while Maruko reports them as
+reports `video0.scene_threshold` / `video0.scene_holdoff` as supported,
+while Maruko reports them as
 unsupported. Use this to discover which fields can be changed at runtime.
 
 ```sh
@@ -370,37 +371,36 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `enc_ctrl.enabled` | bool | restart | Request IDR after scene change spike settles (Star6E only) |
-| `enc_ctrl.scene_change_threshold` | uint16 | restart | Scene spike threshold ratio x100 (default 150) |
-| `enc_ctrl.scene_change_holdoff` | uint8 | restart | Consecutive spike frames required (default 2) |
+| `video0.scene_threshold` | uint16 | restart | Scene spike threshold ratio x100 (0=off, 150=1.5x EMA spike detection) |
+| `video0.scene_holdoff` | uint8 | restart | Consecutive spike frames required (default 2) |
 
-When enabled, the inline scene detector tracks frame size EMA, computes
-complexity, and requests an IDR after a spike above the threshold settles.
-The JSON config section is `encCtrl`, and the HTTP API accepts both
-`enc_ctrl.*` and `encCtrl.*` field names. Use `/api/v1/capabilities` to
-check backend support before writing these fields.
+CamelCase aliases: `video0.sceneThreshold`, `video0.sceneHoldoff`.
+
+When `scene_threshold` is non-zero, the inline scene detector tracks frame
+size EMA, computes complexity, and requests an IDR after a spike above the
+threshold settles. Use `/api/v1/capabilities` to check backend support
+before writing these fields.
 
 Typical usage:
-- Leave `encCtrl.enabled=false` for fixed-GOP behavior controlled by
+- Leave `video0.scene_threshold=0` for fixed-GOP behavior controlled by
   `video0.gop_size`.
-- Enable `encCtrl` for FPV/live links where scene-change-triggered IDRs
-  improve stream recovery.
-- Pair `encCtrl.enabled=true` with `outgoing.sidecar_port>0` when an external
+- Set `video0.scene_threshold=150` for FPV/live links where
+  scene-change-triggered IDRs improve stream recovery.
+- Pair scene detection with `outgoing.sidecar_port>0` when an external
   controller needs per-frame `frame_type`, `complexity`, `scene_change`,
   `idr_inserted`, and `frames_since_idr` telemetry on the sidecar.
 
 Current Star6E IMX335 bench starting point:
 
 ```json
-"encCtrl": {
-  "enabled": true,
-  "sceneChangeThreshold": 150,
-  "sceneChangeHoldoff": 2
+"video0": {
+  "sceneThreshold": 150,
+  "sceneHoldoff": 2
 }
 ```
 
 Tuning notes:
-- `sceneChangeThreshold` is a frame-size-spike ratio scaled by `100`, so
+- `sceneThreshold` is a frame-size-spike ratio scaled by `100`, so
   `150` means roughly "trigger near a 1.5x spike over the rolling baseline".
   Raise to reduce false positives, lower to increase sensitivity.
 - Keep `sceneChangeHoldoff=2` unless threshold changes alone cannot suppress
@@ -629,7 +629,7 @@ This enables measurement of:
   (requires clock synchronisation)
 - **Frame intervals** — jitter and regularity of both sender and receiver clocks
 - **RTP packet counts and gaps** — per-frame packet accounting
-- **Encoded frame size / type / QP** — when Star6E `encCtrl` telemetry is active
+- **Encoded frame size / type / QP** — when Star6E scene detection is active
 - **Scene detection state** — complexity, scene-change flag, IDR decision, frames-since-IDR
 
 ### Enabling
@@ -679,7 +679,7 @@ Link-control / FEC usage:
 - RTP video keeps using `outgoing.server` as usual.
 - Set `outgoing.sidecarPort` to expose sidecar metadata on a separate UDP port.
 - Base timing fields are available whenever the sidecar is enabled.
-- The extra encoder trailer requires Star6E with `encCtrl.enabled=true`.
+- The extra encoder trailer requires Star6E with `video0.scene_threshold>0`.
 - The sender tracks one active sidecar subscriber at a time; the most recent
   probe or consumer to subscribe receives the frame metadata.
 
@@ -785,8 +785,8 @@ Run the API test suite against a live device after `venc` is already running:
 ./scripts/api_test_suite.sh 192.168.1.13 80
 ```
 
-Scene-change IDR control is configured through the `encCtrl` section in
-`/etc/venc.json`. Leave `encCtrl.enabled=false` for baseline behavior.
+Scene-change IDR control is configured through `video0.scene_threshold` in
+`/etc/venc.json`. Leave `video0.scene_threshold=0` for baseline behavior.
 
 ## Web Dashboard
 

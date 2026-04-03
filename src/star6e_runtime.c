@@ -75,6 +75,8 @@ static struct timespec g_imu_eis_verbose_last = {0};
 typedef struct {
 	uint32_t ema_size_fp8;
 	uint32_t frame_count;
+	uint32_t last_frame_size;  /* cached from scene_update */
+	uint8_t  last_frame_type;  /* cached from scene_update */
 	uint16_t cooldown;
 	uint16_t settle_count;
 	uint8_t  spike_pending;
@@ -86,6 +88,7 @@ typedef struct {
 	uint8_t  holdoff;
 	uint8_t  consecutive_spikes;
 	uint8_t  idr_enabled;   /* 1 = request IDR after settle, 0 = telemetry only */
+	uint8_t  warmup_done;   /* set once frame_count passes SCENE_WARMUP_FRAMES */
 } SceneDetector;
 
 static uint32_t scene_frame_size(const MI_VENC_Stream_t *s)
@@ -138,7 +141,12 @@ static void scene_update(SceneDetector *sd, const MI_VENC_Stream_t *stream,
 	ftype = scene_frame_type(stream, codec);
 	if (size > (UINT32_MAX / 1000)) size = (UINT32_MAX / 1000);
 	size_fp8 = size << 8;
-	sd->frame_count++;
+
+	/* Cache for scene_fill_sidecar — avoids re-walking packet arrays */
+	sd->last_frame_size = size;
+	sd->last_frame_type = ftype;
+
+	if (sd->frame_count < UINT32_MAX) sd->frame_count++;
 	sd->idr_inserted = 0;
 	sd->scene_change = 0;
 
@@ -170,18 +178,24 @@ static void scene_update(SceneDetector *sd, const MI_VENC_Stream_t *stream,
 		sd->complexity = (uint8_t)c;
 	}
 
+	if (!sd->warmup_done) {
+		if (sd->frame_count > SCENE_WARMUP_FRAMES)
+			sd->warmup_done = 1;
+		return;
+	}
+
+	/* Scene-change IDR logic — skip entirely when disabled (threshold=0) */
+	if (!sd->idr_enabled) return;
+
 	if (sd->cooldown > 0) { sd->cooldown--; return; }
-	if (sd->frame_count <= SCENE_WARMUP_FRAMES) return;
 
 	if (sd->spike_pending) {
 		if (ratio_x100 <= 120) {
 			sd->spike_pending = 0;
 			sd->settle_count = 0;
 			sd->scene_change = 1;
-			if (sd->idr_enabled) {
-				sd->idr_inserted = 1;
-				MI_VENC_RequestIdr(venc_chn, 1);
-			}
+			sd->idr_inserted = 1;
+			MI_VENC_RequestIdr(venc_chn, 1);
 		} else {
 			sd->settle_count++;
 			if (sd->settle_count > 30) {
@@ -201,12 +215,12 @@ static void scene_update(SceneDetector *sd, const MI_VENC_Stream_t *stream,
 }
 
 static void scene_fill_sidecar(const SceneDetector *sd,
-	const MI_VENC_Stream_t *stream, int codec, RtpSidecarEncInfo *out)
+	RtpSidecarEncInfo *out)
 {
 	if (!sd || !out) return;
 	memset(out, 0, sizeof(*out));
-	out->frame_size_bytes = scene_frame_size(stream);
-	out->frame_type = scene_frame_type(stream, codec);
+	out->frame_size_bytes = sd->last_frame_size;
+	out->frame_type = sd->last_frame_type;
 	out->complexity = sd->complexity;
 	out->scene_change = sd->scene_change;
 	out->idr_inserted = sd->idr_inserted;
@@ -811,15 +825,13 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 
 	{
 		RtpSidecarEncInfo enc_info;
-		const RtpSidecarEncInfo *enc_ptr = NULL;
 		int codec = (strcmp(vcfg->video0.codec, "h264") == 0) ? 0 : 1;
 
 		scene_update(&ctx->scene, &stream, codec, ps->venc_channel);
-		scene_fill_sidecar(&ctx->scene, &stream, codec, &enc_info);
-		enc_ptr = &enc_info;
+		scene_fill_sidecar(&ctx->scene, &enc_info);
 
 		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
-			ps->output_enabled, vcfg->system.verbose, enc_ptr);
+			ps->output_enabled, vcfg->system.verbose, &enc_info);
 	}
 
 	/* In dual/dual-stream mode, ch1 handles recording (see below).
