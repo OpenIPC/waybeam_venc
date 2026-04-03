@@ -15,7 +15,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.6.0`
+- `contract_version`: `0.6.1`
 - `status`: `active`
 
 ## Governance Rules
