@@ -93,6 +93,11 @@ static void star6e_pipeline_pre_init_teardown(void)
 	(void)MI_SYS_UnBindChnPort(&vif_port, &vpe_port);
 	(void)MI_VENC_StopRecvPic(0);
 	(void)MI_VENC_DestroyChn(0);
+	(void)MI_VPE_DisablePort(0, 0);
+	(void)MI_VPE_StopChannel(0);
+	(void)MI_VPE_DestroyChannel(0);
+	(void)MI_VIF_DisableChnPort(0, 0);
+	(void)MI_VIF_DisableDev(0);
 }
 
 static int star6e_pipeline_disable_userspace3a(const IspRuntimeLib *lib,
