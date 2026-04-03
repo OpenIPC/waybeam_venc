@@ -586,6 +586,74 @@ static int test_single_set_runtime_apply_failure(void)
 	return failures;
 }
 
+static int test_restart_set_accepts_maruko_h264_config(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	strcpy(cfg.video0.codec, "h264");
+
+	CHECK("maruko restart h264 rc",
+		apply_set_query_http(&cfg, "maruko", NULL,
+			"video0.size=1280x720", &status, response,
+			sizeof(response)) == 0);
+	CHECK("maruko restart h264 status", status == 200);
+	CHECK("maruko restart width updated", cfg.video0.width == 1280);
+	CHECK("maruko restart height updated", cfg.video0.height == 720);
+	CHECK("maruko restart response reinit",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+
+	return failures;
+}
+
+static int test_restart_set_rejects_star6e_h264_rtp(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+
+	CHECK("star6e restart h264 rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"video0.codec=h264", &status, response,
+			sizeof(response)) == 0);
+	CHECK("star6e restart h264 status", status == 409);
+	CHECK("star6e restart h264 unchanged",
+		strcmp(cfg.video0.codec, "h265") == 0);
+	CHECK("star6e restart h264 error",
+		strstr(response, "star6e RTP mode currently supports h265 only") != NULL);
+
+	return failures;
+}
+
+static int test_restart_set_accepts_star6e_h264_compact(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	strcpy(cfg.outgoing.stream_mode, "compact");
+
+	CHECK("star6e compact h264 rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"video0.codec=h264", &status, response,
+			sizeof(response)) == 0);
+	CHECK("star6e compact h264 status", status == 200);
+	CHECK("star6e compact h264 updated",
+		strcmp(cfg.video0.codec, "h264") == 0);
+	CHECK("star6e compact h264 response reinit",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_api(void)
@@ -602,6 +670,9 @@ int test_venc_api(void)
 	failures += test_multi_set_preflights_missing_callback();
 	failures += test_multi_set_rolls_back_on_apply_failure();
 	failures += test_single_set_runtime_apply_failure();
+	failures += test_restart_set_accepts_maruko_h264_config();
+	failures += test_restart_set_rejects_star6e_h264_rtp();
+	failures += test_restart_set_accepts_star6e_h264_compact();
 	stop_api_test_server();
 	return failures;
 }

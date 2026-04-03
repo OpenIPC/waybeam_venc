@@ -359,7 +359,7 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.codec` | string | restart | `"h265"` (h264 on Maruko) |
+| `video0.codec` | string | restart | `"h265"` (Maruko also supports `"h264"`; Star6E RTP remains h265-only) |
 | `video0.rc_mode` | string | restart | `"cbr"`, `"vbr"`, `"avbr"`, `"fixqp"` |
 | `video0.fps` | uint | live | Output frame rate |
 | `video0.size` | WxH | restart | Encode resolution (e.g., `"1920x1080"`) |
@@ -387,6 +387,10 @@ configured second-based `enc_ctrl` windows stay stable across FPS changes.
 The JSON config section is `encCtrl`, and the HTTP API accepts both
 `enc_ctrl.*` and `encCtrl.*` field names. Use `/api/v1/capabilities` to
 check backend support before writing these fields.
+
+Codec note:
+- Star6E with `outgoing.stream_mode="rtp"` requires `video0.codec="h265"`.
+- Maruko accepts both `h264` and `h265`.
 
 #### Outgoing (Streaming)
 

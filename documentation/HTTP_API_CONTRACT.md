@@ -287,13 +287,13 @@ a time and let each accepted write schedule the pipeline rebuild.
 **Validation errors** — some values are rejected before being applied:
 
 ```bash
-# Attempt to switch to h264 (not yet supported on star6e RTP)
+# Attempt to switch Star6E RTP mode to h264
 curl "http://<device-ip>/api/v1/set?video0.codec=h264"
 ```
 
 Error `409`:
 ```json
-{"ok":false,"error":{"code":"validation_failed","message":"only h265 codec is currently supported"}}
+{"ok":false,"error":{"code":"validation_failed","message":"star6e RTP mode currently supports h265 only"}}
 ```
 
 Error `501` — apply callback not available:
@@ -849,8 +849,9 @@ Behavior:
    A reboot always restores the on-disk config. To persist changes, edit
    `/etc/venc.json` directly and then `SIGHUP` or call `/api/v1/restart`.
 
-2. **Codec restriction.** Only `h265` is currently supported on Star6E RTP mode.
-   Attempting to set `video0.codec=h264` returns a `409` error.
+2. **Codec restriction is backend-specific.** Star6E RTP mode requires
+   `video0.codec=h265`, so attempting to set `video0.codec=h264` there returns
+   a `409` error. Maruko accepts both `h264` and `h265`.
 
 3. **BusyBox compatibility.** All endpoints use `GET` method so they work with
    BusyBox `wget` (which only supports GET):

@@ -23,6 +23,7 @@ BASELINE_CAPTURED=0
 RESTORE_ON_EXIT=0
 
 BASE_VIDEO0_BITRATE=""
+BASE_VIDEO0_CODEC=""
 BASE_VIDEO0_FPS=""
 BASE_VIDEO0_GOP_SIZE=""
 BASE_VIDEO0_QP_DELTA=""
@@ -156,6 +157,7 @@ derive_alt_server() {
 
 capture_baseline() {
 	snapshot_field BASE_VIDEO0_BITRATE video0.bitrate
+	snapshot_field BASE_VIDEO0_CODEC video0.codec
 	snapshot_field BASE_VIDEO0_FPS video0.fps
 	snapshot_field BASE_VIDEO0_GOP_SIZE video0.gop_size
 	snapshot_field BASE_VIDEO0_QP_DELTA video0.qp_delta
@@ -743,6 +745,13 @@ assert_set_fail "video0.fps" "0"
 assert_set_fail "video0.qp_delta" "-13"
 assert_set_fail "video0.qp_delta" "13"
 assert_set_fail "isp.awb_mode" "invalid_mode"
+
+if [[ "${backend}" == "\"star6e\"" && "${BASE_OUTGOING_STREAM_MODE}" != "compact" ]]; then
+	assert_set_fail "video0.codec" "h264" "Star6E RTP rejects h264 codec"
+	assert_value_is "video0.codec" "\"${BASE_VIDEO0_CODEC}\"" "VERIFY codec unchanged after rejected h264"
+else
+	skip "Star6E RTP rejects h264 codec" "not Star6E RTP mode"
+fi
 
 # Unknown route
 resp="$(curl -sf --max-time 3 "${BASE}/api/v1/nonexistent" 2>/dev/null)" || resp="error"
