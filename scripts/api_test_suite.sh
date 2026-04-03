@@ -195,36 +195,36 @@ run_transport_checks() {
 	unix_name="api_suite_unix_live_$$"
 	out="$(remote_ssh "
 		rm -f /tmp/api_suite_unix_live.bin;
-		(timeout 8 socat -u ABSTRACT-RECVFROM:${unix_name} - >/tmp/api_suite_unix_live.bin) &
+		(timeout 3 socat -u ABSTRACT-RECV:${unix_name} - >/tmp/api_suite_unix_live.bin) &
 		listener=\$!;
 		sleep 1;
 		wget -q -O- 'http://127.0.0.1/api/v1/set?outgoing.server=unix://${unix_name}' >/dev/null || exit 10;
-		sleep 2;
 		wait \$listener || true;
-		wc -c </tmp/api_suite_unix_live.bin 2>/dev/null || echo 0
+		wc -c </tmp/api_suite_unix_live.bin 2>/dev/null || echo 0;
+		rm -f /tmp/api_suite_unix_live.bin
 	")" || out=""
 	video_bytes="$(echo "${out}" | tr -d '[:space:]')"
-	if [[ "${video_bytes}" =~ ^[0-9]+$ ]] && [[ "${video_bytes}" -gt 0 ]]; then
+	if [[ "${video_bytes}" =~ ^[0-9]+$ ]] && [[ "${video_bytes}" -gt 100000 ]]; then
 		pass "TRANSPORT live udp->unix video (${video_bytes} bytes)"
 	else
-		fail "TRANSPORT live udp->unix video" "captured ${video_bytes:-none} bytes"
+		fail "TRANSPORT live udp->unix video" "captured ${video_bytes:-none} bytes (expected >100KB)"
 	fi
 
 	out="$(remote_ssh "
 		rm -f /tmp/api_suite_udp_restore.bin;
-		(timeout 8 socat -u UDP-RECVFROM:5600,reuseaddr - >/tmp/api_suite_udp_restore.bin) &
+		(timeout 3 socat -u UDP-RECV:5600,reuseaddr - >/tmp/api_suite_udp_restore.bin) &
 		listener=\$!;
 		sleep 1;
 		wget -q -O- 'http://127.0.0.1/api/v1/set?outgoing.server=udp://127.0.0.1:5600' >/dev/null || exit 10;
-		sleep 2;
 		wait \$listener || true;
-		wc -c </tmp/api_suite_udp_restore.bin 2>/dev/null || echo 0
+		wc -c </tmp/api_suite_udp_restore.bin 2>/dev/null || echo 0;
+		rm -f /tmp/api_suite_udp_restore.bin
 	")" || out=""
 	udp_bytes="$(echo "${out}" | tr -d '[:space:]')"
-	if [[ "${udp_bytes}" =~ ^[0-9]+$ ]] && [[ "${udp_bytes}" -gt 0 ]]; then
+	if [[ "${udp_bytes}" =~ ^[0-9]+$ ]] && [[ "${udp_bytes}" -gt 100000 ]]; then
 		pass "TRANSPORT live unix->udp video (${udp_bytes} bytes)"
 	else
-		fail "TRANSPORT live unix->udp video" "captured ${udp_bytes:-none} bytes"
+		fail "TRANSPORT live unix->udp video" "captured ${udp_bytes:-none} bytes (expected >100KB)"
 	fi
 
 	unix_name="api_suite_unix_audio_$$"
@@ -235,24 +235,26 @@ run_transport_checks() {
 		killall -9 venc >/dev/null 2>&1 || true;
 		sleep 5;
 		rm -f /tmp/api_suite_unix_audio_video.bin /tmp/api_suite_unix_audio_udp.bin;
-		(timeout 30 socat -u ABSTRACT-RECVFROM:${unix_name} - >/tmp/api_suite_unix_audio_video.bin) &
+		(timeout 30 socat -u ABSTRACT-RECV:${unix_name} - 2>/dev/null | dd bs=4096 count=256 of=/tmp/api_suite_unix_audio_video.bin 2>/dev/null) &
 		video_listener=\$!;
-		(timeout 30 socat -u UDP-RECVFROM:5601,reuseaddr - >/tmp/api_suite_unix_audio_udp.bin) &
+		(timeout 30 socat -u UDP-RECV:5601,reuseaddr - 2>/dev/null | dd bs=4096 count=64 of=/tmp/api_suite_unix_audio_udp.bin 2>/dev/null) &
 		audio_listener=\$!;
 		sleep 1;
-		nohup /usr/bin/venc >/tmp/venc.log 2>&1 </dev/null & >/dev/null;
+		nohup /usr/bin/venc >/tmp/venc.log 2>&1 </dev/null &
 		sleep 25;
-		wait \$video_listener || true;
-		wait \$audio_listener || true;
+		kill \$video_listener \$audio_listener 2>/dev/null || true;
+		wait \$video_listener 2>/dev/null || true;
+		wait \$audio_listener 2>/dev/null || true;
 		video_bytes=\$(wc -c </tmp/api_suite_unix_audio_video.bin 2>/dev/null || echo 0);
 		audio_bytes=\$(wc -c </tmp/api_suite_unix_audio_udp.bin 2>/dev/null || echo 0);
+		rm -f /tmp/api_suite_unix_audio_video.bin /tmp/api_suite_unix_audio_udp.bin /tmp/venc.log;
 		printf '%s %s\n' \"\$video_bytes\" \"\$audio_bytes\"
 	")" || out=""
 	audio_video_bytes="$(echo "${out}" | awk '{print $1}')"
 	audio_udp_bytes="$(echo "${out}" | awk '{print $2}')"
 	if [[ "${audio_video_bytes}" =~ ^[0-9]+$ ]] &&
 	   [[ "${audio_udp_bytes}" =~ ^[0-9]+$ ]] &&
-	   [[ "${audio_video_bytes}" -gt 0 ]] &&
+	   [[ "${audio_video_bytes}" -gt 100000 ]] &&
 	   [[ "${audio_udp_bytes}" -gt 0 ]]; then
 		pass "TRANSPORT unix video + dedicated UDP audio (${audio_video_bytes}/${audio_udp_bytes} bytes)"
 	else
