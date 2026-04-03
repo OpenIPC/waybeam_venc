@@ -282,19 +282,21 @@ static void dispatch(int client_fd, const HttpRequest *req)
 
 static int g_listen_fd = -1;
 static pthread_t g_thread;
-static volatile int g_running = 0;
+static int g_running = 0;
 
 static void *httpd_thread(void *arg)
 {
 	(void)arg;
 
-	while (g_running) {
+	while (__atomic_load_n(&g_running, __ATOMIC_ACQUIRE)) {
 		struct sockaddr_in client_addr;
 		socklen_t addr_len = sizeof(client_addr);
-		int client_fd = accept(g_listen_fd,
-			(struct sockaddr *)&client_addr, &addr_len);
+		int listen_fd = __atomic_load_n(&g_listen_fd, __ATOMIC_ACQUIRE);
+		int client_fd = listen_fd >= 0 ?
+			accept(listen_fd, (struct sockaddr *)&client_addr,
+				&addr_len) : -1;
 		if (client_fd < 0) {
-			if (g_running && errno != EINTR)
+			if (__atomic_load_n(&g_running, __ATOMIC_ACQUIRE) && errno != EINTR)
 				fprintf(stderr, "[httpd] accept error: %s\n", strerror(errno));
 			continue;
 		}
@@ -352,10 +354,10 @@ int venc_httpd_start(uint16_t port)
 		return -1;
 	}
 
-	g_running = 1;
+	__atomic_store_n(&g_running, 1, __ATOMIC_RELEASE);
 	if (pthread_create(&g_thread, NULL, httpd_thread, NULL) != 0) {
 		fprintf(stderr, "[httpd] pthread_create error: %s\n", strerror(errno));
-		g_running = 0;
+		__atomic_store_n(&g_running, 0, __ATOMIC_RELEASE);
 		close(g_listen_fd);
 		g_listen_fd = -1;
 		return -1;
@@ -367,16 +369,18 @@ int venc_httpd_start(uint16_t port)
 
 void venc_httpd_stop(void)
 {
-	if (!g_running)
+	if (!__atomic_load_n(&g_running, __ATOMIC_ACQUIRE))
 		return;
 
-	g_running = 0;
+	__atomic_store_n(&g_running, 0, __ATOMIC_RELEASE);
 
 	/* Close the listen socket to unblock accept() */
-	if (g_listen_fd >= 0) {
-		shutdown(g_listen_fd, SHUT_RDWR);
-		close(g_listen_fd);
-		g_listen_fd = -1;
+	{
+		int fd = __atomic_exchange_n(&g_listen_fd, -1, __ATOMIC_ACQ_REL);
+		if (fd >= 0) {
+			shutdown(fd, SHUT_RDWR);
+			close(fd);
+		}
 	}
 
 	/* Detach instead of join — on some embedded kernels, closing the listen
