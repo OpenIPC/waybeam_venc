@@ -5,8 +5,9 @@
  * Scene complexity estimator — derives complexity and scene-change
  * signals from encoder feedback without any additional computation.
  *
- * Primary signal: frame_size_bytes spike vs. exponential moving average.
- * Secondary signal: qp_avg sudden jump.
+ * Primary signal: intra_ratio (intra CUs / total CUs) — works under CBR
+ * where frame sizes are constant but intra CU count spikes on scene changes.
+ * Secondary signal: frame_size_bytes spike vs. EMA (useful under VBR/AVBR).
  * Hysteresis: consecutive frames above threshold before triggering.
  */
 
@@ -18,15 +19,12 @@ typedef struct {
 	/* EMA of P-frame sizes (fixed-point: value << 8) */
 	uint32_t ema_p_size_fp8;
 
-	/* EMA of QP (fixed-point: value << 8) */
-	uint32_t ema_qp_fp8;
-
 	/* Scene change detection state */
 	uint8_t  consecutive_spikes;
 	uint8_t  scene_change_fired;
 
 	/* Configuration (copied from GopConfig at init) */
-	uint16_t threshold;     /* spike ratio * 100 (e.g. 250 = 2.5x) */
+	uint16_t threshold;     /* intra_ratio permille (e.g. 150 = 15% intra CUs) */
 	uint8_t  holdoff;       /* consecutive frames required */
 
 	/* Target frame size for budget ratio (set from bitrate / fps) */

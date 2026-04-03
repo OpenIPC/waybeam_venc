@@ -264,17 +264,15 @@ static int runtime_enc_ctrl_init(Star6eRunnerContext *ctx)
 {
 	GopConfig cfg;
 	uint32_t bitrate_bps;
-	const VencApplyCallbacks *cb;
 
 	if (!ctx->vcfg.enc_ctrl.enabled)
 		return 0;
 
 	runtime_enc_ctrl_config(&ctx->vcfg, &cfg);
-	cb = star6e_controls_callbacks();
-	if (!cb || !cb->apply_gop || cb->apply_gop(cfg.max_gop_length) != 0) {
-		fprintf(stderr, "ERROR: failed to set Star6E GOP for encCtrl\n");
-		return -1;
-	}
+
+	/* Do NOT override the hardware encoder's GOP — the user's gopSize
+	 * config stays in effect. enc_ctrl requests additional IDRs via
+	 * request_idr() when scene changes are detected. */
 
 	bitrate_bps = ctx->vcfg.video0.bitrate * 1024U;
 	if (enc_ctrl_init(&cfg, ctx->ps.venc_channel,

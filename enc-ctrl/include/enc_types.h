@@ -17,6 +17,7 @@ typedef struct {
 	uint8_t  qp_avg;            /* from SDK startQual or NAL parse; 0 if unavailable */
 	uint8_t  qp_max;            /* reserved, 0 if unavailable */
 	uint8_t  _pad0;
+	uint16_t intra_ratio;       /* intra_CUs * 1000 / total_CUs; 0-1000 */
 	uint32_t encode_time_us;    /* wall-clock encode latency; 0 if not measured */
 	uint64_t timestamp_us;      /* capture timestamp from MI_VENC stream */
 } EncoderFrameStats;
@@ -44,7 +45,7 @@ typedef struct {
 	uint16_t max_gop_length;        /* hard ceiling for frames between IDRs (e.g. 300) */
 	uint16_t min_gop_length;        /* minimum frames between IDRs (e.g. 30) */
 	uint16_t defer_timeout_frames;  /* max frames to defer a pending IDR (e.g. 60) */
-	uint16_t scene_change_threshold;/* frame_size spike ratio * 100 (e.g. 250 = 2.5x) */
+	uint16_t scene_change_threshold;/* intra_ratio permille (e.g. 150 = 15% intra CUs) */
 	uint8_t  scene_change_holdoff;  /* consecutive frames above threshold (e.g. 2) */
 	uint8_t  enable_variable_gop;   /* 0 = passthrough (stats only), 1 = active GOP */
 	uint8_t  idr_qp_boost;         /* QP steps to add for IDR size control (e.g. 4) */
@@ -56,7 +57,7 @@ typedef struct {
 #define GOP_CONFIG_DEFAULT_MAX_GOP          300
 #define GOP_CONFIG_DEFAULT_MIN_GOP          30
 #define GOP_CONFIG_DEFAULT_DEFER_TIMEOUT    60
-#define GOP_CONFIG_DEFAULT_SC_THRESHOLD     325  /* 3.25x */
+#define GOP_CONFIG_DEFAULT_SC_THRESHOLD     150  /* intra_ratio permille (15% intra CUs) */
 #define GOP_CONFIG_DEFAULT_SC_HOLDOFF       2
 #define GOP_CONFIG_DEFAULT_IDR_QP_BOOST     4
 

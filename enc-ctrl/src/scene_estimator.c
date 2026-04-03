@@ -29,39 +29,35 @@ void scene_est_update(SceneEstimatorState *state,
 {
 	uint32_t size;
 	uint32_t size_fp8;
-	uint32_t qp_fp8;
 	uint32_t ema_size;
-	uint32_t ratio_x100;
 	uint32_t budget_ratio;
+	uint16_t intra_ratio;
 	int spike;
 
 	if (!state || !stats)
 		return;
 
 	size = stats->frame_size_bytes;
+	intra_ratio = stats->intra_ratio;
 
-	/* Clamp before shifting to prevent uint32_t overflow.
-	 * 16 MB << 8 = 4 GB which wraps.  Cap at ~16 MB.
-	 * Also prevents size * 1000 overflow in budget_ratio. */
+	/* Clamp frame size to prevent overflow in * 1000 and << 8 */
 	if (size > (UINT32_MAX / 1000))
-		size = (UINT32_MAX / 1000);  /* prevent overflow in * 1000 and << 8 */
+		size = (UINT32_MAX / 1000);
 
 	size_fp8 = size << 8;
-	qp_fp8 = (uint32_t)stats->qp_avg << 8;
 
 	state->frame_count++;
 
 	/* Seed EMA on first frame */
 	if (state->frame_count == 1) {
 		state->ema_p_size_fp8 = size_fp8;
-		state->ema_qp_fp8 = qp_fp8;
-		state->latest.complexity = 128;
+		state->latest.complexity = 0;
 		state->latest.scene_change = 0;
 		state->latest.budget_ratio = 1000;
 		return;
 	}
 
-	/* Update EMA: ema += (sample - ema) >> EMA_SHIFT */
+	/* Update frame size EMA */
 	if (size_fp8 > state->ema_p_size_fp8) {
 		state->ema_p_size_fp8 += (size_fp8 - state->ema_p_size_fp8)
 			>> EMA_SHIFT;
@@ -69,21 +65,6 @@ void scene_est_update(SceneEstimatorState *state,
 		state->ema_p_size_fp8 -= (state->ema_p_size_fp8 - size_fp8)
 			>> EMA_SHIFT;
 	}
-
-	if (qp_fp8 > state->ema_qp_fp8) {
-		state->ema_qp_fp8 += (qp_fp8 - state->ema_qp_fp8)
-			>> EMA_SHIFT;
-	} else {
-		state->ema_qp_fp8 -= (state->ema_qp_fp8 - qp_fp8)
-			>> EMA_SHIFT;
-	}
-
-	/* Compute size ratio vs EMA (x100) */
-	ema_size = state->ema_p_size_fp8 >> 8;
-	if (ema_size > 0)
-		ratio_x100 = (size * 100) / ema_size;
-	else
-		ratio_x100 = 100;
 
 	/* Budget ratio: actual / target * 1000 */
 	if (state->target_frame_size > 0)
@@ -94,30 +75,34 @@ void scene_est_update(SceneEstimatorState *state,
 	if (budget_ratio > 65535)
 		budget_ratio = 65535;
 
-	/* Complexity: map ratio to 0-255 range.
-	 * ratio_x100 = 100 means average → complexity ~128.
-	 * ratio_x100 = 50 means easy → complexity ~64.
-	 * ratio_x100 = 300 means hard → complexity ~255. */
+	/* Complexity: map intra_ratio (0-1000) to 0-255.
+	 * Stable P-frame: intra_ratio ~0-20 → complexity ~0-5
+	 * Moderate motion: intra_ratio ~50-100 → complexity ~13-25
+	 * Scene change: intra_ratio ~200+ → complexity ~50+ */
 	{
-		uint32_t cplx;
-		if (ratio_x100 <= 50)
-			cplx = (ratio_x100 * 128) / 100;
-		else if (ratio_x100 >= 300)
+		uint32_t cplx = (intra_ratio * 255) / 1000;
+		if (cplx > 255)
 			cplx = 255;
-		else
-			cplx = 64 + ((ratio_x100 - 50) * 191) / 250;
-
 		state->latest.complexity = (uint8_t)cplx;
 	}
 
 	state->latest.budget_ratio = (uint16_t)budget_ratio;
 
-	/* Scene change detection — only after EMA warm-up */
+	/* Scene change detection: intra_ratio spike above threshold.
+	 * Under CBR, frame sizes stay constant but intra CU count spikes
+	 * when inter prediction fails due to scene discontinuity.
+	 * Only active after EMA warm-up to avoid false triggers at startup. */
 	spike = 0;
 	if (state->frame_count > EMA_WARMUP_FRAMES) {
-		/* Primary: frame size spike above threshold */
-		if (ratio_x100 >= state->threshold)
+		if (intra_ratio >= state->threshold)
 			spike = 1;
+
+		/* Secondary: frame size spike for VBR/AVBR modes */
+		if (!spike) {
+			ema_size = state->ema_p_size_fp8 >> 8;
+			if (ema_size > 0 && (size * 100) / ema_size >= 300)
+				spike = 1;
+		}
 	}
 
 	if (spike) {

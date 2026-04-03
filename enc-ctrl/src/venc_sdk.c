@@ -421,6 +421,37 @@ static int real_extract_frame_stats(VencSdkContext *ctx,
 
 	out->qp_avg = qp;
 
+	/* CU/MB intra ratio — primary scene change signal under CBR */
+	{
+		uint32_t intra = 0, inter = 0, total;
+
+		if (ctx->codec == 0) {
+			/* H.264: macroblock counts */
+			intra = stream->h264Info.iMb16x8 +
+				stream->h264Info.iMb16x16 +
+				stream->h264Info.iMb8x16 +
+				stream->h264Info.iMb8x8;
+			inter = stream->h264Info.pMb16 +
+				stream->h264Info.pMb8 +
+				stream->h264Info.pMb4 +
+				stream->h264Info.skipMb;
+		} else {
+			/* H.265: coding unit counts */
+			intra = stream->h265Info.iCu64x64 +
+				stream->h265Info.iCu32x32 +
+				stream->h265Info.iCu16x16 +
+				stream->h265Info.iCu8x8;
+			inter = stream->h265Info.pCu32x32 +
+				stream->h265Info.pCu16x16 +
+				stream->h265Info.pCu8x8 +
+				stream->h265Info.pCu4x4;
+		}
+
+		total = intra + inter;
+		out->intra_ratio = total > 0 ?
+			(uint16_t)((intra * 1000) / total) : 0;
+	}
+
 	return 0;
 }
 
