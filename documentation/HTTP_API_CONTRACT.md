@@ -102,7 +102,7 @@ Response `200`:
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "exposure": 9, "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500 },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
       "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0 },
-      "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "targetPacketRate": 0, "connectedUdp": false },
+      "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 }
     }
   }
@@ -134,7 +134,6 @@ Response `200`:
       "outgoing.enabled": { "mutability": "live", "supported": true },
       "outgoing.server": { "mutability": "live", "supported": true },
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
-      "outgoing.target_pkt_rate": { "mutability": "restart_required", "supported": true },
       "outgoing.connected_udp": { "mutability": "restart_required", "supported": true },
       "fpv.roi_qp": { "mutability": "live", "supported": true }
     }
@@ -197,7 +196,7 @@ Majestic-style camelCase aliases are also accepted for selected fields,
 including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `fpv.noiseLevel`, `isp.sensorBin`, `isp.awbMode`, `isp.awbCt`,
 `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
-`outgoing.maxPayloadSize`, `outgoing.targetPacketRate`,
+`outgoing.maxPayloadSize`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
 
 ### `GET /api/v1/set?<field_name>=<value>`
@@ -332,10 +331,18 @@ The `outgoing.server` field can be changed at runtime to redirect the stream.
 curl "http://192.168.2.10/api/v1/set?outgoing.server=udp://192.168.1.100:5600"
 ```
 
+- Accepted URI schemes:
+  - `udp://HOST:PORT` — standard UDP datagram output
+  - `unix://NAME` — Linux abstract Unix datagram socket `@NAME`
+  - `shm://NAME` — shared-memory RTP ring buffer
 - No pipeline restart required.
 - An IDR keyframe is issued after the change for stream continuity.
-- If `connectedUdp` is enabled, the socket is re-connected to the new destination.
-- Only `udp://` scheme is accepted.
+- If `connectedUdp` is enabled, the UDP socket is re-connected to the new destination.
+- Live redirects support `udp://` and `unix://`. Live switch to `shm://` is not supported.
+- `connectedUdp` applies only to `udp://`.
+- `shm://` remains RTP-only. It cannot share audio; use a nonzero `audioPort` for separate UDP audio.
+- On Star6E, `audioPort=0` piggybacks on the active video destination for both `udp://` and `unix://`.
+- On Star6E, a nonzero `audioPort` keeps audio on a dedicated UDP port. With `unix://` or `shm://` video output, that dedicated audio port is sent to `127.0.0.1:<audioPort>`.
 
 ### Stream Mode and Send Feedback
 
@@ -349,7 +356,6 @@ curl "http://192.168.2.10/api/v1/set?outgoing.connected_udp=true"
 - `outgoing.max_payload_size`: Maximum RTP payload size in bytes. Default `1400`.
   Applies to both RTP (FU fragmentation threshold) and compact modes. Values above 1400
   are supported for jumbo-frame networks.
-- `outgoing.target_pkt_rate`: Target packets-per-second for adaptive RTP payload sizing.
   Default `0` (disabled — uses fixed `maxPayloadSize`). When non-zero, the adaptive
   algorithm adjusts the effective payload size to hit this target, clamped to
   `[1000, maxPayloadSize]`.
@@ -846,7 +852,6 @@ Behavior:
     `GET /api/v1/get` and `GET /api/v1/set`.
 - `0.2.1`:
   - `outgoing.max_payload_size` now applies to RTP mode (was only used by compact mode).
-  - Added `outgoing.targetPacketRate` (MUT_RESTART): configurable adaptive pkt/s target.
     Default 850. Set to 0 to disable adaptive sizing.
 - `0.2.0`:
   - Added `outgoing.enabled` (MUT_LIVE): enable/disable UDP output with FPS idle.
@@ -854,7 +859,7 @@ Behavior:
   - Added `outgoing.streamMode` (MUT_RESTART): explicit stream mode selection.
   - Added `outgoing.connectedUdp` (MUT_RESTART): connected UDP error reporting.
   - IDR keyframe issued on output enable, destination change, and bitrate change.
-  - Only `udp://` scheme is accepted for server URIs.
+  - Server URIs now accept `udp://`, `unix://`, and `shm://`.
 - `0.1.3`:
   - Documented live FPS control behavior (hardware bind decimation, clamping, mode switching limitation).
   - `video0.fps` set via API now uses MI_SYS_BindChnPort2 rebind instead of /proc write.

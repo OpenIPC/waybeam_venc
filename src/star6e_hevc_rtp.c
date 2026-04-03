@@ -96,7 +96,7 @@ static void hevc_ap_add(HevcApBuilder *ap, const uint8_t *nal, size_t nal_len)
 	ap->nal_count++;
 }
 
-static int send_rtp_packet(const Star6eOutput *output, const uint8_t *payload,
+static int send_rtp_packet(Star6eOutput *output, const uint8_t *payload,
 	size_t payload_len, RtpPacketizerState *rtp, int marker)
 {
 	if (!output || !payload || payload_len == 0 || !rtp)
@@ -106,7 +106,7 @@ static int send_rtp_packet(const Star6eOutput *output, const uint8_t *payload,
 		(void *)output, payload, payload_len, NULL, 0, marker);
 }
 
-static size_t hevc_ap_flush(HevcApBuilder *ap, const Star6eOutput *output,
+static size_t hevc_ap_flush(HevcApBuilder *ap, Star6eOutput *output,
 	RtpPacketizerState *rtp, int marker, Star6eHevcRtpStats *stats)
 {
 	size_t total_bytes = 0;
@@ -150,7 +150,7 @@ static size_t hevc_ap_flush(HevcApBuilder *ap, const Star6eOutput *output,
 }
 
 static size_t send_nal_rtp_hevc(const uint8_t *data, size_t length,
-	const Star6eOutput *output, RtpPacketizerState *rtp, int is_last,
+	Star6eOutput *output, RtpPacketizerState *rtp, int is_last,
 	size_t max_payload, Star6eHevcRtpStats *stats)
 {
 	RtpPacketizerResult result;
@@ -168,7 +168,7 @@ static size_t send_nal_rtp_hevc(const uint8_t *data, size_t length,
 }
 
 static size_t send_or_queue_nal_rtp_hevc(const uint8_t *data, size_t length,
-	const Star6eOutput *output, RtpPacketizerState *rtp, HevcApBuilder *ap,
+	Star6eOutput *output, RtpPacketizerState *rtp, HevcApBuilder *ap,
 	int is_last, size_t max_payload, Star6eHevcRtpStats *stats)
 {
 	size_t total_bytes = 0;
@@ -202,7 +202,7 @@ static size_t send_or_queue_nal_rtp_hevc(const uint8_t *data, size_t length,
 }
 
 static size_t send_prepend_param_sets_hevc(const H26xParamSets *params,
-	uint8_t nal_type, const Star6eOutput *output, RtpPacketizerState *rtp,
+	uint8_t nal_type, Star6eOutput *output, RtpPacketizerState *rtp,
 	HevcApBuilder *ap, size_t max_payload, Star6eHevcRtpStats *stats)
 {
 	H26xParamSetRef refs[3];
@@ -223,7 +223,7 @@ static size_t send_prepend_param_sets_hevc(const H26xParamSets *params,
 }
 
 size_t star6e_hevc_rtp_send_frame(const MI_VENC_Stream_t *stream,
-	const Star6eOutput *output, RtpPacketizerState *rtp,
+	Star6eOutput *output, RtpPacketizerState *rtp,
 	uint32_t frame_ticks, H26xParamSets *params, size_t max_payload,
 	Star6eHevcRtpStats *stats)
 {

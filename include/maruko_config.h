@@ -24,10 +24,8 @@ typedef struct {
 	double venc_gop_seconds;
 	uint16_t max_frame_size;
 	uint16_t rtp_payload_size;
-	uint32_t udp_sink_ip;
-	uint16_t udp_sink_port;
+	VencOutputUri output_uri;
 	uint16_t sidecar_port;
-	char shm_name[128];
 	PAYLOAD_TYPE_E rc_codec;
 	int rc_mode;
 	MarukoStreamMode stream_mode;

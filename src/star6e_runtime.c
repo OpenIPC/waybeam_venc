@@ -439,8 +439,8 @@ static void star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			if (star6e_output_prepare(&ds_setup, ps->dual->server,
 			    vcfg->outgoing.stream_mode,
 			    vcfg->outgoing.max_payload_size,
-			    vcfg->outgoing.connected_udp) == 0) {
-				star6e_output_init(&ps->dual->output, &ds_setup);
+			    vcfg->outgoing.connected_udp) == 0 &&
+			    star6e_output_init(&ps->dual->output, &ds_setup) == 0) {
 				star6e_video_init(&ps->dual->video, vcfg,
 					ps->sensor.mode.maxFps,
 					&ps->dual->output);

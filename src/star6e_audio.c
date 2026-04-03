@@ -474,7 +474,8 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 		state->rtp_frame_ticks = 0;
 	}
 
-	if (star6e_audio_output_port(&state->output) == 0)
+	if (output->transport == VENC_OUTPUT_URI_UDP &&
+	    star6e_audio_output_port(&state->output) == 0)
 		fprintf(stderr, "[audio] WARNING: audio output has no destination port\n");
 
 	audio_ring_init(&state->cap_ring);
@@ -611,10 +612,17 @@ opus_init_done:
 	if (start_audio_output_and_thread(state, output, vcfg) != 0)
 		goto fail;
 
-	if (state->verbose)
-		printf("[audio] Initialized: %s @ %u Hz, %u ch, port %u\n",
-			vcfg->audio.codec, state->sample_rate, state->channels,
-			star6e_audio_output_port(&state->output));
+	if (state->verbose) {
+		uint16_t port = star6e_audio_output_port(&state->output);
+		if (port != 0) {
+			printf("[audio] Initialized: %s @ %u Hz, %u ch, port %u\n",
+				vcfg->audio.codec, state->sample_rate, state->channels,
+				port);
+		} else {
+			printf("[audio] Initialized: %s @ %u Hz, %u ch, shared output transport\n",
+				vcfg->audio.codec, state->sample_rate, state->channels);
+		}
+	}
 	return 0;
 
 fail:

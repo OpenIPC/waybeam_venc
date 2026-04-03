@@ -99,7 +99,7 @@ template is provided at `config/venc.default.json`.
   },
   "outgoing": {
     "enabled": false, "server": "", "streamMode": "rtp",
-    "maxPayloadSize": 1400, "targetPacketRate": 0,
+    "maxPayloadSize": 1400,
     "connectedUdp": true, "audioPort": 5601, "sidecarPort": 0
   },
   "fpv": {
@@ -129,7 +129,8 @@ template is provided at `config/venc.default.json`.
 ```
 
 Set `outgoing.enabled` to `true` and `outgoing.server` to
-`udp://<receiver_ip>:5600` to start streaming.
+`udp://<receiver_ip>:5600`, `unix://<abstract_name>`, or `shm://<ring_name>`
+to start streaming.
 
 ## HTTP API
 
@@ -349,13 +350,18 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `outgoing.enabled` | bool | live | Enable/disable streaming output |
-| `outgoing.server` | string | live | Destination URI (`udp://ip:port`) |
+| `outgoing.server` | string | live | Destination URI (`udp://ip:port`, `unix://name`, or `shm://name`) |
 | `outgoing.stream_mode` | string | restart | `"rtp"` or `"compact"` |
 | `outgoing.max_payload_size` | uint16 | restart | Max UDP payload bytes |
-| `outgoing.target_pkt_rate` | uint16 | restart | Target packets/sec for adaptive sizing |
-| `outgoing.connected_udp` | bool | restart | Connect UDP socket (skip per-packet routing lookup) |
-| `outgoing.audio_port` | uint16 | restart | Separate audio UDP port |
+| `outgoing.connected_udp` | bool | restart | Connect UDP socket (applies only to `udp://`) |
+| `outgoing.audio_port` | uint16 | restart | `0` = shared video destination; nonzero = dedicated audio port. With `unix://`, dedicated audio is sent to `127.0.0.1:<audioPort>` |
 | `outgoing.sidecar_port` | uint16 | restart | RTP timing sidecar port (0 = disabled) |
+
+`unix://` uses Linux abstract Unix datagram sockets and is available in both
+`rtp` and `compact` mode. On Star6E, `audioPort=0` piggybacks on the same
+active video destination for both `udp://` and `unix://`. `shm://` remains
+RTP-only; it cannot share audio, but a nonzero `audioPort` still uses a
+dedicated local UDP audio destination.
 
 #### FPV
 

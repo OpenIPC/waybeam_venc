@@ -197,6 +197,11 @@ Deployment verification for this gate should prioritize Star6E transport
 parity against the baseline, including direct UDP and current SHM/WFB-related
 paths when those code paths are touched.
 
+Audio transport caching (DONE): `Star6eOutput.transport_gen` generation
+counter bumps on every `apply_server()` and `init()`. Audio caches the
+resolved `Star6eAudioSendTarget` and only re-resolves on generation mismatch.
+Backend-owned, no API layer coupling.
+
 ---
 
 ## Gate 3: Expand Backend Abstraction Around Shared Orchestration

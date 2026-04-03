@@ -7,11 +7,18 @@ set -euo pipefail
 
 DEVICE="${1:-192.168.2.13}"
 PORT="${2:-8888}"
+SSH_HOST="${3:-${SSH_HOST:-}}"
 BASE="http://${DEVICE}:${PORT}"
 PASS=0
 FAIL=0
 SKIP=0
 ERRORS=()
+BACKEND_NAME=""
+TRANSPORT_RESTORE_NEEDED=0
+TRANSPORT_ORIG_SERVER=""
+TRANSPORT_ORIG_AUDIO_ENABLED=""
+TRANSPORT_ORIG_AUDIO_PORT=""
+TRANSPORT_ORIG_VERBOSE=""
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -100,6 +107,168 @@ assert_set_fail() {
 # Wait for stream to settle after parameter change
 settle() { sleep "${1:-1}"; }
 
+remote_ssh() {
+	if [[ -z "${SSH_HOST}" ]]; then
+		return 1
+	fi
+	ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_HOST}" "$@"
+}
+
+wait_http() {
+	local attempts="${1:-20}"
+	local i
+
+	for i in $(seq 1 "${attempts}"); do
+		if c "${BASE}/api/v1/version" >/dev/null; then
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+
+transport_restore_baseline() {
+	local resp
+
+	if [[ "${TRANSPORT_RESTORE_NEEDED}" != "1" || -z "${SSH_HOST}" ]]; then
+		return 0
+	fi
+
+	remote_ssh "json_cli -s .audio.enabled ${TRANSPORT_ORIG_AUDIO_ENABLED} -i /etc/venc.json" >/dev/null
+	remote_ssh "json_cli -s .outgoing.audioPort ${TRANSPORT_ORIG_AUDIO_PORT} -i /etc/venc.json" >/dev/null
+	remote_ssh "json_cli -s .system.verbose ${TRANSPORT_ORIG_VERBOSE} -i /etc/venc.json" >/dev/null
+	remote_ssh "json_cli -s .outgoing.server '\"${TRANSPORT_ORIG_SERVER}\"' -i /etc/venc.json" >/dev/null
+	remote_ssh "killall -9 venc >/dev/null 2>&1 || true; sleep 5; nohup /usr/bin/venc >/tmp/venc.log 2>&1 </dev/null &" >/dev/null
+	if ! wait_http 30; then
+		return 1
+	fi
+
+	resp="$(c "${BASE}/api/v1/get?outgoing.server")" || return 1
+	if ! ok_field "${resp}"; then
+		return 1
+	fi
+	if [[ "$(get_value "${resp}")" != "\"${TRANSPORT_ORIG_SERVER}\"" ]]; then
+		return 1
+	fi
+
+	TRANSPORT_RESTORE_NEEDED=0
+	return 0
+}
+
+cleanup_transport() {
+	if [[ "${TRANSPORT_RESTORE_NEEDED}" == "1" ]]; then
+		transport_restore_baseline >/dev/null 2>&1 || true
+	fi
+}
+
+trap cleanup_transport EXIT
+
+prepare_transport_checks() {
+	if [[ -z "${SSH_HOST}" ]]; then
+		skip "Transport regression" "no SSH host provided"
+		return 1
+	fi
+	if [[ "${BACKEND_NAME}" != "star6e" ]]; then
+		skip "Transport regression" "backend ${BACKEND_NAME:-unknown} not targeted"
+		return 1
+	fi
+	if ! remote_ssh "command -v socat >/dev/null && command -v json_cli >/dev/null && command -v wget >/dev/null"; then
+		skip "Transport regression" "remote tools missing (need socat, json_cli, wget)"
+		return 1
+	fi
+
+	TRANSPORT_ORIG_AUDIO_ENABLED="$(remote_ssh "json_cli -g .audio.enabled --raw -i /etc/venc.json")"
+	TRANSPORT_ORIG_SERVER="$(remote_ssh "json_cli -g .outgoing.server --raw -i /etc/venc.json")"
+	TRANSPORT_ORIG_AUDIO_PORT="$(remote_ssh "json_cli -g .outgoing.audioPort --raw -i /etc/venc.json")"
+	TRANSPORT_ORIG_VERBOSE="$(remote_ssh "json_cli -g .system.verbose --raw -i /etc/venc.json")"
+	TRANSPORT_RESTORE_NEEDED=1
+	return 0
+}
+
+run_transport_checks() {
+	local unix_name video_bytes udp_bytes audio_video_bytes audio_udp_bytes out
+
+	if ! prepare_transport_checks; then
+		return 0
+	fi
+
+	unix_name="api_suite_unix_live_$$"
+	out="$(remote_ssh "
+		rm -f /tmp/api_suite_unix_live.bin;
+		(timeout 3 socat -u ABSTRACT-RECV:${unix_name} - >/tmp/api_suite_unix_live.bin) &
+		listener=\$!;
+		sleep 1;
+		wget -q -O- 'http://127.0.0.1/api/v1/set?outgoing.server=unix://${unix_name}' >/dev/null || exit 10;
+		wait \$listener || true;
+		wc -c </tmp/api_suite_unix_live.bin 2>/dev/null || echo 0;
+		rm -f /tmp/api_suite_unix_live.bin
+	")" || out=""
+	video_bytes="$(echo "${out}" | tr -d '[:space:]')"
+	if [[ "${video_bytes}" =~ ^[0-9]+$ ]] && [[ "${video_bytes}" -gt 100000 ]]; then
+		pass "TRANSPORT live udp->unix video (${video_bytes} bytes)"
+	else
+		fail "TRANSPORT live udp->unix video" "captured ${video_bytes:-none} bytes (expected >100KB)"
+	fi
+
+	out="$(remote_ssh "
+		rm -f /tmp/api_suite_udp_restore.bin;
+		(timeout 3 socat -u UDP-RECV:5600,reuseaddr - >/tmp/api_suite_udp_restore.bin) &
+		listener=\$!;
+		sleep 1;
+		wget -q -O- 'http://127.0.0.1/api/v1/set?outgoing.server=udp://127.0.0.1:5600' >/dev/null || exit 10;
+		wait \$listener || true;
+		wc -c </tmp/api_suite_udp_restore.bin 2>/dev/null || echo 0;
+		rm -f /tmp/api_suite_udp_restore.bin
+	")" || out=""
+	udp_bytes="$(echo "${out}" | tr -d '[:space:]')"
+	if [[ "${udp_bytes}" =~ ^[0-9]+$ ]] && [[ "${udp_bytes}" -gt 100000 ]]; then
+		pass "TRANSPORT live unix->udp video (${udp_bytes} bytes)"
+	else
+		fail "TRANSPORT live unix->udp video" "captured ${udp_bytes:-none} bytes (expected >100KB)"
+	fi
+
+	unix_name="api_suite_unix_audio_$$"
+	out="$(remote_ssh "
+		{ json_cli -s .audio.enabled true -i /etc/venc.json >/dev/null &&
+		  json_cli -s .outgoing.server '\"unix://${unix_name}\"' -i /etc/venc.json >/dev/null &&
+		  json_cli -s .outgoing.audioPort 5601 -i /etc/venc.json >/dev/null; } || true;
+		killall -9 venc >/dev/null 2>&1 || true;
+		sleep 5;
+		rm -f /tmp/api_suite_unix_audio_video.bin /tmp/api_suite_unix_audio_udp.bin;
+		(timeout 30 socat -u ABSTRACT-RECV:${unix_name} - 2>/dev/null | dd bs=4096 count=256 of=/tmp/api_suite_unix_audio_video.bin 2>/dev/null) &
+		video_listener=\$!;
+		(timeout 30 socat -u UDP-RECV:5601,reuseaddr - 2>/dev/null | dd bs=4096 count=64 of=/tmp/api_suite_unix_audio_udp.bin 2>/dev/null) &
+		audio_listener=\$!;
+		sleep 1;
+		nohup /usr/bin/venc >/tmp/venc.log 2>&1 </dev/null &
+		sleep 25;
+		kill \$video_listener \$audio_listener 2>/dev/null || true;
+		wait \$video_listener 2>/dev/null || true;
+		wait \$audio_listener 2>/dev/null || true;
+		video_bytes=\$(wc -c </tmp/api_suite_unix_audio_video.bin 2>/dev/null || echo 0);
+		audio_bytes=\$(wc -c </tmp/api_suite_unix_audio_udp.bin 2>/dev/null || echo 0);
+		rm -f /tmp/api_suite_unix_audio_video.bin /tmp/api_suite_unix_audio_udp.bin /tmp/venc.log;
+		printf '%s %s\n' \"\$video_bytes\" \"\$audio_bytes\"
+	")" || out=""
+	audio_video_bytes="$(echo "${out}" | awk '{print $1}')"
+	audio_udp_bytes="$(echo "${out}" | awk '{print $2}')"
+	if [[ "${audio_video_bytes}" =~ ^[0-9]+$ ]] &&
+	   [[ "${audio_udp_bytes}" =~ ^[0-9]+$ ]] &&
+	   [[ "${audio_video_bytes}" -gt 100000 ]] &&
+	   [[ "${audio_udp_bytes}" -gt 0 ]]; then
+		pass "TRANSPORT unix video + dedicated UDP audio (${audio_video_bytes}/${audio_udp_bytes} bytes)"
+	else
+		fail "TRANSPORT unix video + dedicated UDP audio" \
+			"captured video=${audio_video_bytes:-none} audio=${audio_udp_bytes:-none}"
+	fi
+
+	if transport_restore_baseline; then
+		pass "TRANSPORT restore baseline"
+	else
+		fail "TRANSPORT restore baseline" "failed to restore /etc/venc.json runtime"
+	fi
+}
+
 # ── Connectivity check ───────────────────────────────────────────────────
 
 printf "Testing venc API at %s\n" "${BASE}"
@@ -116,6 +285,7 @@ resp="$(c "${BASE}/api/v1/version")"
 if ok_field "${resp}"; then
 	ver="$(get_json_field "${resp}" "['data']['app_version']")"
 	backend="$(get_json_field "${resp}" "['data']['backend']")"
+	BACKEND_NAME="$(echo "${backend}" | tr -d '"')"
 	pass "GET /api/v1/version (app=${ver}, backend=${backend})"
 else
 	fail "GET /api/v1/version" "${resp}"
@@ -184,7 +354,6 @@ assert_get "outgoing.enabled" bool
 assert_get "outgoing.server" string
 assert_get "outgoing.stream_mode" string
 assert_get "outgoing.max_payload_size" uint
-assert_get "outgoing.target_pkt_rate" uint
 assert_get "outgoing.connected_udp" bool
 assert_get "outgoing.audio_port" uint
 
@@ -514,6 +683,12 @@ done
 assert_set "video0.bitrate" 6000 "POST-RESTART RESTORE bitrate=6000"
 assert_set "video0.fps" 30 "POST-RESTART RESTORE fps=30"
 assert_set "video0.qp_delta" 0 "POST-RESTART RESTORE qp_delta=0"
+
+# ════════════════════════════════════════════════════════════════════════
+section "20. TRANSPORT REGRESSION (optional SSH)"
+# ════════════════════════════════════════════════════════════════════════
+
+run_transport_checks
 
 # ════════════════════════════════════════════════════════════════════════
 printf "\n══════════════════════════════════════════════\n"

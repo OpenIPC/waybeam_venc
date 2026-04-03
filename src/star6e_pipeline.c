@@ -93,6 +93,11 @@ static void star6e_pipeline_pre_init_teardown(void)
 	(void)MI_SYS_UnBindChnPort(&vif_port, &vpe_port);
 	(void)MI_VENC_StopRecvPic(0);
 	(void)MI_VENC_DestroyChn(0);
+	(void)MI_VPE_DisablePort(0, 0);
+	(void)MI_VPE_StopChannel(0);
+	(void)MI_VPE_DestroyChannel(0);
+	(void)MI_VIF_DisableChnPort(0, 0);
+	(void)MI_VIF_DisableDev(0);
 }
 
 static int star6e_pipeline_disable_userspace3a(const IspRuntimeLib *lib,
@@ -759,7 +764,7 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 		fprintf(stderr,
 			"ERROR: RTP mode on star6e currently supports H.265 only.\n");
 		fprintf(stderr,
-			"       Set video0.codec to h265 or outgoing.server to udp://.\n");
+			"       Set video0.codec to h265 or use compact mode / non-RTP output.\n");
 		return -1;
 	}
 
@@ -971,6 +976,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
 
 	if (star6e_output_init(&state->output, &pconf->output_setup) != 0) {
+		star6e_output_teardown(&state->output);
 		MI_SYS_UnBindChnPort(&state->vpe_port, &state->venc_port);
 		state->bound_vpe_venc = 0;
 		MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
@@ -1000,7 +1006,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 
 	if (star6e_output_is_shm(&state->output) &&
 	    vcfg->outgoing.audio_port == 0) {
-		printf("[audio] Disabled in SHM mode (audioPort=0 has no UDP socket to share)\n");
+		printf("[audio] Disabled in SHM mode (audioPort=0 has no socket to share)\n");
 	} else {
 		star6e_audio_init(&state->audio, vcfg, &state->output);
 	}

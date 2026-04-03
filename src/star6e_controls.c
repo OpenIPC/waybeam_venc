@@ -940,12 +940,7 @@ static int apply_output_enabled(bool on)
 
 static int apply_server(const char *uri)
 {
-	char host[128];
-	uint16_t port;
-
 	if (!g_star6e_control_ctx.pipeline)
-		return -1;
-	if (venc_config_parse_server_uri(uri, host, sizeof(host), &port) != 0)
 		return -1;
 	if (star6e_output_apply_server(&g_star6e_control_ctx.pipeline->output,
 	    uri) != 0) {
@@ -953,7 +948,7 @@ static int apply_server(const char *uri)
 	}
 
 	MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1);
-	printf("> Destination changed to %s:%u\n", host, port);
+	printf("> Destination changed to %s\n", uri);
 	return 0;
 }
 
