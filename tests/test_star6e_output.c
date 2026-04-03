@@ -997,6 +997,114 @@ static int test_star6e_audio_output_shared_teardown_keeps_video_socket(void)
 	return failures;
 }
 
+static int test_audio_target_cache_gen_tracks_transport(void)
+{
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	Star6eAudioOutput audio_output;
+	uint8_t payload[2] = { 0xAB, 0xCD };
+	uint8_t buf[16];
+	char uri_a[64];
+	char uri_b[64];
+	uint16_t port_a;
+	uint16_t port_b;
+	uint32_t gen_after_init;
+	ssize_t received;
+	int recv_a;
+	int recv_b;
+	int failures = 0;
+	int ret;
+
+	recv_a = create_udp_receiver(&port_a);
+	CHECK("cache gen receiver a", recv_a >= 0);
+	recv_b = create_udp_receiver(&port_b);
+	CHECK("cache gen receiver b", recv_b >= 0);
+	snprintf(uri_a, sizeof(uri_a), "udp://127.0.0.1:%u", port_a);
+	snprintf(uri_b, sizeof(uri_b), "udp://127.0.0.1:%u", port_b);
+
+	ret = star6e_output_prepare(&setup, uri_a, "compact", 1400, 0);
+	CHECK("cache gen prepare", ret == 0);
+	ret = star6e_output_init(&output, &setup);
+	CHECK("cache gen output init", ret == 0);
+	gen_after_init = output.transport_gen;
+	CHECK("cache gen init > 0", gen_after_init > 0);
+
+	ret = star6e_audio_output_init(&audio_output, &output, 0, 16);
+	CHECK("cache gen audio init", ret == 0);
+	CHECK("cache starts invalid", audio_output.cache_valid == 0);
+
+	ret = star6e_audio_output_send(&audio_output, payload, sizeof(payload), NULL, 0);
+	CHECK("cache gen send a", ret == 0);
+	received = recv(recv_a, buf, sizeof(buf), 0);
+	CHECK("cache gen recv a", received == 6);
+	CHECK("cache now valid", audio_output.cache_valid == 1);
+	CHECK("cached gen matches", audio_output.cached_gen == gen_after_init);
+
+	ret = star6e_output_apply_server(&output, uri_b);
+	CHECK("cache gen apply server", ret == 0);
+	CHECK("gen incremented", output.transport_gen == gen_after_init + 1);
+
+	ret = star6e_audio_output_send(&audio_output, payload, sizeof(payload), NULL, 0);
+	CHECK("cache gen send b", ret == 0);
+	received = recv(recv_b, buf, sizeof(buf), 0);
+	CHECK("cache gen recv b", received == 6);
+	CHECK("cached gen updated", audio_output.cached_gen == gen_after_init + 1);
+
+	star6e_audio_output_teardown(&audio_output);
+	star6e_output_teardown(&output);
+	close(recv_b);
+	close(recv_a);
+	return failures;
+}
+
+static int test_audio_target_cache_hit_stable(void)
+{
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	Star6eAudioOutput audio_output;
+	uint8_t payload[2] = { 0x11, 0x22 };
+	uint8_t buf[16];
+	char uri[64];
+	uint16_t port;
+	uint32_t gen_after_init;
+	ssize_t received;
+	int recv_socket;
+	int failures = 0;
+	int ret;
+
+	recv_socket = create_udp_receiver(&port);
+	CHECK("cache hit receiver", recv_socket >= 0);
+	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
+
+	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	CHECK("cache hit prepare", ret == 0);
+	ret = star6e_output_init(&output, &setup);
+	CHECK("cache hit output init", ret == 0);
+	gen_after_init = output.transport_gen;
+
+	ret = star6e_audio_output_init(&audio_output, &output, 0, 16);
+	CHECK("cache hit audio init", ret == 0);
+
+	ret = star6e_audio_output_send(&audio_output, payload, sizeof(payload), NULL, 0);
+	CHECK("cache hit send 1", ret == 0);
+	received = recv(recv_socket, buf, sizeof(buf), 0);
+	CHECK("cache hit recv 1", received == 6);
+	CHECK("cache valid after send 1", audio_output.cache_valid == 1);
+	CHECK("cached gen after send 1", audio_output.cached_gen == gen_after_init);
+
+	ret = star6e_audio_output_send(&audio_output, payload, sizeof(payload), NULL, 0);
+	CHECK("cache hit send 2", ret == 0);
+	received = recv(recv_socket, buf, sizeof(buf), 0);
+	CHECK("cache hit recv 2", received == 6);
+	CHECK("gen unchanged", output.transport_gen == gen_after_init);
+	CHECK("cache still valid", audio_output.cache_valid == 1);
+
+	star6e_audio_output_teardown(&audio_output);
+	star6e_output_teardown(&output);
+	close(recv_socket);
+	return failures;
+}
+
 int test_star6e_output(void)
 {
 	int failures = 0;
@@ -1026,5 +1134,7 @@ int test_star6e_output(void)
 	failures += test_star6e_audio_output_dedicated_port();
 	failures += test_star6e_audio_output_unix_dedicated_local_udp();
 	failures += test_star6e_audio_output_shared_teardown_keeps_video_socket();
+	failures += test_audio_target_cache_gen_tracks_transport();
+	failures += test_audio_target_cache_hit_stable();
 	return failures;
 }

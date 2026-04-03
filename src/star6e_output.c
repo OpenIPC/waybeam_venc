@@ -11,12 +11,6 @@
 
 #define STAR6E_RTP_HEADER_SIZE 12
 
-typedef struct {
-	int socket_handle;
-	struct sockaddr_storage dst;
-	socklen_t dst_len;
-} Star6eAudioSendTarget;
-
 static uint16_t star6e_read_be16(const uint8_t *data)
 {
 	return (uint16_t)((uint16_t)data[0] << 8 | (uint16_t)data[1]);
@@ -94,6 +88,25 @@ static int resolve_audio_target(const Star6eAudioOutput *audio_output,
 	if (audio_output->port_override == 0)
 		return resolve_shared_audio_target(audio_output, target);
 	return resolve_dedicated_audio_target(audio_output, target);
+}
+
+static int resolve_cached_audio_target(Star6eAudioOutput *ao,
+	Star6eAudioSendTarget *target)
+{
+	if (!ao || !target)
+		return -1;
+	if (ao->cache_valid && ao->video_output &&
+	    ao->cached_gen == ao->video_output->transport_gen) {
+		*target = ao->cached_target;
+		return 0;
+	}
+	if (resolve_audio_target(ao, target) != 0)
+		return -1;
+	ao->cached_target = *target;
+	if (ao->video_output)
+		ao->cached_gen = ao->video_output->transport_gen;
+	ao->cache_valid = 1;
+	return 0;
 }
 
 static int send_audio_rtp(const uint8_t *header,
@@ -200,12 +213,16 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 		memset(&output->dst, 0, sizeof(output->dst));
 		output->dst_len = 0;
 		output->connected_udp = 0;
+		output->transport_gen++;
 		return 0;
 	}
 
-	return output_socket_configure(&output->socket_handle, &output->dst,
-		&output->dst_len, &output->transport, &setup->uri,
-		output->requested_connected_udp, &output->connected_udp);
+	if (output_socket_configure(&output->socket_handle, &output->dst,
+	    &output->dst_len, &output->transport, &setup->uri,
+	    output->requested_connected_udp, &output->connected_udp) != 0)
+		return -1;
+	output->transport_gen++;
+	return 0;
 }
 
 int star6e_output_is_rtp(const Star6eOutput *output)
@@ -423,9 +440,12 @@ int star6e_output_apply_server(Star6eOutput *output, const char *uri)
 		return -1;
 	}
 
-	return output_socket_configure(&output->socket_handle, &output->dst,
-		&output->dst_len, &output->transport, &parsed,
-		output->requested_connected_udp, &output->connected_udp);
+	if (output_socket_configure(&output->socket_handle, &output->dst,
+	    &output->dst_len, &output->transport, &parsed,
+	    output->requested_connected_udp, &output->connected_udp) != 0)
+		return -1;
+	output->transport_gen++;
+	return 0;
 }
 
 void star6e_output_teardown(Star6eOutput *output)
@@ -510,7 +530,7 @@ uint16_t star6e_audio_output_port(const Star6eAudioOutput *audio_output)
 	return ntohs(dst->sin_port);
 }
 
-int star6e_audio_output_send_rtp(const Star6eAudioOutput *audio_output,
+int star6e_audio_output_send_rtp(Star6eAudioOutput *audio_output,
 	const uint8_t *data, size_t len, RtpPacketizerState *rtp_state,
 	uint32_t frame_ticks)
 {
@@ -518,7 +538,7 @@ int star6e_audio_output_send_rtp(const Star6eAudioOutput *audio_output,
 
 	if (!audio_output || !data || len == 0 || !rtp_state)
 		return -1;
-	if (resolve_audio_target(audio_output, &target) != 0)
+	if (resolve_cached_audio_target(audio_output, &target) != 0)
 		return -1;
 
 	if (rtp_packetizer_send_packet(rtp_state, send_audio_rtp, &target,
@@ -530,7 +550,7 @@ int star6e_audio_output_send_rtp(const Star6eAudioOutput *audio_output,
 	return 0;
 }
 
-int star6e_audio_output_send_compact(const Star6eAudioOutput *audio_output,
+int star6e_audio_output_send_compact(Star6eAudioOutput *audio_output,
 	const uint8_t *data, size_t len)
 {
 	Star6eAudioSendTarget target;
@@ -538,7 +558,7 @@ int star6e_audio_output_send_compact(const Star6eAudioOutput *audio_output,
 	size_t offset = 0;
 
 	if (!audio_output || !data || len == 0 ||
-	    resolve_audio_target(audio_output, &target) != 0) {
+	    resolve_cached_audio_target(audio_output, &target) != 0) {
 		return -1;
 	}
 
@@ -579,7 +599,7 @@ int star6e_audio_output_send_compact(const Star6eAudioOutput *audio_output,
 	return 0;
 }
 
-int star6e_audio_output_send(const Star6eAudioOutput *audio_output,
+int star6e_audio_output_send(Star6eAudioOutput *audio_output,
 	const uint8_t *data, size_t len, RtpPacketizerState *rtp_state,
 	uint32_t frame_ticks)
 {

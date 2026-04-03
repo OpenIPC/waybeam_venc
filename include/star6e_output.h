@@ -33,7 +33,14 @@ typedef struct {
 	int requested_connected_udp;
 	venc_ring_t *ring;
 	uint32_t send_errors;
+	uint32_t transport_gen;
 } Star6eOutput;
+
+typedef struct {
+	int socket_handle;
+	struct sockaddr_storage dst;
+	socklen_t dst_len;
+} Star6eAudioSendTarget;
 
 typedef struct {
 	const Star6eOutput *video_output;
@@ -42,6 +49,9 @@ typedef struct {
 	socklen_t fallback_dst_len;
 	uint16_t port_override;
 	uint16_t max_payload_size;
+	Star6eAudioSendTarget cached_target;
+	uint32_t cached_gen;
+	int cache_valid;
 } Star6eAudioOutput;
 
 typedef size_t (*Star6eOutputRtpSendFn)(const Star6eOutput *output,
@@ -110,16 +120,16 @@ int star6e_audio_output_init(Star6eAudioOutput *audio_output,
 uint16_t star6e_audio_output_port(const Star6eAudioOutput *audio_output);
 
 /** Send audio frame as RTP packets. */
-int star6e_audio_output_send_rtp(const Star6eAudioOutput *audio_output,
+int star6e_audio_output_send_rtp(Star6eAudioOutput *audio_output,
 	const uint8_t *data, size_t len, RtpPacketizerState *rtp_state,
 	uint32_t frame_ticks);
 
 /** Send audio frame in compact mode (raw bytes, no RTP). */
-int star6e_audio_output_send_compact(const Star6eAudioOutput *audio_output,
+int star6e_audio_output_send_compact(Star6eAudioOutput *audio_output,
 	const uint8_t *data, size_t len);
 
 /** Send audio frame using the configured output mode. */
-int star6e_audio_output_send(const Star6eAudioOutput *audio_output,
+int star6e_audio_output_send(Star6eAudioOutput *audio_output,
 	const uint8_t *data, size_t len, RtpPacketizerState *rtp_state,
 	uint32_t frame_ticks);
 
