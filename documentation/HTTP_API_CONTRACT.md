@@ -272,7 +272,7 @@ curl "http://<device-ip>/api/v1/set?video0.size=4MP"
 
 # Enable Star6E adaptive encoder control
 curl "http://<device-ip>/api/v1/set?enc_ctrl.enabled=true"
-curl "http://<device-ip>/api/v1/set?encCtrl.maxGopSize=0.75"
+curl "http://<device-ip>/api/v1/set?encCtrl.maxGopSize=10.0"
 ```
 
 Response `200` (includes `"reinit_pending": true`):
@@ -283,6 +283,31 @@ Response `200` (includes `"reinit_pending": true`):
 Restart/reinit writes stay single-field by design. Even though the main loop
 debounces reinit requests, clients should send restart-required changes one at
 a time and let each accepted write schedule the pipeline rebuild.
+
+Adaptive control usage notes:
+- Keep `encCtrl.enabled=false` for fixed-GOP workflows and drive keyframe
+  interval through `video0.gop_size`.
+- On the current Star6E IMX335 bench, a practical starting point is:
+  `encCtrl.maxGopSize=10.0`, `encCtrl.minGopSize=0.25`,
+  `encCtrl.sceneChangeThreshold=325`, `encCtrl.sceneChangeHoldoff=2`,
+  `encCtrl.idrQpBoost=4`.
+- Tune GOP range first, threshold second, and holdoff last. In practice,
+  threshold changes are a safer first response than raising holdoff.
+- While enabled, live `video0.fps` writes remain allowed and preserve the
+  configured second-based `encCtrl.maxGopSize` / `encCtrl.minGopSize` window.
+- Manual `/request/idr` calls are routed through the controller and may be
+  deferred until `enc_ctrl.min_gop_size` is reached.
+
+Example Star6E tuning sequence:
+
+```bash
+curl "http://<device-ip>/api/v1/set?encCtrl.enabled=true"
+curl "http://<device-ip>/api/v1/set?encCtrl.maxGopSize=10.0"
+curl "http://<device-ip>/api/v1/set?encCtrl.minGopSize=0.25"
+curl "http://<device-ip>/api/v1/set?encCtrl.sceneChangeThreshold=325"
+curl "http://<device-ip>/api/v1/set?encCtrl.sceneChangeHoldoff=2"
+curl "http://<device-ip>/api/v1/set?encCtrl.idrQpBoost=4"
+```
 
 **Validation errors** — some values are rejected before being applied:
 
@@ -758,6 +783,10 @@ On Star6E with `encCtrl.enabled=true`, manual IDR requests are routed
 through the adaptive GOP controller. That means a request made too soon
 after the previous IDR can be deferred until `enc_ctrl.min_gop_size` is
 reached instead of forcing an immediate keyframe.
+
+If `outgoing.sidecar_port` is enabled at the same time, Star6E also appends
+the adaptive-controller telemetry trailer to sidecar `FRAME` packets. That
+is the intended external interface for per-frame size/QP/GOP observations.
 
 ### `GET /api/v1/dual/status`
 

@@ -209,9 +209,9 @@ curl "http://<device-ip>:<port>/api/v1/set?video0.size=1280x720"
 ```
 
 ```json
-{"ok":true,"data":{"field":"video0.bitrate","applied":"live"}}
+{"ok":true,"data":{"field":"video0.bitrate","value":4096}}
 {"ok":true,"data":{"applied":[{"field":"video0.bitrate","value":4096},{"field":"system.verbose","value":true}]}}
-{"ok":true,"data":{"field":"video0.size","applied":"restart_required"}}
+{"ok":true,"data":{"field":"video0.size","value":"1280x720","reinit_pending":true}}
 ```
 
 Multi-set is supported only for live fields. If any restart-required field
@@ -387,6 +387,48 @@ configured second-based `enc_ctrl` windows stay stable across FPS changes.
 The JSON config section is `encCtrl`, and the HTTP API accepts both
 `enc_ctrl.*` and `encCtrl.*` field names. Use `/api/v1/capabilities` to
 check backend support before writing these fields.
+
+Typical usage:
+- Leave `encCtrl.enabled=false` when you want fixed-GOP behavior and direct
+  control through `video0.gop_size`.
+- Enable `encCtrl` for FPV/live links where long steady-state GOPs are useful
+  but you still want earlier scene/manual IDRs.
+- Pair `encCtrl.enabled=true` with `outgoing.sidecar_port>0` when an external
+  controller needs per-frame `frame_size_bytes`, frame type, QP, scene-change,
+  and GOP-state telemetry on the sidecar.
+
+Current Star6E IMX335 bench starting point:
+
+```json
+"encCtrl": {
+  "enabled": true,
+  "maxGopSize": 10.0,
+  "minGopSize": 0.25,
+  "deferTimeoutFrames": 60,
+  "sceneChangeThreshold": 325,
+  "sceneChangeHoldoff": 2,
+  "idrQpBoost": 4
+}
+```
+
+Tuning order:
+1. Set `maxGopSize` and `minGopSize` first. They define the operating envelope.
+   A common FPV starting point is `10.0 / 0.25`.
+2. Tune `sceneChangeThreshold` next. It is a size-spike ratio scaled by `100`,
+   so `325` means roughly "trigger near a 3.25x spike over the rolling baseline".
+3. Keep `sceneChangeHoldoff=2` unless threshold changes alone cannot suppress
+   false positives. Raising holdoff reduces responsiveness faster than raising
+   threshold does.
+4. Keep `idrQpBoost` small. `2..4` is a sensible range; larger values make the
+   forced/manual IDR stand out more but can waste bits.
+5. Use `deferTimeoutFrames` as a guardrail, not a tuning knob. Around one
+   nominal second is a reasonable default on this bench.
+
+Operational notes:
+- `/request/idr` is routed through the controller while enabled, so manual IDRs
+  respect `minGopSize` and can be deferred instead of firing immediately.
+- Live `video0.fps` changes keep `maxGopSize` and `minGopSize` second-based.
+  You do not need to retune them after FPS changes.
 
 Codec note:
 - Star6E with `outgoing.stream_mode="rtp"` requires `video0.codec="h265"`.
@@ -655,6 +697,14 @@ When Star6E adaptive encoder control is enabled, `FRAME` appends a 12-byte
 trailer carrying `frame_size_bytes`, `frame_type`, `qp`, `complexity`,
 `scene_change`, `gop_state`, `idr_inserted`, and `frames_since_idr`.
 Maruko and timing-only Star6E runs keep sending the original 52-byte frame.
+
+Link-control / FEC usage:
+- RTP video keeps using `outgoing.server` as usual.
+- Set `outgoing.sidecarPort` to expose sidecar metadata on a separate UDP port.
+- Base timing fields are available whenever the sidecar is enabled.
+- The extra encoder trailer requires Star6E with `encCtrl.enabled=true`.
+- The sender tracks one active sidecar subscriber at a time; the most recent
+  probe or consumer to subscribe receives the frame metadata.
 
 ### Reference Probe
 

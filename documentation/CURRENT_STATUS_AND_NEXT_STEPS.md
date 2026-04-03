@@ -49,9 +49,11 @@
   - Details: `documentation/LIVE_FPS_CONTROL.md`
 - Adaptive encoder control is now integrated into Star6E `venc` behind `encCtrl`:
   - restart-only config section controls variable GOP, forced/scene/manual IDRs,
-    deferred IDR timeout, and optional per-frame stderr telemetry.
+    deferred IDR timeout, and optional per-frame sidecar telemetry.
   - `video0.gop_size` remains live in baseline mode, but is intentionally owned by
     `encCtrl` while adaptive control is enabled.
+  - current Star6E IMX335 starting point is `10.0s / 0.25s` GOP range with
+    `sceneChangeThreshold=325`, `sceneChangeHoldoff=2`, `idrQpBoost=4`.
   - hardware-validated on `root@192.168.1.13` in `cbr`, `vbr`, and `avbr`.
 - Overscan crop detection for Star6E (v0.1.6):
   - When sensor mode.output < mode.crop by >10%, VIF center-crops to usable area.
