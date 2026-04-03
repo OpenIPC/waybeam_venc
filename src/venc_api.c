@@ -495,6 +495,15 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
 			return "roi_qp must be in range [-30, 30]";
 	}
+	if (strcmp(key, "fpv.roi_steps") == 0) {
+		if (cfg->fpv.roi_steps < 1 ||
+		    cfg->fpv.roi_steps > PIPELINE_ROI_MAX_STEPS)
+			return "roi_steps must be in range [1, 4]";
+	}
+	if (strcmp(key, "fpv.roi_center") == 0) {
+		if (cfg->fpv.roi_center < 0.1 || cfg->fpv.roi_center > 0.9)
+			return "roi_center must be in range [0.1, 0.9]";
+	}
 	if (strcmp(key, "video0.bitrate") == 0) {
 		if (cfg->video0.bitrate == 0 || cfg->video0.bitrate > 200000)
 			return "bitrate must be 1-200000 kbps";
@@ -1191,13 +1200,148 @@ static int collect_live_groups(SetQueryParam *params, size_t param_count,
 	return 0;
 }
 
+static int stage_params_into_cfg(VencConfig *cfg, const SetQueryParam *params,
+	size_t param_count, int *status_code, char **response_json)
+{
+	size_t i;
+
+	if (!cfg || !params || !status_code || !response_json)
+		return -1;
+
+	for (i = 0; i < param_count; i++) {
+		const char *field_err;
+
+		if (field_from_string_cfg(cfg, params[i].field, params[i].value) != 0) {
+			*status_code = 400;
+			return make_error_json("validation_failed",
+				"invalid value for field", response_json) == 0 ? 1 : -1;
+		}
+
+		field_err = validate_field_cfg(cfg, params[i].canonical_key);
+		if (field_err) {
+			*status_code = 409;
+			return make_error_json("validation_failed", field_err,
+				response_json) == 0 ? 1 : -1;
+		}
+	}
+
+	{
+		const char *err = validate_backend_config(g_backend, cfg);
+		if (err) {
+			*status_code = 409;
+			return make_error_json("validation_failed", err,
+				response_json) == 0 ? 1 : -1;
+		}
+	}
+
+	return 0;
+}
+
+static int preflight_live_group_callbacks(const VencConfig *cfg,
+	const LiveApplyGroup *group_order, size_t group_count,
+	const LiveBatchTouched *touched, size_t param_count,
+	int *status_code, char **response_json)
+{
+	size_t i;
+
+	if (!cfg || !group_order || !status_code || !response_json)
+		return -1;
+
+	for (i = 0; i < group_count; i++) {
+		if (!live_group_supported_for_cfg(cfg, group_order[i], touched)) {
+			*status_code = 501;
+			return make_error_json("not_implemented",
+				param_count == 1 ? "apply callback not available" :
+				"apply callback not available for one or more live fields",
+				response_json) == 0 ? 1 : -1;
+		}
+	}
+
+	return 0;
+}
+
+static int apply_live_group_sequence_locked(const LiveApplyGroup *group_order,
+	size_t group_count, const LiveBatchTouched *touched,
+	const VencConfig *old_cfg, const VencConfig *new_cfg,
+	VencConfig *actual_cfg, int *status_code, char **response_json)
+{
+	size_t i;
+
+	if (!group_order || !old_cfg || !new_cfg || !actual_cfg ||
+	    !status_code || !response_json)
+		return -1;
+
+	for (i = 0; i < group_count; i++) {
+		VencConfig group_cfg;
+		int rollback_incomplete;
+		char message[192];
+
+		build_live_group_config(&group_cfg, actual_cfg, new_cfg,
+			group_order[i], touched);
+		if (apply_live_group_for_cfg(&group_cfg, group_order[i],
+		    touched) == 0) {
+			*actual_cfg = group_cfg;
+			continue;
+		}
+
+		commit_config_locked(actual_cfg);
+		rollback_incomplete = rollback_live_groups(group_order, i,
+			group_order[i], touched, old_cfg, actual_cfg);
+		commit_config_locked(actual_cfg);
+
+		snprintf(message, sizeof(message),
+			rollback_incomplete ?
+			"failed to apply live field group %s; rollback incomplete" :
+			"failed to apply live field group %s",
+			live_group_name(group_order[i]));
+		*status_code = 500;
+		return make_error_json("internal_error", message,
+			response_json) == 0 ? 1 : -1;
+	}
+
+	return 0;
+}
+
+static int make_live_set_response_locked(const VencConfig *cfg,
+	const SetQueryParam *params, size_t param_count, int single_response,
+	int *status_code, char **response_json)
+{
+	if (!cfg || !params || param_count == 0 || !status_code || !response_json)
+		return -1;
+
+	if (single_response) {
+		char *jval;
+		int rc;
+
+		jval = field_to_json_value_from_cfg(cfg, params[0].field);
+		if (!jval) {
+			*status_code = 500;
+			return make_error_json("internal_error", "out of memory",
+				response_json);
+		}
+
+		rc = make_single_set_success_json(params[0].key, jval, 0,
+			response_json);
+		free(jval);
+		if (rc != 0)
+			return -1;
+	} else {
+		if (make_multi_live_set_success_json(params, param_count,
+		    response_json) != 0) {
+			return -1;
+		}
+	}
+
+	*status_code = 200;
+	return 0;
+}
+
 static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	int single_response, int *status_code, char **response_json)
 {
 	LiveApplyGroup group_order[LIVE_GROUP_COUNT];
 	LiveBatchTouched touched;
 	size_t group_count = 0;
-	size_t i;
 	VencConfig old_cfg;
 	VencConfig new_cfg;
 	VencConfig actual_cfg;
@@ -1213,73 +1357,25 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	new_cfg = old_cfg;
 	actual_cfg = old_cfg;
 
-	for (i = 0; i < param_count; i++) {
-		const char *field_err;
-
-		if (field_from_string_cfg(&new_cfg, params[i].field,
-		    params[i].value) != 0) {
-			pthread_mutex_unlock(&g_cfg_mutex);
-			*status_code = 400;
-			return make_error_json("validation_failed",
-				"invalid value for field", response_json);
-		}
-
-		field_err = validate_field_cfg(&new_cfg, params[i].canonical_key);
-		if (field_err) {
-			pthread_mutex_unlock(&g_cfg_mutex);
-			*status_code = 409;
-			return make_error_json("validation_failed", field_err,
-				response_json);
-		}
+	rc = stage_params_into_cfg(&new_cfg, params, param_count, status_code,
+		response_json);
+	if (rc != 0) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return rc > 0 ? 0 : rc;
 	}
 
-	{
-		const char *err = validate_backend_config(g_backend, &new_cfg);
-		if (err) {
-			pthread_mutex_unlock(&g_cfg_mutex);
-			*status_code = 409;
-			return make_error_json("validation_failed", err,
-				response_json);
-		}
+	rc = preflight_live_group_callbacks(&new_cfg, group_order, group_count,
+		&touched, param_count, status_code, response_json);
+	if (rc != 0) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return rc > 0 ? 0 : rc;
 	}
 
-	for (i = 0; i < group_count; i++) {
-		if (!live_group_supported_for_cfg(&new_cfg, group_order[i],
-		    &touched)) {
-			pthread_mutex_unlock(&g_cfg_mutex);
-			*status_code = 501;
-			return make_error_json("not_implemented",
-				param_count == 1 ? "apply callback not available" :
-				"apply callback not available for one or more live fields",
-				response_json);
-		}
-	}
-
-	for (i = 0; i < group_count; i++) {
-		VencConfig group_cfg;
-		int rollback_incomplete;
-		char message[192];
-
-		build_live_group_config(&group_cfg, &actual_cfg, &new_cfg,
-			group_order[i], &touched);
-		if (apply_live_group_for_cfg(&group_cfg, group_order[i],
-		    &touched) != 0) {
-			commit_config_locked(&actual_cfg);
-			rollback_incomplete = rollback_live_groups(group_order, i,
-				group_order[i], &touched, &old_cfg, &actual_cfg);
-			commit_config_locked(&actual_cfg);
-			pthread_mutex_unlock(&g_cfg_mutex);
-
-			snprintf(message, sizeof(message),
-				rollback_incomplete ?
-				"failed to apply live field group %s; rollback incomplete" :
-				"failed to apply live field group %s",
-				live_group_name(group_order[i]));
-			*status_code = 500;
-			return make_error_json("internal_error", message,
-				response_json);
-		}
-		actual_cfg = group_cfg;
+	rc = apply_live_group_sequence_locked(group_order, group_count, &touched,
+		&old_cfg, &new_cfg, &actual_cfg, status_code, response_json);
+	if (rc != 0) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return rc > 0 ? 0 : rc;
 	}
 
 	if (commit_config_locked(&actual_cfg) != 0) {
@@ -1287,35 +1383,88 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 		return -1;
 	}
 
-	if (single_response) {
-		char *jval;
-
-		jval = field_to_json_value_from_cfg(&actual_cfg, params[0].field);
-		if (!jval) {
-			pthread_mutex_unlock(&g_cfg_mutex);
-			*status_code = 500;
-			return make_error_json("internal_error", "out of memory",
-				response_json);
-		}
-
-		rc = make_single_set_success_json(params[0].key, jval, 0,
-			response_json);
-		free(jval);
-		if (rc != 0) {
-			pthread_mutex_unlock(&g_cfg_mutex);
-			return -1;
-		}
-	} else {
-		if (make_multi_live_set_success_json(params, param_count,
-		    response_json) != 0) {
-			pthread_mutex_unlock(&g_cfg_mutex);
-			return -1;
-		}
+	rc = make_live_set_response_locked(&actual_cfg, params, param_count,
+		single_response, status_code, response_json);
+	if (rc != 0) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return rc;
 	}
 
 	pthread_mutex_unlock(&g_cfg_mutex);
-	*status_code = 200;
 	return 0;
+}
+
+static int resolve_set_query_field(const char *key, const char **canonical_key,
+	const FieldDesc **field, int *status_code, char **response_json)
+{
+	if (!key || !*key || !canonical_key || !field || !status_code ||
+	    !response_json)
+		return -1;
+
+	*canonical_key = canonicalize_field_key(key);
+	*field = find_field(*canonical_key);
+	if (!*field) {
+		*status_code = 404;
+		return make_error_json("not_found", "unknown config field",
+			response_json) == 0 ? 1 : -1;
+	}
+	if (!venc_api_field_supported_for_backend(g_backend, *canonical_key)) {
+		*status_code = 501;
+		return make_error_json("not_implemented",
+			"field not supported on this backend",
+			response_json) == 0 ? 1 : -1;
+	}
+
+	return 0;
+}
+
+static void init_single_set_param(SetQueryParam *param, const char *key,
+	const char *canonical_key, const char *value, const FieldDesc *field)
+{
+	if (!param || !key || !canonical_key || !value || !field)
+		return;
+
+	memset(param, 0, sizeof(*param));
+	snprintf(param->key, sizeof(param->key), "%s", key);
+	snprintf(param->canonical_key, sizeof(param->canonical_key), "%s",
+		canonical_key);
+	snprintf(param->value, sizeof(param->value), "%s", value);
+	param->field = field;
+}
+
+static int process_restart_set_query(const SetQueryParam *param,
+	int *status_code, char **response_json)
+{
+	VencConfig new_cfg;
+	char *jval;
+	int rc;
+
+	if (!param || !status_code || !response_json)
+		return -1;
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	new_cfg = *g_cfg;
+	rc = stage_params_into_cfg(&new_cfg, param, 1, status_code,
+		response_json);
+	if (rc != 0) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return rc > 0 ? 0 : rc;
+	}
+
+	*g_cfg = new_cfg;
+	venc_api_request_reinit(2);
+	jval = field_to_json_value_from_cfg(&new_cfg, param->field);
+	pthread_mutex_unlock(&g_cfg_mutex);
+	if (!jval) {
+		*status_code = 500;
+		return make_error_json("internal_error", "out of memory",
+			response_json);
+	}
+
+	*status_code = 200;
+	rc = make_single_set_success_json(param->key, jval, 1, response_json);
+	free(jval);
+	return rc;
 }
 
 static int process_single_set_query(const char *query, int *status_code,
@@ -1325,8 +1474,7 @@ static int process_single_set_query(const char *query, int *status_code,
 	const char *canonical_key;
 	const FieldDesc *f;
 	SetQueryParam param;
-	char *jval;
-	VencConfig new_cfg;
+	int rc;
 
 	if (parse_first_query_param(query, key, sizeof(key), val, sizeof(val)) != 0 ||
 	    !*key) {
@@ -1335,78 +1483,18 @@ static int process_single_set_query(const char *query, int *status_code,
 			"missing query parameter key=value", response_json);
 	}
 
-	canonical_key = canonicalize_field_key(key);
-	f = find_field(canonical_key);
-	if (!f) {
-		*status_code = 404;
-		return make_error_json("not_found", "unknown config field",
-			response_json);
-	}
-	if (!venc_api_field_supported_for_backend(g_backend, canonical_key)) {
-		*status_code = 501;
-		return make_error_json("not_implemented",
-			"field not supported on this backend", response_json);
-	}
+	rc = resolve_set_query_field(key, &canonical_key, &f, status_code,
+		response_json);
+	if (rc != 0)
+		return rc > 0 ? 0 : rc;
 
+	init_single_set_param(&param, key, canonical_key, val, f);
 	if (f->mut == MUT_LIVE) {
-		memset(&param, 0, sizeof(param));
-		snprintf(param.key, sizeof(param.key), "%s", key);
-		snprintf(param.canonical_key, sizeof(param.canonical_key), "%s",
-			canonical_key);
-		snprintf(param.value, sizeof(param.value), "%s", val);
-		param.field = f;
 		return apply_live_set_query(&param, 1, 1, status_code,
 			response_json);
 	}
 
-	pthread_mutex_lock(&g_cfg_mutex);
-	new_cfg = *g_cfg;
-
-	if (field_from_string_cfg(&new_cfg, f, val) != 0) {
-		pthread_mutex_unlock(&g_cfg_mutex);
-		*status_code = 400;
-		return make_error_json("validation_failed",
-			"invalid value for field", response_json);
-	}
-
-	{
-		const char *field_err = validate_field_cfg(&new_cfg, canonical_key);
-		if (field_err) {
-			pthread_mutex_unlock(&g_cfg_mutex);
-			*status_code = 409;
-			return make_error_json("validation_failed", field_err,
-				response_json);
-		}
-	}
-
-	if (f->mut == MUT_RESTART) {
-		const char *err = validate_backend_config(g_backend, &new_cfg);
-		if (err) {
-			pthread_mutex_unlock(&g_cfg_mutex);
-			*status_code = 409;
-			return make_error_json("validation_failed", err, response_json);
-		}
-
-		*g_cfg = new_cfg;
-		venc_api_request_reinit(2);
-		jval = field_to_json_value_from_cfg(&new_cfg, f);
-		pthread_mutex_unlock(&g_cfg_mutex);
-		if (!jval) {
-			*status_code = 500;
-			return make_error_json("internal_error", "out of memory",
-				response_json);
-		}
-
-		*status_code = 200;
-		if (make_single_set_success_json(key, jval, 1, response_json) != 0) {
-			free(jval);
-			return -1;
-		}
-		free(jval);
-		return 0;
-	}
-
-	return -1;
+	return process_restart_set_query(&param, status_code, response_json);
 }
 
 static int process_multi_live_set_query(const char *query, int *status_code,

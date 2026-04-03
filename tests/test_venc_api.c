@@ -586,6 +586,36 @@ static int test_single_set_runtime_apply_failure(void)
 	return failures;
 }
 
+static int test_live_set_rejects_out_of_range_roi_values(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+
+	CHECK("roi center reject rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"fpv.roi_center=42", &status, response,
+			sizeof(response)) == 0);
+	CHECK("roi center reject status", status == 409);
+	CHECK("roi center reject error",
+		strstr(response, "roi_center must be in range [0.1, 0.9]") != NULL);
+	CHECK("roi center unchanged", cfg.fpv.roi_center == 0.4);
+
+	CHECK("roi steps reject rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"fpv.roi_steps=999", &status, response,
+			sizeof(response)) == 0);
+	CHECK("roi steps reject status", status == 409);
+	CHECK("roi steps reject error",
+		strstr(response, "roi_steps must be in range [1, 4]") != NULL);
+	CHECK("roi steps unchanged", cfg.fpv.roi_steps == 2);
+
+	return failures;
+}
+
 static int test_restart_set_accepts_maruko_h264_config(void)
 {
 	int failures = 0;
@@ -670,6 +700,7 @@ int test_venc_api(void)
 	failures += test_multi_set_preflights_missing_callback();
 	failures += test_multi_set_rolls_back_on_apply_failure();
 	failures += test_single_set_runtime_apply_failure();
+	failures += test_live_set_rejects_out_of_range_roi_values();
 	failures += test_restart_set_accepts_maruko_h264_config();
 	failures += test_restart_set_rejects_star6e_h264_rtp();
 	failures += test_restart_set_accepts_star6e_h264_compact();

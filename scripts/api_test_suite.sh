@@ -745,6 +745,12 @@ assert_set_fail "video0.fps" "0"
 assert_set_fail "video0.qp_delta" "-13"
 assert_set_fail "video0.qp_delta" "13"
 assert_set_fail "isp.awb_mode" "invalid_mode"
+assert_set_fail "fpv.roi_steps" "0"
+assert_set_fail "fpv.roi_steps" "999"
+assert_set_fail "fpv.roi_center" "0.05"
+assert_set_fail "fpv.roi_center" "42"
+assert_value_is "fpv.roi_steps" "${BASE_FPV_ROI_STEPS}" "VERIFY roi_steps unchanged after rejected values"
+assert_value_is "fpv.roi_center" "${BASE_FPV_ROI_CENTER}" "VERIFY roi_center unchanged after rejected values"
 
 if [[ "${backend}" == "\"star6e\"" && "${BASE_OUTGOING_STREAM_MODE}" != "compact" ]]; then
 	assert_set_fail "video0.codec" "h264" "Star6E RTP rejects h264 codec"
