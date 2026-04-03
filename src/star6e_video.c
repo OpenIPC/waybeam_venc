@@ -27,7 +27,7 @@ typedef struct {
 	Star6eHevcRtpStats *stats;
 } Star6eRtpFrameContext;
 
-static size_t send_frame_output_rtp(const Star6eOutput *output,
+static size_t send_frame_output_rtp(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream, void *opaque)
 {
 	Star6eRtpFrameContext *ctx = opaque;
@@ -82,7 +82,7 @@ void star6e_video_init(Star6eVideoState *state, const VencConfig *vcfg,
 }
 
 size_t star6e_video_send_frame(Star6eVideoState *state,
-	const Star6eOutput *output, const MI_VENC_Stream_t *stream,
+	Star6eOutput *output, const MI_VENC_Stream_t *stream,
 	int output_enabled, int verbose_enabled)
 {
 	size_t total_bytes = 0;

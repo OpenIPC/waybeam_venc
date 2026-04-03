@@ -21,7 +21,7 @@ typedef struct {
 
 /** Packetize and send one encoder frame as HEVC RTP packets. */
 size_t star6e_hevc_rtp_send_frame(const MI_VENC_Stream_t *stream,
-	const Star6eOutput *output, RtpPacketizerState *rtp,
+	Star6eOutput *output, RtpPacketizerState *rtp,
 	uint32_t frame_ticks, H26xParamSets *params, size_t max_payload,
 	Star6eHevcRtpStats *stats);
 

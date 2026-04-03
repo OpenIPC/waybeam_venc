@@ -137,12 +137,13 @@ int output_socket_configure(int *socket_handle, struct sockaddr_storage *dst,
 		close_socket_if_open(socket_handle);
 		if (open_socket(socket_handle, uri->type) != 0)
 			return -1;
+		*transport = uri->type;
 	}
 
-	if (output_socket_fill_destination(uri, dst, dst_len) != 0)
+	if (output_socket_fill_destination(uri, dst, dst_len) != 0) {
+		close_socket_if_open(socket_handle);
 		return -1;
-
-	*transport = uri->type;
+	}
 	if (!connected_udp)
 		return 0;
 

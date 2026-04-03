@@ -99,7 +99,7 @@ static uint32_t output_udp_addr(const Star6eOutput *output)
 static int g_test_star6e_rtp_send_called;
 static int g_test_star6e_rtp_send_valid;
 
-static size_t test_star6e_output_rtp_send_stub(const Star6eOutput *output,
+static size_t test_star6e_output_rtp_send_stub(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream, void *opaque)
 {
 	size_t *result = opaque;
@@ -1042,13 +1042,13 @@ static int test_audio_target_cache_gen_tracks_transport(void)
 
 	ret = star6e_output_apply_server(&output, uri_b);
 	CHECK("cache gen apply server", ret == 0);
-	CHECK("gen incremented", output.transport_gen == gen_after_init + 1);
+	CHECK("gen incremented", output.transport_gen == gen_after_init + 2);
 
 	ret = star6e_audio_output_send(&audio_output, payload, sizeof(payload), NULL, 0);
 	CHECK("cache gen send b", ret == 0);
 	received = recv(recv_b, buf, sizeof(buf), 0);
 	CHECK("cache gen recv b", received == 6);
-	CHECK("cached gen updated", audio_output.cached_gen == gen_after_init + 1);
+	CHECK("cached gen updated", audio_output.cached_gen == gen_after_init + 2);
 
 	star6e_audio_output_teardown(&audio_output);
 	star6e_output_teardown(&output);

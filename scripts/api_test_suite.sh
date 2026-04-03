@@ -229,9 +229,9 @@ run_transport_checks() {
 
 	unix_name="api_suite_unix_audio_$$"
 	out="$(remote_ssh "
-		json_cli -s .audio.enabled true -i /etc/venc.json >/dev/null &&
-		json_cli -s .outgoing.server '\"unix://${unix_name}\"' -i /etc/venc.json >/dev/null &&
-		json_cli -s .outgoing.audioPort 5601 -i /etc/venc.json >/dev/null &&
+		{ json_cli -s .audio.enabled true -i /etc/venc.json >/dev/null &&
+		  json_cli -s .outgoing.server '\"unix://${unix_name}\"' -i /etc/venc.json >/dev/null &&
+		  json_cli -s .outgoing.audioPort 5601 -i /etc/venc.json >/dev/null; } || true;
 		killall -9 venc >/dev/null 2>&1 || true;
 		sleep 2;
 		rm -f /tmp/api_suite_unix_audio_video.bin /tmp/api_suite_unix_audio_udp.bin;

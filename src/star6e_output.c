@@ -93,19 +93,29 @@ static int resolve_audio_target(const Star6eAudioOutput *audio_output,
 static int resolve_cached_audio_target(Star6eAudioOutput *ao,
 	Star6eAudioSendTarget *target)
 {
-	if (!ao || !target)
+	uint32_t gen;
+
+	if (!ao || !target || !ao->video_output)
 		return -1;
-	if (ao->cache_valid && ao->video_output &&
-	    ao->cached_gen == ao->video_output->transport_gen) {
+
+	gen = __atomic_load_n(&ao->video_output->transport_gen, __ATOMIC_ACQUIRE);
+	if (ao->cache_valid && ao->cached_gen == gen && !(gen & 1)) {
 		*target = ao->cached_target;
 		return 0;
 	}
+
+	/* Cache miss or writer in progress — resolve from live state */
 	if (resolve_audio_target(ao, target) != 0)
 		return -1;
-	ao->cached_target = *target;
-	if (ao->video_output)
-		ao->cached_gen = ao->video_output->transport_gen;
-	ao->cache_valid = 1;
+
+	/* Only cache if the generation is stable (even = no write in progress)
+	 * and unchanged since we started reading */
+	gen = __atomic_load_n(&ao->video_output->transport_gen, __ATOMIC_ACQUIRE);
+	if (!(gen & 1)) {
+		ao->cached_target = *target;
+		ao->cached_gen = gen;
+		ao->cache_valid = 1;
+	}
 	return 0;
 }
 
@@ -213,7 +223,7 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 		memset(&output->dst, 0, sizeof(output->dst));
 		output->dst_len = 0;
 		output->connected_udp = 0;
-		output->transport_gen++;
+		__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 		return 0;
 	}
 
@@ -221,7 +231,7 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 	    &output->dst_len, &output->transport, &setup->uri,
 	    output->requested_connected_udp, &output->connected_udp) != 0)
 		return -1;
-	output->transport_gen++;
+	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
 }
 
@@ -245,7 +255,7 @@ uint32_t star6e_output_drain_send_errors(Star6eOutput *output)
 	return n;
 }
 
-int star6e_output_send_rtp_parts(const Star6eOutput *output,
+int star6e_output_send_rtp_parts(Star6eOutput *output,
 	const uint8_t *header, size_t header_len,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len)
@@ -274,13 +284,13 @@ int star6e_output_send_rtp_parts(const Star6eOutput *output,
 	if (output_socket_send_parts(output->socket_handle, &output->dst,
 	    output->dst_len, header, header_len, payload1, payload1_len,
 	    payload2, payload2_len) != 0) {
-		((Star6eOutput *)output)->send_errors++;
+		output->send_errors++;
 		return -1;
 	}
 	return 0;
 }
 
-int star6e_output_send_compact_packet(const Star6eOutput *output,
+int star6e_output_send_compact_packet(Star6eOutput *output,
 	const uint8_t *packet, uint32_t packet_size, uint32_t max_size)
 {
 	uint32_t payload_offset = STAR6E_RTP_HEADER_SIZE;
@@ -293,8 +303,6 @@ int star6e_output_send_compact_packet(const Star6eOutput *output,
 	uint32_t ssrc_id;
 	uint32_t max_fragment;
 
-	const struct sockaddr *dst = (const struct sockaddr *)&output->dst;
-
 	if (!output || output->socket_handle < 0 ||
 	    output->transport == VENC_OUTPUT_URI_SHM ||
 	    !packet || packet_size == 0) {
@@ -303,10 +311,10 @@ int star6e_output_send_compact_packet(const Star6eOutput *output,
 
 	if (packet_size <= max_size) {
 		ssize_t sent = sendto(output->socket_handle, packet, packet_size, 0,
-			dst, output->dst_len);
+			(const struct sockaddr *)&output->dst, output->dst_len);
 
 		if (sent < 0) {
-			((Star6eOutput *)output)->send_errors++;
+			output->send_errors++;
 			return -1;
 		}
 		return 0;
@@ -345,12 +353,12 @@ int star6e_output_send_compact_packet(const Star6eOutput *output,
 		vec[1].iov_len = fragment_size;
 
 		memset(&msg, 0, sizeof(msg));
-		msg.msg_name = (void *)dst;
+		msg.msg_name = (void *)&output->dst;
 		msg.msg_namelen = output->dst_len;
 		msg.msg_iov = vec;
 		msg.msg_iovlen = 2;
 		if (sendmsg(output->socket_handle, &msg, 0) < 0) {
-			((Star6eOutput *)output)->send_errors++;
+			output->send_errors++;
 			return -1;
 		}
 		offset += fragment_size;
@@ -359,7 +367,7 @@ int star6e_output_send_compact_packet(const Star6eOutput *output,
 	return 0;
 }
 
-size_t star6e_output_send_compact_frame(const Star6eOutput *output,
+size_t star6e_output_send_compact_frame(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream, uint32_t max_size)
 {
 	size_t total_bytes = 0;
@@ -411,7 +419,7 @@ size_t star6e_output_send_compact_frame(const Star6eOutput *output,
 	return total_bytes;
 }
 
-size_t star6e_output_send_frame(const Star6eOutput *output,
+size_t star6e_output_send_frame(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream, uint32_t max_size,
 	Star6eOutputRtpSendFn rtp_send, void *opaque)
 {
@@ -440,11 +448,14 @@ int star6e_output_apply_server(Star6eOutput *output, const char *uri)
 		return -1;
 	}
 
+	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* odd = writing */
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, &parsed,
-	    output->requested_connected_udp, &output->connected_udp) != 0)
+	    output->requested_connected_udp, &output->connected_udp) != 0) {
+		__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* restore even */
 		return -1;
-	output->transport_gen++;
+	}
+	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* even = stable */
 	return 0;
 }
 

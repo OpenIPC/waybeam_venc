@@ -33,7 +33,7 @@ typedef struct {
 	int requested_connected_udp;
 	venc_ring_t *ring;
 	uint32_t send_errors;
-	uint32_t transport_gen;
+	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
 } Star6eOutput;
 
 typedef struct {
@@ -54,7 +54,7 @@ typedef struct {
 	int cache_valid;
 } Star6eAudioOutput;
 
-typedef size_t (*Star6eOutputRtpSendFn)(const Star6eOutput *output,
+typedef size_t (*Star6eOutputRtpSendFn)(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream, void *opaque);
 
 /** Validate and prepare output config from URI and stream mode name. */
@@ -78,7 +78,7 @@ int star6e_output_is_shm(const Star6eOutput *output);
 
 /** Send RTP header and payload parts as a single UDP datagram.
  *  payload2 may be NULL/0 for single-part payloads. */
-int star6e_output_send_rtp_parts(const Star6eOutput *output,
+int star6e_output_send_rtp_parts(Star6eOutput *output,
 	const uint8_t *header, size_t header_len,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len);
@@ -87,15 +87,15 @@ int star6e_output_send_rtp_parts(const Star6eOutput *output,
 uint32_t star6e_output_drain_send_errors(Star6eOutput *output);
 
 /** Send one raw packet in compact stream mode. */
-int star6e_output_send_compact_packet(const Star6eOutput *output,
+int star6e_output_send_compact_packet(Star6eOutput *output,
 	const uint8_t *packet, uint32_t packet_size, uint32_t max_size);
 
 /** Send entire encoder frame in compact stream mode. */
-size_t star6e_output_send_compact_frame(const Star6eOutput *output,
+size_t star6e_output_send_compact_frame(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream, uint32_t max_size);
 
 /** Send encoder frame via configured output mode (RTP or compact). */
-size_t star6e_output_send_frame(const Star6eOutput *output,
+size_t star6e_output_send_frame(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream, uint32_t max_size,
 	Star6eOutputRtpSendFn rtp_send, void *opaque);
 

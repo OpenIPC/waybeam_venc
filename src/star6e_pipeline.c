@@ -976,6 +976,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
 
 	if (star6e_output_init(&state->output, &pconf->output_setup) != 0) {
+		star6e_output_teardown(&state->output);
 		MI_SYS_UnBindChnPort(&state->vpe_port, &state->venc_port);
 		state->bound_vpe_venc = 0;
 		MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
