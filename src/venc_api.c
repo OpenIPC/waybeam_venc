@@ -223,12 +223,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, gop_size,    FT_DOUBLE, MUT_RESTART),
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
 	FIELD(enc_ctrl, enabled,               FT_BOOL,   MUT_RESTART),
-	FIELD(enc_ctrl, max_gop_size,          FT_DOUBLE, MUT_RESTART),
-	FIELD(enc_ctrl, min_gop_size,          FT_DOUBLE, MUT_RESTART),
-	FIELD(enc_ctrl, defer_timeout_frames,  FT_UINT16, MUT_RESTART),
 	FIELD(enc_ctrl, scene_change_threshold, FT_UINT16, MUT_RESTART),
 	FIELD(enc_ctrl, scene_change_holdoff,  FT_UINT8,  MUT_RESTART),
-	FIELD(enc_ctrl, idr_qp_boost,          FT_UINT8,  MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -293,12 +289,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.maxMB", "record.max_mb" },
 	{ "record.gopSize", "record.gop_size" },
 	{ "encCtrl.enabled", "enc_ctrl.enabled" },
-	{ "encCtrl.maxGopSize", "enc_ctrl.max_gop_size" },
-	{ "encCtrl.minGopSize", "enc_ctrl.min_gop_size" },
-	{ "encCtrl.deferTimeoutFrames", "enc_ctrl.defer_timeout_frames" },
 	{ "encCtrl.sceneChangeThreshold", "enc_ctrl.scene_change_threshold" },
 	{ "encCtrl.sceneChangeHoldoff", "enc_ctrl.scene_change_holdoff" },
-	{ "encCtrl.idrQpBoost", "enc_ctrl.idr_qp_boost" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -506,19 +498,6 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.bitrate == 0 || cfg->video0.bitrate > 200000)
 			return "bitrate must be 1-200000 kbps";
 	}
-	if (strcmp(key, "enc_ctrl.max_gop_size") == 0 &&
-	    cfg->enc_ctrl.max_gop_size <= 0.0)
-		return "enc_ctrl.max_gop_size must be > 0 seconds";
-	if (strcmp(key, "enc_ctrl.min_gop_size") == 0 &&
-	    cfg->enc_ctrl.min_gop_size < 0.0)
-		return "enc_ctrl.min_gop_size must be >= 0 seconds";
-	if ((strcmp(key, "enc_ctrl.max_gop_size") == 0 ||
-	     strcmp(key, "enc_ctrl.min_gop_size") == 0) &&
-	    cfg->enc_ctrl.min_gop_size > cfg->enc_ctrl.max_gop_size)
-		return "enc_ctrl.min_gop_size must be <= max_gop_size";
-	if (strcmp(key, "enc_ctrl.defer_timeout_frames") == 0 &&
-	    cfg->enc_ctrl.defer_timeout_frames == 0)
-		return "enc_ctrl.defer_timeout_frames must be >= 1";
 	if (strcmp(key, "enc_ctrl.scene_change_threshold") == 0 &&
 	    cfg->enc_ctrl.scene_change_threshold == 0)
 		return "enc_ctrl.scene_change_threshold must be >= 1";

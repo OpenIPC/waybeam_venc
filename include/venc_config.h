@@ -129,13 +129,9 @@ typedef struct {
 } VencConfigRecord;
 
 typedef struct {
-	bool enabled;                 /* enable adaptive encoder controller */
-	double max_gop_size;          /* hard ceiling in seconds between IDRs */
-	double min_gop_size;          /* earliest scene/manual IDR in seconds */
-	uint16_t defer_timeout_frames;/* max deferred frames before forced IDR */
-	uint16_t scene_change_threshold; /* ratio * 100 */
-	uint8_t scene_change_holdoff; /* consecutive frames above threshold */
-	uint8_t idr_qp_boost;         /* min-QP boost applied before requested IDR */
+	bool enabled;                    /* request IDR after scene change spike settles */
+	uint16_t scene_change_threshold; /* frame size ratio x100 (e.g. 150 = 1.5x EMA) */
+	uint8_t scene_change_holdoff;    /* consecutive frames above threshold to trigger */
 } VencConfigEncCtrl;
 
 typedef struct {

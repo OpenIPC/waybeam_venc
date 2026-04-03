@@ -324,7 +324,7 @@ static int test_field_support_by_backend(void)
 			"enc_ctrl.enabled") == 1);
 	CHECK("enc_ctrl alias supported star6e",
 		venc_api_field_supported_for_backend("star6e",
-			"encCtrl.maxGopSize") == 1);
+			"encCtrl.sceneChangeThreshold") == 1);
 	CHECK("enc_ctrl unsupported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"enc_ctrl.enabled") == 0);

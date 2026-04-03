@@ -170,12 +170,8 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* encCtrl */
 	cfg->enc_ctrl.enabled = false;
-	cfg->enc_ctrl.max_gop_size = 10.0;
-	cfg->enc_ctrl.min_gop_size = 0.25;
-	cfg->enc_ctrl.defer_timeout_frames = 60;
-	cfg->enc_ctrl.scene_change_threshold = 325;
+	cfg->enc_ctrl.scene_change_threshold = 150;
 	cfg->enc_ctrl.scene_change_holdoff = 2;
-	cfg->enc_ctrl.idr_qp_boost = 4;
 
 	/* debug */
 	cfg->debug.show_osd = false;
@@ -435,25 +431,10 @@ static void load_enc_ctrl(const cJSON *root, VencConfigEncCtrl *s)
 	if (!obj) return;
 
 	s->enabled = json_get_bool(obj, "enabled", s->enabled);
-	s->max_gop_size = json_get_double(obj, "maxGopSize",
-		s->max_gop_size);
-	s->min_gop_size = json_get_double(obj, "minGopSize",
-		s->min_gop_size);
-	s->defer_timeout_frames = (uint16_t)json_get_int(obj,
-		"deferTimeoutFrames", s->defer_timeout_frames);
 	s->scene_change_threshold = (uint16_t)json_get_int(obj,
 		"sceneChangeThreshold", s->scene_change_threshold);
 	s->scene_change_holdoff = (uint8_t)json_get_int(obj,
 		"sceneChangeHoldoff", s->scene_change_holdoff);
-	s->idr_qp_boost = (uint8_t)json_get_int(obj, "idrQpBoost",
-		s->idr_qp_boost);
-
-	if (s->max_gop_size <= 0.0)
-		s->max_gop_size = 0.001;
-	if (s->min_gop_size < 0.0)
-		s->min_gop_size = 0.0;
-	if (s->min_gop_size > s->max_gop_size)
-		s->min_gop_size = s->max_gop_size;
 }
 
 static void load_fpv(const cJSON *root, VencConfigFpv *s)
@@ -760,18 +741,10 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	cJSON *enc = cJSON_AddObjectToObject(root, "encCtrl");
 	if (enc) {
 		cJSON_AddBoolToObject(enc, "enabled", cfg->enc_ctrl.enabled);
-		cJSON_AddNumberToObject(enc, "maxGopSize",
-			cfg->enc_ctrl.max_gop_size);
-		cJSON_AddNumberToObject(enc, "minGopSize",
-			cfg->enc_ctrl.min_gop_size);
-		cJSON_AddNumberToObject(enc, "deferTimeoutFrames",
-			cfg->enc_ctrl.defer_timeout_frames);
 		cJSON_AddNumberToObject(enc, "sceneChangeThreshold",
 			cfg->enc_ctrl.scene_change_threshold);
 		cJSON_AddNumberToObject(enc, "sceneChangeHoldoff",
 			cfg->enc_ctrl.scene_change_holdoff);
-		cJSON_AddNumberToObject(enc, "idrQpBoost",
-			cfg->enc_ctrl.idr_qp_boost);
 	}
 
 	/* debug */
