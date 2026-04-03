@@ -15,11 +15,16 @@
  *
  * Per completed frame (RTP marker bit) one TSV line is written to stdout:
  *   frame_no  ssrc  rtp_ts  seq_first  seq_last  gaps
- *   frame_id  frame_ready_us  recv_first_us  recv_last_us  meta_recv_us
+ *   frame_id  frame_size_bytes  frame_type  qp  complexity  scene_change
+ *   gop_state  idr_inserted  frames_since_idr
+ *   frame_ready_us  recv_first_us  recv_last_us  meta_recv_us
  *   sender_interval_us  recv_interval_us  latency_est_us
  *
- * latency_est_us is omitted ("-") until at least one sync round-trip
- * has completed.
+ * Encoder-feedback columns print "-" when the sender is emitting the
+ * timing-only base FRAME message without the optional trailer.
+ *
+ * latency_est_us is omitted ("-") until at least one sync round-trip has
+ * completed.
  *
  * Build (host, x86-64 / arm64):
  *   cc -std=c99 -Wall -O2 -D_GNU_SOURCE \
@@ -100,16 +105,26 @@ typedef struct {
 	uint64_t         capture_us;        /* venc: encoder PTS (0=unknown)        */
 	uint64_t         frame_ready_us;    /* venc: before packetise+send          */
 	uint64_t         last_pkt_send_us;  /* venc: after final sendmsg            */
+	uint32_t         frame_size_bytes;  /* scene detect telemetry (optional)    */
 	uint16_t         seq_first;
 	uint16_t         seq_count;
+	uint16_t         frames_since_idr;  /* scene detect telemetry (optional)    */
+	uint8_t          frame_type;        /* RTP_SIDECAR_FRAME_*                  */
+	uint8_t          qp;
+	uint8_t          complexity;
+	uint8_t          scene_change;
+	uint8_t          gop_state;
+	uint8_t          idr_inserted;
+	uint8_t          has_enc_info;
 	uint64_t         meta_recv_us;      /* probe: received MSG_FRAME            */
 	int              valid;
 } CacheEntry;
 
 static CacheEntry g_cache[SIDECAR_CACHE_SIZE];
 
-static void cache_store_frame(const RtpSidecarFrame *wire, uint64_t recv_us)
+static void cache_store_frame(const uint8_t *buf, size_t len, uint64_t recv_us)
 {
+	const RtpSidecarFrame *wire = (const RtpSidecarFrame *)buf;
 	uint32_t ssrc   = ntohl(wire->ssrc);
 	uint32_t rtp_ts = ntohl(wire->rtp_timestamp);
 	unsigned idx    = (ssrc ^ rtp_ts) & (SIDECAR_CACHE_SIZE - 1u);
@@ -123,6 +138,29 @@ static void cache_store_frame(const RtpSidecarFrame *wire, uint64_t recv_us)
 	e->seq_first         = ntohs(wire->seq_first);
 	e->seq_count         = ntohs(wire->seq_count);
 	e->meta_recv_us      = recv_us;
+	e->frame_size_bytes  = 0;
+	e->frames_since_idr  = 0;
+	e->frame_type        = RTP_SIDECAR_FRAME_P;
+	e->qp                = 0;
+	e->complexity        = 0;
+	e->scene_change      = 0;
+	e->gop_state         = 0;
+	e->idr_inserted      = 0;
+	e->has_enc_info      = 0;
+	if ((wire->flags & RTP_SIDECAR_FLAG_ENC_INFO) != 0 &&
+	    len >= sizeof(RtpSidecarFrameExt)) {
+		const RtpSidecarFrameExt *ext = (const RtpSidecarFrameExt *)buf;
+
+		e->frame_size_bytes = ntohl(ext->enc.frame_size_bytes);
+		e->frames_since_idr = ntohs(ext->enc.frames_since_idr);
+		e->frame_type = ext->enc.frame_type;
+		e->qp = ext->enc.qp;
+		e->complexity = ext->enc.complexity;
+		e->scene_change = ext->enc.scene_change;
+		e->gop_state = ext->enc.gop_state;
+		e->idr_inserted = ext->enc.idr_inserted;
+		e->has_enc_info = 1;
+	}
 	e->valid             = 1;
 }
 
@@ -271,7 +309,8 @@ static void print_header(void)
 	 *   capture_us+offset → recv_last_us       : sensor-to-received latency
 	 */
 	printf("# frame_no\tssrc\trtp_ts\tseq_first\tseq_last\tseq_count\tgaps\t"
-	       "frame_id\t"
+	       "frame_id\tframe_size_bytes\tframe_type\tqp\tcomplexity\t"
+	       "scene_change\tgop_state\tidr_inserted\tframes_since_idr\t"
 	       "capture_us\tframe_ready_us\tlast_pkt_send_us\t"
 	       "meta_recv_us\t"
 	       "recv_first_us\trecv_last_us\t"
@@ -335,6 +374,24 @@ static void emit_frame(unsigned long frame_no,
 
 	/* frame_id */
 	if (ce) printf("%" PRIu64, ce->frame_id); else printf("-");
+	printf("\t");
+
+	/* Optional encoder feedback */
+	if (ce && ce->has_enc_info) printf("%u", ce->frame_size_bytes); else printf("-");
+	printf("\t");
+	if (ce && ce->has_enc_info) printf("%u", ce->frame_type); else printf("-");
+	printf("\t");
+	if (ce && ce->has_enc_info) printf("%u", ce->qp); else printf("-");
+	printf("\t");
+	if (ce && ce->has_enc_info) printf("%u", ce->complexity); else printf("-");
+	printf("\t");
+	if (ce && ce->has_enc_info) printf("%u", ce->scene_change); else printf("-");
+	printf("\t");
+	if (ce && ce->has_enc_info) printf("%u", ce->gop_state); else printf("-");
+	printf("\t");
+	if (ce && ce->has_enc_info) printf("%u", ce->idr_inserted); else printf("-");
+	printf("\t");
+	if (ce && ce->has_enc_info) printf("%u", ce->frames_since_idr); else printf("-");
 	printf("\t");
 
 	/* Venc-side timestamps */
@@ -421,6 +478,7 @@ typedef struct {
 	unsigned long total_rtp_pkts;
 	unsigned long total_gaps;
 	unsigned long sidecar_meta_rx;     /* MSG_FRAME received */
+	uint64_t      sidecar_meta_rx_bytes;
 	unsigned long sidecar_sub_tx;      /* MSG_SUBSCRIBE sent */
 	unsigned long sidecar_sync_tx;     /* MSG_SYNC_REQ sent */
 	unsigned long sidecar_sync_rx;     /* MSG_SYNC_RESP received */
@@ -474,7 +532,7 @@ static void stats_print(const ProbeStats *ps, const SyncState *ss)
 	fprintf(stderr, "\n--- Sidecar overhead ---\n");
 	unsigned long sc_rx = ps->sidecar_meta_rx + ps->sidecar_sync_rx;
 	unsigned long sc_tx = ps->sidecar_sub_tx + ps->sidecar_sync_tx;
-	uint64_t rx_bytes = ps->sidecar_meta_rx * (uint64_t)sizeof(RtpSidecarFrame)
+	uint64_t rx_bytes = ps->sidecar_meta_rx_bytes
 	                  + ps->sidecar_sync_rx * (uint64_t)sizeof(RtpSidecarSyncResp);
 	uint64_t tx_bytes = ps->sidecar_sub_tx * (uint64_t)sizeof(RtpSidecarSubscribe)
 	                  + ps->sidecar_sync_tx * (uint64_t)sizeof(RtpSidecarSyncReq);
@@ -707,8 +765,9 @@ int main(int argc, char **argv)
 
 					if (msg_type == RTP_SIDECAR_MSG_FRAME &&
 					    (size_t)n >= sizeof(RtpSidecarFrame)) {
-						cache_store_frame((const RtpSidecarFrame *)buf, recv_ts);
+						cache_store_frame(buf, (size_t)n, recv_ts);
 						ps.sidecar_meta_rx++;
+						ps.sidecar_meta_rx_bytes += (uint64_t)n;
 
 					} else if (msg_type == RTP_SIDECAR_MSG_SYNC_RESP &&
 					           (size_t)n >= sizeof(RtpSidecarSyncResp) &&

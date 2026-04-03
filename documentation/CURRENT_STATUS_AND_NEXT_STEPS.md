@@ -11,10 +11,10 @@
   - `SOC_BUILD=star6e`
   - `SOC_BUILD=maruko`
 - Runtime SoC autodetect/override in `venc` was removed intentionally.
-- JSON runtime implementation was attempted and rolled back.
-  - reason: Star6E regression (`waiting for encoder data`, no stream output).
-  - detailed notes: `documentation/JSON_CONFIG_ROLLBACK_NOTES.md`
-- Current runtime interface is the known-good CLI path (no active JSON runtime wiring).
+- JSON config runtime is active:
+  - `venc` loads `/etc/venc.json` and serves the HTTP API as the primary runtime interface.
+  - current Star6E validation uses `scripts/star6e_direct_deploy.sh` against `root@192.168.1.13`.
+  - historical rollback notes remain in `documentation/JSON_CONFIG_ROLLBACK_NOTES.md`.
 - Automatic VIF precrop for Star6E is implemented (v0.1.4):
   - When encode resolution has a different aspect ratio than the sensor mode,
     VIF center-crops the sensor frame to match before VPE scaling.
@@ -47,6 +47,14 @@
   - Sensor always set to mode maxFps (avoids IMX335 intermediate fps stall).
   - FPS-aware mode selection prefers modes whose maxFps is closest to target.
   - Details: `documentation/LIVE_FPS_CONTROL.md`
+- Inline scene detector is now integrated into Star6E `venc` via `video0.scene_threshold`:
+  - Tracks frame size EMA, computes complexity (0-255), detects scene change
+    spikes above threshold, and requests IDR after the spike settles.
+  - Two config fields: `video0.scene_threshold` (uint16, 0=off, 150=1.5x EMA
+    spike detection), `video0.scene_holdoff` (uint8, default 2).
+  - Reports `frame_type`, `complexity`, `scene_change`, `idr_inserted`,
+    `frames_since_idr` via RTP timing sidecar when enabled.
+  - hardware-validated on `root@192.168.1.13` in `cbr`, `vbr`, and `avbr`.
 - Overscan crop detection for Star6E (v0.1.6):
   - When sensor mode.output < mode.crop by >10%, VIF center-crops to usable area.
   - Fixes imx415 mode 1 pipeline hang (crop=2952x1656, output=2560x1440).
@@ -60,10 +68,10 @@
   - end-to-end H.265 compact UDP stream works and emits frames.
   - end-to-end H.265 RTP mode works with visible frames.
   - ring-pool + graph setup changes are in place and stable in smoke runs.
-- Remote workflow defaults were updated:
-  - default script host: `root@192.168.1.11` (Maruko bench)
-  - Star6E bench currently used: `root@192.168.2.10`
-  - stream destination host: `192.168.1.2`
+- Remote workflow:
+  - preferred Star6E `venc` validation target: `root@192.168.1.13`
+  - `remote_test.sh` default host remains `root@192.168.1.11` (legacy Maruko bench), so pass `--host` explicitly
+  - stream destination host on the 192.168.1.x bench: `192.168.1.2`
 
 - SD card MPEG-TS recording with audio (Star6E):
   - HEVC video + PCM audio muxed into power-loss safe .ts container.
@@ -101,11 +109,10 @@
    - Read-only endpoints, live-safe writes (bitrate, fps, gop, exposure), and restart-required
      settings are all implemented. Live FPS uses hardware bind decimation.
    - Contract: `documentation/HTTP_API_CONTRACT.md` (v0.1.3).
-2. Harden JSON config model:
-   - reintroduce parser/runtime wiring in a dedicated branch only,
-   - keep stream graph behavior unchanged during parser migration,
-   - define strict/compatible behavior for unknown keys,
-   - validate Star6E parity against CLI baseline before merge,
+2. Harden the live JSON config model:
+   - keep schema validation behavior explicit (strict vs compatible handling of unknown keys),
+   - keep direct helper, HTTP API, and on-disk config examples synchronized,
+   - validate Star6E parity against the current `/etc/venc.json` runtime path,
    - add config migration notes for future schema versions.
 3. Precrop aspect-ratio correction for Maruko (SCL-level crop):
    - Port Star6E precrop logic to Maruko using `scl_port.crop`.
@@ -117,8 +124,8 @@
 5. Keep Star6E-first implementation order for SigmaStar API-touching changes:
    - validate on Star6E first, then port to Maruko.
 6. Maintain regression gates on both boards after each merged change:
-   - Star6E (`192.168.2.10`): CLI baseline run(s) with matching known-good settings.
-   - Maruko (`192.168.1.11`): H.265 compact + H.265 RTP with `isp.bin_path=/etc/sensors/imx415.bin`.
+   - Star6E (`192.168.1.13`): direct deploy cycle plus targeted `remote_test.sh` sweeps when sensor-mode coverage matters.
+   - Maruko (`192.168.2.12`): H.265 compact + H.265 RTP with `isp.bin_path=/etc/sensors/imx415.bin`.
 7. Complete Maruko codec parity checks:
    - verify H.264 behavior (`264cbr`) end-to-end with current graph path.
 8. Resume deferred Maruko sensor-depth work after driver refresh:

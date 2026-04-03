@@ -46,6 +46,12 @@ typedef struct {
 int venc_api_register(VencConfig *cfg, const char *backend_name,
 	const VencApplyCallbacks *cb);
 
+/* Return 1 if a config field is supported on the named backend.
+ * field_key may be canonical (video0.scene_threshold) or an accepted
+ * alias (video0.sceneThreshold). */
+int venc_api_field_supported_for_backend(const char *backend_name,
+	const char *field_key);
+
 /* Pipeline reinit request flag (shared between API and backend).
  *   0 = no reinit pending
  *   1 = reload config from disk + reinit pipeline (SIGHUP / /api/v1/restart)

@@ -168,6 +168,10 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->record.gop_size = 0;
 	cfg->record.server[0] = '\0';
 
+	/* scene detection (video0) */
+	cfg->video0.scene_threshold = 0;   /* 0 = off */
+	cfg->video0.scene_holdoff = 2;
+
 	/* debug */
 	cfg->debug.show_osd = false;
 }
@@ -307,6 +311,11 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	if (v->qp_delta < -12) v->qp_delta = -12;
 	if (v->qp_delta > 12) v->qp_delta = 12;
 	v->frame_lost = json_get_bool(obj, "frameLost", v->frame_lost);
+	v->scene_threshold = (uint16_t)json_get_int(obj, "sceneThreshold",
+		(int)v->scene_threshold);
+	v->scene_holdoff = (uint8_t)json_get_int(obj, "sceneHoldoff",
+		(int)v->scene_holdoff);
+	if (v->scene_holdoff < 1 && v->scene_threshold > 0) v->scene_holdoff = 1;
 }
 
 static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
@@ -638,6 +647,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "gopSize", cfg->video0.gop_size);
 		cJSON_AddNumberToObject(vid, "qpDelta", cfg->video0.qp_delta);
 		cJSON_AddBoolToObject(vid, "frameLost", cfg->video0.frame_lost);
+		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
+		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
 	}
 
 	/* outgoing */

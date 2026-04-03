@@ -1,12 +1,23 @@
 # Remote Test Workflow
 
-This is the stable remote test workflow for standalone development across
-Star6E and Maruko backends.
+This document covers the bounded `remote_test.sh` workflow for CLI-driven
+probes and short-lived test binaries across Star6E and Maruko backends.
+
+For the current Star6E `venc` runtime path, prefer the direct deploy helper:
+
+```bash
+./scripts/star6e_direct_deploy.sh cycle
+```
+
+That path validates the production `/etc/venc.json` config, daemon startup,
+HTTP API readiness, and persistent `/tmp/venc.log`. `remote_test.sh` remains
+useful for sensor mode discovery, max-FPS sweeps, and auxiliary test binaries.
 
 ## Target Device
 
 - Default target in script: `root@192.168.1.11` (legacy Maruko bench)
-- Star6E bench currently used: `root@192.168.2.10`
+- Current Star6E venc bench: `root@192.168.1.13` via `star6e_direct_deploy.sh`
+- Star6E remote-test bench example: `root@192.168.1.13`
 - Maruko bench currently used: `root@192.168.2.12`
 - For `root@192.168.2.12`, use longer SSH settings:
   `SSH_CONNECT_TIMEOUT=7 SSH_PROBE_TIMEOUT=12 make remote-test ...`
@@ -15,8 +26,8 @@ Star6E and Maruko backends.
 - `remote_test.sh` auto-detects target family (`infinity6e` / `infinity6c`) and
   picks matching build target (`SOC_BUILD=star6e|maruko`).
 - For deterministic runs, prefer explicit flags:
-  - `--host root@192.168.2.10 --soc-build star6e`
-  - `--host root@192.168.1.11 --soc-build maruko`
+  - `--host root@192.168.1.13 --soc-build star6e`
+  - `--host root@192.168.2.12 --soc-build maruko`
 - For Maruko runs, always pass ISP bin:
   `--isp-bin /etc/sensors/imx415.bin`.
   `remote_test.sh` now injects this automatically for Maruko when not provided.
@@ -38,6 +49,9 @@ Star6E and Maruko backends.
 3. Run tests with bounded timeout.
 4. Check SSH liveness immediately after each run.
 5. Inspect `dmesg` delta for sensor/ISP/VIF/VENC-related kernel messages.
+
+This flow is intentionally best-effort for short-lived processes. It is not
+the preferred way to validate the long-running `venc` daemon on Star6E.
 
 `make stage` builds and bundles binaries **and** libs into `out/` for manual
 provisioning or firmware image preparation. `remote_test.sh` uses the staged
@@ -95,13 +109,13 @@ Pass `--json-summary` to emit a machine-readable JSON line after all
 human-readable output:
 
 ```bash
-./scripts/remote_test.sh --json-summary --host root@192.168.2.10 -- -f 30
+./scripts/remote_test.sh --json-summary --host root@192.168.1.13 -- --list-sensor-modes --sensor-index 0
 ```
 
 Output (last line):
 
 ```json
-{"status":"success","exit_code":0,"device_alive":true,"dmesg_hits":0,"duration_sec":12,"run_bin":"venc","soc_build":"star6e","host":"root@192.168.2.10"}
+{"status":"success","exit_code":0,"device_alive":true,"dmesg_hits":0,"duration_sec":12,"run_bin":"venc","soc_build":"star6e","host":"root@192.168.1.13"}
 ```
 
 See `AGENTS.md` → Deployment Test Interpretation for field definitions.

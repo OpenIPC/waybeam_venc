@@ -74,6 +74,8 @@ static int test_defaults(void)
 	CHECK("defaults_audio_codec", strcmp(cfg.audio.codec, "opus") == 0);
 	CHECK("defaults_audio_vol", cfg.audio.volume == 80);
 	CHECK("defaults_audio_port", cfg.outgoing.audio_port == 5601);
+	CHECK("defaults_scene_threshold_off", cfg.video0.scene_threshold == 0);
+	CHECK("defaults_scene_holdoff", cfg.video0.scene_holdoff == 2);
 
 	return failures;
 }
@@ -133,6 +135,7 @@ static int test_load_full_json(void)
 	CHECK("load_roi_qp", cfg.fpv.roi_qp == -18);
 	CHECK("load_roi_steps", cfg.fpv.roi_steps == 2);
 	CHECK("load_noise", cfg.fpv.noise_level == 5);
+	/* scene_threshold/scene_holdoff live in video0 section */
 
 	return failures;
 }
@@ -258,6 +261,7 @@ static int test_roundtrip(void)
 	cfg.video0.bitrate = 12000;
 	cfg.video0.qp_delta = 6;
 	cfg.system.verbose = true;
+	cfg.video0.scene_threshold = 150;
 
 	char *json = venc_config_to_json_string(&cfg);
 	CHECK("serialize_ok", json != NULL);
@@ -280,6 +284,7 @@ static int test_roundtrip(void)
 	CHECK("roundtrip_bitrate", cfg2.video0.bitrate == 12000);
 	CHECK("roundtrip_qp_delta", cfg2.video0.qp_delta == 6);
 	CHECK("roundtrip_verbose", cfg2.system.verbose == true);
+	CHECK("roundtrip_scene_threshold", cfg2.video0.scene_threshold == 150);
 	/* Unchanged fields preserved */
 	CHECK("roundtrip_codec", strcmp(cfg2.video0.codec, "h265") == 0);
 	CHECK("roundtrip_gop", cfg2.video0.gop_size == 1.0);

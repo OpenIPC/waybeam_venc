@@ -1002,6 +1002,19 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	 * limits to its own defaults which could exceed the frame period. */
 	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate,
 		pconf->exposure_cap_us);
+
+	/* Cold-boot fix: with legacyAe the ISP bin's AE may initialize the
+	 * sensor at a shutter exceeding the frame period.  SetExposureLimit
+	 * only constrains the AE algorithm, not the physical sensor register.
+	 * MI_SNR_SetFps forces the sensor driver to reconfigure timing,
+	 * resetting the shutter to fit the frame period.  When CUS3A is
+	 * active it handles this via the fps_kick logic; when legacyAe is
+	 * active we must do it here. */
+	if (vcfg->isp.legacy_ae && pconf->exposure_cap_us > 0 &&
+	    pconf->sensor_framerate > 0) {
+		MI_SNR_SetFps(state->sensor.pad_id, pconf->sensor_framerate);
+	}
+
 	star6e_pipeline_set_hw_clocks(pconf->oc_level, vcfg->system.verbose);
 
 	if (star6e_output_is_shm(&state->output) &&

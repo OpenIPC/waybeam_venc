@@ -96,7 +96,8 @@ help:
 	@echo "  make clean       Clean build outputs"
 	@echo "  make toolchain   Ensure Star6E cross-toolchain is present"
 	@echo "  make toolchain-maruko Ensure Maruko cross-toolchain is present"
-	@echo "  make remote-test Run remote tester (pass ARGS='...')"
+	@echo "  make remote-test Run bounded remote CLI/test-binary workflow (pass ARGS='...')"
+	@echo "  scripts/star6e_direct_deploy.sh cycle  Preferred Star6E venc deploy+HTTP smoke test"
 	@echo "  make verify      Build both backends and verify binaries exist"
 	@echo "  make pre-pr      Full pre-PR checklist (version, changelog, build)"
 
@@ -190,7 +191,7 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
 TEST_LIB_SRCS := src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/sensor_select.c src/venc_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c lib/cJSON.c
 
 $(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/h26x_param_sets.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h
-	$(HOST_CC) $(HOST_CFLAGS) $(HOST_TEST_EXTRA) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -o $@
 
 test: $(TEST_RUNNER)
 	./$(TEST_RUNNER)

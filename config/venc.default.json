@@ -23,7 +23,9 @@
     "bitrate": 8192,
     "gopSize": 1.0,
     "qpDelta": -4,
-    "frameLost": true
+    "frameLost": true,
+    "sceneThreshold": 0,
+    "sceneHoldoff": 2
   },
   "outgoing": {
     "enabled": false,

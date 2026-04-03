@@ -15,17 +15,16 @@
   4. Maruko backend streams in compact and RTP modes.
   5. Maruko runtime/link libs are vendored under `libs/maruko/`.
   6. Maruko shim is a normal runtime dependency (`libmaruko_uclibc_shim.so`), not a preload requirement.
-  7. JSON runtime attempt was rolled back after Star6E stream regressions.
-     - current runtime remains CLI-based `venc` path.
-     - rollback/postmortem: `documentation/JSON_CONFIG_ROLLBACK_NOTES.md`
+  7. JSON config + HTTP API runtime is live again.
+     - current Star6E `venc` validation uses `/etc/venc.json` and `scripts/star6e_direct_deploy.sh`.
+     - historical rollback/postmortem remains in `documentation/JSON_CONFIG_ROLLBACK_NOTES.md`.
 
 ## Remaining Implementation Steps (Priority Order)
-1. JSON config migration (top priority):
-   - keep user-facing config simple and unambiguous (`capture_resolution` + `fps` auto-select sensor mode),
-   - split parser/config mapping from graph/runtime behavior changes,
+1. JSON config runtime hardening (top priority):
+   - keep user-facing config simple and unambiguous,
    - harden schema validation behavior (strict vs compatible mode),
    - add explicit migration handling/checks for future schema versions,
-   - validate Star6E output parity against CLI baseline before merge.
+   - validate Star6E output parity against the production `/etc/venc.json` path.
 2. 3A control review (Star6E-first):
    - review/confirm default SigmaStar 3A activation state in standalone flow,
    - evaluate tunable AE/AWB cadence controls for high-fps CPU reduction (for example AE every 2nd/3rd frame),
@@ -34,11 +33,10 @@
 3. Versioning and release traceability:
    - enforce SemVer via `VERSION`,
    - require `HISTORY.md` update for each PR/iteration.
-4. HTTP control API for live runtime updates:
-   - add a local HTTP endpoint to query and update runtime settings (bitrate, GOP, codec profile, stream target, image controls),
-   - define and implement setting mutability classes (`live`, `requires_rebind`, `requires_pipeline_restart`),
-   - include Maruko stubs where behavior is not yet implemented,
-   - keep endpoint/payload/status contract synchronized in `documentation/HTTP_API_CONTRACT.md`.
+4. HTTP/API contract hardening:
+   - keep endpoint/payload/status contract synchronized in `documentation/HTTP_API_CONTRACT.md`,
+   - expand validation around live vs restart-required setting classes,
+   - keep Maruko stubs explicit where behavior is not yet implemented.
 5. Maruko codec parity validation:
    - verify and document `264cbr` behavior in current Maruko graph path.
 6. Maruko sensor-depth follow-up (deferred until newer driver):
@@ -79,11 +77,11 @@
 1. Build gate:
    - `make build SOC_BUILD=star6e`
    - `make build SOC_BUILD=maruko`
-2. Star6E gate (board: `192.168.2.10`):
-   - baseline CLI run starts pipeline without crashes.
-   - with matching sensor/ISP tuning, RTP payload output is non-zero.
+2. Star6E gate (board: `192.168.1.13`):
+   - direct deploy cycle starts pipeline without crashes.
+   - with matching sensor/ISP tuning, HTTP API is reachable and RTP payload output is non-zero.
    - no new VIF/VPE dmesg regressions vs baseline.
-3. Maruko gate (board: `192.168.1.11`):
+3. Maruko gate (board: `192.168.2.12`):
    - H.265 compact stream stable.
    - H.265 RTP stream stable.
 

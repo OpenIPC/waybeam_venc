@@ -67,8 +67,17 @@ make test-ci
 Copy the binary to the target device:
 
 ```sh
-scp out/star6e/venc root@192.168.2.13:/usr/bin/venc
+scp out/star6e/venc root@<device-ip>:/usr/bin/venc
 ```
+
+For the current Star6E bench workflow, prefer the helper:
+
+```sh
+scripts/star6e_direct_deploy.sh cycle
+```
+
+It deploys `/usr/bin/venc`, uses the production `/etc/venc.json`, waits for
+HTTP readiness, and captures `/tmp/venc.log`.
 
 The binary resolves shared libraries from `/usr/lib`. For staged bundles,
 set `LD_LIBRARY_PATH` to the lib directory.
@@ -80,7 +89,7 @@ template is provided at `config/venc.default.json`.
 
 ```json
 {
-  "system": { "webPort": 8888, "overclockLevel": 0, "verbose": false },
+  "system": { "webPort": 80, "overclockLevel": 0, "verbose": false },
   "sensor": {
     "index": -1, "mode": -1,
     "unlockEnabled": true, "unlockCmd": 35,
@@ -100,7 +109,7 @@ template is provided at `config/venc.default.json`.
   "outgoing": {
     "enabled": false, "server": "", "streamMode": "rtp",
     "maxPayloadSize": 1400,
-    "connectedUdp": true, "audioPort": 5601, "sidecarPort": 0
+    "connectedUdp": true, "audioPort": 5601, "sidecarPort": 5602
   },
   "fpv": {
     "roiEnabled": true, "roiQp": 0, "roiSteps": 2,
@@ -135,7 +144,7 @@ to start streaming.
 ## HTTP API
 
 All endpoints use **HTTP GET** (BusyBox wget compatible). The default
-port is 8888 (configurable via `system.webPort`). Responses are JSON
+port is 80 (configurable via `system.webPort`). Responses are JSON
 with an `{"ok": true/false, ...}` envelope.
 
 ### Endpoints
@@ -145,7 +154,7 @@ with an `{"ok": true/false, ...}` envelope.
 Returns version info.
 
 ```sh
-curl http://192.168.2.13:8888/api/v1/version
+curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
@@ -157,17 +166,19 @@ curl http://192.168.2.13:8888/api/v1/version
 Returns the full active configuration as JSON.
 
 ```sh
-curl http://192.168.2.13:8888/api/v1/config
+curl http://<device-ip>:<port>/api/v1/config
 ```
 
 #### GET /api/v1/capabilities
 
 Returns every field with its mutability (`live` or `restart_required`)
-and support status. Use this to discover which fields can be changed
-at runtime.
+and support status. Support is backend-specific; for example, Star6E
+reports `video0.scene_threshold` / `video0.scene_holdoff` as supported,
+while Maruko reports them as
+unsupported. Use this to discover which fields can be changed at runtime.
 
 ```sh
-curl http://192.168.2.13:8888/api/v1/capabilities
+curl http://<device-ip>:<port>/api/v1/capabilities
 ```
 
 #### GET /api/v1/get?field_name
@@ -175,7 +186,7 @@ curl http://192.168.2.13:8888/api/v1/capabilities
 Read a single configuration field.
 
 ```sh
-curl "http://192.168.2.13:8888/api/v1/get?video0.bitrate"
+curl "http://<device-ip>:<port>/api/v1/get?video0.bitrate"
 ```
 
 ```json
@@ -189,16 +200,24 @@ fields trigger an automatic pipeline reinit.
 
 ```sh
 # Live change — immediate
-curl "http://192.168.2.13:8888/api/v1/set?video0.bitrate=4096"
+curl "http://<device-ip>:<port>/api/v1/set?video0.bitrate=4096"
+
+# Live multi-set — all fields must be live
+curl "http://<device-ip>:<port>/api/v1/set?video0.bitrate=4096&system.verbose=true"
 
 # Restart-required — triggers pipeline reinit
-curl "http://192.168.2.13:8888/api/v1/set?video0.size=1280x720"
+curl "http://<device-ip>:<port>/api/v1/set?video0.size=1280x720"
 ```
 
 ```json
-{"ok":true,"data":{"field":"video0.bitrate","applied":"live"}}
-{"ok":true,"data":{"field":"video0.size","applied":"restart_required"}}
+{"ok":true,"data":{"field":"video0.bitrate","value":4096}}
+{"ok":true,"data":{"applied":[{"field":"video0.bitrate","value":4096},{"field":"system.verbose","value":true}]}}
+{"ok":true,"data":{"field":"video0.size","value":"1280x720","reinit_pending":true}}
 ```
+
+Multi-set is supported only for live fields. If any restart-required field
+is present, the full request is rejected and restart/reinit changes must be
+sent one at a time.
 
 Returns HTTP 409 on validation failure (e.g., invalid AWB mode).
 
@@ -208,7 +227,7 @@ Trigger a full pipeline reinit. Reloads `/etc/venc.json` and restarts
 the camera pipeline without exiting the process.
 
 ```sh
-curl http://192.168.2.13:8888/api/v1/restart
+curl http://<device-ip>:<port>/api/v1/restart
 ```
 
 #### GET /api/v1/awb
@@ -216,15 +235,15 @@ curl http://192.168.2.13:8888/api/v1/restart
 Query current AWB (auto white balance) state from the ISP.
 
 ```sh
-curl http://192.168.2.13:8888/api/v1/awb
+curl http://<device-ip>:<port>/api/v1/awb
 ```
 
 #### GET /request/idr
 
-Request an immediate IDR keyframe from the encoder.
+Request an IDR keyframe from the encoder.
 
 ```sh
-curl http://192.168.2.13:8888/request/idr
+curl http://<device-ip>:<port>/request/idr
 ```
 
 #### GET /api/v1/record/start
@@ -233,8 +252,8 @@ Start SD card recording. Uses the configured `record.dir`, or override
 with a `?dir=` query parameter.
 
 ```sh
-curl "http://192.168.2.13:8888/api/v1/record/start"
-curl "http://192.168.2.13:8888/api/v1/record/start?dir=/mnt/mmcblk0p1"
+curl "http://<device-ip>:<port>/api/v1/record/start"
+curl "http://<device-ip>:<port>/api/v1/record/start?dir=/mnt/mmcblk0p1"
 ```
 
 #### GET /api/v1/record/stop
@@ -242,7 +261,7 @@ curl "http://192.168.2.13:8888/api/v1/record/start?dir=/mnt/mmcblk0p1"
 Stop SD card recording.
 
 ```sh
-curl "http://192.168.2.13:8888/api/v1/record/stop"
+curl "http://<device-ip>:<port>/api/v1/record/stop"
 ```
 
 #### GET /api/v1/record/status
@@ -250,7 +269,7 @@ curl "http://192.168.2.13:8888/api/v1/record/stop"
 Query recording status.
 
 ```sh
-curl "http://192.168.2.13:8888/api/v1/record/status"
+curl "http://<device-ip>:<port>/api/v1/record/status"
 ```
 
 ```json
@@ -262,7 +281,7 @@ curl "http://192.168.2.13:8888/api/v1/record/status"
 Query the secondary VENC channel status (dual/dual-stream modes only).
 
 ```sh
-curl "http://192.168.2.13:8888/api/v1/dual/status"
+curl "http://<device-ip>:<port>/api/v1/dual/status"
 ```
 
 ```json
@@ -277,10 +296,10 @@ Live-change secondary VENC channel parameters.
 
 ```sh
 # Change ch1 bitrate
-curl "http://192.168.2.13:8888/api/v1/dual/set?bitrate=10000"
+curl "http://<device-ip>:<port>/api/v1/dual/set?bitrate=10000"
 
 # Change ch1 GOP (in seconds)
-curl "http://192.168.2.13:8888/api/v1/dual/set?gop=1.0"
+curl "http://<device-ip>:<port>/api/v1/dual/set?gop=1.0"
 ```
 
 #### GET /api/v1/dual/idr
@@ -288,7 +307,7 @@ curl "http://192.168.2.13:8888/api/v1/dual/set?gop=1.0"
 Request an IDR keyframe on the secondary VENC channel.
 
 ```sh
-curl "http://192.168.2.13:8888/api/v1/dual/idr"
+curl "http://<device-ip>:<port>/api/v1/dual/idr"
 ```
 
 ### Field Reference
@@ -339,12 +358,59 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.codec` | string | restart | `"h265"` (h264 on Maruko) |
+| `video0.codec` | string | restart | `"h265"` (Maruko also supports `"h264"`; Star6E RTP remains h265-only) |
 | `video0.rc_mode` | string | restart | `"cbr"`, `"vbr"`, `"avbr"`, `"fixqp"` |
 | `video0.fps` | uint | live | Output frame rate |
 | `video0.size` | WxH | restart | Encode resolution (e.g., `"1920x1080"`) |
 | `video0.bitrate` | uint | live | Target bitrate in kbps |
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
+| `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |
+| `video0.frame_lost` | bool | restart | Enable frame-lost safety net |
+
+#### Adaptive Encoder Control (Star6E only)
+
+| Field | Type | Mutability | Description |
+|-------|------|------------|-------------|
+| `video0.scene_threshold` | uint16 | restart | Scene spike threshold ratio x100 (0=off, 150=1.5x EMA spike detection) |
+| `video0.scene_holdoff` | uint8 | restart | Consecutive spike frames required (default 2) |
+
+CamelCase aliases: `video0.sceneThreshold`, `video0.sceneHoldoff`.
+
+When `scene_threshold` is non-zero, the inline scene detector tracks frame
+size EMA, computes complexity, and requests an IDR after a spike above the
+threshold settles. Use `/api/v1/capabilities` to check backend support
+before writing these fields.
+
+Typical usage:
+- Leave `video0.scene_threshold=0` for fixed-GOP behavior controlled by
+  `video0.gop_size`.
+- Set `video0.scene_threshold=150` for FPV/live links where
+  scene-change-triggered IDRs improve stream recovery.
+- Pair scene detection with `outgoing.sidecar_port>0` when an external
+  controller needs per-frame `frame_type`, `complexity`, `scene_change`,
+  `idr_inserted`, and `frames_since_idr` telemetry on the sidecar.
+
+Current Star6E IMX335 bench starting point:
+
+```json
+"video0": {
+  "sceneThreshold": 150,
+  "sceneHoldoff": 2
+}
+```
+
+Tuning notes:
+- `sceneThreshold` is a frame-size-spike ratio scaled by `100`, so
+  `150` means roughly "trigger near a 1.5x spike over the rolling baseline".
+  Raise to reduce false positives, lower to increase sensitivity.
+- Keep `sceneChangeHoldoff=2` unless threshold changes alone cannot suppress
+  false positives. Raising holdoff reduces responsiveness faster than raising
+  threshold does.
+
+Codec note:
+- Star6E with `outgoing.stream_mode="rtp"` requires `video0.codec="h265"`.
+- Maruko accepts both `h264` and `h265`.
+
 #### Outgoing (Streaming)
 
 | Field | Type | Mutability | Description |
@@ -454,50 +520,50 @@ modes, the secondary channel parameters can be adjusted live via `/api/v1/dual/s
 **Start streaming to a receiver:**
 
 ```sh
-curl "http://192.168.2.13:8888/api/v1/set?outgoing.server=udp://192.168.2.20:5600"
-curl "http://192.168.2.13:8888/api/v1/set?outgoing.enabled=true"
+curl "http://<device-ip>:<port>/api/v1/set?outgoing.server=udp://<receiver-ip>:5600"
+curl "http://<device-ip>:<port>/api/v1/set?outgoing.enabled=true"
 ```
 
 **Switch to 720p at 90fps with lower bitrate:**
 
 ```sh
-curl "http://192.168.2.13:8888/api/v1/set?video0.size=1280x720"
-curl "http://192.168.2.13:8888/api/v1/set?video0.fps=90"
-curl "http://192.168.2.13:8888/api/v1/set?video0.bitrate=4096"
+curl "http://<device-ip>:<port>/api/v1/set?video0.size=1280x720"
+curl "http://<device-ip>:<port>/api/v1/set?video0.fps=90"
+curl "http://<device-ip>:<port>/api/v1/set?video0.bitrate=4096"
 ```
 
 **Manual white balance at 6500K:**
 
 ```sh
-curl "http://192.168.2.13:8888/api/v1/set?isp.awb_mode=ct_manual"
-curl "http://192.168.2.13:8888/api/v1/set?isp.awb_ct=6500"
+curl "http://<device-ip>:<port>/api/v1/set?isp.awb_mode=ct_manual"
+curl "http://<device-ip>:<port>/api/v1/set?isp.awb_ct=6500"
 ```
 
 **Enable center-priority ROI encoding:**
 
 ```sh
-curl "http://192.168.2.13:8888/api/v1/set?fpv.roi_enabled=true"
-curl "http://192.168.2.13:8888/api/v1/set?fpv.roi_qp=-18"
-curl "http://192.168.2.13:8888/api/v1/set?fpv.roi_steps=2"
+curl "http://<device-ip>:<port>/api/v1/set?fpv.roi_enabled=true"
+curl "http://<device-ip>:<port>/api/v1/set?fpv.roi_qp=-18"
+curl "http://<device-ip>:<port>/api/v1/set?fpv.roi_steps=2"
 ```
 
 **Request an IDR keyframe (useful after stream start):**
 
 ```sh
-curl http://192.168.2.13:8888/request/idr
+curl http://<device-ip>:<port>/request/idr
 ```
 
 **Start/stop SD card recording:**
 
 ```sh
 # Start recording (MPEG-TS with audio)
-curl "http://192.168.2.13:8888/api/v1/record/start"
+curl "http://<device-ip>:<port>/api/v1/record/start"
 
 # Check recording status
-curl "http://192.168.2.13:8888/api/v1/record/status"
+curl "http://<device-ip>:<port>/api/v1/record/status"
 
 # Stop recording
-curl "http://192.168.2.13:8888/api/v1/record/stop"
+curl "http://<device-ip>:<port>/api/v1/record/stop"
 ```
 
 ## SD Card Recording
@@ -543,7 +609,7 @@ performance benchmarks, limitations, and architecture details.
 ## RTP Timing Sidecar
 
 An optional out-of-band UDP channel that sends per-frame timing metadata
-alongside the RTP video stream. Disabled by default (`outgoing.sidecarPort=0`).
+alongside the RTP video stream. Set `outgoing.sidecarPort=0` to disable it.
 
 ### Purpose
 
@@ -563,13 +629,15 @@ This enables measurement of:
   (requires clock synchronisation)
 - **Frame intervals** — jitter and regularity of both sender and receiver clocks
 - **RTP packet counts and gaps** — per-frame packet accounting
+- **Encoded frame size / type / QP** — when Star6E scene detection is active
+- **Scene detection state** — complexity, scene-change flag, IDR decision, frames-since-IDR
 
 ### Enabling
 
 Set the sidecar port in the configuration:
 
 ```sh
-curl "http://192.168.2.13:8888/api/v1/set?outgoing.sidecar_port=6666"
+curl "http://<device-ip>:<port>/api/v1/set?outgoing.sidecar_port=6666"
 ```
 
 Or in `/etc/venc.json`:
@@ -592,7 +660,7 @@ The sidecar uses a simple binary UDP protocol:
 | Message | Direction | Size | Purpose |
 |---------|-----------|------|---------|
 | SUBSCRIBE | probe -> venc | 8 B | Start/refresh metadata subscription |
-| FRAME | venc -> probe | 52 B | Per-frame timing + RTP sequence info |
+| FRAME | venc -> probe | 52 B base, 64 B with trailer | Per-frame timing + RTP sequence info, plus optional encoder telemetry |
 | SYNC_REQ | probe -> venc | 16 B | NTP-style clock offset request |
 | SYNC_RESP | venc -> probe | 32 B | Clock offset response (t1, t2, t3) |
 
@@ -601,6 +669,19 @@ All messages share a common 6-byte header: 4-byte magic (`0x52545053` =
 
 Subscription expires after 5 seconds without any probe message. Both
 SUBSCRIBE and SYNC_REQ refresh the expiry timer.
+
+When Star6E adaptive encoder control is enabled, `FRAME` appends a 12-byte
+trailer carrying `frame_size_bytes`, `frame_type`, `qp`, `complexity`,
+`scene_change`, `idr_inserted`, and `frames_since_idr`.
+Maruko and timing-only Star6E runs keep sending the original 52-byte frame.
+
+Link-control / FEC usage:
+- RTP video keeps using `outgoing.server` as usual.
+- Set `outgoing.sidecarPort` to expose sidecar metadata on a separate UDP port.
+- Base timing fields are available whenever the sidecar is enabled.
+- The extra encoder trailer requires Star6E with `video0.scene_threshold>0`.
+- The sender tracks one active sidecar subscriber at a time; the most recent
+  probe or consumer to subscribe receives the frame metadata.
 
 ### Reference Probe
 
@@ -617,13 +698,14 @@ make rtp_timing_probe
 Usage:
 
 ```sh
-./rtp_timing_probe --venc-ip 192.168.2.13 [--rtp-port 5600] [--sidecar-port 6666] [--stats]
+./rtp_timing_probe --venc-ip <device-ip> [--rtp-port 5600] [--sidecar-port 6666] [--stats]
 ```
 
 Without `--stats`, the probe outputs tab-separated frame records to stdout
 (one line per frame) suitable for piping to analysis tools. The TSV includes
-columns for all timing fields, sequence numbers, gaps, intervals, and
-estimated latency.
+columns for all timing fields, sequence numbers, gaps, intervals, estimated
+latency, and optional encoder-feedback fields when the sidecar trailer is
+present. For timing-only frames, the encoder-feedback columns print `-`.
 
 With `--stats`, a summary is printed to stderr on exit:
 
@@ -677,19 +759,34 @@ restart.
 
 See `documentation/SENSOR_UNLOCK_IMX415_IMX335.md` for register details.
 
-## Remote Testing
+## Deployment Testing
 
-Build, deploy, and test in one command:
+For the current Star6E bench, use the direct helper against the production
+`/etc/venc.json` workflow:
+
+```sh
+./scripts/star6e_direct_deploy.sh cycle
+./scripts/star6e_direct_deploy.sh status
+```
+
+This deploys `/usr/bin/venc`, waits for the HTTP API, and captures
+`/tmp/venc.log`.
+
+Use `remote_test.sh` for bounded CLI runs such as sensor-mode discovery,
+max-FPS sweeps, and dedicated test binaries:
 
 ```sh
 ./scripts/remote_test.sh --help
 ```
 
-Run the API test suite against a live device:
+Run the API test suite against a live device after `venc` is already running:
 
 ```sh
-./scripts/api_test_suite.sh 192.168.2.13 8888
+./scripts/api_test_suite.sh 192.168.1.13 80
 ```
+
+Scene-change IDR control is configured through `video0.scene_threshold` in
+`/etc/venc.json`. Leave `video0.scene_threshold=0` for baseline behavior.
 
 ## Web Dashboard
 
@@ -698,8 +795,9 @@ venc includes a built-in web dashboard served at the root URL (`/`). Open
 
 ### Settings Tab
 
-All 75 configuration fields across 11 sections (System, Sensor, ISP, Image,
-Video, Outgoing, Audio, FPV, IMU, EIS, Recording) with:
+All 84 configuration fields across 13 sections (System, Sensor, ISP, Image,
+Video, Outgoing, Audio, FPV, IMU, EIS, Recording, Adaptive Encoder Control,
+Debug) with:
 
 - **Collapsible sections** — start collapsed for a clean overview
 - **Live/Restart badges** — green for immediate changes, orange for restart-required

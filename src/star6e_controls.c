@@ -133,6 +133,9 @@ enum {
 
 static Star6eControlContext g_star6e_control_ctx;
 
+static int apply_encoder_gop(uint32_t gop_size);
+static int request_idr(void);
+
 static uint32_t align_down(uint32_t value, uint32_t align)
 {
 	return value / align * align;
@@ -208,10 +211,11 @@ static int apply_bitrate(uint32_t kbps)
 		kbps = 200000;
 	bits = kbps * 1024;
 
-	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
-		return -1;
 	if (g_star6e_control_ctx.vcfg)
 		frame_lost_enabled = g_star6e_control_ctx.vcfg->video0.frame_lost;
+
+	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
+		return -1;
 
 	switch (attr.rate.mode) {
 	case I6_VENC_RATEMODE_H265CBR:
@@ -244,7 +248,7 @@ static int apply_bitrate(uint32_t kbps)
 	return 0;
 }
 
-static int apply_gop(uint32_t gop_size)
+static int apply_encoder_gop(uint32_t gop_size)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 
@@ -278,6 +282,11 @@ static int apply_gop(uint32_t gop_size)
 		0 : -1;
 }
 
+static int apply_gop(uint32_t gop_size)
+{
+	return apply_encoder_gop(gop_size);
+}
+
 static int apply_qp_delta(int delta)
 {
 	MI_VENC_ChnAttr_t attr = {0};
@@ -291,15 +300,53 @@ static int apply_qp_delta(int delta)
 		return -1;
 	if (MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
 		return -1;
-
-	MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1);
+	if (request_idr() != 0)
+		return -1;
 	printf("> qpDelta changed to %d\n", delta);
+	return 0;
+}
+
+static int apply_encoder_fps(uint32_t fps)
+{
+	MI_VENC_ChnAttr_t attr = {0};
+	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
+		return -1;
+
+	switch (attr.rate.mode) {
+	case I6_VENC_RATEMODE_H265CBR:
+		attr.rate.h265Cbr.fpsNum = fps;
+		break;
+	case I6_VENC_RATEMODE_H264CBR:
+		attr.rate.h264Cbr.fpsNum = fps;
+		break;
+	case I6_VENC_RATEMODE_H265VBR:
+		attr.rate.h265Vbr.fpsNum = fps;
+		break;
+	case I6_VENC_RATEMODE_H264VBR:
+		attr.rate.h264Vbr.fpsNum = fps;
+		break;
+	case I6_VENC_RATEMODE_H265AVBR:
+		attr.rate.h265Avbr.fpsNum = fps;
+		break;
+	case I6_VENC_RATEMODE_H264AVBR:
+		attr.rate.h264Avbr.fpsNum = fps;
+		break;
+	default:
+		break;
+	}
+
+	return MI_VENC_SetChnAttr(g_star6e_control_ctx.venc_chn, &attr) == 0 ?
+		0 : -1;
+}
+
+static int apply_scene_fps(uint32_t fps)
+{
+	(void)fps;
 	return 0;
 }
 
 static int apply_fps(uint32_t fps)
 {
-	MI_VENC_ChnAttr_t attr = {0};
 	MI_S32 bind_ret;
 	uint32_t sensor_fps;
 
@@ -327,31 +374,10 @@ static int apply_fps(uint32_t fps)
 		return -1;
 	}
 
-	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) == 0) {
-		switch (attr.rate.mode) {
-		case I6_VENC_RATEMODE_H265CBR:
-			attr.rate.h265Cbr.fpsNum = fps;
-			break;
-		case I6_VENC_RATEMODE_H264CBR:
-			attr.rate.h264Cbr.fpsNum = fps;
-			break;
-		case I6_VENC_RATEMODE_H265VBR:
-			attr.rate.h265Vbr.fpsNum = fps;
-			break;
-		case I6_VENC_RATEMODE_H264VBR:
-			attr.rate.h264Vbr.fpsNum = fps;
-			break;
-		case I6_VENC_RATEMODE_H265AVBR:
-			attr.rate.h265Avbr.fpsNum = fps;
-			break;
-		case I6_VENC_RATEMODE_H264AVBR:
-			attr.rate.h264Avbr.fpsNum = fps;
-			break;
-		default:
-			break;
-		}
-		MI_VENC_SetChnAttr(g_star6e_control_ctx.venc_chn, &attr);
-	}
+	if (apply_encoder_fps(fps) != 0)
+		return -1;
+	if (apply_scene_fps(fps) != 0)
+		return -1;
 
 	printf("> FPS changed to %u (bind %u:%u)\n", fps, sensor_fps, fps);
 	return 0;
@@ -923,14 +949,23 @@ static int apply_output_enabled(bool on)
 		restored_fps = g_star6e_control_ctx.pipeline->stored_fps ?
 			g_star6e_control_ctx.pipeline->stored_fps :
 			g_star6e_control_ctx.vcfg->video0.fps;
-		apply_fps(restored_fps);
-		MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1);
+		if (apply_fps(restored_fps) != 0) {
+			g_star6e_control_ctx.pipeline->output_enabled = 0;
+			return -1;
+		}
+		if (request_idr() != 0) {
+			g_star6e_control_ctx.pipeline->output_enabled = 0;
+			return -1;
+		}
 		printf("> Output enabled, FPS restored to %u\n", restored_fps);
 	} else {
 		g_star6e_control_ctx.pipeline->output_enabled = 0;
 		g_star6e_control_ctx.pipeline->stored_fps = g_star6e_control_ctx.vcfg ?
 			g_star6e_control_ctx.vcfg->video0.fps : 30;
-		apply_fps(STAR6E_CONTROLS_IDLE_FPS);
+		if (apply_fps(STAR6E_CONTROLS_IDLE_FPS) != 0) {
+			g_star6e_control_ctx.pipeline->output_enabled = 1;
+			return -1;
+		}
 		printf("> Output disabled, FPS reduced to %u (idle)\n",
 			STAR6E_CONTROLS_IDLE_FPS);
 	}
@@ -946,8 +981,8 @@ static int apply_server(const char *uri)
 	    uri) != 0) {
 		return -1;
 	}
-
-	MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1);
+	if (request_idr() != 0)
+		return -1;
 	printf("> Destination changed to %s\n", uri);
 	return 0;
 }

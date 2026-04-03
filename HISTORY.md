@@ -1,5 +1,39 @@
 # History
 
+## [0.6.1] - 2026-04-03
+
+- Fix cold-boot 54fps lock with legacyAe: call MI_SNR_SetFps during
+  pipeline startup to force sensor timing compliance when CUS3A is not
+  active.
+- Fix sidecar telemetry NULL pointer: enriched encoder feedback was
+  never sent (enc_ptr was NULL instead of &enc_info).
+- Scene detector: saturate frame_count to prevent EMA warmup re-entry
+  after ~13h; cache frame_size/type to avoid redundant packet walks;
+  skip spike logic entirely when disabled (threshold=0).
+- Change video0.scene_threshold and scene_holdoff to MUT_RESTART
+  (no live-apply pathway exists).
+- Remove all enc_ctrl/encCtrl references from code and documentation.
+
+## [0.6.0] - 2026-04-02
+
+- Add inline scene detector in star6e_runtime.c (~150 lines) behind
+  `video0.scene_threshold` config field.
+  - Tracks frame size EMA, computes complexity (0-255).
+  - Detects spikes above configurable threshold for holdoff consecutive frames.
+  - Waits for spike to subside before requesting IDR (when threshold>0).
+  - Two config fields: `video0.scene_threshold` (uint16, 0=off, 150=1.5x EMA
+    spike detection), `video0.scene_holdoff` (uint8, default 2).
+  - Default off (`scene_threshold=0`): no IDR injection — zero-risk default.
+- Enrich RTP timing sidecar with per-frame encoder telemetry:
+  `frame_type`, `complexity`, `scene_change`, `idr_inserted`,
+  `frames_since_idr`.
+- Add multi-field set to HTTP API: `GET /api/v1/set?a=1&b=2` applies
+  multiple live fields atomically in one request.
+- Add field capabilities endpoint with backend-specific support filtering:
+  `GET /api/v1/capabilities` reports mutability and per-backend support.
+- API improvements: camelCase alias table for Majestic-compatible clients,
+  duplicate-field rejection in multi-set, mixed live/restart rejection.
+
 ## [0.5.0] - 2026-04-01
 
 - Add debug OSD overlay for encoder diagnostics and EIS crop visualization.

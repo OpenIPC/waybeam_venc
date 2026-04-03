@@ -37,6 +37,15 @@
 #define RTP_SIDECAR_SUB_TTL_US    (5 * 1000000ULL)   /* 5 seconds          */
 
 #define RTP_SIDECAR_FLAG_KEYFRAME 0x01
+#define RTP_SIDECAR_FLAG_ENC_INFO 0x02
+
+/*
+ * Frame type values carried in the optional encoder-feedback trailer.
+ * These stay local to the sidecar ABI.
+ */
+#define RTP_SIDECAR_FRAME_P       0
+#define RTP_SIDECAR_FRAME_I       1
+#define RTP_SIDECAR_FRAME_IDR     2
 
 /* ── Wire structs (all fields network byte order) ────────────────────── */
 
@@ -85,6 +94,30 @@ typedef struct {
 	uint64_t last_pkt_send_us; /* CLOCK_MONOTONIC_RAW µs after final sendmsg */
 } RtpSidecarFrame;           /* 52 bytes */
 
+/**
+ * Optional encoder-feedback trailer — venc → probe, 12 bytes.
+ *
+ * Appended immediately after RtpSidecarFrame when
+ * RTP_SIDECAR_FLAG_ENC_INFO is set.
+ *
+ * Values come from the inline scene detector's per-frame telemetry.
+ */
+typedef struct {
+	uint32_t frame_size_bytes; /* encoded frame bytes                        */
+	uint8_t  frame_type;       /* RTP_SIDECAR_FRAME_*                        */
+	uint8_t  qp;               /* start QP / closest available per-frame QP  */
+	uint8_t  complexity;       /* 0-255 scene complexity estimate            */
+	uint8_t  scene_change;     /* 1 = scene spike detected                   */
+	uint8_t  gop_state;        /* GopState enum value                        */
+	uint8_t  idr_inserted;     /* 1 = controller requested IDR after frame   */
+	uint16_t frames_since_idr; /* controller frames-since-IDR counter        */
+} RtpSidecarEncInfoWire;     /* 12 bytes */
+
+typedef struct {
+	RtpSidecarFrame       frame;
+	RtpSidecarEncInfoWire enc;
+} RtpSidecarFrameExt;         /* 64 bytes */
+
 /** Clock sync request — probe → venc, 16 bytes */
 typedef struct {
 	uint32_t magic;
@@ -106,6 +139,18 @@ typedef struct {
 } RtpSidecarSyncResp;        /* 32 bytes */
 
 #pragma pack(pop)
+
+/* Host-order encoder feedback passed to rtp_sidecar_send_frame(). */
+typedef struct {
+	uint32_t frame_size_bytes;
+	uint8_t  frame_type;
+	uint8_t  qp;
+	uint8_t  complexity;
+	uint8_t  scene_change;
+	uint8_t  gop_state;
+	uint8_t  idr_inserted;
+	uint16_t frames_since_idr;
+} RtpSidecarEncInfo;
 
 /* ── Sender state (embedded in backend, not used by probe) ───────────── */
 
@@ -156,12 +201,14 @@ void rtp_sidecar_poll(RtpSidecarSender *s);
  * seq_count      : number of RTP packets sent for this frame.
  * capture_us     : encoder PTS converted to CLOCK_MONOTONIC µs, or 0.
  * frame_ready_us : CLOCK_MONOTONIC µs captured before RTP sending began.
+ * enc_info       : optional host-order encoder feedback trailer.
  *
  * Returns 0 (success, no subscriber, or disabled), -1 on send error.
  */
 int rtp_sidecar_send_frame(RtpSidecarSender *s,
-                           uint32_t ssrc, uint32_t rtp_ts,
-                           uint16_t seq_first, uint16_t seq_count,
-                           uint64_t capture_us, uint64_t frame_ready_us);
+	uint32_t ssrc, uint32_t rtp_ts,
+	uint16_t seq_first, uint16_t seq_count,
+	uint64_t capture_us, uint64_t frame_ready_us,
+	const RtpSidecarEncInfo *enc_info);
 
 #endif /* RTP_SIDECAR_H */

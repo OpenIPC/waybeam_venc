@@ -17,6 +17,7 @@
 static VencConfig *g_cfg;
 static const VencApplyCallbacks *g_cb;
 static char g_backend[32];
+static int g_api_routes_registered = 0;
 
 /* Mutex protecting g_cfg field access from the httpd thread.
  * All handle_set/handle_get calls run on the httpd pthread; the main
@@ -221,6 +222,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, fps,         FT_UINT,   MUT_RESTART),
 	FIELD(record, gop_size,    FT_DOUBLE, MUT_RESTART),
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
+	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
+	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -284,6 +287,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.maxSeconds", "record.max_seconds" },
 	{ "record.maxMB", "record.max_mb" },
 	{ "record.gopSize", "record.gop_size" },
+	{ "video0.sceneThreshold", "video0.scene_threshold" },
+	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -303,14 +308,33 @@ static const char *canonicalize_field_key(const char *key)
 	return key;
 }
 
+int venc_api_field_supported_for_backend(const char *backend_name,
+	const char *field_key)
+{
+	const char *canonical_key;
+
+	(void)backend_name;
+	canonical_key = canonicalize_field_key(field_key);
+	if (!canonical_key)
+		return 0;
+
+	return 1;
+}
+
 /* ── Field value helpers ─────────────────────────────────────────────── */
 
 /* Format a field value as a JSON fragment string (caller must free).
  * Uses cJSON for strings to ensure proper escaping of special chars. */
-static char *field_to_json_value(const FieldDesc *f)
+static char *field_to_json_value_from_cfg(const VencConfig *cfg,
+	const FieldDesc *f)
 {
-	const void *ptr = (const char *)g_cfg + f->offset;
+	const void *ptr;
 	char buf[320];
+
+	if (!cfg || !f)
+		return strdup("null");
+
+	ptr = (const char *)cfg + f->offset;
 	switch (f->type) {
 	case FT_BOOL:
 		snprintf(buf, sizeof(buf), "%s", *(const bool *)ptr ? "true" : "false");
@@ -349,11 +373,22 @@ static char *field_to_json_value(const FieldDesc *f)
 	return strdup("null");
 }
 
+static char *field_to_json_value(const FieldDesc *f)
+{
+	return field_to_json_value_from_cfg(g_cfg, f);
+}
+
 /* Parse a string value and write it into the config field.
  * Returns 0 on success, -1 on parse error. */
-static int field_from_string(const FieldDesc *f, const char *val)
+static int field_from_string_cfg(VencConfig *cfg, const FieldDesc *f,
+	const char *val)
 {
-	void *ptr = (char *)g_cfg + f->offset;
+	void *ptr;
+
+	if (!cfg || !f || !val)
+		return -1;
+
+	ptr = (char *)cfg + f->offset;
 	switch (f->type) {
 	case FT_BOOL:
 		if (strcmp(val, "true") == 0 || strcmp(val, "1") == 0)
@@ -423,109 +458,44 @@ static int field_from_string(const FieldDesc *f, const char *val)
 	return 0;
 }
 
-/* Try to apply a live field change via callbacks.  Returns 0 if applied,
- * -1 if no callback available. */
-/* Convert GOP interval (seconds) to frame count for the encoder.
- * 0 = all-intra (every frame is a keyframe, gop=1). */
-static uint32_t gop_seconds_to_frames(double gop_sec, uint32_t fps)
-{
-	if (gop_sec <= 0.0)
-		return 1;
-	if (fps == 0)
-		fps = 30;
-	uint32_t frames = (uint32_t)(gop_sec * fps + 0.5);
-	return frames < 1 ? 1 : frames;
-}
-
-static int try_apply_live(const char *key, const FieldDesc *f)
-{
-	if (!g_cb) return -1;
-
-	if (strcmp(key, "video0.bitrate") == 0 && g_cb->apply_bitrate)
-		return g_cb->apply_bitrate(g_cfg->video0.bitrate);
-	if (strcmp(key, "video0.fps") == 0 && g_cb->apply_fps) {
-		int ret = g_cb->apply_fps(g_cfg->video0.fps);
-		if (ret != 0) return ret;
-		/* GOP is relative to FPS — recalculate frames for new rate */
-		if (g_cb->apply_gop) {
-			uint32_t gop_frames = gop_seconds_to_frames(
-				g_cfg->video0.gop_size, g_cfg->video0.fps);
-			g_cb->apply_gop(gop_frames);
-		}
-		return 0;
-	}
-	if (strcmp(key, "video0.gop_size") == 0 && g_cb->apply_gop) {
-		uint32_t gop_frames = gop_seconds_to_frames(
-			g_cfg->video0.gop_size, g_cfg->video0.fps);
-		return g_cb->apply_gop(gop_frames);
-	}
-	if (strcmp(key, "video0.qp_delta") == 0 && g_cb->apply_qp_delta)
-		return g_cb->apply_qp_delta(g_cfg->video0.qp_delta);
-	if (strcmp(key, "fpv.roi_enabled") == 0 && g_cb->apply_roi_qp)
-		return g_cb->apply_roi_qp(g_cfg->fpv.roi_qp);
-	if (strcmp(key, "fpv.roi_qp") == 0 && g_cb->apply_roi_qp)
-		return g_cb->apply_roi_qp(g_cfg->fpv.roi_qp);
-	if (strcmp(key, "fpv.roi_steps") == 0 && g_cb->apply_roi_qp) {
-		if (g_cfg->fpv.roi_steps < 1) g_cfg->fpv.roi_steps = 1;
-		if (g_cfg->fpv.roi_steps > PIPELINE_ROI_MAX_STEPS)
-			g_cfg->fpv.roi_steps = PIPELINE_ROI_MAX_STEPS;
-		return g_cb->apply_roi_qp(g_cfg->fpv.roi_qp);
-	}
-	if (strcmp(key, "fpv.roi_center") == 0 && g_cb->apply_roi_qp) {
-		if (g_cfg->fpv.roi_center < 0.1) g_cfg->fpv.roi_center = 0.1;
-		if (g_cfg->fpv.roi_center > 0.9) g_cfg->fpv.roi_center = 0.9;
-		return g_cb->apply_roi_qp(g_cfg->fpv.roi_qp);
-	}
-	if (strcmp(key, "isp.exposure") == 0 && g_cb->apply_exposure)
-		return g_cb->apply_exposure(g_cfg->isp.exposure * 1000);  /* ms -> us */
-	if (strcmp(key, "isp.gain_max") == 0 && g_cb->apply_gain_max)
-		return g_cb->apply_gain_max(g_cfg->isp.gain_max);
-	if (strcmp(key, "isp.awb_mode") == 0 && g_cb->apply_awb_mode) {
-		int mode = 0;
-		if (strcmp(g_cfg->isp.awb_mode, "ct_manual") == 0) mode = 1;
-		return g_cb->apply_awb_mode(mode, g_cfg->isp.awb_ct);
-	}
-	if (strcmp(key, "isp.awb_ct") == 0 && g_cb->apply_awb_mode) {
-		int mode = 0;
-		if (strcmp(g_cfg->isp.awb_mode, "ct_manual") == 0) mode = 1;
-		return g_cb->apply_awb_mode(mode, g_cfg->isp.awb_ct);
-	}
-	if (strcmp(key, "system.verbose") == 0 && g_cb->apply_verbose)
-		return g_cb->apply_verbose(g_cfg->system.verbose);
-	if (strcmp(key, "outgoing.enabled") == 0 && g_cb->apply_output_enabled)
-		return g_cb->apply_output_enabled(g_cfg->outgoing.enabled);
-	if (strcmp(key, "outgoing.server") == 0 && g_cb->apply_server)
-		return g_cb->apply_server(g_cfg->outgoing.server);
-	if (strcmp(key, "audio.mute") == 0 && g_cb->apply_mute)
-		return g_cb->apply_mute(g_cfg->audio.mute);
-
-	(void)f;
-	return -1;
-}
-
 /* ── Field-level validation ──────────────────────────────────────────── */
 
 /* Check a single field value after parsing.  Returns NULL if valid,
  * or a static error message string if invalid. */
-static const char *validate_field(const char *key)
+static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 {
+	if (!cfg || !key)
+		return "invalid config state";
+
 	if (strcmp(key, "isp.awb_mode") == 0) {
-		if (strcmp(g_cfg->isp.awb_mode, "auto") != 0 &&
-		    strcmp(g_cfg->isp.awb_mode, "ct_manual") != 0)
+		if (strcmp(cfg->isp.awb_mode, "auto") != 0 &&
+		    strcmp(cfg->isp.awb_mode, "ct_manual") != 0)
 			return "awb_mode must be 'auto' or 'ct_manual'";
 	}
 	if (strcmp(key, "video0.qp_delta") == 0) {
-		if (g_cfg->video0.qp_delta < -12 || g_cfg->video0.qp_delta > 12)
+		if (cfg->video0.qp_delta < -12 || cfg->video0.qp_delta > 12)
 			return "qp_delta must be in range [-12, 12]";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
-		if (g_cfg->fpv.roi_qp < -30 || g_cfg->fpv.roi_qp > 30)
+		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
 			return "roi_qp must be in range [-30, 30]";
 	}
+	if (strcmp(key, "fpv.roi_steps") == 0) {
+		if (cfg->fpv.roi_steps < 1 ||
+		    cfg->fpv.roi_steps > PIPELINE_ROI_MAX_STEPS)
+			return "roi_steps must be in range [1, 4]";
+	}
+	if (strcmp(key, "fpv.roi_center") == 0) {
+		if (cfg->fpv.roi_center < 0.1 || cfg->fpv.roi_center > 0.9)
+			return "roi_center must be in range [0.1, 0.9]";
+	}
 	if (strcmp(key, "video0.bitrate") == 0) {
-		if (g_cfg->video0.bitrate == 0 || g_cfg->video0.bitrate > 200000)
+		if (cfg->video0.bitrate == 0 || cfg->video0.bitrate > 200000)
 			return "bitrate must be 1-200000 kbps";
 	}
+	if (strcmp(key, "video0.scene_holdoff") == 0 &&
+	    cfg->video0.scene_holdoff == 0)
+		return "video0.scene_holdoff must be >= 1";
 	return NULL;
 }
 
@@ -533,14 +503,25 @@ static const char *validate_field(const char *key)
 
 /* Check config consistency after a field change.  Returns NULL if valid,
  * or a static error message string if invalid. */
-static const char *validate_config(const VencConfig *cfg)
+static int config_codec_is_h265(const VencConfig *cfg)
 {
-	/* H.264 codec is not yet supported (RTP requires H.265, compact mode
-	 * H.264 support is planned but not implemented) */
-	if (strcmp(cfg->video0.codec, "h265") != 0 &&
-	    strcmp(cfg->video0.codec, "265") != 0) {
-		return "only h265 codec is currently supported";
+	return cfg &&
+		(strcmp(cfg->video0.codec, "h265") == 0 ||
+		 strcmp(cfg->video0.codec, "265") == 0);
+}
+
+static const char *validate_backend_config(const char *backend_name,
+	const VencConfig *cfg)
+{
+	if (!cfg)
+		return "invalid config state";
+
+	if (backend_name && strcmp(backend_name, "star6e") == 0 &&
+	    strcmp(cfg->outgoing.stream_mode, "compact") != 0 &&
+	    !config_codec_is_h265(cfg)) {
+		return "star6e RTP mode currently supports h265 only";
 	}
+
 	return NULL;
 }
 
@@ -573,6 +554,953 @@ static int parse_first_query_param(const char *query, char *key, size_t key_sz,
 		val[0] = '\0';
 	}
 	return 0;
+}
+
+#define SET_QUERY_MAX_PARAMS 16
+
+typedef struct {
+	char key[128];
+	char canonical_key[128];
+	char value[256];
+	const FieldDesc *field;
+} SetQueryParam;
+
+typedef enum {
+	LIVE_GROUP_INVALID = -1,
+	LIVE_GROUP_BITRATE = 0,
+	LIVE_GROUP_VIDEO_TIMING,
+	LIVE_GROUP_QP_DELTA,
+	LIVE_GROUP_ROI,
+	LIVE_GROUP_EXPOSURE,
+	LIVE_GROUP_GAIN_MAX,
+	LIVE_GROUP_AWB,
+	LIVE_GROUP_VERBOSE,
+	LIVE_GROUP_OUTGOING,
+	LIVE_GROUP_MUTE,
+	LIVE_GROUP_COUNT
+} LiveApplyGroup;
+
+typedef struct {
+	int video_fps;
+	int video_gop;
+	int awb_mode;
+	int awb_ct;
+	int outgoing_enabled;
+	int outgoing_server;
+} LiveBatchTouched;
+
+static int make_error_json(const char *code, const char *message, char **out_json)
+{
+	char buf[1024];
+	int len;
+
+	if (!out_json)
+		return -1;
+
+	len = snprintf(buf, sizeof(buf),
+		"{\"ok\":false,\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",
+		code ? code : "internal_error",
+		message ? message : "unknown error");
+	if (len >= (int)sizeof(buf))
+		len = (int)sizeof(buf) - 1;
+
+	*out_json = strdup(buf);
+	return *out_json ? 0 : -1;
+}
+
+static int make_handled_error_json(int status, const char *code,
+	const char *message, int *status_code, char **response_json)
+{
+	if (status_code)
+		*status_code = status;
+	if (make_error_json(code, message, response_json) != 0)
+		return -1;
+	return 1;
+}
+
+static int make_single_set_success_json(const char *field_key,
+	const char *json_value, int reinit_pending, char **out_json)
+{
+	char buf[512];
+	int len;
+
+	if (!field_key || !json_value || !out_json)
+		return -1;
+
+	if (reinit_pending) {
+		len = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s,"
+			"\"reinit_pending\":true}}",
+			field_key, json_value);
+	} else {
+		len = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s}}",
+			field_key, json_value);
+	}
+	if (len >= (int)sizeof(buf))
+		len = (int)sizeof(buf) - 1;
+
+	*out_json = strdup(buf);
+	return *out_json ? 0 : -1;
+}
+
+static int make_multi_live_set_success_json(const SetQueryParam *params,
+	size_t count, char **out_json)
+{
+	cJSON *root;
+	cJSON *data;
+	cJSON *applied;
+	size_t i;
+	char *str;
+
+	if (!params || count == 0 || !out_json)
+		return -1;
+
+	root = cJSON_CreateObject();
+	if (!root)
+		return -1;
+
+	cJSON_AddBoolToObject(root, "ok", 1);
+	data = cJSON_AddObjectToObject(root, "data");
+	applied = cJSON_AddArrayToObject(data, "applied");
+
+	for (i = 0; i < count; i++) {
+		cJSON *entry;
+		cJSON *value_item;
+		char *json_value;
+
+		entry = cJSON_CreateObject();
+		if (!entry) {
+			cJSON_Delete(root);
+			return -1;
+		}
+		cJSON_AddStringToObject(entry, "field", params[i].key);
+
+		json_value = field_to_json_value(params[i].field);
+		if (!json_value) {
+			cJSON_Delete(entry);
+			cJSON_Delete(root);
+			return -1;
+		}
+
+		value_item = cJSON_Parse(json_value);
+		if (!value_item) {
+			free(json_value);
+			cJSON_Delete(entry);
+			cJSON_Delete(root);
+			return -1;
+		}
+		free(json_value);
+
+		cJSON_AddItemToObject(entry, "value", value_item);
+		cJSON_AddItemToArray(applied, entry);
+	}
+
+	str = cJSON_PrintUnformatted(root);
+	cJSON_Delete(root);
+	if (!str)
+		return -1;
+
+	*out_json = str;
+	return 0;
+}
+
+static LiveApplyGroup live_group_for_key(const char *canonical_key)
+{
+	if (!canonical_key)
+		return LIVE_GROUP_INVALID;
+
+	if (strcmp(canonical_key, "video0.bitrate") == 0)
+		return LIVE_GROUP_BITRATE;
+	if (strcmp(canonical_key, "video0.fps") == 0 ||
+	    strcmp(canonical_key, "video0.gop_size") == 0)
+		return LIVE_GROUP_VIDEO_TIMING;
+	if (strcmp(canonical_key, "video0.qp_delta") == 0)
+		return LIVE_GROUP_QP_DELTA;
+	if (strcmp(canonical_key, "fpv.roi_enabled") == 0 ||
+	    strcmp(canonical_key, "fpv.roi_qp") == 0 ||
+	    strcmp(canonical_key, "fpv.roi_steps") == 0 ||
+	    strcmp(canonical_key, "fpv.roi_center") == 0)
+		return LIVE_GROUP_ROI;
+	if (strcmp(canonical_key, "isp.exposure") == 0)
+		return LIVE_GROUP_EXPOSURE;
+	if (strcmp(canonical_key, "isp.gain_max") == 0)
+		return LIVE_GROUP_GAIN_MAX;
+	if (strcmp(canonical_key, "isp.awb_mode") == 0 ||
+	    strcmp(canonical_key, "isp.awb_ct") == 0)
+		return LIVE_GROUP_AWB;
+	if (strcmp(canonical_key, "system.verbose") == 0)
+		return LIVE_GROUP_VERBOSE;
+	if (strcmp(canonical_key, "outgoing.enabled") == 0 ||
+	    strcmp(canonical_key, "outgoing.server") == 0)
+		return LIVE_GROUP_OUTGOING;
+	if (strcmp(canonical_key, "audio.mute") == 0)
+		return LIVE_GROUP_MUTE;
+
+	return LIVE_GROUP_INVALID;
+}
+
+static const char *live_group_name(LiveApplyGroup group)
+{
+	switch (group) {
+	case LIVE_GROUP_BITRATE:
+		return "video0.bitrate";
+	case LIVE_GROUP_VIDEO_TIMING:
+		return "video0.fps/video0.gop_size";
+	case LIVE_GROUP_QP_DELTA:
+		return "video0.qp_delta";
+	case LIVE_GROUP_ROI:
+		return "fpv.roi_*";
+	case LIVE_GROUP_EXPOSURE:
+		return "isp.exposure";
+	case LIVE_GROUP_GAIN_MAX:
+		return "isp.gain_max";
+	case LIVE_GROUP_AWB:
+		return "isp.awb_*";
+	case LIVE_GROUP_VERBOSE:
+		return "system.verbose";
+	case LIVE_GROUP_OUTGOING:
+		return "outgoing.*";
+	case LIVE_GROUP_MUTE:
+		return "audio.mute";
+	default:
+		return "unknown";
+	}
+}
+
+static void note_live_group_touch(LiveBatchTouched *touched,
+	const char *canonical_key)
+{
+	if (!touched || !canonical_key)
+		return;
+
+	if (strcmp(canonical_key, "video0.fps") == 0)
+		touched->video_fps = 1;
+	else if (strcmp(canonical_key, "video0.gop_size") == 0)
+		touched->video_gop = 1;
+	else if (strcmp(canonical_key, "isp.awb_mode") == 0)
+		touched->awb_mode = 1;
+	else if (strcmp(canonical_key, "isp.awb_ct") == 0)
+		touched->awb_ct = 1;
+	else if (strcmp(canonical_key, "outgoing.enabled") == 0)
+		touched->outgoing_enabled = 1;
+	else if (strcmp(canonical_key, "outgoing.server") == 0)
+		touched->outgoing_server = 1;
+}
+
+static int parse_query_params(const char *query, SetQueryParam *params,
+	size_t max_params, size_t *out_count, const char **error_message)
+{
+	const char *cursor;
+	size_t count = 0;
+
+	if (out_count)
+		*out_count = 0;
+	if (error_message)
+		*error_message = NULL;
+
+	if (!query || !*query) {
+		if (error_message)
+			*error_message = "missing query parameter key=value";
+		return -1;
+	}
+
+	cursor = query;
+	while (*cursor) {
+		const char *segment_end = strchr(cursor, '&');
+		const char *eq;
+		size_t key_len;
+		size_t value_len;
+		const char *canonical_key;
+
+		if (!segment_end)
+			segment_end = cursor + strlen(cursor);
+		if (segment_end == cursor) {
+			if (error_message)
+				*error_message = "empty query parameter";
+			return -1;
+		}
+		if (count >= max_params) {
+			if (error_message)
+				*error_message = "too many query parameters";
+			return -1;
+		}
+
+		eq = memchr(cursor, '=', (size_t)(segment_end - cursor));
+		if (!eq || eq == cursor) {
+			if (error_message)
+				*error_message = "missing query parameter key=value";
+			return -1;
+		}
+
+		key_len = (size_t)(eq - cursor);
+		if (key_len >= sizeof(params[count].key))
+			key_len = sizeof(params[count].key) - 1;
+		memcpy(params[count].key, cursor, key_len);
+		params[count].key[key_len] = '\0';
+
+		value_len = (size_t)(segment_end - (eq + 1));
+		if (value_len >= sizeof(params[count].value))
+			value_len = sizeof(params[count].value) - 1;
+		memcpy(params[count].value, eq + 1, value_len);
+		params[count].value[value_len] = '\0';
+
+		canonical_key = canonicalize_field_key(params[count].key);
+		if (!canonical_key)
+			canonical_key = params[count].key;
+		snprintf(params[count].canonical_key,
+			sizeof(params[count].canonical_key), "%s", canonical_key);
+		params[count].field = NULL;
+		count++;
+
+		cursor = *segment_end ? segment_end + 1 : segment_end;
+	}
+
+	if (out_count)
+		*out_count = count;
+	return 0;
+}
+
+static int live_group_supported_for_cfg(const VencConfig *cfg,
+	LiveApplyGroup group, const LiveBatchTouched *touched)
+{
+	if (!g_cb)
+		return 0;
+
+	switch (group) {
+	case LIVE_GROUP_BITRATE:
+		return g_cb->apply_bitrate != NULL;
+	case LIVE_GROUP_VIDEO_TIMING:
+		if (touched && touched->video_fps && !g_cb->apply_fps)
+			return 0;
+		if (cfg && !(cfg->video0.scene_threshold > 0) &&
+		    touched && (touched->video_fps || touched->video_gop) &&
+		    !g_cb->apply_gop)
+			return 0;
+		if (cfg && cfg->video0.scene_threshold > 0 &&
+		    touched && touched->video_gop)
+			return 0;
+		return 1;
+	case LIVE_GROUP_QP_DELTA:
+		return g_cb->apply_qp_delta != NULL;
+	case LIVE_GROUP_ROI:
+		return g_cb->apply_roi_qp != NULL;
+	case LIVE_GROUP_EXPOSURE:
+		return g_cb->apply_exposure != NULL;
+	case LIVE_GROUP_GAIN_MAX:
+		return g_cb->apply_gain_max != NULL;
+	case LIVE_GROUP_AWB:
+		return g_cb->apply_awb_mode != NULL;
+	case LIVE_GROUP_VERBOSE:
+		return g_cb->apply_verbose != NULL;
+	case LIVE_GROUP_OUTGOING:
+		if (touched && touched->outgoing_server && !g_cb->apply_server)
+			return 0;
+		if (touched && touched->outgoing_enabled &&
+		    !g_cb->apply_output_enabled)
+			return 0;
+		return 1;
+	case LIVE_GROUP_MUTE:
+		return g_cb->apply_mute != NULL;
+	default:
+		return 0;
+	}
+}
+
+static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
+	LiveApplyGroup group, const LiveBatchTouched *touched)
+{
+	if (!dst || !src)
+		return;
+
+	switch (group) {
+	case LIVE_GROUP_BITRATE:
+		dst->video0.bitrate = src->video0.bitrate;
+		break;
+	case LIVE_GROUP_VIDEO_TIMING:
+		if (touched && touched->video_fps)
+			dst->video0.fps = src->video0.fps;
+		if (touched && touched->video_gop)
+			dst->video0.gop_size = src->video0.gop_size;
+		break;
+	case LIVE_GROUP_QP_DELTA:
+		dst->video0.qp_delta = src->video0.qp_delta;
+		break;
+	case LIVE_GROUP_ROI:
+		dst->fpv.roi_enabled = src->fpv.roi_enabled;
+		dst->fpv.roi_qp = src->fpv.roi_qp;
+		dst->fpv.roi_steps = src->fpv.roi_steps;
+		dst->fpv.roi_center = src->fpv.roi_center;
+		break;
+	case LIVE_GROUP_EXPOSURE:
+		dst->isp.exposure = src->isp.exposure;
+		break;
+	case LIVE_GROUP_GAIN_MAX:
+		dst->isp.gain_max = src->isp.gain_max;
+		break;
+	case LIVE_GROUP_AWB:
+		if (touched && touched->awb_mode) {
+			snprintf(dst->isp.awb_mode, sizeof(dst->isp.awb_mode), "%s",
+				src->isp.awb_mode);
+		}
+		if (touched && touched->awb_ct)
+			dst->isp.awb_ct = src->isp.awb_ct;
+		break;
+	case LIVE_GROUP_VERBOSE:
+		dst->system.verbose = src->system.verbose;
+		break;
+	case LIVE_GROUP_OUTGOING:
+		if (touched && touched->outgoing_enabled)
+			dst->outgoing.enabled = src->outgoing.enabled;
+		if (touched && touched->outgoing_server) {
+			snprintf(dst->outgoing.server, sizeof(dst->outgoing.server), "%s",
+				src->outgoing.server);
+		}
+		break;
+	case LIVE_GROUP_MUTE:
+		dst->audio.mute = src->audio.mute;
+		break;
+	default:
+		break;
+	}
+}
+
+static void build_live_group_config(VencConfig *out, const VencConfig *base,
+	const VencConfig *updates, LiveApplyGroup group,
+	const LiveBatchTouched *touched)
+{
+	if (!out || !base || !updates)
+		return;
+
+	*out = *base;
+	copy_live_group_fields(out, updates, group, touched);
+}
+
+static int commit_config_locked(const VencConfig *cfg)
+{
+	if (!g_cfg || !cfg)
+		return -1;
+
+	*g_cfg = *cfg;
+	return 0;
+}
+
+static int apply_live_group_for_cfg(const VencConfig *cfg,
+	LiveApplyGroup group, const LiveBatchTouched *touched)
+{
+	int rc;
+	int mode;
+	uint32_t gop_frames;
+
+	if (!cfg || commit_config_locked(cfg) != 0)
+		return -1;
+	if (!live_group_supported_for_cfg(cfg, group, touched))
+		return -2;
+
+	switch (group) {
+	case LIVE_GROUP_BITRATE:
+		return g_cb->apply_bitrate(cfg->video0.bitrate);
+	case LIVE_GROUP_VIDEO_TIMING:
+		if (touched && touched->video_fps) {
+			rc = g_cb->apply_fps(cfg->video0.fps);
+			if (rc != 0)
+				return -1;
+		}
+		if (!(cfg->video0.scene_threshold > 0) &&
+		    touched && (touched->video_fps || touched->video_gop)) {
+			gop_frames = pipeline_common_gop_frames(
+				cfg->video0.gop_size, cfg->video0.fps);
+			rc = g_cb->apply_gop(gop_frames);
+			if (rc != 0)
+				return -1;
+		}
+		return 0;
+	case LIVE_GROUP_QP_DELTA:
+		return g_cb->apply_qp_delta(cfg->video0.qp_delta);
+	case LIVE_GROUP_ROI:
+		return g_cb->apply_roi_qp(cfg->fpv.roi_qp);
+	case LIVE_GROUP_EXPOSURE:
+		return g_cb->apply_exposure(cfg->isp.exposure * 1000);
+	case LIVE_GROUP_GAIN_MAX:
+		return g_cb->apply_gain_max(cfg->isp.gain_max);
+	case LIVE_GROUP_AWB:
+		mode = strcmp(cfg->isp.awb_mode, "ct_manual") == 0 ? 1 : 0;
+		return g_cb->apply_awb_mode(mode, cfg->isp.awb_ct);
+	case LIVE_GROUP_VERBOSE:
+		return g_cb->apply_verbose(cfg->system.verbose);
+	case LIVE_GROUP_OUTGOING:
+		if (touched && touched->outgoing_enabled && touched->outgoing_server) {
+			if (cfg->outgoing.enabled) {
+				rc = g_cb->apply_server(cfg->outgoing.server);
+				if (rc != 0)
+					return -1;
+				rc = g_cb->apply_output_enabled(cfg->outgoing.enabled);
+				if (rc != 0)
+					return -1;
+				return 0;
+			}
+
+			rc = g_cb->apply_output_enabled(cfg->outgoing.enabled);
+			if (rc != 0)
+				return -1;
+			rc = g_cb->apply_server(cfg->outgoing.server);
+			if (rc != 0)
+				return -1;
+			return 0;
+		}
+		if (touched && touched->outgoing_server)
+			return g_cb->apply_server(cfg->outgoing.server);
+		if (touched && touched->outgoing_enabled)
+			return g_cb->apply_output_enabled(cfg->outgoing.enabled);
+		return 0;
+	case LIVE_GROUP_MUTE:
+		return g_cb->apply_mute(cfg->audio.mute);
+	default:
+		return -2;
+	}
+}
+
+static int rollback_live_groups(const LiveApplyGroup *groups,
+	size_t applied_count, LiveApplyGroup current_group,
+	const LiveBatchTouched *touched, const VencConfig *old_cfg,
+	VencConfig *actual_cfg)
+{
+	VencConfig rollback_cfg;
+	int rollback_incomplete = 0;
+	size_t i;
+
+	if (!old_cfg || !actual_cfg)
+		return 1;
+
+	if (current_group != LIVE_GROUP_INVALID) {
+		build_live_group_config(&rollback_cfg, actual_cfg, old_cfg,
+			current_group, touched);
+		if (apply_live_group_for_cfg(&rollback_cfg, current_group,
+		    touched) == 0) {
+			*actual_cfg = rollback_cfg;
+		} else {
+			fprintf(stderr,
+				"[venc_api] live batch rollback failed for %s\n",
+				live_group_name(current_group));
+			rollback_incomplete = 1;
+			commit_config_locked(actual_cfg);
+		}
+	}
+
+	for (i = applied_count; i > 0; i--) {
+		build_live_group_config(&rollback_cfg, actual_cfg, old_cfg,
+			groups[i - 1], touched);
+		if (apply_live_group_for_cfg(&rollback_cfg, groups[i - 1],
+		    touched) == 0) {
+			*actual_cfg = rollback_cfg;
+		} else {
+			fprintf(stderr,
+				"[venc_api] live batch rollback failed for %s\n",
+				live_group_name(groups[i - 1]));
+			rollback_incomplete = 1;
+			commit_config_locked(actual_cfg);
+		}
+	}
+
+	return rollback_incomplete;
+}
+
+static int collect_live_groups(SetQueryParam *params, size_t param_count,
+	LiveApplyGroup *group_order, size_t *group_count,
+	LiveBatchTouched *touched, int *status_code, char **response_json)
+{
+	int group_seen[LIVE_GROUP_COUNT] = {0};
+	size_t i;
+
+	if (!params || !group_order || !group_count || !touched ||
+	    !status_code || !response_json)
+		return -1;
+
+	memset(touched, 0, sizeof(*touched));
+	*group_count = 0;
+
+	for (i = 0; i < param_count; i++) {
+		size_t j;
+		LiveApplyGroup group;
+
+		if (!params[i].field)
+			params[i].field = find_field(params[i].canonical_key);
+		if (!params[i].field) {
+			return make_handled_error_json(404, "not_found",
+				"unknown config field", status_code,
+				response_json);
+		}
+		if (!venc_api_field_supported_for_backend(g_backend,
+		    params[i].canonical_key)) {
+			return make_handled_error_json(501, "not_implemented",
+				"field not supported on this backend",
+				status_code, response_json);
+		}
+		if (params[i].field->mut != MUT_LIVE) {
+			return make_handled_error_json(400, "invalid_request",
+				"multi-set only supports live fields; restart-required fields must be set one at a time",
+				status_code, response_json);
+		}
+
+		for (j = 0; j < i; j++) {
+			if (strcmp(params[i].canonical_key,
+			    params[j].canonical_key) == 0) {
+				return make_handled_error_json(400,
+					"invalid_request",
+					"duplicate field in multi-set request",
+					status_code, response_json);
+			}
+		}
+
+		group = live_group_for_key(params[i].canonical_key);
+		if (group == LIVE_GROUP_INVALID) {
+			return make_handled_error_json(400, "invalid_request",
+				"field does not support multi-set batching",
+				status_code, response_json);
+		}
+		note_live_group_touch(touched, params[i].canonical_key);
+		if (!group_seen[group]) {
+			group_seen[group] = 1;
+			group_order[*group_count] = group;
+			(*group_count)++;
+		}
+	}
+
+	return 0;
+}
+
+static int stage_params_into_cfg(VencConfig *cfg, const SetQueryParam *params,
+	size_t param_count, int *status_code, char **response_json)
+{
+	size_t i;
+
+	if (!cfg || !params || !status_code || !response_json)
+		return -1;
+
+	for (i = 0; i < param_count; i++) {
+		const char *field_err;
+
+		if (field_from_string_cfg(cfg, params[i].field, params[i].value) != 0) {
+			*status_code = 400;
+			return make_error_json("validation_failed",
+				"invalid value for field", response_json) == 0 ? 1 : -1;
+		}
+
+		field_err = validate_field_cfg(cfg, params[i].canonical_key);
+		if (field_err) {
+			*status_code = 409;
+			return make_error_json("validation_failed", field_err,
+				response_json) == 0 ? 1 : -1;
+		}
+	}
+
+	{
+		const char *err = validate_backend_config(g_backend, cfg);
+		if (err) {
+			*status_code = 409;
+			return make_error_json("validation_failed", err,
+				response_json) == 0 ? 1 : -1;
+		}
+	}
+
+	return 0;
+}
+
+static int preflight_live_group_callbacks(const VencConfig *cfg,
+	const LiveApplyGroup *group_order, size_t group_count,
+	const LiveBatchTouched *touched, size_t param_count,
+	int *status_code, char **response_json)
+{
+	size_t i;
+
+	if (!cfg || !group_order || !status_code || !response_json)
+		return -1;
+
+	for (i = 0; i < group_count; i++) {
+		if (!live_group_supported_for_cfg(cfg, group_order[i], touched)) {
+			*status_code = 501;
+			return make_error_json("not_implemented",
+				param_count == 1 ? "apply callback not available" :
+				"apply callback not available for one or more live fields",
+				response_json) == 0 ? 1 : -1;
+		}
+	}
+
+	return 0;
+}
+
+static int apply_live_group_sequence_locked(const LiveApplyGroup *group_order,
+	size_t group_count, const LiveBatchTouched *touched,
+	const VencConfig *old_cfg, const VencConfig *new_cfg,
+	VencConfig *actual_cfg, int *status_code, char **response_json)
+{
+	size_t i;
+
+	if (!group_order || !old_cfg || !new_cfg || !actual_cfg ||
+	    !status_code || !response_json)
+		return -1;
+
+	for (i = 0; i < group_count; i++) {
+		VencConfig group_cfg;
+		int rollback_incomplete;
+		char message[192];
+
+		build_live_group_config(&group_cfg, actual_cfg, new_cfg,
+			group_order[i], touched);
+		if (apply_live_group_for_cfg(&group_cfg, group_order[i],
+		    touched) == 0) {
+			*actual_cfg = group_cfg;
+			continue;
+		}
+
+		commit_config_locked(actual_cfg);
+		rollback_incomplete = rollback_live_groups(group_order, i,
+			group_order[i], touched, old_cfg, actual_cfg);
+		commit_config_locked(actual_cfg);
+
+		snprintf(message, sizeof(message),
+			rollback_incomplete ?
+			"failed to apply live field group %s; rollback incomplete" :
+			"failed to apply live field group %s",
+			live_group_name(group_order[i]));
+		*status_code = 500;
+		return make_error_json("internal_error", message,
+			response_json) == 0 ? 1 : -1;
+	}
+
+	return 0;
+}
+
+static int make_live_set_response_locked(const VencConfig *cfg,
+	const SetQueryParam *params, size_t param_count, int single_response,
+	int *status_code, char **response_json)
+{
+	if (!cfg || !params || param_count == 0 || !status_code || !response_json)
+		return -1;
+
+	if (single_response) {
+		char *jval;
+		int rc;
+
+		jval = field_to_json_value_from_cfg(cfg, params[0].field);
+		if (!jval) {
+			*status_code = 500;
+			return make_error_json("internal_error", "out of memory",
+				response_json);
+		}
+
+		rc = make_single_set_success_json(params[0].key, jval, 0,
+			response_json);
+		free(jval);
+		if (rc != 0)
+			return -1;
+	} else {
+		if (make_multi_live_set_success_json(params, param_count,
+		    response_json) != 0) {
+			return -1;
+		}
+	}
+
+	*status_code = 200;
+	return 0;
+}
+
+static int apply_live_set_query(SetQueryParam *params, size_t param_count,
+	int single_response, int *status_code, char **response_json)
+{
+	LiveApplyGroup group_order[LIVE_GROUP_COUNT];
+	LiveBatchTouched touched;
+	size_t group_count = 0;
+	VencConfig old_cfg;
+	VencConfig new_cfg;
+	VencConfig actual_cfg;
+	int rc;
+
+	rc = collect_live_groups(params, param_count, group_order, &group_count,
+		&touched, status_code, response_json);
+	if (rc != 0)
+		return rc > 0 ? 0 : rc;
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	old_cfg = *g_cfg;
+	new_cfg = old_cfg;
+	actual_cfg = old_cfg;
+
+	rc = stage_params_into_cfg(&new_cfg, params, param_count, status_code,
+		response_json);
+	if (rc != 0) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return rc > 0 ? 0 : rc;
+	}
+
+	rc = preflight_live_group_callbacks(&new_cfg, group_order, group_count,
+		&touched, param_count, status_code, response_json);
+	if (rc != 0) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return rc > 0 ? 0 : rc;
+	}
+
+	rc = apply_live_group_sequence_locked(group_order, group_count, &touched,
+		&old_cfg, &new_cfg, &actual_cfg, status_code, response_json);
+	if (rc != 0) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return rc > 0 ? 0 : rc;
+	}
+
+	if (commit_config_locked(&actual_cfg) != 0) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return -1;
+	}
+
+	rc = make_live_set_response_locked(&actual_cfg, params, param_count,
+		single_response, status_code, response_json);
+	if (rc != 0) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return rc;
+	}
+
+	pthread_mutex_unlock(&g_cfg_mutex);
+	return 0;
+}
+
+static int resolve_set_query_field(const char *key, const char **canonical_key,
+	const FieldDesc **field, int *status_code, char **response_json)
+{
+	if (!key || !*key || !canonical_key || !field || !status_code ||
+	    !response_json)
+		return -1;
+
+	*canonical_key = canonicalize_field_key(key);
+	*field = find_field(*canonical_key);
+	if (!*field) {
+		*status_code = 404;
+		return make_error_json("not_found", "unknown config field",
+			response_json) == 0 ? 1 : -1;
+	}
+	if (!venc_api_field_supported_for_backend(g_backend, *canonical_key)) {
+		*status_code = 501;
+		return make_error_json("not_implemented",
+			"field not supported on this backend",
+			response_json) == 0 ? 1 : -1;
+	}
+
+	return 0;
+}
+
+static void init_single_set_param(SetQueryParam *param, const char *key,
+	const char *canonical_key, const char *value, const FieldDesc *field)
+{
+	if (!param || !key || !canonical_key || !value || !field)
+		return;
+
+	memset(param, 0, sizeof(*param));
+	snprintf(param->key, sizeof(param->key), "%s", key);
+	snprintf(param->canonical_key, sizeof(param->canonical_key), "%s",
+		canonical_key);
+	snprintf(param->value, sizeof(param->value), "%s", value);
+	param->field = field;
+}
+
+static int process_restart_set_query(const SetQueryParam *param,
+	int *status_code, char **response_json)
+{
+	VencConfig new_cfg;
+	char *jval;
+	int rc;
+
+	if (!param || !status_code || !response_json)
+		return -1;
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	new_cfg = *g_cfg;
+	rc = stage_params_into_cfg(&new_cfg, param, 1, status_code,
+		response_json);
+	if (rc != 0) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return rc > 0 ? 0 : rc;
+	}
+
+	*g_cfg = new_cfg;
+	venc_api_request_reinit(2);
+	jval = field_to_json_value_from_cfg(&new_cfg, param->field);
+	pthread_mutex_unlock(&g_cfg_mutex);
+	if (!jval) {
+		*status_code = 500;
+		return make_error_json("internal_error", "out of memory",
+			response_json);
+	}
+
+	*status_code = 200;
+	rc = make_single_set_success_json(param->key, jval, 1, response_json);
+	free(jval);
+	return rc;
+}
+
+static int process_single_set_query(const char *query, int *status_code,
+	char **response_json)
+{
+	char key[128], val[256];
+	const char *canonical_key;
+	const FieldDesc *f;
+	SetQueryParam param;
+	int rc;
+
+	if (parse_first_query_param(query, key, sizeof(key), val, sizeof(val)) != 0 ||
+	    !*key) {
+		*status_code = 400;
+		return make_error_json("invalid_request",
+			"missing query parameter key=value", response_json);
+	}
+
+	rc = resolve_set_query_field(key, &canonical_key, &f, status_code,
+		response_json);
+	if (rc != 0)
+		return rc > 0 ? 0 : rc;
+
+	init_single_set_param(&param, key, canonical_key, val, f);
+	if (f->mut == MUT_LIVE) {
+		return apply_live_set_query(&param, 1, 1, status_code,
+			response_json);
+	}
+
+	return process_restart_set_query(&param, status_code, response_json);
+}
+
+static int process_multi_live_set_query(const char *query, int *status_code,
+	char **response_json)
+{
+	SetQueryParam params[SET_QUERY_MAX_PARAMS];
+	const char *parse_error = NULL;
+	size_t param_count = 0;
+
+	if (parse_query_params(query, params, SET_QUERY_MAX_PARAMS, &param_count,
+	    &parse_error) != 0) {
+		*status_code = 400;
+		return make_error_json("invalid_request",
+			parse_error ? parse_error : "invalid query parameters",
+			response_json);
+	}
+	if (param_count < 2)
+		return process_single_set_query(query, status_code, response_json);
+
+	return apply_live_set_query(params, param_count, 0, status_code,
+		response_json);
+}
+
+static int process_set_query(const char *query, int *status_code,
+	char **response_json)
+{
+	if (!status_code || !response_json)
+		return -1;
+
+	*status_code = 500;
+	*response_json = NULL;
+
+	if (query && strchr(query, '&'))
+		return process_multi_live_set_query(query, status_code,
+			response_json);
+
+	return process_single_set_query(query, status_code, response_json);
 }
 
 /* ── Route handlers ──────────────────────────────────────────────────── */
@@ -630,7 +1558,9 @@ static int handle_capabilities(int fd, const HttpRequest *req, void *ctx)
 		cJSON *entry = cJSON_AddObjectToObject(fields, g_fields[i].key);
 		cJSON_AddStringToObject(entry, "mutability",
 			g_fields[i].mut == MUT_LIVE ? "live" : "restart_required");
-		cJSON_AddBoolToObject(entry, "supported", 1);
+		cJSON_AddBoolToObject(entry, "supported",
+			venc_api_field_supported_for_backend(g_backend,
+				g_fields[i].key));
 	}
 	char *str = cJSON_PrintUnformatted(root);
 	cJSON_Delete(root);
@@ -675,86 +1605,21 @@ static int handle_fps_live(int fd, const HttpRequest *req, void *ctx)
 
 static int handle_set(int fd, const HttpRequest *req, void *ctx)
 {
+	char *json = NULL;
+	int status = 500;
+	int rc;
+
 	(void)ctx;
-	char key[128], val[256];
-	const char *canonical_key;
-	if (parse_first_query_param(req->query, key, sizeof(key),
-			val, sizeof(val)) != 0 || !*key) {
-		return httpd_send_error(fd, 400, "invalid_request",
-			"missing query parameter key=value");
+
+	rc = process_set_query(req->query, &status, &json);
+	if (rc != 0 || !json) {
+		free(json);
+		return httpd_send_error(fd, 500, "internal_error", "out of memory");
 	}
 
-	canonical_key = canonicalize_field_key(key);
-	const FieldDesc *f = find_field(canonical_key);
-	if (!f) {
-		return httpd_send_error(fd, 404, "not_found",
-			"unknown config field");
-	}
-
-	pthread_mutex_lock(&g_cfg_mutex);
-
-	/* Save old value so we can rollback if apply fails */
-	char saved[VENC_CONFIG_STRING_MAX];
-	memcpy(saved, (char *)g_cfg + f->offset, f->size);
-
-	if (field_from_string(f, val) != 0) {
-		pthread_mutex_unlock(&g_cfg_mutex);
-		return httpd_send_error(fd, 400, "validation_failed",
-			"invalid value for field");
-	}
-
-	{
-		const char *field_err = validate_field(canonical_key);
-		if (field_err) {
-			memcpy((char *)g_cfg + f->offset, saved, f->size);
-			pthread_mutex_unlock(&g_cfg_mutex);
-			return httpd_send_error(fd, 409, "validation_failed",
-				field_err);
-		}
-	}
-
-	if (f->mut == MUT_RESTART) {
-		/* Validate config consistency before accepting the change */
-		const char *err = validate_config(g_cfg);
-		if (err) {
-			memcpy((char *)g_cfg + f->offset, saved, f->size);
-			pthread_mutex_unlock(&g_cfg_mutex);
-			return httpd_send_error(fd, 409, "validation_failed", err);
-		}
-
-		/* In-memory only — never save to disk from API (safety: bad config
-		 * could prevent recovery on reboot).  Trigger pipeline reinit. */
-		venc_api_request_reinit(2);
-
-		char *jval = field_to_json_value(f);
-		pthread_mutex_unlock(&g_cfg_mutex);
-
-		char buf[512];
-		snprintf(buf, sizeof(buf),
-			"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s,"
-			"\"reinit_pending\":true}}",
-			key, jval);
-		free(jval);
-		return httpd_send_json(fd, 200, buf);
-	}
-
-	/* MUT_LIVE: apply immediately via callback */
-	if (try_apply_live(canonical_key, f) != 0) {
-		memcpy((char *)g_cfg + f->offset, saved, f->size);
-		pthread_mutex_unlock(&g_cfg_mutex);
-		return httpd_send_error(fd, 501, "not_implemented",
-			"apply callback not available");
-	}
-
-	char *jval = field_to_json_value(f);
-	pthread_mutex_unlock(&g_cfg_mutex);
-
-	char buf[512];
-	snprintf(buf, sizeof(buf),
-		"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s}}",
-		key, jval);
-	free(jval);
-	return httpd_send_json(fd, 200, buf);
+	rc = httpd_send_json(fd, status, json);
+	free(json);
+	return rc;
 }
 
 static int handle_get(int fd, const HttpRequest *req, void *ctx)
@@ -1275,11 +2140,20 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 int venc_api_register(VencConfig *cfg, const char *backend_name,
 	const VencApplyCallbacks *cb)
 {
+	int r = 0;
+
+	pthread_mutex_lock(&g_cfg_mutex);
 	g_cfg = cfg;
 	g_cb = cb;
-	snprintf(g_backend, sizeof(g_backend), "%s", backend_name ? backend_name : "unknown");
+	snprintf(g_backend, sizeof(g_backend), "%s",
+		backend_name ? backend_name : "unknown");
+	if (g_api_routes_registered) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return 0;
+	}
+	g_api_routes_registered = 1;
+	pthread_mutex_unlock(&g_cfg_mutex);
 
-	int r = 0;
 	r |= venc_httpd_route("GET", "/api/v1/version",      handle_version, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config",       handle_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config.json",  handle_config, NULL);
@@ -1305,6 +2179,9 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
 	r |= venc_webui_register();
 	if (r != 0) {
+		pthread_mutex_lock(&g_cfg_mutex);
+		g_api_routes_registered = 0;
+		pthread_mutex_unlock(&g_cfg_mutex);
 		fprintf(stderr, "[api] ERROR: failed to register one or more routes\n");
 		return -1;
 	}

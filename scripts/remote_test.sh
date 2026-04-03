@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Bounded remote runner for CLI-driven probes and short-lived test binaries.
+# For long-running Star6E venc validation against the production
+# /etc/venc.json workflow, prefer scripts/star6e_direct_deploy.sh.
+
 HOST="${HOST:-root@192.168.1.11}"
 REMOTE_DIR="${REMOTE_DIR:-/tmp/waybeam_venc_test}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-10}"
@@ -20,9 +24,46 @@ JSON_SUMMARY=0
 SKIP_DEPLOY=0
 SKIP_BUILD=0
 
+usage() {
+	cat <<'EOF'
+Usage: scripts/remote_test.sh [options] [-- run-bin-args...]
+
+Bounded remote runner for CLI-driven probes and short-lived test binaries.
+For long-running Star6E venc validation against the production /etc/venc.json
+path, prefer:
+
+  scripts/star6e_direct_deploy.sh cycle
+
+Options:
+  --host HOST              SSH target
+  --soc-build BUILD        auto | star6e | maruko
+  --remote-dir DIR         Remote staging dir (default: /tmp/waybeam_venc_test)
+  --timeout-sec SEC        Remote run timeout (default: 10)
+  --run-bin BIN            venc | snr_toggle_test | snr_sequence_probe
+  --prewarm-majestic       Start majestic briefly before the test
+  --prewarm-seconds SEC    Prewarm duration (default: 7)
+  --no-dmesg               Skip dmesg delta collection
+  --reboot-before-run      Reboot target before running
+  --reboot-wait-sec SEC    Reconnect wait after reboot (default: 12)
+  --ioctl-trace            Preload ioctl trace shim
+  --json-summary           Emit machine-readable JSON summary at the end
+  --skip-build             Reuse current local build
+  --skip-deploy            Reuse already deployed binary/runtime bundle
+  --help                   Show this help
+
+Examples:
+  scripts/remote_test.sh --host root@192.168.1.13 --soc-build star6e --run-bin venc -- --list-sensor-modes --sensor-index 0
+  scripts/remote_test.sh --host root@192.168.2.12 --soc-build maruko --run-bin snr_toggle_test -- --sensor-index 0 --sensor-mode 1 -f 30
+EOF
+}
+
 RUN_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
     --soc-build)
       SOC_BUILD="$2"
       shift 2

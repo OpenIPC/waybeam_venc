@@ -187,33 +187,54 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 /* ── Frame metadata sender ───────────────────────────────────────────── */
 
 int rtp_sidecar_send_frame(RtpSidecarSender *s,
-                           uint32_t ssrc, uint32_t rtp_ts,
-                           uint16_t seq_first, uint16_t seq_count,
-                           uint64_t capture_us, uint64_t frame_ready_us)
+	uint32_t ssrc, uint32_t rtp_ts,
+	uint16_t seq_first, uint16_t seq_count,
+	uint64_t capture_us, uint64_t frame_ready_us,
+	const RtpSidecarEncInfo *enc_info)
 {
 	if (!s || s->fd < 0)
 		return 0;  /* disabled */
 	if (!sub_active(s))
 		return 0;  /* no subscriber — channel stays silent */
 
-	RtpSidecarFrame f;
-	f.magic            = htonl(RTP_SIDECAR_MAGIC);
-	f.version          = RTP_SIDECAR_VERSION;
-	f.msg_type         = RTP_SIDECAR_MSG_FRAME;
-	f.stream_id        = 0;
-	f.flags            = 0;
-	f.ssrc             = htonl(ssrc);
-	f.rtp_timestamp    = htonl(rtp_ts);
-	f.frame_id         = sidecar_htobe64(s->frame_id++);
-	f.frame_ready_us   = sidecar_htobe64(frame_ready_us);
-	f.seq_first        = htons(seq_first);
-	f.seq_count        = htons(seq_count);
-	f.capture_us       = sidecar_htobe64(capture_us);
-	f.last_pkt_send_us = sidecar_htobe64(now_us());
+	RtpSidecarFrameExt msg;
+	size_t msg_len = sizeof(msg.frame);
 
-	ssize_t sent = sendto(s->fd, &f, sizeof(f), MSG_DONTWAIT,
-	                      (struct sockaddr *)&s->subscriber,
-	                      sizeof(s->subscriber));
+	memset(&msg, 0, sizeof(msg));
+	msg.frame.magic            = htonl(RTP_SIDECAR_MAGIC);
+	msg.frame.version          = RTP_SIDECAR_VERSION;
+	msg.frame.msg_type         = RTP_SIDECAR_MSG_FRAME;
+	msg.frame.stream_id        = 0;
+	msg.frame.flags            = 0;
+	msg.frame.ssrc             = htonl(ssrc);
+	msg.frame.rtp_timestamp    = htonl(rtp_ts);
+	msg.frame.frame_id         = sidecar_htobe64(s->frame_id++);
+	msg.frame.frame_ready_us   = sidecar_htobe64(frame_ready_us);
+	msg.frame.seq_first        = htons(seq_first);
+	msg.frame.seq_count        = htons(seq_count);
+	msg.frame.capture_us       = sidecar_htobe64(capture_us);
+	msg.frame.last_pkt_send_us = sidecar_htobe64(now_us());
+
+	if (enc_info) {
+		msg.frame.flags |= RTP_SIDECAR_FLAG_ENC_INFO;
+		if (enc_info->frame_type == RTP_SIDECAR_FRAME_I ||
+		    enc_info->frame_type == RTP_SIDECAR_FRAME_IDR)
+			msg.frame.flags |= RTP_SIDECAR_FLAG_KEYFRAME;
+
+		msg.enc.frame_size_bytes = htonl(enc_info->frame_size_bytes);
+		msg.enc.frame_type = enc_info->frame_type;
+		msg.enc.qp = enc_info->qp;
+		msg.enc.complexity = enc_info->complexity;
+		msg.enc.scene_change = enc_info->scene_change;
+		msg.enc.gop_state = enc_info->gop_state;
+		msg.enc.idr_inserted = enc_info->idr_inserted;
+		msg.enc.frames_since_idr = htons(enc_info->frames_since_idr);
+		msg_len = sizeof(msg);
+	}
+
+	ssize_t sent = sendto(s->fd, &msg, msg_len, MSG_DONTWAIT,
+		(struct sockaddr *)&s->subscriber,
+		sizeof(s->subscriber));
 	if (sent < 0 && errno != EAGAIN) {
 		fprintf(stderr, "[sidecar] sendto: %s\n", strerror(errno));
 		return -1;

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Exhaustive HTTP API test suite for venc on a live device.
-# Assumes venc is already running (deployed via remote_test.sh).
+# Assumes venc is already running (for example via star6e_direct_deploy.sh).
 # Exercises every API endpoint and every live-mutable config field.
 
 DEVICE="${1:-192.168.2.13}"
@@ -19,10 +19,38 @@ TRANSPORT_ORIG_SERVER=""
 TRANSPORT_ORIG_AUDIO_ENABLED=""
 TRANSPORT_ORIG_AUDIO_PORT=""
 TRANSPORT_ORIG_VERBOSE=""
+BASELINE_CAPTURED=0
+RESTORE_ON_EXIT=0
+
+BASE_VIDEO0_BITRATE=""
+BASE_VIDEO0_CODEC=""
+BASE_VIDEO0_FPS=""
+BASE_VIDEO0_GOP_SIZE=""
+BASE_VIDEO0_QP_DELTA=""
+BASE_VIDEO0_RC_MODE=""
+BASE_VIDEO0_FRAME_LOST=""
+BASE_ISP_EXPOSURE=""
+BASE_ISP_AWB_MODE=""
+BASE_ISP_AWB_CT=""
+BASE_FPV_ROI_ENABLED=""
+BASE_FPV_ROI_QP=""
+BASE_FPV_ROI_STEPS=""
+BASE_FPV_ROI_CENTER=""
+BASE_OUTGOING_ENABLED=""
+BASE_OUTGOING_SERVER=""
+BASE_OUTGOING_STREAM_MODE=""
+BASE_OUTGOING_MAX_PAYLOAD_SIZE=""
+BASE_SYSTEM_VERBOSE=""
+BASE_AUDIO_MUTE=""
+ALT_OUTGOING_SERVER=""
+POST_RESTART_BITRATE=8000
+POST_RESTART_FPS=25
+POST_RESTART_QP_DELTA=-6
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 c() { curl -sf --max-time 5 "$@" 2>/dev/null; }
+c_raw() { curl -s --max-time 5 "$@" 2>/dev/null; }
 
 ok_field() {
 	local resp="$1"
@@ -37,6 +65,156 @@ get_value() {
 get_json_field() {
 	local resp="$1" field="$2"
 	echo "${resp}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d${field}))" 2>/dev/null
+}
+
+current_value() {
+	local field="$1"
+	local resp
+
+	resp="$(c "${BASE}/api/v1/get?${field}")" || return 1
+	ok_field "${resp}" || return 1
+	echo "${resp}" | python3 -c '
+import json, sys
+v = json.load(sys.stdin)["data"]["value"]
+if isinstance(v, bool):
+    print("true" if v else "false")
+elif v is None:
+    print("")
+else:
+    print(v)
+' 2>/dev/null
+}
+
+snapshot_field() {
+	local var_name="$1"
+	local field="$2"
+	local value
+
+	value="$(current_value "${field}")" || {
+		echo "ERROR: Failed to snapshot ${field}" >&2
+		exit 2
+	}
+	printf -v "${var_name}" '%s' "${value}"
+}
+
+quiet_set() {
+	local field="$1" value="$2"
+	c "${BASE}/api/v1/set?${field}=${value}" >/dev/null || true
+}
+
+assert_set_query() {
+	local query="$1" label="${2:-SET ${1}}"
+	local resp
+	resp="$(c "${BASE}/api/v1/set?${query}")" || { fail "${label}" "curl failed"; return; }
+	if ok_field "${resp}"; then
+		pass "${label}"
+	else
+		fail "${label}" "ok!=true: ${resp}"
+	fi
+}
+
+assert_set_query_fail() {
+	local query="$1" label="${2:-SET ${1} (expect fail)}"
+	local resp
+	resp="$(c_raw "${BASE}/api/v1/set?${query}")" || { pass "${label} (curl error = rejection)"; return; }
+	if ok_field "${resp}" 2>/dev/null; then
+		fail "${label}" "expected failure but got ok=true"
+	else
+		pass "${label}"
+	fi
+}
+
+assert_value_is() {
+	local field="$1" expected="$2" label="${3:-VERIFY ${1} == ${2}}"
+	local resp val
+	resp="$(c "${BASE}/api/v1/get?${field}")" || { fail "${label}" "curl failed"; return; }
+	if ! ok_field "${resp}"; then
+		fail "${label}" "ok!=true: ${resp}"
+		return
+	fi
+	val="$(get_value "${resp}" 2>/dev/null)"
+	if [[ "${val}" == "${expected}" ]]; then
+		pass "${label}"
+	else
+		fail "${label}" "expected ${expected}, got ${val}"
+	fi
+}
+
+derive_alt_server() {
+	local current="$1"
+	local host="192.168.1.2"
+	local port="5601"
+
+	if [[ "${current}" =~ ^udp://([^:/]+):([0-9]+)$ ]]; then
+		host="${BASH_REMATCH[1]}"
+		if [[ "${BASH_REMATCH[2]}" == "5601" ]]; then
+			port="5600"
+		fi
+	fi
+
+	printf 'udp://%s:%s\n' "${host}" "${port}"
+}
+
+capture_baseline() {
+	snapshot_field BASE_VIDEO0_BITRATE video0.bitrate
+	snapshot_field BASE_VIDEO0_CODEC video0.codec
+	snapshot_field BASE_VIDEO0_FPS video0.fps
+	snapshot_field BASE_VIDEO0_GOP_SIZE video0.gop_size
+	snapshot_field BASE_VIDEO0_QP_DELTA video0.qp_delta
+	snapshot_field BASE_VIDEO0_RC_MODE video0.rc_mode
+	snapshot_field BASE_VIDEO0_FRAME_LOST video0.frame_lost
+	snapshot_field BASE_ISP_EXPOSURE isp.exposure
+	snapshot_field BASE_ISP_AWB_MODE isp.awb_mode
+	snapshot_field BASE_ISP_AWB_CT isp.awb_ct
+	snapshot_field BASE_FPV_ROI_ENABLED fpv.roi_enabled
+	snapshot_field BASE_FPV_ROI_QP fpv.roi_qp
+	snapshot_field BASE_FPV_ROI_STEPS fpv.roi_steps
+	snapshot_field BASE_FPV_ROI_CENTER fpv.roi_center
+	snapshot_field BASE_OUTGOING_ENABLED outgoing.enabled
+	snapshot_field BASE_OUTGOING_SERVER outgoing.server
+	snapshot_field BASE_OUTGOING_STREAM_MODE outgoing.stream_mode
+	snapshot_field BASE_OUTGOING_MAX_PAYLOAD_SIZE outgoing.max_payload_size
+	snapshot_field BASE_SYSTEM_VERBOSE system.verbose
+	snapshot_field BASE_AUDIO_MUTE audio.mute
+	snapshot_field BASE_SCENE_THRESHOLD video0.scene_threshold 2>/dev/null || BASE_SCENE_THRESHOLD="0"
+
+	ALT_OUTGOING_SERVER="$(derive_alt_server "${BASE_OUTGOING_SERVER}")"
+	if [[ "${POST_RESTART_BITRATE}" == "${BASE_VIDEO0_BITRATE}" ]]; then
+		POST_RESTART_BITRATE=4000
+	fi
+	if [[ "${POST_RESTART_FPS}" == "${BASE_VIDEO0_FPS}" ]]; then
+		POST_RESTART_FPS=20
+	fi
+	if [[ "${POST_RESTART_QP_DELTA}" == "${BASE_VIDEO0_QP_DELTA}" ]]; then
+		POST_RESTART_QP_DELTA=6
+	fi
+
+	BASELINE_CAPTURED=1
+	RESTORE_ON_EXIT=1
+}
+
+restore_live_baseline() {
+	[[ "${BASELINE_CAPTURED}" -eq 1 ]] || return 0
+	[[ "${RESTORE_ON_EXIT}" -eq 1 ]] || return 0
+
+	printf '\n[api_test_suite] Restoring live baseline values...\n' >&2
+	quiet_set "video0.scene_threshold" "0"
+	quiet_set "video0.bitrate" "${BASE_VIDEO0_BITRATE}"
+	quiet_set "video0.fps" "${BASE_VIDEO0_FPS}"
+	quiet_set "video0.gop_size" "${BASE_VIDEO0_GOP_SIZE}"
+	quiet_set "video0.qp_delta" "${BASE_VIDEO0_QP_DELTA}"
+	quiet_set "isp.exposure" "${BASE_ISP_EXPOSURE}"
+	quiet_set "isp.awb_ct" "${BASE_ISP_AWB_CT}"
+	quiet_set "isp.awb_mode" "${BASE_ISP_AWB_MODE}"
+	quiet_set "fpv.roi_qp" "${BASE_FPV_ROI_QP}"
+	quiet_set "fpv.roi_steps" "${BASE_FPV_ROI_STEPS}"
+	quiet_set "fpv.roi_center" "${BASE_FPV_ROI_CENTER}"
+	quiet_set "fpv.roi_enabled" "${BASE_FPV_ROI_ENABLED}"
+	quiet_set "outgoing.server" "${BASE_OUTGOING_SERVER}"
+	quiet_set "outgoing.enabled" "${BASE_OUTGOING_ENABLED}"
+	quiet_set "system.verbose" "${BASE_SYSTEM_VERBOSE}"
+	quiet_set "audio.mute" "${BASE_AUDIO_MUTE}"
+	quiet_set "video0.scene_threshold" "${BASE_SCENE_THRESHOLD}"
 }
 
 pass() {
@@ -161,8 +339,6 @@ cleanup_transport() {
 	fi
 }
 
-trap cleanup_transport EXIT
-
 prepare_transport_checks() {
 	if [[ -z "${SSH_HOST}" ]]; then
 		skip "Transport regression" "no SSH host provided"
@@ -269,6 +445,13 @@ run_transport_checks() {
 	fi
 }
 
+cleanup_all() {
+	restore_live_baseline
+	cleanup_transport
+}
+
+trap cleanup_all EXIT
+
 # ── Connectivity check ───────────────────────────────────────────────────
 
 printf "Testing venc API at %s\n" "${BASE}"
@@ -276,6 +459,8 @@ if ! c "${BASE}/api/v1/version" >/dev/null; then
 	echo "ERROR: Cannot reach venc at ${BASE}. Is it running?"
 	exit 2
 fi
+
+capture_baseline
 
 # ════════════════════════════════════════════════════════════════════════
 section "1. VERSION & CAPABILITIES"
@@ -374,8 +559,8 @@ section "4. LIVE PARAMETER CHANGES — Bitrate sweep"
 for br in 1000 2000 4000 6000 8192 12000 16000; do
 	assert_set "video0.bitrate" "${br}"
 done
-# Restore default
-assert_set "video0.bitrate" 6000 "RESTORE video0.bitrate=6000"
+# Restore baseline
+assert_set "video0.bitrate" "${BASE_VIDEO0_BITRATE}" "RESTORE video0.bitrate=${BASE_VIDEO0_BITRATE}"
 
 # ════════════════════════════════════════════════════════════════════════
 section "5. LIVE PARAMETER CHANGES — FPS sweep"
@@ -386,17 +571,28 @@ for fps in 5 10 15 20 25 30; do
 	settle 0.5
 done
 # Restore
-assert_set "video0.fps" 30 "RESTORE video0.fps=30"
+assert_set "video0.fps" "${BASE_VIDEO0_FPS}" "RESTORE video0.fps=${BASE_VIDEO0_FPS}"
 
 # ════════════════════════════════════════════════════════════════════════
 section "6. LIVE PARAMETER CHANGES — GOP size"
 # ════════════════════════════════════════════════════════════════════════
 
+# scene_threshold > 0 means scene detection manages gop_size — temporarily disable for manual sweep
+if [[ "${BASE_SCENE_THRESHOLD}" != "0" ]]; then
+	quiet_set "video0.scene_threshold" "0"
+	settle 1
+fi
+
 for gop in 0 0.5 1.0 2.0 5.0; do
 	assert_set "video0.gop_size" "${gop}"
 	settle 0.3
 done
-assert_set "video0.gop_size" 1.0 "RESTORE video0.gop_size=1.0"
+assert_set "video0.gop_size" "${BASE_VIDEO0_GOP_SIZE}" "RESTORE video0.gop_size=${BASE_VIDEO0_GOP_SIZE}"
+
+if [[ "${BASE_SCENE_THRESHOLD}" != "0" ]]; then
+	quiet_set "video0.scene_threshold" "${BASE_SCENE_THRESHOLD}"
+	settle 1
+fi
 
 # ════════════════════════════════════════════════════════════════════════
 section "6a. LIVE PARAMETER CHANGES — qpDelta"
@@ -405,7 +601,7 @@ for delta in -12 -6 0 6 12; do
 	assert_set "video0.qp_delta" "${delta}"
 	settle 0.3
 done
-assert_set "video0.qp_delta" 0 "RESTORE video0.qp_delta=0"
+assert_set "video0.qp_delta" "${BASE_VIDEO0_QP_DELTA}" "RESTORE video0.qp_delta=${BASE_VIDEO0_QP_DELTA}"
 
 section "7. LIVE PARAMETER CHANGES — Exposure"
 
@@ -413,7 +609,7 @@ for exp in 0 1 3 5 7 10 15 20; do
 	assert_set "isp.exposure" "${exp}"
 	settle 0.5
 done
-assert_set "isp.exposure" 7 "RESTORE isp.exposure=7"
+assert_set "isp.exposure" "${BASE_ISP_EXPOSURE}" "RESTORE isp.exposure=${BASE_ISP_EXPOSURE}"
 
 # ════════════════════════════════════════════════════════════════════════
 section "8. AWB MODE — Auto and manual CT"
@@ -431,7 +627,8 @@ for ct in 2700 3500 4500 5500 6500 8000 10000; do
 done
 
 # Back to auto
-assert_set "isp.awb_mode" "auto" "RESTORE awb_mode=auto"
+assert_set "isp.awb_ct" "${BASE_ISP_AWB_CT}" "RESTORE awb_ct=${BASE_ISP_AWB_CT}"
+assert_set "isp.awb_mode" "${BASE_ISP_AWB_MODE}" "RESTORE awb_mode=${BASE_ISP_AWB_MODE}"
 
 # ════════════════════════════════════════════════════════════════════════
 section "9. AWB QUERY ENDPOINT"
@@ -474,7 +671,10 @@ for center in 0.1 0.25 0.5 0.75 0.9; do
 done
 
 # Disable ROI
-assert_set "fpv.roi_enabled" "false" "RESTORE roi_enabled=false"
+assert_set "fpv.roi_qp" "${BASE_FPV_ROI_QP}" "RESTORE roi_qp=${BASE_FPV_ROI_QP}"
+assert_set "fpv.roi_steps" "${BASE_FPV_ROI_STEPS}" "RESTORE roi_steps=${BASE_FPV_ROI_STEPS}"
+assert_set "fpv.roi_center" "${BASE_FPV_ROI_CENTER}" "RESTORE roi_center=${BASE_FPV_ROI_CENTER}"
+assert_set "fpv.roi_enabled" "${BASE_FPV_ROI_ENABLED}" "RESTORE roi_enabled=${BASE_FPV_ROI_ENABLED}"
 
 # ════════════════════════════════════════════════════════════════════════
 section "11. OUTPUT ENABLE/DISABLE TOGGLE"
@@ -488,21 +688,23 @@ settle 2
 # Verify FPS restored after re-enable
 resp="$(c "${BASE}/api/v1/get?video0.fps")"
 fps_val="$(get_value "${resp}" 2>/dev/null)"
-if [[ "${fps_val}" == "30" ]]; then
-	pass "FPS restored to 30 after output re-enable"
+if [[ "${fps_val}" == "${BASE_VIDEO0_FPS}" ]]; then
+	pass "FPS restored to ${BASE_VIDEO0_FPS} after output re-enable"
 else
-	fail "FPS after re-enable" "expected 30, got ${fps_val}"
+	fail "FPS after re-enable" "expected ${BASE_VIDEO0_FPS}, got ${fps_val}"
 fi
+
+assert_set "outgoing.enabled" "${BASE_OUTGOING_ENABLED}" "RESTORE outgoing.enabled=${BASE_OUTGOING_ENABLED}"
 
 # ════════════════════════════════════════════════════════════════════════
 section "12. SERVER CHANGE (live)"
 # ════════════════════════════════════════════════════════════════════════
 
 # Change to a different port
-assert_set "outgoing.server" "udp://192.168.2.6:5601" "SET server to :5601"
+assert_set "outgoing.server" "${ALT_OUTGOING_SERVER}" "SET server to alternate destination"
 settle 1
 # Change back
-assert_set "outgoing.server" "udp://192.168.2.6:5600" "RESTORE server to :5600"
+assert_set "outgoing.server" "${BASE_OUTGOING_SERVER}" "RESTORE server=${BASE_OUTGOING_SERVER}"
 settle 1
 
 # ════════════════════════════════════════════════════════════════════════
@@ -528,7 +730,7 @@ section "14. VERBOSE TOGGLE"
 
 assert_set "system.verbose" "true" "SET verbose=true"
 settle 0.5
-assert_set "system.verbose" "false" "RESTORE verbose=false"
+assert_set "system.verbose" "${BASE_SYSTEM_VERBOSE}" "RESTORE verbose=${BASE_SYSTEM_VERBOSE}"
 
 # ════════════════════════════════════════════════════════════════════════
 section "15. AUDIO MUTE (live, audio may be disabled)"
@@ -537,7 +739,7 @@ section "15. AUDIO MUTE (live, audio may be disabled)"
 # Mute should succeed even when audio is disabled (no-op)
 assert_set "audio.mute" "true" "SET audio.mute=true"
 settle 0.3
-assert_set "audio.mute" "false" "RESTORE audio.mute=false"
+assert_set "audio.mute" "${BASE_AUDIO_MUTE}" "RESTORE audio.mute=${BASE_AUDIO_MUTE}"
 
 # ════════════════════════════════════════════════════════════════════════
 section "16. ERROR HANDLING — Invalid fields and values"
@@ -557,6 +759,19 @@ assert_set_fail "video0.fps" "0"
 assert_set_fail "video0.qp_delta" "-13"
 assert_set_fail "video0.qp_delta" "13"
 assert_set_fail "isp.awb_mode" "invalid_mode"
+assert_set_fail "fpv.roi_steps" "0"
+assert_set_fail "fpv.roi_steps" "999"
+assert_set_fail "fpv.roi_center" "0.05"
+assert_set_fail "fpv.roi_center" "42"
+assert_value_is "fpv.roi_steps" "${BASE_FPV_ROI_STEPS}" "VERIFY roi_steps unchanged after rejected values"
+assert_value_is "fpv.roi_center" "${BASE_FPV_ROI_CENTER}" "VERIFY roi_center unchanged after rejected values"
+
+if [[ "${backend}" == "\"star6e\"" && "${BASE_OUTGOING_STREAM_MODE}" != "compact" ]]; then
+	assert_set_fail "video0.codec" "h264" "Star6E RTP rejects h264 codec"
+	assert_value_is "video0.codec" "\"${BASE_VIDEO0_CODEC}\"" "VERIFY codec unchanged after rejected h264"
+else
+	skip "Star6E RTP rejects h264 codec" "not Star6E RTP mode"
+fi
 
 # Unknown route
 resp="$(curl -sf --max-time 3 "${BASE}/api/v1/nonexistent" 2>/dev/null)" || resp="error"
@@ -574,6 +789,11 @@ fi
 section "17. COMBINED PARAMETER CHANGES (rapid fire)"
 # ════════════════════════════════════════════════════════════════════════
 
+if [[ "${BASE_SCENE_THRESHOLD}" != "0" ]]; then
+	quiet_set "video0.scene_threshold" "0"
+	settle 1
+fi
+
 # Rapidly change multiple live parameters
 assert_set "video0.bitrate" 4000
 assert_set "video0.fps" 20
@@ -588,25 +808,72 @@ settle 2
 for check in "video0.bitrate:4000" "video0.fps:20" "video0.qp_delta:-4" "fpv.roi_enabled:true"; do
 	field="${check%%:*}"
 	expected="${check#*:}"
-	resp="$(c "${BASE}/api/v1/get?${field}")"
-	val="$(get_value "${resp}" 2>/dev/null)"
-	if [[ "${val}" == "${expected}" ]]; then
-		pass "VERIFY ${field} == ${expected}"
-	else
-		fail "VERIFY ${field}" "expected ${expected}, got ${val}"
-	fi
+	assert_value_is "${field}" "${expected}" "VERIFY ${field} == ${expected}"
 done
 
 # Restore all
-assert_set "video0.bitrate" 6000
-assert_set "video0.fps" 30
-assert_set "video0.gop_size" 1.0
-assert_set "video0.qp_delta" 0
-assert_set "fpv.roi_enabled" "false"
-assert_set "isp.exposure" 7
+assert_set "video0.bitrate" "${BASE_VIDEO0_BITRATE}"
+assert_set "video0.fps" "${BASE_VIDEO0_FPS}"
+assert_set "video0.gop_size" "${BASE_VIDEO0_GOP_SIZE}"
+assert_set "video0.qp_delta" "${BASE_VIDEO0_QP_DELTA}"
+assert_set "fpv.roi_qp" "${BASE_FPV_ROI_QP}"
+assert_set "fpv.roi_steps" "${BASE_FPV_ROI_STEPS}"
+assert_set "fpv.roi_center" "${BASE_FPV_ROI_CENTER}"
+assert_set "fpv.roi_enabled" "${BASE_FPV_ROI_ENABLED}"
+assert_set "isp.exposure" "${BASE_ISP_EXPOSURE}"
 
 # ════════════════════════════════════════════════════════════════════════
-section "18. RESTART-REQUIRED FIELDS (verify reinit_pending)"
+section "18. LIVE MULTI-SET QUERIES"
+# ════════════════════════════════════════════════════════════════════════
+
+assert_set_query \
+	"video0.bitrate=3072&system.verbose=false" \
+	"MULTI-SET bitrate+verbose"
+settle 1
+assert_value_is "video0.bitrate" "3072" "VERIFY multi-set bitrate == 3072"
+assert_value_is "system.verbose" "false" "VERIFY multi-set verbose == false"
+assert_set_query \
+	"video0.bitrate=${BASE_VIDEO0_BITRATE}&system.verbose=${BASE_SYSTEM_VERBOSE}" \
+	"MULTI-SET restore bitrate+verbose"
+
+assert_set_query \
+	"video0.fps=30&video0.gopSize=1.0" \
+	"MULTI-SET fps+gop"
+settle 2
+assert_value_is "video0.fps" "30" "VERIFY multi-set fps == 30"
+assert_value_is "video0.gop_size" "1" "VERIFY multi-set gop_size == 1"
+assert_set_query \
+	"video0.fps=${BASE_VIDEO0_FPS}&video0.gop_size=${BASE_VIDEO0_GOP_SIZE}" \
+	"MULTI-SET restore fps+gop"
+settle 1
+
+assert_set_query \
+	"isp.awbMode=ct_manual&isp.awbCt=6000" \
+	"MULTI-SET awb mode+ct"
+settle 1
+assert_value_is "isp.awb_mode" "\"ct_manual\"" "VERIFY multi-set awb_mode == ct_manual"
+assert_value_is "isp.awb_ct" "6000" "VERIFY multi-set awb_ct == 6000"
+assert_set_query \
+	"isp.awbMode=${BASE_ISP_AWB_MODE}&isp.awbCt=${BASE_ISP_AWB_CT}" \
+	"MULTI-SET restore awb"
+
+assert_set_query_fail \
+	"video0.bitrate=4096&video0.size=1280x720" \
+	"MULTI-SET rejects mixed live+restart"
+assert_value_is "video0.bitrate" "${BASE_VIDEO0_BITRATE}" "VERIFY mixed live+restart left bitrate unchanged"
+
+assert_set_query_fail \
+	"video0.qp_delta=1&video0.qpDelta=2" \
+	"MULTI-SET rejects duplicate canonical field"
+assert_value_is "video0.qp_delta" "${BASE_VIDEO0_QP_DELTA}" "VERIFY duplicate-key reject left qp_delta unchanged"
+
+if [[ "${BASE_SCENE_THRESHOLD}" != "0" ]]; then
+	quiet_set "video0.scene_threshold" "${BASE_SCENE_THRESHOLD}"
+	settle 1
+fi
+
+# ════════════════════════════════════════════════════════════════════════
+section "19. RESTART-REQUIRED FIELDS (verify reinit_pending)"
 # ════════════════════════════════════════════════════════════════════════
 
 # These fields should return reinit_pending=true but we do NOT trigger
@@ -628,8 +895,13 @@ for field_val in "video0.rc_mode=cbr" "video0.frame_lost=true" \
 	fi
 done
 
+assert_set "video0.rc_mode" "${BASE_VIDEO0_RC_MODE}" "RESTORE video0.rc_mode=${BASE_VIDEO0_RC_MODE}"
+assert_set "video0.frame_lost" "${BASE_VIDEO0_FRAME_LOST}" "RESTORE video0.frame_lost=${BASE_VIDEO0_FRAME_LOST}"
+assert_set "outgoing.stream_mode" "${BASE_OUTGOING_STREAM_MODE}" "RESTORE outgoing.stream_mode=${BASE_OUTGOING_STREAM_MODE}"
+assert_set "outgoing.max_payload_size" "${BASE_OUTGOING_MAX_PAYLOAD_SIZE}" "RESTORE outgoing.max_payload_size=${BASE_OUTGOING_MAX_PAYLOAD_SIZE}"
+
 # ════════════════════════════════════════════════════════════════════════
-section "19. PIPELINE RESTART"
+section "20. PIPELINE RESTART"
 # ════════════════════════════════════════════════════════════════════════
 
 resp="$(c "${BASE}/api/v1/restart")"
@@ -640,7 +912,7 @@ else
 fi
 
 # Wait for pipeline to reinitialize
-sleep 10
+sleep 15
 
 # Verify venc is back up
 resp="$(c "${BASE}/api/v1/version")" || resp=""
@@ -659,15 +931,15 @@ else
 fi
 
 # Verify live parameter changes work after restart
-assert_set "video0.bitrate" 8000 "POST-RESTART SET bitrate=8000"
+assert_set "video0.bitrate" "${POST_RESTART_BITRATE}" "POST-RESTART SET bitrate=${POST_RESTART_BITRATE}"
 settle 1
-assert_set "video0.fps" 25 "POST-RESTART SET fps=25"
+assert_set "video0.fps" "${POST_RESTART_FPS}" "POST-RESTART SET fps=${POST_RESTART_FPS}"
 settle 1
-assert_set "video0.qp_delta" -6 "POST-RESTART SET qp_delta=-6"
+assert_set "video0.qp_delta" "${POST_RESTART_QP_DELTA}" "POST-RESTART SET qp_delta=${POST_RESTART_QP_DELTA}"
 settle 1
 
 # Verify values took effect
-for check in "video0.bitrate:8000" "video0.fps:25" "video0.qp_delta:-6"; do
+for check in "video0.bitrate:${POST_RESTART_BITRATE}" "video0.fps:${POST_RESTART_FPS}" "video0.qp_delta:${POST_RESTART_QP_DELTA}"; do
 	field="${check%%:*}"
 	expected="${check#*:}"
 	resp="$(c "${BASE}/api/v1/get?${field}")"
@@ -680,9 +952,11 @@ for check in "video0.bitrate:8000" "video0.fps:25" "video0.qp_delta:-6"; do
 done
 
 # Restore
-assert_set "video0.bitrate" 6000 "POST-RESTART RESTORE bitrate=6000"
-assert_set "video0.fps" 30 "POST-RESTART RESTORE fps=30"
-assert_set "video0.qp_delta" 0 "POST-RESTART RESTORE qp_delta=0"
+assert_set "video0.bitrate" "${BASE_VIDEO0_BITRATE}" "POST-RESTART RESTORE bitrate=${BASE_VIDEO0_BITRATE}"
+assert_set "video0.fps" "${BASE_VIDEO0_FPS}" "POST-RESTART RESTORE fps=${BASE_VIDEO0_FPS}"
+assert_set "video0.qp_delta" "${BASE_VIDEO0_QP_DELTA}" "POST-RESTART RESTORE qp_delta=${BASE_VIDEO0_QP_DELTA}"
+
+RESTORE_ON_EXIT=0
 
 # ════════════════════════════════════════════════════════════════════════
 section "20. TRANSPORT REGRESSION (optional SSH)"
