@@ -489,8 +489,6 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.qp_delta < -12 || cfg->video0.qp_delta > 12)
 			return "qp_delta must be in range [-12, 12]";
 	}
-	if (strcmp(key, "video0.gop_size") == 0 && cfg->enc_ctrl.enabled)
-		return "video0.gop_size is managed by encCtrl while adaptive control is enabled";
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
 			return "roi_qp must be in range [-30, 30]";

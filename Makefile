@@ -32,12 +32,11 @@ MARUKO_SHIM_SRC := tools/maruko_uclibc_shim.c
 MARUKO_SHIM_SO := tools/libmaruko_uclibc_shim.so
 
 VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
-COMMON_CFLAGS := -Os -s -Iinclude -Ilib -Ienc-ctrl/include -include include/ssc338q_compat.h -DVENC_VERSION=\"$(VENC_VERSION)\"
+COMMON_CFLAGS := -Os -s -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VERSION=\"$(VENC_VERSION)\"
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c src/sensor_select.c src/venc_ring.c lib/cJSON.c
 HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/sdk_quiet.c src/rtp_packetizer.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c
-ENC_CTRL_SRC := enc-ctrl/src/ring_buffer.c enc-ctrl/src/scene_estimator.c enc-ctrl/src/gop_controller.c enc-ctrl/src/venc_sdk.c enc-ctrl/src/enc_ctrl.c enc-ctrl/src/telemetry.c
 MARUKO_ONLY_SRC := src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c
-STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/imu_bmi270.c src/eis.c src/eis_gyroglide.c src/star6e_iq.c src/debug_osd.c $(ENC_CTRL_SRC)
+STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/imu_bmi270.c src/eis.c src/eis_gyroglide.c src/star6e_iq.c src/debug_osd.c
 LIB_RUNPATH ?= /usr/lib
 COMMON_LDFLAGS := -Wl,-rpath,$(LIB_RUNPATH) -Wl,--no-as-needed
 BASE_LIBS := -Wl,--start-group \

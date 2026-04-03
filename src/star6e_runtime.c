@@ -1,7 +1,6 @@
 #include "star6e_runtime.h"
 
 #include "debug_osd.h"
-#include "enc_ctrl.h"
 #include "eis.h"
 #include "imu_bmi270.h"
 #include "pipeline_common.h"
@@ -64,12 +63,165 @@ static volatile sig_atomic_t g_running = 1;
 static volatile sig_atomic_t g_signal_count = 0;
 static struct timespec g_imu_eis_verbose_last = {0};
 
+/* ── Lightweight scene detector ──────────────────────────────────────── */
+
+#define ENC_FRAME_P   0
+#define ENC_FRAME_IDR 2
+
+#define SCENE_EMA_SHIFT      4
+#define SCENE_WARMUP_FRAMES  8
+#define SCENE_COOLDOWN_AFTER_IDR 30
+
+typedef struct {
+	uint32_t ema_size_fp8;
+	uint32_t frame_count;
+	uint16_t cooldown;
+	uint16_t settle_count;
+	uint8_t  spike_pending;
+	uint8_t  idr_inserted;
+	uint8_t  complexity;
+	uint8_t  scene_change;
+	uint16_t frames_since_idr;
+	uint16_t threshold;
+	uint8_t  holdoff;
+	uint8_t  consecutive_spikes;
+	uint8_t  idr_enabled;   /* 1 = request IDR after settle, 0 = telemetry only */
+} SceneDetector;
+
+static uint32_t scene_frame_size(const MI_VENC_Stream_t *s)
+{
+	uint32_t t = 0;
+	unsigned int i;
+	if (!s || !s->packet) return 0;
+	for (i = 0; i < s->count; i++) t += s->packet[i].length;
+	return t;
+}
+
+static uint8_t scene_frame_type(const MI_VENC_Stream_t *s, int codec)
+{
+	unsigned int i;
+	if (!s || !s->packet) return ENC_FRAME_P;
+	for (i = 0; i < s->count; i++) {
+		const MI_VENC_Pack_t *p = &s->packet[i];
+		unsigned int k, n = p->packNum > 8 ? 8 : p->packNum;
+		if (n > 0) {
+			for (k = 0; k < n; k++) {
+				if (codec == 0 && p->packetInfo[k].packType.h264Nalu == 5)
+					return ENC_FRAME_IDR;
+				if (codec != 0 && p->packetInfo[k].packType.h265Nalu == 19)
+					return ENC_FRAME_IDR;
+			}
+		} else {
+			if (codec == 0 && p->naluType.h264Nalu == 5) return ENC_FRAME_IDR;
+			if (codec != 0 && p->naluType.h265Nalu == 19) return ENC_FRAME_IDR;
+		}
+	}
+	return ENC_FRAME_P;
+}
+
+static void scene_init(SceneDetector *sd, const VencConfigEncCtrl *ec)
+{
+	memset(sd, 0, sizeof(*sd));
+	sd->threshold = ec->scene_change_threshold > 0 ? ec->scene_change_threshold : 150;
+	sd->holdoff = ec->scene_change_holdoff > 0 ? ec->scene_change_holdoff : 2;
+	sd->idr_enabled = ec->enabled ? 1 : 0;
+}
+
+static void scene_update(SceneDetector *sd, const MI_VENC_Stream_t *stream,
+	int codec, int venc_chn)
+{
+	uint32_t size, size_fp8, ema_size, ratio_x100;
+	uint8_t ftype;
+
+	if (!sd) return;
+	size = scene_frame_size(stream);
+	ftype = scene_frame_type(stream, codec);
+	if (size > (UINT32_MAX / 1000)) size = (UINT32_MAX / 1000);
+	size_fp8 = size << 8;
+	sd->frame_count++;
+	sd->idr_inserted = 0;
+	sd->scene_change = 0;
+
+	if (ftype == ENC_FRAME_IDR) {
+		sd->frames_since_idr = 0;
+		sd->spike_pending = 0;
+		sd->settle_count = 0;
+		sd->consecutive_spikes = 0;
+		sd->cooldown = SCENE_COOLDOWN_AFTER_IDR;
+	} else {
+		if (sd->frames_since_idr < UINT16_MAX) sd->frames_since_idr++;
+	}
+
+	if (sd->frame_count == 1) { sd->ema_size_fp8 = size_fp8; return; }
+
+	if (size_fp8 > sd->ema_size_fp8)
+		sd->ema_size_fp8 += (size_fp8 - sd->ema_size_fp8) >> SCENE_EMA_SHIFT;
+	else
+		sd->ema_size_fp8 -= (sd->ema_size_fp8 - size_fp8) >> SCENE_EMA_SHIFT;
+
+	ema_size = sd->ema_size_fp8 >> 8;
+	ratio_x100 = ema_size > 0 ? (size * 100) / ema_size : 100;
+
+	{ /* complexity 0-255 from frame size ratio */
+		uint32_t c;
+		if (ratio_x100 <= 50) c = (ratio_x100 * 128) / 100;
+		else if (ratio_x100 >= 300) c = 255;
+		else c = 64 + ((ratio_x100 - 50) * 191) / 250;
+		sd->complexity = (uint8_t)c;
+	}
+
+	if (sd->cooldown > 0) { sd->cooldown--; return; }
+	if (sd->frame_count <= SCENE_WARMUP_FRAMES) return;
+
+	if (sd->spike_pending) {
+		if (ratio_x100 <= 120) {
+			sd->spike_pending = 0;
+			sd->settle_count = 0;
+			sd->scene_change = 1;
+			if (sd->idr_enabled) {
+				sd->idr_inserted = 1;
+				MI_VENC_RequestIdr(venc_chn, 1);
+			}
+		} else {
+			sd->settle_count++;
+			if (sd->settle_count > 30) {
+				sd->spike_pending = 0;
+				sd->settle_count = 0;
+			}
+		}
+	} else {
+		if (ratio_x100 >= sd->threshold) {
+			sd->consecutive_spikes++;
+			if (sd->consecutive_spikes >= sd->holdoff)
+				sd->spike_pending = 1;
+		} else {
+			sd->consecutive_spikes = 0;
+		}
+	}
+}
+
+static void scene_fill_sidecar(const SceneDetector *sd,
+	const MI_VENC_Stream_t *stream, int codec, RtpSidecarEncInfo *out)
+{
+	if (!sd || !out) return;
+	memset(out, 0, sizeof(*out));
+	out->frame_size_bytes = scene_frame_size(stream);
+	out->frame_type = scene_frame_type(stream, codec);
+	out->complexity = sd->complexity;
+	out->scene_change = sd->scene_change;
+	out->idr_inserted = sd->idr_inserted;
+	out->frames_since_idr = sd->frames_since_idr;
+}
+
+/* ── Runner context ────────────────────────────────────────────────────── */
+
 typedef struct {
 	VencConfig vcfg;
 	Star6ePipelineState ps;
 	int system_initialized;
 	int httpd_started;
 	int pipeline_started;
+	SceneDetector scene;
 } Star6eRunnerContext;
 
 static void install_signal_handlers(void);
@@ -194,95 +346,7 @@ static int runtime_request_idr(void)
 	if (!g_runner_ctx)
 		return -1;
 
-	if (enc_ctrl_is_active())
-		return enc_ctrl_request_idr(
-			g_runner_ctx->vcfg.enc_ctrl.idr_qp_boost);
-
 	return MI_VENC_RequestIdr(g_runner_ctx->ps.venc_channel, 1) == 0 ? 0 : -1;
-}
-
-static int runtime_sidecar_enc_info(RtpSidecarEncInfo *out)
-{
-	TelemetryRecord rec;
-
-	if (!out || !enc_ctrl_is_active())
-		return 0;
-	if (enc_ctrl_get_latest_telemetry(&rec) != 0)
-		return 0;
-
-	memset(out, 0, sizeof(*out));
-	out->frame_size_bytes = rec.frame_size;
-	out->frame_type = rec.frame_type;
-	out->qp = rec.qp;
-	out->complexity = rec.complexity;
-	out->scene_change = rec.scene_change;
-	out->gop_state = rec.gop_state;
-	out->idr_inserted = rec.idr_inserted;
-	out->frames_since_idr = rec.frames_since_idr;
-	return 1;
-}
-
-static int runtime_enc_ctrl_codec(const VencConfig *vcfg)
-{
-	if (vcfg && strcmp(vcfg->video0.codec, "h264") == 0)
-		return 0;
-	return 1;
-}
-
-static void runtime_enc_ctrl_config(const VencConfig *vcfg, GopConfig *cfg)
-{
-	uint32_t fps;
-
-	gop_config_defaults(cfg);
-	if (!vcfg)
-		return;
-
-	fps = vcfg->video0.fps;
-	cfg->enable_variable_gop = vcfg->enc_ctrl.enabled ? 1 : 0;
-	cfg->max_gop_length = pipeline_common_gop_frames(
-		vcfg->enc_ctrl.max_gop_size, fps);
-	cfg->min_gop_length = pipeline_common_gop_frames(
-		vcfg->enc_ctrl.min_gop_size, fps);
-	cfg->defer_timeout_frames = vcfg->enc_ctrl.defer_timeout_frames;
-	cfg->scene_change_threshold = vcfg->enc_ctrl.scene_change_threshold;
-	cfg->scene_change_holdoff = vcfg->enc_ctrl.scene_change_holdoff;
-	cfg->idr_qp_boost = vcfg->enc_ctrl.idr_qp_boost;
-
-	if (cfg->max_gop_length == 0)
-		cfg->max_gop_length = 1;
-	if (cfg->min_gop_length > cfg->max_gop_length)
-		cfg->min_gop_length = cfg->max_gop_length;
-}
-
-static void runtime_enc_ctrl_shutdown(void)
-{
-	if (enc_ctrl_is_active())
-		enc_ctrl_shutdown();
-}
-
-static int runtime_enc_ctrl_init(Star6eRunnerContext *ctx)
-{
-	GopConfig cfg;
-	uint32_t bitrate_bps;
-
-	if (!ctx->vcfg.enc_ctrl.enabled)
-		return 0;
-
-	runtime_enc_ctrl_config(&ctx->vcfg, &cfg);
-
-	/* Do NOT override the hardware encoder's GOP — the user's gopSize
-	 * config stays in effect. enc_ctrl requests additional IDRs via
-	 * request_idr() when scene changes are detected. */
-
-	bitrate_bps = ctx->vcfg.video0.bitrate * 1024U;
-	if (enc_ctrl_init(&cfg, ctx->ps.venc_channel,
-	    runtime_enc_ctrl_codec(&ctx->vcfg), bitrate_bps,
-	    ctx->vcfg.video0.fps) != 0) {
-		fprintf(stderr, "ERROR: encCtrl init failed\n");
-		return -1;
-	}
-
-	return 0;
 }
 
 static void start_custom_ae(const Star6ePipelineState *ps,
@@ -485,8 +549,7 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	venc_api_register(vcfg, "star6e", star6e_controls_callbacks());
 	venc_api_set_record_status_fn(record_status_callback);
 
-	if (runtime_enc_ctrl_init(ctx) != 0)
-		return -1;
+	scene_init(&ctx->scene, &ctx->vcfg.enc_ctrl);
 
 	if (!vcfg->isp.legacy_ae)
 		start_custom_ae(ps, vcfg);
@@ -585,7 +648,6 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 	uint32_t prev_max_fps = ps->sensor.mode.maxFps;
 
 	star6e_cus3a_request_stop();
-	runtime_enc_ctrl_shutdown();
 
 	star6e_controls_reset();
 	star6e_pipeline_cus3a_reset();
@@ -627,8 +689,7 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 	star6e_controls_bind(ps, vcfg);
 	install_signal_handlers();
 
-	if (runtime_enc_ctrl_init(ctx) != 0)
-		return -1;
+	scene_init(&ctx->scene, &ctx->vcfg.enc_ctrl);
 
 	if (!vcfg->isp.legacy_ae)
 		start_custom_ae(ps, vcfg);
@@ -746,15 +807,14 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		return ret;
 	}
 
-	if (enc_ctrl_is_active())
-		(void)enc_ctrl_on_frame(&stream);
-
 	{
 		RtpSidecarEncInfo enc_info;
 		const RtpSidecarEncInfo *enc_ptr = NULL;
+		int codec = (strcmp(vcfg->video0.codec, "h264") == 0) ? 0 : 1;
 
-		if (runtime_sidecar_enc_info(&enc_info))
-			enc_ptr = &enc_info;
+		scene_update(&ctx->scene, &stream, codec, ps->venc_channel);
+		scene_fill_sidecar(&ctx->scene, &stream, codec, &enc_info);
+		enc_ptr = &enc_info;
 
 		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
 			ps->output_enabled, vcfg->system.verbose, enc_ptr);
@@ -1046,7 +1106,6 @@ static void star6e_runner_teardown(void *opaque)
 	 * open until StopRecvPic completes.  The thread skips SD writes
 	 * when g_running==0 (already set by the signal handler). */
 	if (ctx->pipeline_started) {
-		runtime_enc_ctrl_shutdown();
 		star6e_iq_cleanup();
 		star6e_controls_reset();
 		star6e_pipeline_stop(&ctx->ps);

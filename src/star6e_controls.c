@@ -1,6 +1,5 @@
 #include "star6e_controls.h"
 
-#include "enc_ctrl.h"
 #include "pipeline_common.h"
 #include "star6e_audio.h"
 #include "star6e_cus3a.h"
@@ -215,13 +214,6 @@ static int apply_bitrate(uint32_t kbps)
 	if (g_star6e_control_ctx.vcfg)
 		frame_lost_enabled = g_star6e_control_ctx.vcfg->video0.frame_lost;
 
-	if (enc_ctrl_is_active()) {
-		if (enc_ctrl_set_bitrate(bits) != 0)
-			return -1;
-		return star6e_controls_apply_frame_lost_threshold(
-			g_star6e_control_ctx.venc_chn, frame_lost_enabled, kbps);
-	}
-
 	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
 		return -1;
 
@@ -292,9 +284,6 @@ static int apply_encoder_gop(uint32_t gop_size)
 
 static int apply_gop(uint32_t gop_size)
 {
-	if (enc_ctrl_is_active())
-		return -1;
-
 	return apply_encoder_gop(gop_size);
 }
 
@@ -352,27 +341,8 @@ static int apply_encoder_fps(uint32_t fps)
 
 static int apply_enc_ctrl_fps(uint32_t fps)
 {
-	uint16_t max_gop_frames;
-	uint16_t min_gop_frames;
-
-	if (!enc_ctrl_is_active())
-		return 0;
-
-	if (!g_star6e_control_ctx.vcfg)
-		return -1;
-
-	max_gop_frames = (uint16_t)pipeline_common_gop_frames(
-		g_star6e_control_ctx.vcfg->enc_ctrl.max_gop_size, fps);
-	min_gop_frames = (uint16_t)pipeline_common_gop_frames(
-		g_star6e_control_ctx.vcfg->enc_ctrl.min_gop_size, fps);
-	if (max_gop_frames == 0)
-		max_gop_frames = 1;
-	if (min_gop_frames > max_gop_frames)
-		min_gop_frames = max_gop_frames;
-
-	if (apply_encoder_gop(max_gop_frames) != 0)
-		return -1;
-	return enc_ctrl_set_fps(fps, max_gop_frames, min_gop_frames);
+	(void)fps;
+	return 0;
 }
 
 static int apply_fps(uint32_t fps)
@@ -449,14 +419,6 @@ static int apply_verbose(bool on)
 
 static int request_idr(void)
 {
-	if (enc_ctrl_is_active()) {
-		uint8_t qp_boost = 0;
-
-		if (g_star6e_control_ctx.vcfg)
-			qp_boost = g_star6e_control_ctx.vcfg->enc_ctrl.idr_qp_boost;
-		return enc_ctrl_request_idr(qp_boost);
-	}
-
 	return MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1) == 0 ? 0 : -1;
 }
 
