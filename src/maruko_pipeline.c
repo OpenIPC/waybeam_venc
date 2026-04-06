@@ -106,32 +106,31 @@ static void maruko_enable_cus3a(void)
 	typedef int (*fn_t)(MI_U32 dev_id, MI_U32 channel, void *params);
 	fn_t fn = (fn_t)dlsym(h, "MI_ISP_CUS3A_Enable");
 	if (fn) {
-		MI_BOOL p100[3] = {1, 0, 0};
-		MI_BOOL p110[3] = {1, 1, 0};
-		MI_BOOL p111[3] = {1, 1, 1};
-		fn(0, 0, p100);
-		fn(0, 0, p110);
-		MI_S32 ret = fn(0, 0, p111);
-		if (ret != 0) {
-			fprintf(stderr,
-				"WARNING: [maruko] MI_ISP_CUS3A_Enable(1,1,1) failed %d\n",
-				ret);
-		}
+		/* Disable userspace CUS3A — let the ISP's internal 3A
+		 * (from libispalgo.so + bin file) handle AE/AWB/AF.
+		 * CUS3A_Enable(1,1,1) hands control to userspace which
+		 * we don't have a processing loop for. Setting (0,0,0)
+		 * returns control to the ISP's built-in algorithms. */
+		MI_BOOL p000[3] = {0, 0, 0};
+		MI_S32 ret = fn(0, 0, p000);
+		printf("> [maruko] CUS3A_Enable(0,0,0) ret=%d "
+			"(ISP internal 3A)\n", ret);
 	}
 	/* Do NOT dlclose — CUS3A opens /dev/isp_fe which must stay open
 	 * for IQ parameter writes to reach the ISP front-end hardware. */
 
-	/* Open /dev/isp_fe directly — CUS3A uses this device for IQ
-	 * parameter processing. Majestic has it open; we need it too. */
+	/* Enable InjectMode AFTER bin load + I2C exposure.
+	 * Pre-StartChannel placement made image black. */
 	{
-		int isp_fe_fd = open("/dev/isp_fe", O_RDWR);
-		if (isp_fe_fd >= 0)
-			printf("> [maruko] /dev/isp_fe opened (fd %d)\n",
-				isp_fe_fd);
-		else
-			printf("> [maruko] WARNING: /dev/isp_fe open failed: "
-				"%s\n", strerror(errno));
-		/* Keep fd open */
+		typedef int (*inject_fn_t)(MI_U32, MI_U32, void *);
+		inject_fn_t fn_inject = (inject_fn_t)dlsym(h,
+			"MI_ISP_CUS3A_InjectModeEnable");
+		if (fn_inject) {
+			MI_BOOL inject = 1;
+			int r = fn_inject(0, 0, &inject);
+			printf("> [maruko] CUS3A InjectModeEnable(%d) "
+				"ret=%d\n", inject, r);
+		}
 	}
 	/* Keep dlopen handle open — do not dlclose */
 }

@@ -807,6 +807,27 @@ apply:
 					.s32Ret = 0,
 				};
 				ret = g_fn_api_set(&hdr, data_ptr);
+
+				/* Readback via GetIQApiData to verify */
+				if (g_fn_api_get && shm) {
+					memset(shm, 0xAA, data_len);
+					if (g_fn_flush) g_fn_flush(shm, data_len);
+					IspApiHeader ghdr = hdr;
+					ghdr.s32Ret = 0;
+					int gr = g_fn_api_get(&ghdr, shm);
+					uint32_t rb_en = 0, rb_val = 0;
+					if (data_len >= 4)
+						memcpy(&rb_en, shm, 4);
+					if (target->manual_offset > 0 &&
+					    target->manual_offset + 4 <= data_len)
+						memcpy(&rb_val,
+							(uint8_t*)shm + target->manual_offset, 4);
+					printf("[iq] %s: readback: gr=%d "
+						"en=%u val@%u=%u\n",
+						param, gr, rb_en,
+						target->manual_offset, rb_val);
+				}
+
 				printf("[iq] %s: SetIQApiData(id=0x%x "
 					"len=%u shm=%s) ret=%d hdr.ret=%d "
 					"(0x%x)\n",
