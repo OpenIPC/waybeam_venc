@@ -14,45 +14,15 @@
 #include "cJSON.h"
 
 #include <dlfcn.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
 
 /* Maruko ISP functions: (dev, channel, data*) */
 typedef int (*iq_fn_t)(uint32_t dev, uint32_t channel, void *param);
 
-/* Maruko (DUAL_OS firmware) IQ API path:
- * 1. MI_ISP_Alloc_IQDataBuf — allocate shared memory buffer
- * 2. memcpy data into shared buffer
- * 3. MI_SYS_FlushInvCache — flush CPU cache for DMA coherency
- * 4. MI_ISP_SetIQApiData(&header, buffer) — send to ISP RTOS
- *
- * The GENERAL_* and individual MI_ISP_IQ_Set* functions return
- * success but don't take effect because they don't use the
- * shared memory path required by DUAL_OS. */
-typedef struct {
-	uint32_t u32HeadSize;  /* sizeof(this struct) = 24 */
-	uint32_t u32DataLen;   /* size of parameter struct */
-	uint32_t u32CtrlID;    /* API ID (e.g. 4100 for ColorToGray) */
-	uint32_t u32Channel;
-	uint32_t u32DevId;
-	int32_t  s32Ret;
-} IspApiHeader;
-
-typedef int (*isp_api_fn_t)(IspApiHeader *header, void *data);
-typedef int (*isp_alloc_fn_t)(uint32_t size, void **buf);
-typedef int (*sys_flush_fn_t)(void *buf, uint32_t size);
-
-static isp_api_fn_t g_fn_api_set;
-static isp_api_fn_t g_fn_api_get;
-static isp_alloc_fn_t g_fn_alloc;
-static sys_flush_fn_t g_fn_flush;
 
 #define IQ_DEV  0
 #define IQ_CHN  0
@@ -316,20 +286,6 @@ int maruko_iq_init(void)
 			resolved++;
 	}
 
-	/* Resolve DUAL_OS IQ API path — shared memory + cache flush. */
-	g_fn_api_set = (isp_api_fn_t)dlsym(g_isp_handle,
-		"MI_ISP_SetIQApiData");
-	g_fn_api_get = (isp_api_fn_t)dlsym(g_isp_handle,
-		"MI_ISP_GetIQApiData");
-	g_fn_alloc = (isp_alloc_fn_t)dlsym(g_isp_handle,
-		"MI_ISP_Alloc_IQDataBuf");
-	g_fn_flush = (sys_flush_fn_t)dlsym(RTLD_DEFAULT,
-		"MI_SYS_FlushInvCache");
-	printf("[iq] DUAL_OS API: Set=%s Get=%s Alloc=%s Flush=%s\n",
-		g_fn_api_set ? "yes" : "NO",
-		g_fn_api_get ? "yes" : "NO",
-		g_fn_alloc ? "yes" : "NO",
-		g_fn_flush ? "yes" : "NO");
 
 	/* Ensure all IQ modules have API bypass OFF so that
 	 * MI_ISP_IQ_Set* calls take effect on the image.
@@ -481,33 +437,7 @@ char *maruko_iq_query(void)
 		}
 
 		memset(iq_buf, 0, IQ_BUF_SIZE);
-		int ret;
-		if (p->api_id && g_fn_api_get && g_fn_alloc) {
-			/* DUAL_OS Get: alloc shared buf, get, copy back */
-			uint32_t sz = (p->vtype == VT_BOOL) ? 4 :
-				(p->manual_offset > 0 ?
-				 p->manual_offset + 4 : 256);
-			void *shm_buf = NULL;
-			if (g_fn_alloc(sz, &shm_buf) == 0 && shm_buf) {
-				memset(shm_buf, 0, sz);
-				IspApiHeader hdr = {
-					.u32HeadSize = sizeof(IspApiHeader),
-					.u32DataLen = sz,
-					.u32CtrlID = p->api_id,
-					.u32Channel = IQ_CHN,
-					.u32DevId = IQ_DEV,
-					.s32Ret = 0,
-				};
-				if (g_fn_flush)
-					g_fn_flush(shm_buf, sz);
-				ret = g_fn_api_get(&hdr, shm_buf);
-				memcpy(iq_buf, shm_buf, sz);
-			} else {
-				ret = IQ_CALL(p->fn_get, iq_buf);
-			}
-		} else {
-			ret = IQ_CALL(p->fn_get, iq_buf);
-		}
+		int ret = IQ_CALL(p->fn_get, iq_buf);
 		uint32_t enable = read_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32);
 
 		if (p->vtype == VT_BOOL) {
@@ -638,28 +568,7 @@ int maruko_iq_set(const char *param, const char *value)
 	else
 		data_len = 256;
 
-	if (target->api_id && g_fn_api_get && g_fn_alloc) {
-		void *shm_buf = NULL;
-		if (g_fn_alloc(data_len, &shm_buf) == 0 && shm_buf) {
-			memcpy(shm_buf, iq_buf, data_len);
-			IspApiHeader hdr = {
-				.u32HeadSize = sizeof(IspApiHeader),
-				.u32DataLen = data_len,
-				.u32CtrlID = target->api_id,
-				.u32Channel = IQ_CHN,
-				.u32DevId = IQ_DEV,
-				.s32Ret = 0,
-			};
-			if (g_fn_flush)
-				g_fn_flush(shm_buf, data_len);
-			ret = g_fn_api_get(&hdr, shm_buf);
-			memcpy(iq_buf, shm_buf, data_len);
-		} else {
-			ret = IQ_CALL(target->fn_get, iq_buf);
-		}
-	} else {
-		ret = IQ_CALL(target->fn_get, iq_buf);
-	}
+	ret = IQ_CALL(target->fn_get, iq_buf);
 	if (ret != 0) {
 		fprintf(stderr, "[iq] %s: Get failed: 0x%08x\n",
 			param_name, (unsigned)ret);
@@ -728,133 +637,9 @@ int maruko_iq_set(const char *param, const char *value)
 	}
 
 apply:
-	if (target->api_id) {
-		/* Use MI_ISP_GENERAL_SetIspApiData — this is the correct
-		 * non-DUAL_OS path that goes through ioctl internally.
-		 * The IQApiHeader struct is passed to the function which
-		 * builds the ioctl command and sends it to /dev/mi_isp. */
-		/* Direct ioctl to /dev/mi_isp using the EXACT format from
-		 * disassembly of MI_ISP_SetIQApiData in libmi_isp.so.
-		 *
-		 * The ioctl buffer (28 bytes, passed at sp to ioctl):
-		 *   [0]  u16: high16(DevId) = 0
-		 *   [2]  u16: padding = 0
-		 *   [4]  u32: 28 (0x1c, constant)
-		 *   [8]  u32: data_ptr (low 32 bits)
-		 *   [12] u32: data_ptr sign-extended (0 for positive)
-		 *   [16] u32: HeadSize (0x18)
-		 *   [20] u32: DataLen
-		 *   [24] u32: CtrlID (api_id)
-		 */
-		static int isp_fd = -1;
-		if (isp_fd < 0) {
-			char link[64];
-			for (int f = 3; f < 30; f++) {
-				char path[128];
-				snprintf(link, sizeof(link),
-					"/proc/self/fd/%d", f);
-				int n = readlink(link, path,
-					sizeof(path) - 1);
-				if (n > 0) {
-					path[n] = '\0';
-					if (strcmp(path, "/dev/mi_isp") == 0) {
-						isp_fd = f;
-						break;
-					}
-				}
-			}
-		}
-		if (isp_fd >= 0) {
-			/* Allocate data in ISP shared memory pool so the
-			 * ISP RTOS can access it (stack buffers may not
-			 * be in the shared memory region). */
-			void *shm = NULL;
-			if (g_fn_alloc)
-				g_fn_alloc(data_len, &shm);
-			void *data_ptr = shm ? shm : iq_buf;
-			if (shm)
-				memcpy(shm, iq_buf, data_len);
-			if (g_fn_flush && shm)
-				g_fn_flush(shm, data_len);
-
-			struct {
-				uint16_t dev_hi;    /* 0 */
-				uint16_t pad;       /* 0 */
-				uint32_t size_28;   /* 0x1c */
-				uint32_t data_lo;   /* data ptr */
-				uint32_t data_hi;   /* 0 (sign ext) */
-				uint32_t head_sz;   /* 0x18 */
-				uint32_t data_len;  /* struct size */
-				uint32_t ctrl_id;   /* api_id */
-			} iocmd;
-			memset(&iocmd, 0, sizeof(iocmd));
-			iocmd.size_28 = 0x1c;
-			iocmd.data_lo = (uint32_t)(uintptr_t)data_ptr;
-			iocmd.data_hi = 0;
-			iocmd.head_sz = 0x18;
-			iocmd.data_len = data_len;
-			iocmd.ctrl_id = target->api_id;
-
-			/* Try MI_ISP_SetIQApiData first (library ioctl wrapper),
-			 * then raw ioctl if library doesn't work. */
-			if (g_fn_api_set) {
-				IspApiHeader hdr = {
-					.u32HeadSize = sizeof(IspApiHeader),
-					.u32DataLen = data_len,
-					.u32CtrlID = target->api_id,
-					.u32Channel = IQ_CHN,
-					.u32DevId = IQ_DEV,
-					.s32Ret = 0,
-				};
-				ret = g_fn_api_set(&hdr, data_ptr);
-
-				/* Readback via GetIQApiData to verify */
-				if (g_fn_api_get && shm) {
-					memset(shm, 0xAA, data_len);
-					if (g_fn_flush) g_fn_flush(shm, data_len);
-					IspApiHeader ghdr = hdr;
-					ghdr.s32Ret = 0;
-					int gr = g_fn_api_get(&ghdr, shm);
-					uint32_t rb_en = 0, rb_val = 0;
-					if (data_len >= 4)
-						memcpy(&rb_en, shm, 4);
-					if (target->manual_offset > 0 &&
-					    target->manual_offset + 4 <= data_len)
-						memcpy(&rb_val,
-							(uint8_t*)shm + target->manual_offset, 4);
-					printf("[iq] %s: readback: gr=%d "
-						"en=%u val@%u=%u\n",
-						param, gr, rb_en,
-						target->manual_offset, rb_val);
-				}
-
-				printf("[iq] %s: SetIQApiData(id=0x%x "
-					"len=%u shm=%s) ret=%d hdr.ret=%d "
-					"(0x%x)\n",
-					param, target->api_id, data_len,
-					shm ? "yes" : "no",
-					ret, hdr.s32Ret,
-					(unsigned)hdr.s32Ret);
-			} else {
-				ret = ioctl(isp_fd, 0x401c6911, &iocmd);
-				printf("[iq] %s: ioctl(id=0x%x len=%u) "
-					"ret=%d (0x%x)\n",
-					param, target->api_id, data_len,
-					ret, (unsigned)ret);
-			}
-		} else {
-			/* Fallback to library call */
-			ret = IQ_CALL(target->fn_set, iq_buf);
-		}
-	} else {
-		ret = IQ_CALL(target->fn_set, iq_buf);
-	}
-	if (ret != 0) {
-		fprintf(stderr, "[iq] %s: Set failed: 0x%08x\n",
-			param, (unsigned)ret);
-		rc = -1;
-		goto out;
-	}
+	/* With EnableUserspace3A active, the 3A_Proc_0 thread picks up
+	 * IQ parameter changes. Use the standard library Set function. */
+	ret = IQ_CALL(target->fn_set, iq_buf);
 	printf("[iq] %s = %s (set OK)\n", param, value);
 	rc = 0;
 

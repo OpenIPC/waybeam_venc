@@ -14,8 +14,6 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
-#include <linux/i2c-dev.h>
-#include <linux/i2c.h>
 #include <sys/ioctl.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -1090,81 +1088,6 @@ static void assign_maruko_ports(MarukoBackendContext *ctx,
 	};
 }
 
-/* Set IMX415 exposure and gain via direct I2C register writes.
- * This replicates majestic's mi_isp_set_image behavior.
- * The ISP bin (disabledBin) has AE disabled so sensor exposure
- * must be set manually.
- *
- * IMX415 registers:
- *   SHR0 (0x3050-0x3052): shutter = VMAX - SHR0 lines
- *   GAIN (0x3090-0x3091): analog gain in 0.3dB steps
- */
-static void maruko_sensor_set_exposure_i2c(uint32_t fps)
-{
-	int fd = open("/dev/i2c-1", O_RDWR);
-	if (fd < 0) {
-		fprintf(stderr, "WARNING: [maruko] cannot open /dev/i2c-1: %s\n",
-			strerror(errno));
-		return;
-	}
-
-	/* IMX415 I2C address (7-bit) */
-	if (ioctl(fd, I2C_SLAVE_FORCE, 0x1a) < 0) {
-		fprintf(stderr, "WARNING: [maruko] I2C_SLAVE_FORCE 0x1a: %s\n",
-			strerror(errno));
-		close(fd);
-		return;
-	}
-
-	/* Read VMAX to compute exposure time */
-	uint8_t vmax_cmd[2] = {0x30, 0x24};
-	uint8_t vmax_buf[3] = {0};
-	struct i2c_msg vmax_msgs[2] = {
-		{ .addr = 0x1a, .flags = 0, .len = 2, .buf = vmax_cmd },
-		{ .addr = 0x1a, .flags = I2C_M_RD, .len = 3, .buf = vmax_buf },
-	};
-	struct i2c_rdwr_ioctl_data vmax_data = { .msgs = vmax_msgs, .nmsgs = 2 };
-	uint32_t vmax = 816; /* fallback */
-	if (ioctl(fd, I2C_RDWR, &vmax_data) >= 0)
-		vmax = vmax_buf[0] | (vmax_buf[1] << 8) | ((vmax_buf[2] & 0xF) << 16);
-
-	/* Target: ~16ms exposure (matching majestic exposure=16).
-	 * exposure_lines = exposure_us / line_time_us
-	 * line_time for 120fps mode ~8.3us (1/120/VMAX * 1e6)
-	 * SHR0 = VMAX - exposure_lines (min SHR0 = 8) */
-	uint32_t target_us = 16000; /* 16ms like majestic */
-	uint32_t line_us = 1000000 / (fps * vmax);
-	if (line_us == 0) line_us = 1;
-	uint32_t exp_lines = target_us / line_us;
-	if (exp_lines >= vmax)
-		exp_lines = vmax - 8;
-	uint32_t shr0 = vmax - exp_lines;
-	if (shr0 < 8) shr0 = 8;
-
-	/* Write SHR0 (0x3050-0x3052, 3 bytes LSB first) */
-	uint8_t shr0_cmd[5] = {
-		0x30, 0x50,
-		shr0 & 0xFF, (shr0 >> 8) & 0xFF, (shr0 >> 16) & 0x0F
-	};
-	struct i2c_msg shr0_msg = { .addr = 0x1a, .flags = 0, .len = 5, .buf = shr0_cmd };
-	struct i2c_rdwr_ioctl_data shr0_data = { .msgs = &shr0_msg, .nmsgs = 1 };
-	int r1 = ioctl(fd, I2C_RDWR, &shr0_data);
-
-	/* Write GAIN (0x3090-0x3091, analog gain in 0.3dB steps)
-	 * majestic analog=512 maps to ~20dB = 67 steps (0x43) */
-	uint8_t gain_val = 0x43; /* ~20dB */
-	uint8_t gain_cmd[4] = { 0x30, 0x90, gain_val, 0x00 };
-	struct i2c_msg gain_msg = { .addr = 0x1a, .flags = 0, .len = 4, .buf = gain_cmd };
-	struct i2c_rdwr_ioctl_data gain_data = { .msgs = &gain_msg, .nmsgs = 1 };
-	int r2 = ioctl(fd, I2C_RDWR, &gain_data);
-
-	printf("> [maruko] I2C exposure: VMAX=%u SHR0=%u (%u lines, ~%ums) "
-		"gain=0x%02x ret=%d/%d\n",
-		vmax, shr0, exp_lines, target_us / 1000, gain_val, r1, r2);
-
-	close(fd);
-}
-
 static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 {
 	uint32_t out_w = ctx->cfg.image_width;
@@ -1216,26 +1139,13 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			if (ret != 0)
 				return -1;
 		}
-		/* The ISP bin (disabledBin) has AE disabled.
-		 * All MI_ISP_AE_* API calls return 0xA0212209.
-		 * Majestic sets initial exposure via direct I2C writes
-		 * to the IMX415 sensor registers (mi_isp_set_image).
-		 * We do the same: write SHR0 (shutter) and gain via I2C. */
-		/* I2C exposure bootstrap — needed until ISP AE API works.
-		 * MI_ISP_AE_* calls return 0xA0212209 on all Maruko bins.
-		 * TODO: replace with proper API path once resolved. */
-		/* CUS3A enable: the 100->110->111 sequence opens /dev/isp_fe
-		 * via libcus3a.so. Without this, IQ parameter writes go to
-		 * /dev/mi_isp but never reach the ISP front-end hardware.
-		 * This was previously removed but is REQUIRED for IQ. */
+		/* CUS3A enable + EnableUserspace3A: the 100->110->111 sequence
+		 * initializes the CUS3A framework, then EnableUserspace3A
+		 * creates the 3A_Proc_0 thread that drives AE/AWB and
+		 * applies IQ parameter changes to ISP hardware. */
 		maruko_enable_cus3a();
-
-		maruko_sensor_set_exposure_i2c(ctx->sensor.fps);
 		g_maruko_isp_initialized = 1;
 	}
-	/* Skip exposure cap — SetExposureLimit returns 0xA0212209 on Maruko
-	 * when CUS3A is active. The ISP bin's AE handles FPS-appropriate
-	 * shutter limits internally. */
 
 	if (ctx->cfg.output_uri.type == VENC_OUTPUT_URI_SHM) {
 		if (ctx->cfg.stream_mode != MARUKO_STREAM_RTP) {
