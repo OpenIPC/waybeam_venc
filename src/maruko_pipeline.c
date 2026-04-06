@@ -805,6 +805,16 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 			" (continuing)\n", ret);
 	}
 
+	/* Ring pool MUST be configured before CreateChannel (matching
+	 * majestic i6c_hal.c order: pool → CreateChn → SetSource → Start) */
+	MI_U16 venc_ring = (MI_U16)height;
+	if (venc_ring == 0)
+		venc_ring = 1;
+	MI_S32 pool_ret = maruko_config_dev_ring_pool(I6C_SYS_MOD_VENC,
+		(MI_U32)venc_dev, (MI_U16)width, (MI_U16)height, venc_ring);
+	printf("> [maruko] VENC ring pool: %ux%u ring=%u ret=%d\n",
+		width, height, venc_ring, pool_ret);
+
 	i6c_venc_chn attr = {0};
 	if (cfg->rc_codec == PT_H265) {
 		attr.attrib.codec = I6C_VENC_CODEC_H265;
@@ -832,16 +842,6 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 		}
 		return ret;
 	}
-
-	/* Sample-venc behavior: configure VENC private ring pool
-	 * before StartRecvPic. */
-	MI_U16 venc_ring = (MI_U16)height;
-	if (venc_ring == 0)
-		venc_ring = 1;
-	MI_S32 pool_ret = maruko_config_dev_ring_pool(I6C_SYS_MOD_VENC,
-		(MI_U32)venc_dev, (MI_U16)width, (MI_U16)height, venc_ring);
-	printf("> [maruko] VENC ring pool: %ux%u ring=%u ret=%d\n",
-		width, height, venc_ring, pool_ret);
 
 	i6c_venc_src_conf input_mode = I6C_VENC_SRC_CONF_RING_DMA;
 	ret = maruko_mi_venc_set_input_source(venc_dev, *chn, &input_mode);
@@ -992,10 +992,9 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 	ctx->cfg.venc_gop_size = pipeline_common_gop_frames(
 		ctx->cfg.venc_gop_seconds, ctx->sensor.fps);
 
-	/* SCL ring pool uses sensor capture dimensions (ISP output size),
-	 * not the effective/binned output. When sensor has output binning
-	 * (e.g. mode 1: capture 2952x1656, output 2560x1440), the ISP
-	 * still outputs at the capture resolution. */
+	/* Configure SCL ring pool using sensor capture dimensions.
+	 * Note: majestic skips this, but the SDK sample_venc.c uses it.
+	 * Use capture (ISP output) size, not effective/binned size. */
 	uint32_t capt_w = ctx->sensor.plane.capt.width;
 	uint32_t capt_h = ctx->sensor.plane.capt.height;
 	MI_U16 scl_ring = (MI_U16)(capt_h / 4);
@@ -1003,10 +1002,8 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 		scl_ring = 1;
 	MI_S32 pool_ret = maruko_config_dev_ring_pool(I6C_SYS_MOD_SCL, 0,
 		(MI_U16)capt_w, (MI_U16)capt_h, scl_ring);
-	printf("> [maruko] SCL ring pool: %ux%u ring=%u ret=%d "
-		"(eff %ux%u out %ux%u)\n",
-		capt_w, capt_h, scl_ring, pool_ret,
-		eff_w, eff_h, out_w, out_h);
+	printf("> [maruko] SCL ring pool: %ux%u ring=%u ret=%d\n",
+		capt_w, capt_h, scl_ring, pool_ret);
 	printf("> [maruko] sensor capt: %ux%u  eff: %ux%u  out: %ux%u\n",
 		ctx->sensor.plane.capt.width, ctx->sensor.plane.capt.height,
 		eff_w, eff_h, out_w, out_h);
@@ -1048,14 +1045,6 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	ctx->venc_started = 1;
 
 	MI_U32 venc_device = (MI_U32)ctx->venc_device;
-#if !defined(PLATFORM_MARUKO)
-	if (MI_VENC_GetChnDevid(ctx->venc_channel, &venc_device) != 0) {
-		fprintf(stderr,
-			"ERROR: [maruko] MI_VENC_GetChnDevid failed\n");
-		return -1;
-	}
-#endif
-
 	assign_maruko_ports(ctx, venc_device);
 
 	MI_S32 ret = MI_SYS_BindChnPort2(&ctx->vif_port, &ctx->isp_port,
@@ -1087,21 +1076,16 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 
 	/* ISP bin load and CUS3A enable must only run once per process
 	 * lifetime.  On reinit, kernel ISP driver retains CUS3A state;
-	 * re-running the 100→110→111 sequence causes a mutex deadlock. */
+	 * re-running the 100->110->111 sequence causes a mutex deadlock. */
 	if (!g_maruko_isp_initialized) {
 		if (ctx->cfg.isp_bin_path && *ctx->cfg.isp_bin_path) {
 			ret = maruko_load_isp_bin(ctx->cfg.isp_bin_path);
 			if (ret != 0)
 				return -1;
 		}
-		if (getenv("MARUKO_NO_CUS3A")) {
-			printf("> [maruko] CUS3A DISABLED (MARUKO_NO_CUS3A set)\n");
-		} else {
-			maruko_enable_cus3a();
-		}
+		maruko_enable_cus3a();
 		g_maruko_isp_initialized = 1;
 	}
-	/* Exposure cap is safe to reapply — FPS may have changed. */
 	pipeline_common_cap_exposure_for_fps(ctx->sensor.fps,
 		ctx->cfg.exposure_cap_us);
 
