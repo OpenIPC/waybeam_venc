@@ -389,6 +389,10 @@ static int maruko_start_vif(const SensorSelectResult *sensor)
 			 sensor->plane.bayer);
 	}
 
+	printf("> [maruko] VIF dev: inputRect(%u,%u %ux%u) pixel=%d\n",
+		dev.stInputRect.x, dev.stInputRect.y,
+		dev.stInputRect.width, dev.stInputRect.height,
+		dev.eInputPixel);
 	ret = MI_VIF_SetDevAttr(0, &dev);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -412,6 +416,12 @@ static int maruko_start_vif(const SensorSelectResult *sensor)
 	port.eFrameRate = E_MI_VIF_FRAMERATE_FULL;
 	port.eCompressMode = E_MI_SYS_COMPRESS_MODE_NONE;
 
+	printf("> [maruko] VIF port: capRect(%u,%u %ux%u) dest(%ux%u) "
+		"pixel=%d compress=%d\n",
+		port.stCapRect.x, port.stCapRect.y,
+		port.stCapRect.width, port.stCapRect.height,
+		port.stDestSize.width, port.stDestSize.height,
+		port.ePixFormat, port.eCompressMode);
 	ret = MI_VIF_SetOutputPortAttr(0, 0, &port);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -512,6 +522,10 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 	isp_port.crop = sensor->plane.capt;
 	isp_port.pixFmt = I6_PIXFMT_YUV420SP;
 	isp_port.compress = I6_COMPR_NONE;
+	printf("> [maruko] ISP port: crop(%u,%u %ux%u) fmt=%d compress=%d\n",
+		isp_port.crop.x, isp_port.crop.y,
+		isp_port.crop.width, isp_port.crop.height,
+		isp_port.pixFmt, isp_port.compress);
 	ret = g_maruko_isp.fnSetPortConfig(0, 0, 0, &isp_port);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -616,6 +630,12 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	scl_port.pixFmt = I6_PIXFMT_YUV420SP;
 	/* Maruko VENC ring input expects IFC compress mode (enum value 6). */
 	scl_port.compress = (i6_common_compr)6;
+	printf("> [maruko] SCL port: crop(%u,%u %ux%u) out(%ux%u) "
+		"fmt=%d compress=%d\n",
+		scl_port.crop.x, scl_port.crop.y,
+		scl_port.crop.width, scl_port.crop.height,
+		scl_port.output.width, scl_port.output.height,
+		scl_port.pixFmt, scl_port.compress);
 	ret = g_maruko_scl.fnSetPortConfig(0, 0, 0, &scl_port);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -805,8 +825,10 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	MI_U16 venc_ring = (MI_U16)height;
 	if (venc_ring == 0)
 		venc_ring = 1;
-	(void)maruko_config_dev_ring_pool(I6C_SYS_MOD_VENC,
+	MI_S32 pool_ret = maruko_config_dev_ring_pool(I6C_SYS_MOD_VENC,
 		(MI_U32)venc_dev, (MI_U16)width, (MI_U16)height, venc_ring);
+	printf("> [maruko] VENC ring pool: %ux%u ring=%u ret=%d\n",
+		width, height, venc_ring, pool_ret);
 
 	i6c_venc_src_conf input_mode = I6C_VENC_SRC_CONF_RING_DMA;
 	ret = maruko_mi_venc_set_input_source(venc_dev, *chn, &input_mode);
@@ -839,6 +861,49 @@ static void maruko_stop_venc(MI_VENC_DEV venc_dev, MI_VENC_CHN chn,
 	(void)maruko_mi_venc_destroy_chn(venc_dev, chn);
 	if (destroy_dev)
 		(void)maruko_mi_venc_destroy_dev(venc_dev);
+}
+
+static void maruko_sysfs_write(const char *path, const char *value)
+{
+	FILE *f = fopen(path, "w");
+	if (!f)
+		return;
+	fprintf(f, "%s\n", value);
+	fclose(f);
+}
+
+static void maruko_set_hw_clocks(int oc_level, int verbose)
+{
+	/* ISP clock: 384 MHz (required for >= 1080p) */
+	maruko_sysfs_write("/sys/devices/virtual/mstar/isp0/isp_clk",
+		"384000000");
+
+	/* SCL clock: index 1 = 533 MHz (max available).
+	 * This sysfs node takes an index, not a frequency. */
+	maruko_sysfs_write("/sys/devices/virtual/mstar/mscl/clk", "1");
+
+	if (verbose) {
+		printf("> [maruko] ISP clock -> 384 MHz\n");
+		printf("> [maruko] SCL clock -> 533 MHz (idx 1)\n");
+	}
+
+	if (oc_level >= 1) {
+		/* VENC secondary + AXI clocks are at 320 MHz by default;
+		 * primary is already 384 MHz. No sysfs write interface
+		 * discovered yet — revisit when VENC becomes bottleneck. */
+	}
+
+	if (oc_level >= 2) {
+		maruko_sysfs_write(
+			"/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+			"performance");
+		maruko_sysfs_write(
+			"/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq",
+			"1200000");
+		if (verbose)
+			printf("> [maruko] CPU -> performance @ 1200 MHz "
+				"(oc-level %d)\n", oc_level);
+	}
 }
 
 int maruko_pipeline_init(MarukoBackendContext *ctx)
@@ -919,8 +984,13 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 	MI_U16 scl_ring = (MI_U16)(eff_h / 4);
 	if (scl_ring == 0)
 		scl_ring = 1;
-	(void)maruko_config_dev_ring_pool(I6C_SYS_MOD_SCL, 0,
+	MI_S32 pool_ret = maruko_config_dev_ring_pool(I6C_SYS_MOD_SCL, 0,
 		(MI_U16)eff_w, (MI_U16)eff_h, scl_ring);
+	printf("> [maruko] SCL ring pool: %ux%u ring=%u ret=%d\n",
+		eff_w, eff_h, scl_ring, pool_ret);
+	printf("> [maruko] sensor capt: %ux%u  eff: %ux%u  out: %ux%u\n",
+		ctx->sensor.plane.capt.width, ctx->sensor.plane.capt.height,
+		eff_w, eff_h, out_w, out_h);
 
 	return 0;
 }
@@ -1030,6 +1100,8 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 
 int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 {
+	maruko_set_hw_clocks(ctx->cfg.oc_level, ctx->cfg.verbose);
+
 	if (setup_maruko_graph_dimensions(ctx) != 0)
 		return -1;
 
