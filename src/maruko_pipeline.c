@@ -487,7 +487,10 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 
 	if (!g_maruko_isp_chn_created) {
 		i6c_isp_chn isp_chn = {0};
-		isp_chn.sensorId = (unsigned int)sensor->pad_id;
+		/* SigmaStar ISP sensorId is 1-based (pad 0 -> sensorId 1),
+		 * matching majestic behavior. pad_id=0 with sensorId=0
+		 * causes ISP frame processing to stall at larger resolutions. */
+		isp_chn.sensorId = (unsigned int)(sensor->pad_id + 1);
 		ret = g_maruko_isp.fnCreateChannel(0, 0, &isp_chn);
 		if (ret != 0) {
 			fprintf(stderr,
@@ -499,14 +502,21 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 	}
 	chn = 1;
 
-	i6c_isp_para isp_para = {0};
-	isp_para.hdr = I6_HDR_OFF;
-	isp_para.level3DNR = vpe_level_3dnr;
-	ret = g_maruko_isp.fnSetChannelParam(0, 0, &isp_para);
-	if (ret != 0) {
-		fprintf(stderr,
-			"ERROR: [maruko] MI_ISP_SetChnParam failed %d\n", ret);
-		goto fail;
+	if (!getenv("MARUKO_SKIP_ISP_PARAM")) {
+		i6c_isp_para isp_para = {0};
+		isp_para.hdr = I6_HDR_OFF;
+		isp_para.level3DNR = getenv("MARUKO_NO_3DNR") ? 0 : vpe_level_3dnr;
+		printf("> [maruko] ISP params: 3DNR=%d hdr=%d\n",
+			isp_para.level3DNR, isp_para.hdr);
+		ret = g_maruko_isp.fnSetChannelParam(0, 0, &isp_para);
+		if (ret != 0) {
+			fprintf(stderr,
+				"ERROR: [maruko] MI_ISP_SetChnParam failed %d\n",
+				ret);
+			goto fail;
+		}
+	} else {
+		printf("> [maruko] ISP SetChnParam SKIPPED\n");
 	}
 
 	ret = g_maruko_isp.fnStartChannel(0, 0);
@@ -1075,7 +1085,11 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			if (ret != 0)
 				return -1;
 		}
-		maruko_enable_cus3a();
+		if (getenv("MARUKO_NO_CUS3A")) {
+			printf("> [maruko] CUS3A DISABLED (MARUKO_NO_CUS3A set)\n");
+		} else {
+			maruko_enable_cus3a();
+		}
 		g_maruko_isp_initialized = 1;
 	}
 	/* Exposure cap is safe to reapply — FPS may have changed. */
