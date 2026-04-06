@@ -23,6 +23,33 @@
 /* Maruko ISP functions: (dev, channel, data*) */
 typedef int (*iq_fn_t)(uint32_t dev, uint32_t channel, void *param);
 
+/* Maruko (DUAL_OS firmware) IQ API path:
+ * 1. MI_ISP_Alloc_IQDataBuf — allocate shared memory buffer
+ * 2. memcpy data into shared buffer
+ * 3. MI_SYS_FlushInvCache — flush CPU cache for DMA coherency
+ * 4. MI_ISP_SetIQApiData(&header, buffer) — send to ISP RTOS
+ *
+ * The GENERAL_* and individual MI_ISP_IQ_Set* functions return
+ * success but don't take effect because they don't use the
+ * shared memory path required by DUAL_OS. */
+typedef struct {
+	uint32_t u32HeadSize;  /* sizeof(this struct) = 24 */
+	uint32_t u32DataLen;   /* size of parameter struct */
+	uint32_t u32CtrlID;    /* API ID (e.g. 4100 for ColorToGray) */
+	uint32_t u32Channel;
+	uint32_t u32DevId;
+	int32_t  s32Ret;
+} IspApiHeader;
+
+typedef int (*isp_api_fn_t)(IspApiHeader *header, void *data);
+typedef int (*isp_alloc_fn_t)(uint32_t size, void **buf);
+typedef int (*sys_flush_fn_t)(void *buf, uint32_t size);
+
+static isp_api_fn_t g_fn_api_set;
+static isp_api_fn_t g_fn_api_get;
+static isp_alloc_fn_t g_fn_alloc;
+static sys_flush_fn_t g_fn_flush;
+
 #define IQ_DEV  0
 #define IQ_CHN  0
 #define IQ_CALL(fn, buf)  (fn)(IQ_DEV, IQ_CHN, (buf))
@@ -59,6 +86,7 @@ typedef struct {
 	uint32_t    max_val;
 	const IqFieldDesc *fields;
 	uint16_t    field_count;
+	uint16_t    api_id;  /* MI_ISP_IQ_SetAll/GetAll API ID (0=not mapped) */
 } IqParamDesc;
 
 /* ── Multi-field descriptors ──────────────────────────────────────── */
@@ -120,15 +148,15 @@ static const IqFieldDesc crosstalk_fields[] = {
 static IqParamDesc g_params[] = {
 	/* ── Image quality (same symbol names on both platforms) ─────── */
 	{ "lightness",    "MI_ISP_IQ_GetLightness",   "MI_ISP_IQ_SetLightness",
-	  NULL, NULL, VT_U32, 72,   100, NULL, 0 },
+	  NULL, NULL, VT_U32, 72,   100, NULL, 0, 4103 },
 	{ "contrast",     "MI_ISP_IQ_GetContrast",    "MI_ISP_IQ_SetContrast",
-	  NULL, NULL, VT_U32, 72,   100, NULL, 0 },
+	  NULL, NULL, VT_U32, 72,   100, NULL, 0, 4101 },
 	{ "brightness",   "MI_ISP_IQ_GetBrightness",  "MI_ISP_IQ_SetBrightness",
-	  NULL, NULL, VT_U32, 72,   100, NULL, 0 },
+	  NULL, NULL, VT_U32, 72,   100, NULL, 0, 4102 },
 	{ "saturation",   "MI_ISP_IQ_GetSaturation",  "MI_ISP_IQ_SetSaturation",
-	  NULL, NULL, VT_U8,  392,  127, NULL, 0 },
+	  NULL, NULL, VT_U8,  392,  127, NULL, 0, 4106 },
 	{ "sharpness",    "MI_ISP_IQ_GetSharpness",   "MI_ISP_IQ_SetSharpness",
-	  NULL, NULL, VT_U8,  1192, 255, NULL, 0 },
+	  NULL, NULL, VT_U8,  1192, 255, NULL, 0, 4114 },
 
 	/* ── Noise reduction (Maruko symbol names) ─────────────────── */
 	{ "nr3d",         "MI_ISP_IQ_GetNr3d",        "MI_ISP_IQ_SetNr3d",
@@ -214,9 +242,9 @@ static IqParamDesc g_params[] = {
 
 	/* ── Toggle controls ───────────────────────────────────────── */
 	{ "defog",        "MI_ISP_IQ_GetDefog",        "MI_ISP_IQ_SetDefog",
-	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0, 4107 },
 	{ "color_to_gray","MI_ISP_IQ_GetColorToGray",  "MI_ISP_IQ_SetColorToGray",
-	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0, 4100 },
 	{ "fpn",          "MI_ISP_IQ_GetFpn",           "MI_ISP_IQ_SetFpn",
 	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 
@@ -282,6 +310,41 @@ int maruko_iq_init(void)
 			g_params[i].set_sym);
 		if (g_params[i].fn_get && g_params[i].fn_set)
 			resolved++;
+	}
+
+	/* Resolve DUAL_OS IQ API path — shared memory + cache flush. */
+	g_fn_api_set = (isp_api_fn_t)dlsym(g_isp_handle,
+		"MI_ISP_SetIQApiData");
+	g_fn_api_get = (isp_api_fn_t)dlsym(g_isp_handle,
+		"MI_ISP_GetIQApiData");
+	g_fn_alloc = (isp_alloc_fn_t)dlsym(g_isp_handle,
+		"MI_ISP_Alloc_IQDataBuf");
+	g_fn_flush = (sys_flush_fn_t)dlsym(RTLD_DEFAULT,
+		"MI_SYS_FlushInvCache");
+	printf("[iq] DUAL_OS API: Set=%s Get=%s Alloc=%s Flush=%s\n",
+		g_fn_api_set ? "yes" : "NO",
+		g_fn_api_get ? "yes" : "NO",
+		g_fn_alloc ? "yes" : "NO",
+		g_fn_flush ? "yes" : "NO");
+
+	/* Ensure all IQ modules have API bypass OFF so that
+	 * MI_ISP_IQ_Set* calls take effect on the image.
+	 * ApiBypassMode struct: { bEnable(4), eAPIIndex(4) }
+	 * bEnable=0 means bypass OFF (module active + API-writable). */
+	typedef int (*bypass_fn_t)(uint32_t, uint32_t, void *);
+	bypass_fn_t fn_bypass = (bypass_fn_t)dlsym(g_isp_handle,
+		"MI_ISP_IQ_SetApiBypassMode");
+	if (fn_bypass) {
+		int bypass_ok = 0;
+		/* Iterate all API module IDs (0..62) */
+		for (uint32_t api_id = 0; api_id <= 62; api_id++) {
+			struct { uint32_t enable; uint32_t index; } bp;
+			bp.enable = 0;  /* E_SS_BYPASS_OFF */
+			bp.index = api_id;
+			int r = fn_bypass(0, 0, &bp);
+			if (r == 0) bypass_ok++;
+		}
+		printf("[iq] API bypass OFF set for %d modules\n", bypass_ok);
 	}
 
 	printf("[iq] Maruko IQ parameter API ready (%d/%d params resolved)\n",
@@ -414,7 +477,33 @@ char *maruko_iq_query(void)
 		}
 
 		memset(iq_buf, 0, IQ_BUF_SIZE);
-		int ret = IQ_CALL(p->fn_get, iq_buf);
+		int ret;
+		if (p->api_id && g_fn_api_get && g_fn_alloc) {
+			/* DUAL_OS Get: alloc shared buf, get, copy back */
+			uint32_t sz = (p->vtype == VT_BOOL) ? 4 :
+				(p->manual_offset > 0 ?
+				 p->manual_offset + 4 : 256);
+			void *shm_buf = NULL;
+			if (g_fn_alloc(sz, &shm_buf) == 0 && shm_buf) {
+				memset(shm_buf, 0, sz);
+				IspApiHeader hdr = {
+					.u32HeadSize = sizeof(IspApiHeader),
+					.u32DataLen = sz,
+					.u32CtrlID = p->api_id,
+					.u32Channel = IQ_CHN,
+					.u32DevId = IQ_DEV,
+					.s32Ret = 0,
+				};
+				if (g_fn_flush)
+					g_fn_flush(shm_buf, sz);
+				ret = g_fn_api_get(&hdr, shm_buf);
+				memcpy(iq_buf, shm_buf, sz);
+			} else {
+				ret = IQ_CALL(p->fn_get, iq_buf);
+			}
+		} else {
+			ret = IQ_CALL(p->fn_get, iq_buf);
+		}
 		uint32_t enable = read_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32);
 
 		if (p->vtype == VT_BOOL) {
@@ -536,7 +625,37 @@ int maruko_iq_set(const char *param, const char *value)
 	static uint8_t iq_buf[IQ_BUF_SIZE];
 	memset(iq_buf, 0, IQ_BUF_SIZE);
 
-	int ret = IQ_CALL(target->fn_get, iq_buf);
+	int ret;
+	uint32_t data_len;
+	if (target->vtype == VT_BOOL)
+		data_len = 4;
+	else if (target->manual_offset > 0)
+		data_len = target->manual_offset + 4;
+	else
+		data_len = 256;
+
+	if (target->api_id && g_fn_api_get && g_fn_alloc) {
+		void *shm_buf = NULL;
+		if (g_fn_alloc(data_len, &shm_buf) == 0 && shm_buf) {
+			memcpy(shm_buf, iq_buf, data_len);
+			IspApiHeader hdr = {
+				.u32HeadSize = sizeof(IspApiHeader),
+				.u32DataLen = data_len,
+				.u32CtrlID = target->api_id,
+				.u32Channel = IQ_CHN,
+				.u32DevId = IQ_DEV,
+				.s32Ret = 0,
+			};
+			if (g_fn_flush)
+				g_fn_flush(shm_buf, data_len);
+			ret = g_fn_api_get(&hdr, shm_buf);
+			memcpy(iq_buf, shm_buf, data_len);
+		} else {
+			ret = IQ_CALL(target->fn_get, iq_buf);
+		}
+	} else {
+		ret = IQ_CALL(target->fn_get, iq_buf);
+	}
 	if (ret != 0) {
 		fprintf(stderr, "[iq] %s: Get failed: 0x%08x\n",
 			param_name, (unsigned)ret);
@@ -605,7 +724,27 @@ int maruko_iq_set(const char *param, const char *value)
 	}
 
 apply:
-	ret = IQ_CALL(target->fn_set, iq_buf);
+	if (target->api_id) {
+		/* Use MI_ISP_IQ_SetAll — the ONLY path majestic uses.
+		 * Majestic does NOT use GetAll, GENERAL_*, SetIQApiData,
+		 * or individual MI_ISP_IQ_Set* functions. */
+		typedef int (*setall_fn_t)(uint32_t, uint32_t,
+			uint16_t, uint32_t, uint8_t *);
+		setall_fn_t fn_sa = (setall_fn_t)dlsym(g_isp_handle,
+			"MI_ISP_IQ_SetAll");
+		if (fn_sa) {
+			ret = fn_sa(IQ_DEV, IQ_CHN, target->api_id,
+				data_len, iq_buf);
+			printf("[iq] %s: IQ_SetAll(id=%u len=%u) "
+				"ret=%d (0x%x)\n",
+				param, target->api_id, data_len,
+				ret, (unsigned)ret);
+		} else {
+			ret = IQ_CALL(target->fn_set, iq_buf);
+		}
+	} else {
+		ret = IQ_CALL(target->fn_set, iq_buf);
+	}
 	if (ret != 0) {
 		fprintf(stderr, "[iq] %s: Set failed: 0x%08x\n",
 			param, (unsigned)ret);
