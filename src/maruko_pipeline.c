@@ -106,30 +106,33 @@ static void maruko_enable_cus3a(void)
 	typedef int (*fn_t)(MI_U32 dev_id, MI_U32 channel, void *params);
 	fn_t fn = (fn_t)dlsym(h, "MI_ISP_CUS3A_Enable");
 	if (fn) {
-		/* Disable userspace CUS3A — let the ISP's internal 3A
-		 * (from libispalgo.so + bin file) handle AE/AWB/AF.
-		 * CUS3A_Enable(1,1,1) hands control to userspace which
-		 * we don't have a processing loop for. Setting (0,0,0)
-		 * returns control to the ISP's built-in algorithms. */
-		MI_BOOL p000[3] = {0, 0, 0};
-		MI_S32 ret = fn(0, 0, p000);
-		printf("> [maruko] CUS3A_Enable(0,0,0) ret=%d "
-			"(ISP internal 3A)\n", ret);
+		/* Enable CUS3A (1,1,1) — this starts the 3A_Proc_0 thread
+		 * in libcus3a.so which processes AE/AWB/AF and applies
+		 * IQ parameter changes. Without this thread, IQ Set calls
+		 * succeed but never reach the ISP hardware. */
+		MI_BOOL p100[3] = {1, 0, 0};
+		MI_BOOL p110[3] = {1, 1, 0};
+		MI_BOOL p111[3] = {1, 1, 1};
+		fn(0, 0, p100);
+		fn(0, 0, p110);
+		MI_S32 ret = fn(0, 0, p111);
+		printf("> [maruko] CUS3A_Enable(1,1,1) ret=%d\n", ret);
 	}
 	/* Do NOT dlclose — CUS3A opens /dev/isp_fe which must stay open
 	 * for IQ parameter writes to reach the ISP front-end hardware. */
 
-	/* Enable InjectMode AFTER bin load + I2C exposure.
-	 * Pre-StartChannel placement made image black. */
+	/* Enable Userspace3A — this should create the 3A_Proc thread
+	 * that processes AE/AWB and applies IQ parameters. */
 	{
-		typedef int (*inject_fn_t)(MI_U32, MI_U32, void *);
-		inject_fn_t fn_inject = (inject_fn_t)dlsym(h,
-			"MI_ISP_CUS3A_InjectModeEnable");
-		if (fn_inject) {
-			MI_BOOL inject = 1;
-			int r = fn_inject(0, 0, &inject);
-			printf("> [maruko] CUS3A InjectModeEnable(%d) "
-				"ret=%d\n", inject, r);
+		typedef int (*us3a_fn_t)(MI_U32, MI_U32);
+		us3a_fn_t fn_us3a = (us3a_fn_t)dlsym(h,
+			"MI_ISP_EnableUserspace3A");
+		if (fn_us3a) {
+			int r = fn_us3a(0, 0);
+			printf("> [maruko] EnableUserspace3A ret=%d\n", r);
+		} else {
+			printf("> [maruko] WARNING: EnableUserspace3A "
+				"not found\n");
 		}
 	}
 	/* Keep dlopen handle open — do not dlclose */
@@ -514,6 +517,12 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 	int dev = 0, chn = 0, started = 0, port = 0;
 
 	if (!g_maruko_isp_loaded) {
+		/* Pre-load CUS3A libs with RTLD_GLOBAL BEFORE loading
+		 * libmi_isp.so. This ensures the CUS3A 3A_Proc thread
+		 * starts properly when MI_ISP_CUS3A_Enable is called. */
+		dlopen("libispalgo.so", RTLD_LAZY | RTLD_GLOBAL);
+		dlopen("libcus3a.so", RTLD_LAZY | RTLD_GLOBAL);
+
 		if (i6c_isp_load(&g_maruko_isp) != 0) {
 			fprintf(stderr,
 				"ERROR: [maruko] failed to load i6c ISP symbols\n");
