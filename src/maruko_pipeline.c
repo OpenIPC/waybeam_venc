@@ -1153,6 +1153,42 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		 * creates the 3A_Proc_0 thread that drives AE/AWB and
 		 * applies IQ parameter changes to ISP hardware. */
 		maruko_enable_cus3a();
+
+		typedef struct {
+			unsigned int minShutterUs, maxShutterUs;
+			unsigned int minApertX10, maxApertX10;
+			unsigned int minSensorGain, minIspGain;
+			unsigned int maxSensorGain, maxIspGain;
+		} MarukoIspExposureLimit;
+		/* Cap exposure to sensor frame period so AE doesn't limit
+		 * output FPS. Default bin has 14ms → 71fps. For 120fps
+		 * sensor: 1000000/120 = 8333us max shutter → ~110fps. */
+		if (ctx->sensor.fps > 0) {
+			uint32_t fps_cap_us = 1000000 / ctx->sensor.fps;
+			/* User config overrides if set (in ms → us) */
+			if (ctx->cfg.exposure_cap_us > 0)
+				fps_cap_us = ctx->cfg.exposure_cap_us;
+			typedef int (*ae_get_fn)(uint32_t, uint32_t,
+				MarukoIspExposureLimit *);
+			typedef int (*ae_set_fn)(uint32_t, uint32_t,
+				MarukoIspExposureLimit *);
+			ae_get_fn fn_get = (ae_get_fn)dlsym(RTLD_DEFAULT,
+				"MI_ISP_AE_GetExposureLimit");
+			ae_set_fn fn_set = (ae_set_fn)dlsym(RTLD_DEFAULT,
+				"MI_ISP_AE_SetExposureLimit");
+			if (fn_get && fn_set) {
+				MarukoIspExposureLimit lim = {0};
+				if (fn_get(0, 0, &lim) == 0) {
+					printf("> [maruko] Exposure cap: "
+						"%uus -> %uus (for %u fps)\n",
+						lim.maxShutterUs, fps_cap_us,
+						ctx->sensor.fps);
+					lim.maxShutterUs = fps_cap_us;
+					fn_set(0, 0, &lim);
+				}
+			}
+		}
+
 		g_maruko_isp_initialized = 1;
 	}
 
