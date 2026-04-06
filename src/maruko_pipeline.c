@@ -1197,7 +1197,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			idle_counter++;
 			if ((idle_counter % 500) == 0)
 				printf("> [maruko] waiting for encoder data...\n");
-			if (idle_counter > 3000) {
+			if (idle_counter > 10000) {
 				fprintf(stderr,
 					"ERROR: [maruko] no encoder data"
 					" received; aborting stream loop\n");
