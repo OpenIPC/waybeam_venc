@@ -729,50 +729,66 @@ int maruko_iq_set(const char *param, const char *value)
 
 apply:
 	if (target->api_id) {
-		/* Direct ioctl to /dev/mi_isp — same path majestic uses.
-		 * The ioctl cmd struct is 28 bytes. */
-		struct {
-			uint32_t type;      /* 0x18 */
-			uint32_t data_len;
-			uint32_t api_id;
-			uint32_t param;
-			uint32_t channel;
-			uint32_t flags;
-			void    *data_ptr;
-		} iocmd = {
-			.type = 0x18,
-			.data_len = data_len,
-			.api_id = target->api_id,
-			.param = 0,
-			.channel = 0,
-			.flags = 0,
-			.data_ptr = iq_buf,
-		};
-		/* Find existing /dev/mi_isp fd from our process.
-		 * libmi_isp.so opens it during dlopen (typically fd 8). */
+		/* Use MI_ISP_GENERAL_SetIspApiData — this is the correct
+		 * non-DUAL_OS path that goes through ioctl internally.
+		 * The IQApiHeader struct is passed to the function which
+		 * builds the ioctl command and sends it to /dev/mi_isp. */
+		/* Direct ioctl to /dev/mi_isp using the EXACT format from
+		 * disassembly of MI_ISP_SetIQApiData in libmi_isp.so.
+		 *
+		 * The ioctl buffer (28 bytes, passed at sp to ioctl):
+		 *   [0]  u16: high16(DevId) = 0
+		 *   [2]  u16: padding = 0
+		 *   [4]  u32: 28 (0x1c, constant)
+		 *   [8]  u32: data_ptr (low 32 bits)
+		 *   [12] u32: data_ptr sign-extended (0 for positive)
+		 *   [16] u32: HeadSize (0x18)
+		 *   [20] u32: DataLen
+		 *   [24] u32: CtrlID (api_id)
+		 */
 		static int isp_fd = -1;
 		if (isp_fd < 0) {
 			char link[64];
 			for (int f = 3; f < 30; f++) {
 				char path[128];
-				snprintf(link, sizeof(link), "/proc/self/fd/%d", f);
-				int n = readlink(link, path, sizeof(path) - 1);
+				snprintf(link, sizeof(link),
+					"/proc/self/fd/%d", f);
+				int n = readlink(link, path,
+					sizeof(path) - 1);
 				if (n > 0) {
 					path[n] = '\0';
 					if (strcmp(path, "/dev/mi_isp") == 0) {
 						isp_fd = f;
-						printf("[iq] Found /dev/mi_isp at fd %d\n", f);
 						break;
 					}
 				}
 			}
 		}
 		if (isp_fd >= 0) {
+			struct {
+				uint16_t dev_hi;    /* 0 */
+				uint16_t pad;       /* 0 */
+				uint32_t size_28;   /* 0x1c */
+				uint32_t data_lo;   /* data ptr */
+				uint32_t data_hi;   /* 0 (sign ext) */
+				uint32_t head_sz;   /* 0x18 */
+				uint32_t data_len;  /* struct size */
+				uint32_t ctrl_id;   /* api_id */
+			} iocmd;
+			memset(&iocmd, 0, sizeof(iocmd));
+			iocmd.size_28 = 0x1c;
+			iocmd.data_lo = (uint32_t)(uintptr_t)iq_buf;
+			iocmd.data_hi = 0;
+			iocmd.head_sz = 0x18;
+			iocmd.data_len = data_len;
+			iocmd.ctrl_id = target->api_id;
+
 			ret = ioctl(isp_fd, 0x401c6911, &iocmd);
-			printf("[iq] %s: ioctl(fd=%d, 0x401c6911, id=0x%x "
-				"len=%u) ret=%d errno=%d (%s)\n",
-				param, isp_fd, target->api_id, data_len,
-				ret, errno, ret < 0 ? strerror(errno) : "ok");
+			printf("[iq] %s: ioctl(fd=%d id=0x%x len=%u) "
+				"ret=%d errno=%d\n",
+				param, isp_fd, target->api_id,
+				data_len, ret,
+				ret < 0 ? errno : 0);
 		} else {
 			/* Fallback to library call */
 			ret = IQ_CALL(target->fn_set, iq_buf);
