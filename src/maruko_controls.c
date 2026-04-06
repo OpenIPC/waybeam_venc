@@ -1,6 +1,7 @@
 #include "maruko_controls.h"
 
 #include "maruko_bindings.h"
+#include "maruko_iq.h"
 #include "maruko_output.h"
 #include "pipeline_common.h"
 #include "venc_config.h"
@@ -922,6 +923,8 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.query_awb_info = maruko_query_awb_info,
 	.query_isp_metrics = maruko_query_isp_metrics,
 	.apply_awb_mode = maruko_apply_awb_mode,
+	.query_iq_info = maruko_iq_query,
+	.apply_iq_param = maruko_iq_set,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
