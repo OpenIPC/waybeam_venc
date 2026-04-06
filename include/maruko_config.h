@@ -36,6 +36,7 @@ typedef struct {
 	uint32_t exposure_cap_us;
 	SensorUnlockConfig sensor_unlock;
 	int oc_level;
+	int frame_lost;
 	int verbose;
 } MarukoBackendConfig;
 

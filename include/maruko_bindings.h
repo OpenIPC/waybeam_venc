@@ -100,12 +100,23 @@ MI_S32 maruko_mi_venc_set_rc_param(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	MI_VENC_RcParam_t *param) __asm__("MI_VENC_SetRcParam");
 MI_S32 maruko_mi_venc_request_idr(MI_VENC_DEV dev, MI_VENC_CHN chn, MI_BOOL instant)
 	__asm__("MI_VENC_RequestIdr");
+MI_S32 maruko_mi_venc_set_frame_lost_strategy(MI_VENC_DEV dev, MI_VENC_CHN chn,
+	MI_VENC_ParamFrameLost_t *p) __asm__("MI_VENC_SetFrameLostStrategy");
 MI_S32 maruko_mi_sys_config_private_pool(MI_U16 soc_id, i6c_sys_pool *config)
 	__asm__("MI_SYS_ConfigPrivateMMAPool");
 
+/* Maruko (i6c) uses the UBR rate mode enum layout — the standard
+ * I6C_VENC_RATEMODE_* values (H265CBR=9) are rejected by the firmware.
+ * The UBR layout inserts an extra UBR slot for H264/H265, shifting
+ * all H265 modes up by 1.  These are the values MI_VENC_CreateChn
+ * actually accepts. */
 enum {
-	MARUKO_VENC_RC_H264_CBR = 1,
-	MARUKO_VENC_RC_H265_CBR = 10,
+	MARUKO_RC_H264_CBR  = 1,   /* I6C_VENC_RATEMODE_UBR_H264CBR  */
+	MARUKO_RC_H264_VBR  = 2,   /* I6C_VENC_RATEMODE_UBR_H264VBR  */
+	MARUKO_RC_H264_AVBR = 6,   /* I6C_VENC_RATEMODE_UBR_H264AVBR */
+	MARUKO_RC_H265_CBR  = 10,  /* I6C_VENC_RATEMODE_UBR_H265CBR  */
+	MARUKO_RC_H265_VBR  = 11,  /* I6C_VENC_RATEMODE_UBR_H265VBR  */
+	MARUKO_RC_H265_AVBR = 14,  /* I6C_VENC_RATEMODE_UBR_H265AVBR */
 };
 
 #endif

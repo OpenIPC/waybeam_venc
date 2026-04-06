@@ -34,6 +34,7 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->forced_sensor_mode = -1;
 	cfg->isp_bin_path = NULL;
 	cfg->vpe_level_3dnr = 1;
+	cfg->frame_lost = 1;
 	cfg->verbose = 0;
 }
 
@@ -88,6 +89,7 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 		.dir = (MI_SNR_CustDir_e)vcfg->sensor.unlock_dir,
 	};
 	cfg->oc_level = vcfg->system.overclock_level;
+	cfg->frame_lost = vcfg->video0.frame_lost ? 1 : 0;
 	cfg->verbose = vcfg->system.verbose ? 1 : 0;
 
 	return 0;

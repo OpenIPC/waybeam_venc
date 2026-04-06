@@ -46,6 +46,10 @@ static int maruko_runner_init(void *opaque)
 			ctx->vcfg.video0.qp_delta);
 	}
 
+	maruko_scene_init(&ctx->backend.scene,
+		ctx->vcfg.video0.scene_threshold,
+		ctx->vcfg.video0.scene_holdoff);
+
 	if (ctx->vcfg.audio.enabled) {
 		fprintf(stderr, "WARNING: audio output is not supported on maruko backend\n");
 	}
@@ -114,6 +118,11 @@ static int maruko_reinit_pipeline(MarukoRunnerContext *ctx)
 		maruko_controls_callbacks()->apply_qp_delta(
 			ctx->vcfg.video0.qp_delta);
 	}
+
+	maruko_scene_init(&ctx->backend.scene,
+		ctx->vcfg.video0.scene_threshold,
+		ctx->vcfg.video0.scene_holdoff);
+
 	return 0;
 }
 

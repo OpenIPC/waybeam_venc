@@ -9,6 +9,25 @@
 #include <signal.h>
 
 typedef struct {
+  uint32_t ema_size_fp8;
+  uint32_t frame_count;
+  uint32_t last_frame_size;
+  uint8_t  last_frame_type;
+  uint16_t cooldown;
+  uint16_t settle_count;
+  uint8_t  spike_pending;
+  uint8_t  idr_inserted;
+  uint8_t  complexity;
+  uint8_t  scene_change;
+  uint16_t frames_since_idr;
+  uint16_t threshold;
+  uint8_t  holdoff;
+  uint8_t  consecutive_spikes;
+  uint8_t  idr_enabled;
+  uint8_t  warmup_done;
+} MarukoSceneDetector;
+
+typedef struct {
   int system_initialized;
   int sensor_enabled;
   int vif_started;
@@ -30,6 +49,7 @@ typedef struct {
   MI_SYS_ChnPort_t venc_port;
   SensorSelectResult sensor;
   MarukoBackendConfig cfg;
+  MarukoSceneDetector scene;
 } MarukoBackendContext;
 
 /** Initialize Maruko pipeline state and load SDK libraries. */
@@ -47,6 +67,10 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx);
 
 /** Full teardown: pipeline + httpd + MI_SYS_Exit. */
 void maruko_pipeline_teardown(MarukoBackendContext *ctx);
+
+/** Initialize scene detector from config thresholds. */
+void maruko_scene_init(MarukoSceneDetector *sd, uint16_t threshold,
+	uint8_t holdoff);
 
 /** Install SIGINT/SIGTERM/SIGHUP handlers for graceful shutdown/reinit. */
 void maruko_pipeline_install_signal_handlers(void);
