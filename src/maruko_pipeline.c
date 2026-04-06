@@ -176,7 +176,38 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 	hooks.disable_userspace3a = maruko_disable_userspace3a;
 	hooks.load_bin = maruko_call_load_bin;
 	hooks.post_load = maruko_post_load_cus3a;
-	return isp_runtime_load_bin_file(isp_bin_path, &hooks);
+	int ret = isp_runtime_load_bin_file(isp_bin_path, &hooks);
+
+	/* Also load via MI_ISP_IQ_ApiCmdLoadBinFile to initialize the
+	 * IQ parameter subsystem. Without this, MI_ISP_IQ_Set* calls
+	 * are accepted but have no effect on the image. The IQ variant
+	 * takes raw bin data (not a file path). */
+	if (ret == 0) {
+		FILE *f = fopen(isp_bin_path, "rb");
+		if (f) {
+			fseek(f, 0, SEEK_END);
+			long sz = ftell(f);
+			fseek(f, 0, SEEK_SET);
+			uint8_t *buf = malloc((size_t)sz);
+			if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz) {
+				typedef int (*iq_load_fn_t)(uint32_t, uint32_t,
+					uint8_t *, uint32_t);
+				iq_load_fn_t fn = (iq_load_fn_t)dlsym(
+					RTLD_DEFAULT,
+					"MI_ISP_IQ_ApiCmdLoadBinFile");
+				if (fn) {
+					int iq_ret = fn(0, 0, buf, 1234);
+					printf("> [maruko] IQ bin load: %s "
+						"(%ld bytes) ret=%d\n",
+						isp_bin_path, sz, iq_ret);
+				}
+			}
+			free(buf);
+			fclose(f);
+		}
+	}
+
+	return ret;
 }
 
 static void *maruko_load_symbol(void *handle, const char *lib_name,
@@ -1167,6 +1198,9 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		 * Majestic sets initial exposure via direct I2C writes
 		 * to the IMX415 sensor registers (mi_isp_set_image).
 		 * We do the same: write SHR0 (shutter) and gain via I2C. */
+		/* I2C exposure bootstrap — needed until ISP AE API works.
+		 * MI_ISP_AE_* calls return 0xA0212209 on all Maruko bins.
+		 * TODO: replace with proper API path once resolved. */
 		maruko_sensor_set_exposure_i2c(ctx->sensor.fps);
 		g_maruko_isp_initialized = 1;
 	}
