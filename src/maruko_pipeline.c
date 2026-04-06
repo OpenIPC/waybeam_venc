@@ -13,6 +13,8 @@
 #include "venc_httpd.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -102,19 +104,36 @@ static void maruko_enable_cus3a(void)
 	typedef int (*fn_t)(MI_U32 dev_id, MI_U32 channel, void *params);
 	fn_t fn = (fn_t)dlsym(h, "MI_ISP_CUS3A_Enable");
 	if (fn) {
+		/* Enable CUS3A (1,1,1) — this starts the 3A_Proc_0 thread
+		 * in libcus3a.so which processes AE/AWB/AF and applies
+		 * IQ parameter changes. Without this thread, IQ Set calls
+		 * succeed but never reach the ISP hardware. */
 		MI_BOOL p100[3] = {1, 0, 0};
 		MI_BOOL p110[3] = {1, 1, 0};
 		MI_BOOL p111[3] = {1, 1, 1};
 		fn(0, 0, p100);
 		fn(0, 0, p110);
 		MI_S32 ret = fn(0, 0, p111);
-		if (ret != 0) {
-			fprintf(stderr,
-				"WARNING: [maruko] MI_ISP_CUS3A_Enable(1,1,1) failed %d\n",
-				ret);
+		printf("> [maruko] CUS3A_Enable(1,1,1) ret=%d\n", ret);
+	}
+	/* Do NOT dlclose — CUS3A opens /dev/isp_fe which must stay open
+	 * for IQ parameter writes to reach the ISP front-end hardware. */
+
+	/* Enable Userspace3A — this should create the 3A_Proc thread
+	 * that processes AE/AWB and applies IQ parameters. */
+	{
+		typedef int (*us3a_fn_t)(MI_U32, MI_U32);
+		us3a_fn_t fn_us3a = (us3a_fn_t)dlsym(h,
+			"MI_ISP_EnableUserspace3A");
+		if (fn_us3a) {
+			int r = fn_us3a(0, 0);
+			printf("> [maruko] EnableUserspace3A ret=%d\n", r);
+		} else {
+			printf("> [maruko] WARNING: EnableUserspace3A "
+				"not found\n");
 		}
 	}
-	dlclose(h);
+	/* Keep dlopen handle open — do not dlclose */
 }
 
 static int maruko_disable_userspace3a(const IspRuntimeLib *lib, void *ctx)
@@ -172,7 +191,38 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 	hooks.disable_userspace3a = maruko_disable_userspace3a;
 	hooks.load_bin = maruko_call_load_bin;
 	hooks.post_load = maruko_post_load_cus3a;
-	return isp_runtime_load_bin_file(isp_bin_path, &hooks);
+	int ret = isp_runtime_load_bin_file(isp_bin_path, &hooks);
+
+	/* Also load via MI_ISP_IQ_ApiCmdLoadBinFile to initialize the
+	 * IQ parameter subsystem. Without this, MI_ISP_IQ_Set* calls
+	 * are accepted but have no effect on the image. The IQ variant
+	 * takes raw bin data (not a file path). */
+	if (ret == 0) {
+		FILE *f = fopen(isp_bin_path, "rb");
+		if (f) {
+			fseek(f, 0, SEEK_END);
+			long sz = ftell(f);
+			fseek(f, 0, SEEK_SET);
+			uint8_t *buf = malloc((size_t)sz);
+			if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz) {
+				typedef int (*iq_load_fn_t)(uint32_t, uint32_t,
+					uint8_t *, uint32_t);
+				iq_load_fn_t fn = (iq_load_fn_t)dlsym(
+					RTLD_DEFAULT,
+					"MI_ISP_IQ_ApiCmdLoadBinFile");
+				if (fn) {
+					int iq_ret = fn(0, 0, buf, 1234);
+					printf("> [maruko] IQ bin load: %s "
+						"(%ld bytes) ret=%d\n",
+						isp_bin_path, sz, iq_ret);
+				}
+			}
+			free(buf);
+			fclose(f);
+		}
+	}
+
+	return ret;
 }
 
 static void *maruko_load_symbol(void *handle, const char *lib_name,
@@ -389,6 +439,10 @@ static int maruko_start_vif(const SensorSelectResult *sensor)
 			 sensor->plane.bayer);
 	}
 
+	printf("> [maruko] VIF dev: inputRect(%u,%u %ux%u) pixel=%d\n",
+		dev.stInputRect.x, dev.stInputRect.y,
+		dev.stInputRect.width, dev.stInputRect.height,
+		dev.eInputPixel);
 	ret = MI_VIF_SetDevAttr(0, &dev);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -412,6 +466,12 @@ static int maruko_start_vif(const SensorSelectResult *sensor)
 	port.eFrameRate = E_MI_VIF_FRAMERATE_FULL;
 	port.eCompressMode = E_MI_SYS_COMPRESS_MODE_NONE;
 
+	printf("> [maruko] VIF port: capRect(%u,%u %ux%u) dest(%ux%u) "
+		"pixel=%d compress=%d\n",
+		port.stCapRect.x, port.stCapRect.y,
+		port.stCapRect.width, port.stCapRect.height,
+		port.stDestSize.width, port.stDestSize.height,
+		port.ePixFormat, port.eCompressMode);
 	ret = MI_VIF_SetOutputPortAttr(0, 0, &port);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -455,6 +515,12 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 	int dev = 0, chn = 0, started = 0, port = 0;
 
 	if (!g_maruko_isp_loaded) {
+		/* Pre-load CUS3A libs with RTLD_GLOBAL BEFORE loading
+		 * libmi_isp.so. This ensures the CUS3A 3A_Proc thread
+		 * starts properly when MI_ISP_CUS3A_Enable is called. */
+		dlopen("libispalgo.so", RTLD_LAZY | RTLD_GLOBAL);
+		dlopen("libcus3a.so", RTLD_LAZY | RTLD_GLOBAL);
+
 		if (i6c_isp_load(&g_maruko_isp) != 0) {
 			fprintf(stderr,
 				"ERROR: [maruko] failed to load i6c ISP symbols\n");
@@ -477,7 +543,10 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 
 	if (!g_maruko_isp_chn_created) {
 		i6c_isp_chn isp_chn = {0};
-		isp_chn.sensorId = (unsigned int)sensor->pad_id;
+		/* SigmaStar ISP sensorId is 1-based (pad 0 -> sensorId 1),
+		 * matching majestic behavior. pad_id=0 with sensorId=0
+		 * causes ISP frame processing to stall at larger resolutions. */
+		isp_chn.sensorId = (unsigned int)(sensor->pad_id + 1);
 		ret = g_maruko_isp.fnCreateChannel(0, 0, &isp_chn);
 		if (ret != 0) {
 			fprintf(stderr,
@@ -489,14 +558,26 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 	}
 	chn = 1;
 
-	i6c_isp_para isp_para = {0};
-	isp_para.hdr = I6_HDR_OFF;
-	isp_para.level3DNR = vpe_level_3dnr;
-	ret = g_maruko_isp.fnSetChannelParam(0, 0, &isp_para);
-	if (ret != 0) {
-		fprintf(stderr,
-			"ERROR: [maruko] MI_ISP_SetChnParam failed %d\n", ret);
-		goto fail;
+	{
+		i6c_isp_para isp_para;
+		memset(&isp_para, 0, sizeof(isp_para));
+		isp_para.hdr = I6_HDR_OFF;
+		isp_para.level3DNR = vpe_level_3dnr;
+		/* Match majestic: set yuv2BayerOn based on sensor bayer type.
+		 * Bayer sensors (bayer <= I6_BAYER_END) feed raw Bayer data;
+		 * YUV sensors have bayer > I6_BAYER_END. */
+		isp_para.yuv2BayerOn =
+			(sensor->plane.bayer > I6_BAYER_END) ? 1 : 0;
+		printf("> [maruko] ISP params: 3DNR=%d hdr=%d yuv2Bayer=%d\n",
+			isp_para.level3DNR, isp_para.hdr,
+			isp_para.yuv2BayerOn);
+		ret = g_maruko_isp.fnSetChannelParam(0, 0, &isp_para);
+		if (ret != 0) {
+			fprintf(stderr,
+				"ERROR: [maruko] MI_ISP_SetChnParam failed %d\n",
+				ret);
+			goto fail;
+		}
 	}
 
 	ret = g_maruko_isp.fnStartChannel(0, 0);
@@ -508,10 +589,17 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 	}
 	started = 1;
 
-	i6c_isp_port isp_port = {0};
-	isp_port.crop = sensor->plane.capt;
-	isp_port.pixFmt = I6_PIXFMT_YUV420SP;
+	i6c_isp_port isp_port;
+	memset(&isp_port, 0, sizeof(isp_port));
+	/* Match majestic: ISP output port uses YUV422_YUYV with zero crop
+	 * (let SCL handle crop/scale). Setting crop to sensor dimensions
+	 * caused ISP frame processing to stall at higher resolutions. */
+	isp_port.pixFmt = I6_PIXFMT_YUV422_YUYV;
 	isp_port.compress = I6_COMPR_NONE;
+	printf("> [maruko] ISP port: crop(%u,%u %ux%u) fmt=%d compress=%d\n",
+		isp_port.crop.x, isp_port.crop.y,
+		isp_port.crop.width, isp_port.crop.height,
+		isp_port.pixFmt, isp_port.compress);
 	ret = g_maruko_isp.fnSetPortConfig(0, 0, 0, &isp_port);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -559,7 +647,8 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	}
 
 	if (!g_maruko_scl_dev_created) {
-		unsigned int scl_bind = 0x3;
+		/* Match majestic: enable all 4 HW scaler ports (bits 0-3). */
+		unsigned int scl_bind = 0xF;
 		ret = g_maruko_scl.fnCreateDevice(0, &scl_bind);
 		if (ret != 0) {
 			fprintf(stderr,
@@ -601,21 +690,21 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	}
 	started = 1;
 
-	PipelinePrecropRect precrop = pipeline_common_compute_precrop(
-		sensor->plane.capt.width, sensor->plane.capt.height,
-		out_width, out_height);
-
-	i6c_scl_port scl_port = {0};
-	scl_port.crop = sensor->plane.capt;
-	scl_port.crop.x += precrop.x;
-	scl_port.crop.y += precrop.y;
-	scl_port.crop.width = precrop.w;
-	scl_port.crop.height = precrop.h;
+	/* Match majestic: SCL port crop = zero (driver fills from input),
+	 * output = target dimensions. SCL handles scaling internally.
+	 * IFC compress required for HW_RING binding to VENC. */
+	i6c_scl_port scl_port;
+	memset(&scl_port, 0, sizeof(scl_port));
 	scl_port.output.width = (unsigned short)out_width;
 	scl_port.output.height = (unsigned short)out_height;
 	scl_port.pixFmt = I6_PIXFMT_YUV420SP;
-	/* Maruko VENC ring input expects IFC compress mode (enum value 6). */
-	scl_port.compress = (i6_common_compr)6;
+	scl_port.compress = (i6_common_compr)6; /* IFC */
+	printf("> [maruko] SCL port: crop(%u,%u %ux%u) out(%ux%u) "
+		"fmt=%d compress=%d\n",
+		scl_port.crop.x, scl_port.crop.y,
+		scl_port.crop.width, scl_port.crop.height,
+		scl_port.output.width, scl_port.output.height,
+		scl_port.pixFmt, scl_port.compress);
 	ret = g_maruko_scl.fnSetPortConfig(0, 0, 0, &scl_port);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -772,6 +861,16 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 			" (continuing)\n", ret);
 	}
 
+	/* Ring pool MUST be configured before CreateChannel (matching
+	 * majestic i6c_hal.c order: pool → CreateChn → SetSource → Start) */
+	MI_U16 venc_ring = (MI_U16)height;
+	if (venc_ring == 0)
+		venc_ring = 1;
+	MI_S32 pool_ret = maruko_config_dev_ring_pool(I6C_SYS_MOD_VENC,
+		(MI_U32)venc_dev, (MI_U16)width, (MI_U16)height, venc_ring);
+	printf("> [maruko] VENC ring pool: %ux%u ring=%u ret=%d\n",
+		width, height, venc_ring, pool_ret);
+
 	i6c_venc_chn attr = {0};
 	if (cfg->rc_codec == PT_H265) {
 		attr.attrib.codec = I6C_VENC_CODEC_H265;
@@ -799,14 +898,6 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 		}
 		return ret;
 	}
-
-	/* Sample-venc behavior: configure VENC private ring pool
-	 * before StartRecvPic. */
-	MI_U16 venc_ring = (MI_U16)height;
-	if (venc_ring == 0)
-		venc_ring = 1;
-	(void)maruko_config_dev_ring_pool(I6C_SYS_MOD_VENC,
-		(MI_U32)venc_dev, (MI_U16)width, (MI_U16)height, venc_ring);
 
 	i6c_venc_src_conf input_mode = I6C_VENC_SRC_CONF_RING_DMA;
 	ret = maruko_mi_venc_set_input_source(venc_dev, *chn, &input_mode);
@@ -841,6 +932,53 @@ static void maruko_stop_venc(MI_VENC_DEV venc_dev, MI_VENC_CHN chn,
 		(void)maruko_mi_venc_destroy_dev(venc_dev);
 }
 
+static void maruko_sysfs_write(const char *path, const char *value)
+{
+	FILE *f = fopen(path, "w");
+	if (!f)
+		return;
+	fprintf(f, "%s\n", value);
+	fclose(f);
+}
+
+static void maruko_set_hw_clocks(int oc_level, int verbose)
+{
+	/* ISP clock: 384 MHz */
+	maruko_sysfs_write("/sys/devices/virtual/mstar/isp0/isp_clk",
+		"384000000");
+
+	/* SCL clock: index 1 = 533 MHz (max available).
+	 * Must be set before SCL device creation (locks clock). */
+	maruko_sysfs_write("/sys/devices/virtual/mstar/mscl/clk", "1");
+
+	printf("> [maruko] ISP clock -> 384 MHz, SCL clock -> 533 MHz\n");
+
+	if (oc_level >= 1) {
+		/* VENC secondary + AXI clocks: try to boost from 320→288
+		 * (writes may be ignored while streaming). */
+		maruko_sysfs_write(
+			"/sys/devices/virtual/mstar/venc/ven_clock_2nd",
+			"288000000");
+		maruko_sysfs_write(
+			"/sys/devices/virtual/mstar/venc/ven_clock_axi",
+			"288000000");
+		printf("> [maruko] VENC 2nd/AXI -> 288 MHz (oc-level %d)\n",
+			oc_level);
+	}
+
+	if (oc_level >= 2) {
+		maruko_sysfs_write(
+			"/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+			"performance");
+		maruko_sysfs_write(
+			"/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq",
+			"1200000");
+		if (verbose)
+			printf("> [maruko] CPU -> performance @ 1200 MHz "
+				"(oc-level %d)\n", oc_level);
+	}
+}
+
 int maruko_pipeline_init(MarukoBackendContext *ctx)
 {
 	MI_S32 ret = MI_SYS_Init();
@@ -850,6 +988,11 @@ int maruko_pipeline_init(MarukoBackendContext *ctx)
 		return ret;
 	}
 	ctx->system_initialized = 1;
+
+	/* Set HW clocks AFTER MI_SYS_Init (kernel modules now loaded)
+	 * but BEFORE ISP/SCL device creation (which locks clocks). */
+	maruko_set_hw_clocks(ctx->cfg.oc_level, 1);
+
 	printf("> [maruko] stage init: MI_SYS_Init ok\n");
 	return 0;
 }
@@ -914,13 +1057,21 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 	ctx->cfg.venc_gop_size = pipeline_common_gop_frames(
 		ctx->cfg.venc_gop_seconds, ctx->sensor.fps);
 
-	/* Sample-venc behavior: configure SCL private ring pool
-	 * before SCL device creation. */
-	MI_U16 scl_ring = (MI_U16)(eff_h / 4);
+	/* Configure SCL ring pool using sensor capture dimensions.
+	 * Note: majestic skips this, but the SDK sample_venc.c uses it.
+	 * Use capture (ISP output) size, not effective/binned size. */
+	uint32_t capt_w = ctx->sensor.plane.capt.width;
+	uint32_t capt_h = ctx->sensor.plane.capt.height;
+	MI_U16 scl_ring = (MI_U16)(capt_h / 4);
 	if (scl_ring == 0)
 		scl_ring = 1;
-	(void)maruko_config_dev_ring_pool(I6C_SYS_MOD_SCL, 0,
-		(MI_U16)eff_w, (MI_U16)eff_h, scl_ring);
+	MI_S32 pool_ret = maruko_config_dev_ring_pool(I6C_SYS_MOD_SCL, 0,
+		(MI_U16)capt_w, (MI_U16)capt_h, scl_ring);
+	printf("> [maruko] SCL ring pool: %ux%u ring=%u ret=%d\n",
+		capt_w, capt_h, scl_ring, pool_ret);
+	printf("> [maruko] sensor capt: %ux%u  eff: %ux%u  out: %ux%u\n",
+		ctx->sensor.plane.capt.width, ctx->sensor.plane.capt.height,
+		eff_w, eff_h, out_w, out_h);
 
 	return 0;
 }
@@ -959,14 +1110,6 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	ctx->venc_started = 1;
 
 	MI_U32 venc_device = (MI_U32)ctx->venc_device;
-#if !defined(PLATFORM_MARUKO)
-	if (MI_VENC_GetChnDevid(ctx->venc_channel, &venc_device) != 0) {
-		fprintf(stderr,
-			"ERROR: [maruko] MI_VENC_GetChnDevid failed\n");
-		return -1;
-	}
-#endif
-
 	assign_maruko_ports(ctx, venc_device);
 
 	MI_S32 ret = MI_SYS_BindChnPort2(&ctx->vif_port, &ctx->isp_port,
@@ -998,19 +1141,56 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 
 	/* ISP bin load and CUS3A enable must only run once per process
 	 * lifetime.  On reinit, kernel ISP driver retains CUS3A state;
-	 * re-running the 100→110→111 sequence causes a mutex deadlock. */
+	 * re-running the 100->110->111 sequence causes a mutex deadlock. */
 	if (!g_maruko_isp_initialized) {
 		if (ctx->cfg.isp_bin_path && *ctx->cfg.isp_bin_path) {
 			ret = maruko_load_isp_bin(ctx->cfg.isp_bin_path);
 			if (ret != 0)
 				return -1;
 		}
+		/* CUS3A enable + EnableUserspace3A: the 100->110->111 sequence
+		 * initializes the CUS3A framework, then EnableUserspace3A
+		 * creates the 3A_Proc_0 thread that drives AE/AWB and
+		 * applies IQ parameter changes to ISP hardware. */
 		maruko_enable_cus3a();
+
+		typedef struct {
+			unsigned int minShutterUs, maxShutterUs;
+			unsigned int minApertX10, maxApertX10;
+			unsigned int minSensorGain, minIspGain;
+			unsigned int maxSensorGain, maxIspGain;
+		} MarukoIspExposureLimit;
+		/* Cap exposure to sensor frame period so AE doesn't limit
+		 * output FPS. Default bin has 14ms → 71fps. For 120fps
+		 * sensor: 1000000/120 = 8333us max shutter → ~110fps. */
+		if (ctx->sensor.fps > 0) {
+			uint32_t fps_cap_us = 1000000 / ctx->sensor.fps;
+			/* User config overrides if set (in ms → us) */
+			if (ctx->cfg.exposure_cap_us > 0)
+				fps_cap_us = ctx->cfg.exposure_cap_us;
+			typedef int (*ae_get_fn)(uint32_t, uint32_t,
+				MarukoIspExposureLimit *);
+			typedef int (*ae_set_fn)(uint32_t, uint32_t,
+				MarukoIspExposureLimit *);
+			ae_get_fn fn_get = (ae_get_fn)dlsym(RTLD_DEFAULT,
+				"MI_ISP_AE_GetExposureLimit");
+			ae_set_fn fn_set = (ae_set_fn)dlsym(RTLD_DEFAULT,
+				"MI_ISP_AE_SetExposureLimit");
+			if (fn_get && fn_set) {
+				MarukoIspExposureLimit lim = {0};
+				if (fn_get(0, 0, &lim) == 0) {
+					printf("> [maruko] Exposure cap: "
+						"%uus -> %uus (for %u fps)\n",
+						lim.maxShutterUs, fps_cap_us,
+						ctx->sensor.fps);
+					lim.maxShutterUs = fps_cap_us;
+					fn_set(0, 0, &lim);
+				}
+			}
+		}
+
 		g_maruko_isp_initialized = 1;
 	}
-	/* Exposure cap is safe to reapply — FPS may have changed. */
-	pipeline_common_cap_exposure_for_fps(ctx->sensor.fps,
-		ctx->cfg.exposure_cap_us);
 
 	if (ctx->cfg.output_uri.type == VENC_OUTPUT_URI_SHM) {
 		if (ctx->cfg.stream_mode != MARUKO_STREAM_RTP) {
@@ -1030,6 +1210,7 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 
 int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 {
+
 	if (setup_maruko_graph_dimensions(ctx) != 0)
 		return -1;
 
@@ -1118,7 +1299,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			idle_counter++;
 			if ((idle_counter % 500) == 0)
 				printf("> [maruko] waiting for encoder data...\n");
-			if (idle_counter > 3000) {
+			if (idle_counter > 10000) {
 				fprintf(stderr,
 					"ERROR: [maruko] no encoder data"
 					" received; aborting stream loop\n");

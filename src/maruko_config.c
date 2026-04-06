@@ -87,6 +87,7 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 		.value = vcfg->sensor.unlock_value,
 		.dir = (MI_SNR_CustDir_e)vcfg->sensor.unlock_dir,
 	};
+	cfg->oc_level = vcfg->system.overclock_level;
 	cfg->verbose = vcfg->system.verbose ? 1 : 0;
 
 	return 0;

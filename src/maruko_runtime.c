@@ -2,6 +2,7 @@
 
 #include "maruko_config.h"
 #include "maruko_controls.h"
+#include "maruko_iq.h"
 #include "maruko_pipeline.h"
 #include "venc_api.h"
 #include "venc_config.h"
@@ -36,6 +37,7 @@ static int maruko_runner_init(void *opaque)
 	if (ret != 0)
 		return ret;
 
+	maruko_iq_init();
 	maruko_bind_controls(ctx);
 	venc_api_register(&ctx->vcfg, "maruko", maruko_controls_callbacks());
 	if (ctx->vcfg.video0.qp_delta != 0 &&

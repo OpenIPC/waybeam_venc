@@ -1,6 +1,7 @@
 #include "maruko_controls.h"
 
 #include "maruko_bindings.h"
+#include "maruko_iq.h"
 #include "maruko_output.h"
 #include "pipeline_common.h"
 #include "venc_config.h"
@@ -746,16 +747,61 @@ static int maruko_apply_awb_mode(int mode, uint32_t ct)
 
 static int maruko_apply_exposure(uint32_t us)
 {
-	uint32_t sensor_fps;
+	/* Direct SetExposureLimit — no star6e poll/wait logic which
+	 * causes encoder stalls on Maruko. The 3A_Proc_0 thread
+	 * handles convergence asynchronously. */
+	typedef int (*ae_get_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
+	typedef int (*ae_set_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
+	void *h = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!h) return -1;
 
+	ae_get_fn fn_get = (ae_get_fn)dlsym(h, "MI_ISP_AE_GetExposureLimit");
+	ae_set_fn fn_set = (ae_set_fn)dlsym(h, "MI_ISP_AE_SetExposureLimit");
+	if (!fn_get || !fn_set) { dlclose(h); return -1; }
+
+	MarukoIspExposureLimit limit = {0};
+	int ret = fn_get(0, 0, &limit);
+	if (ret != 0) { dlclose(h); return ret; }
+
+	uint32_t target_us;
 	if (us == 0) {
-		sensor_fps = g_ctx.sensor_fps;
-		if (sensor_fps == 0)
-			sensor_fps = 30;
-		return pipeline_common_cap_exposure_for_fps(0, 1000000 / sensor_fps);
+		uint32_t fps = g_ctx.sensor_fps;
+		if (fps == 0) fps = 30;
+		target_us = 1000000 / fps;
+	} else {
+		target_us = us;
 	}
 
-	return pipeline_common_cap_exposure_for_fps(0, us);
+	printf("> [maruko] Exposure: maxShutter %uus -> %uus\n",
+		limit.maxShutterUs, target_us);
+	limit.maxShutterUs = target_us;
+	ret = fn_set(0, 0, &limit);
+	dlclose(h);
+	return ret;
+}
+
+static int maruko_apply_gain_max(uint32_t gain)
+{
+	/* Set max sensor gain via SetExposureLimit. */
+	typedef int (*ae_get_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
+	typedef int (*ae_set_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
+	void *h = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!h) return -1;
+
+	ae_get_fn fn_get = (ae_get_fn)dlsym(h, "MI_ISP_AE_GetExposureLimit");
+	ae_set_fn fn_set = (ae_set_fn)dlsym(h, "MI_ISP_AE_SetExposureLimit");
+	if (!fn_get || !fn_set) { dlclose(h); return -1; }
+
+	MarukoIspExposureLimit limit = {0};
+	int ret = fn_get(0, 0, &limit);
+	if (ret != 0) { dlclose(h); return ret; }
+
+	printf("> [maruko] Gain max: %u -> %u\n",
+		limit.maxSensorGain, gain);
+	limit.maxSensorGain = gain;
+	ret = fn_set(0, 0, &limit);
+	dlclose(h);
+	return ret;
 }
 
 /* ── ROI horizontal bands ────────────────────────────────────────────── */
@@ -915,6 +961,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_verbose = maruko_apply_verbose,
 	.apply_output_enabled = maruko_apply_output_enabled,
 	.apply_server = maruko_apply_server,
+	.apply_gain_max = maruko_apply_gain_max,
 	.apply_mute = NULL,
 	.request_idr = maruko_request_idr,
 	.query_live_fps = maruko_query_live_fps,
@@ -922,6 +969,8 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.query_awb_info = maruko_query_awb_info,
 	.query_isp_metrics = maruko_query_isp_metrics,
 	.apply_awb_mode = maruko_apply_awb_mode,
+	.query_iq_info = maruko_iq_query,
+	.apply_iq_param = maruko_iq_set,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
