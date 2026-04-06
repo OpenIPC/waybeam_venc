@@ -943,23 +943,27 @@ static void maruko_sysfs_write(const char *path, const char *value)
 
 static void maruko_set_hw_clocks(int oc_level, int verbose)
 {
-	/* ISP clock: 384 MHz (required for >= 1080p) */
+	/* ISP clock: 384 MHz */
 	maruko_sysfs_write("/sys/devices/virtual/mstar/isp0/isp_clk",
 		"384000000");
 
 	/* SCL clock: index 1 = 533 MHz (max available).
-	 * This sysfs node takes an index, not a frequency. */
+	 * Must be set before SCL device creation (locks clock). */
 	maruko_sysfs_write("/sys/devices/virtual/mstar/mscl/clk", "1");
 
-	if (verbose) {
-		printf("> [maruko] ISP clock -> 384 MHz\n");
-		printf("> [maruko] SCL clock -> 533 MHz (idx 1)\n");
-	}
+	printf("> [maruko] ISP clock -> 384 MHz, SCL clock -> 533 MHz\n");
 
 	if (oc_level >= 1) {
-		/* VENC secondary + AXI clocks are at 320 MHz by default;
-		 * primary is already 384 MHz. No sysfs write interface
-		 * discovered yet — revisit when VENC becomes bottleneck. */
+		/* VENC secondary + AXI clocks: try to boost from 320→288
+		 * (writes may be ignored while streaming). */
+		maruko_sysfs_write(
+			"/sys/devices/virtual/mstar/venc/ven_clock_2nd",
+			"288000000");
+		maruko_sysfs_write(
+			"/sys/devices/virtual/mstar/venc/ven_clock_axi",
+			"288000000");
+		printf("> [maruko] VENC 2nd/AXI -> 288 MHz (oc-level %d)\n",
+			oc_level);
 	}
 
 	if (oc_level >= 2) {
@@ -984,6 +988,11 @@ int maruko_pipeline_init(MarukoBackendContext *ctx)
 		return ret;
 	}
 	ctx->system_initialized = 1;
+
+	/* Set HW clocks AFTER MI_SYS_Init (kernel modules now loaded)
+	 * but BEFORE ISP/SCL device creation (which locks clocks). */
+	maruko_set_hw_clocks(ctx->cfg.oc_level, 1);
+
 	printf("> [maruko] stage init: MI_SYS_Init ok\n");
 	return 0;
 }
@@ -1165,7 +1174,6 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 
 int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 {
-	maruko_set_hw_clocks(ctx->cfg.oc_level, ctx->cfg.verbose);
 
 	if (setup_maruko_graph_dimensions(ctx) != 0)
 		return -1;
