@@ -118,7 +118,22 @@ static void maruko_enable_cus3a(void)
 				ret);
 		}
 	}
-	dlclose(h);
+	/* Do NOT dlclose — CUS3A opens /dev/isp_fe which must stay open
+	 * for IQ parameter writes to reach the ISP front-end hardware. */
+
+	/* Open /dev/isp_fe directly — CUS3A uses this device for IQ
+	 * parameter processing. Majestic has it open; we need it too. */
+	{
+		int isp_fe_fd = open("/dev/isp_fe", O_RDWR);
+		if (isp_fe_fd >= 0)
+			printf("> [maruko] /dev/isp_fe opened (fd %d)\n",
+				isp_fe_fd);
+		else
+			printf("> [maruko] WARNING: /dev/isp_fe open failed: "
+				"%s\n", strerror(errno));
+		/* Keep fd open */
+	}
+	/* Keep dlopen handle open — do not dlclose */
 }
 
 static int maruko_disable_userspace3a(const IspRuntimeLib *lib, void *ctx)
@@ -1201,6 +1216,12 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		/* I2C exposure bootstrap — needed until ISP AE API works.
 		 * MI_ISP_AE_* calls return 0xA0212209 on all Maruko bins.
 		 * TODO: replace with proper API path once resolved. */
+		/* CUS3A enable: the 100->110->111 sequence opens /dev/isp_fe
+		 * via libcus3a.so. Without this, IQ parameter writes go to
+		 * /dev/mi_isp but never reach the ISP front-end hardware.
+		 * This was previously removed but is REQUIRED for IQ. */
+		maruko_enable_cus3a();
+
 		maruko_sensor_set_exposure_i2c(ctx->sensor.fps);
 		g_maruko_isp_initialized = 1;
 	}
