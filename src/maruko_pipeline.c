@@ -502,12 +502,19 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 	}
 	chn = 1;
 
-	if (!getenv("MARUKO_SKIP_ISP_PARAM")) {
-		i6c_isp_para isp_para = {0};
+	{
+		i6c_isp_para isp_para;
+		memset(&isp_para, 0, sizeof(isp_para));
 		isp_para.hdr = I6_HDR_OFF;
-		isp_para.level3DNR = getenv("MARUKO_NO_3DNR") ? 0 : vpe_level_3dnr;
-		printf("> [maruko] ISP params: 3DNR=%d hdr=%d\n",
-			isp_para.level3DNR, isp_para.hdr);
+		isp_para.level3DNR = vpe_level_3dnr;
+		/* Match majestic: set yuv2BayerOn based on sensor bayer type.
+		 * Bayer sensors (bayer <= I6_BAYER_END) feed raw Bayer data;
+		 * YUV sensors have bayer > I6_BAYER_END. */
+		isp_para.yuv2BayerOn =
+			(sensor->plane.bayer > I6_BAYER_END) ? 1 : 0;
+		printf("> [maruko] ISP params: 3DNR=%d hdr=%d yuv2Bayer=%d\n",
+			isp_para.level3DNR, isp_para.hdr,
+			isp_para.yuv2BayerOn);
 		ret = g_maruko_isp.fnSetChannelParam(0, 0, &isp_para);
 		if (ret != 0) {
 			fprintf(stderr,
@@ -515,8 +522,6 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 				ret);
 			goto fail;
 		}
-	} else {
-		printf("> [maruko] ISP SetChnParam SKIPPED\n");
 	}
 
 	ret = g_maruko_isp.fnStartChannel(0, 0);
@@ -528,9 +533,12 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 	}
 	started = 1;
 
-	i6c_isp_port isp_port = {0};
-	isp_port.crop = sensor->plane.capt;
-	isp_port.pixFmt = I6_PIXFMT_YUV420SP;
+	i6c_isp_port isp_port;
+	memset(&isp_port, 0, sizeof(isp_port));
+	/* Match majestic: ISP output port uses YUV422_YUYV with zero crop
+	 * (let SCL handle crop/scale). Setting crop to sensor dimensions
+	 * caused ISP frame processing to stall at higher resolutions. */
+	isp_port.pixFmt = I6_PIXFMT_YUV422_YUYV;
 	isp_port.compress = I6_COMPR_NONE;
 	printf("> [maruko] ISP port: crop(%u,%u %ux%u) fmt=%d compress=%d\n",
 		isp_port.crop.x, isp_port.crop.y,
@@ -583,7 +591,8 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	}
 
 	if (!g_maruko_scl_dev_created) {
-		unsigned int scl_bind = 0x3;
+		/* Match majestic: enable all 4 HW scaler ports (bits 0-3). */
+		unsigned int scl_bind = 0xF;
 		ret = g_maruko_scl.fnCreateDevice(0, &scl_bind);
 		if (ret != 0) {
 			fprintf(stderr,
@@ -625,21 +634,15 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	}
 	started = 1;
 
-	PipelinePrecropRect precrop = pipeline_common_compute_precrop(
-		sensor->plane.capt.width, sensor->plane.capt.height,
-		out_width, out_height);
-
-	i6c_scl_port scl_port = {0};
-	scl_port.crop = sensor->plane.capt;
-	scl_port.crop.x += precrop.x;
-	scl_port.crop.y += precrop.y;
-	scl_port.crop.width = precrop.w;
-	scl_port.crop.height = precrop.h;
+	/* Match majestic: SCL port crop = zero (driver fills from input),
+	 * output = target dimensions. SCL handles scaling internally.
+	 * IFC compress required for HW_RING binding to VENC. */
+	i6c_scl_port scl_port;
+	memset(&scl_port, 0, sizeof(scl_port));
 	scl_port.output.width = (unsigned short)out_width;
 	scl_port.output.height = (unsigned short)out_height;
 	scl_port.pixFmt = I6_PIXFMT_YUV420SP;
-	/* Maruko VENC ring input expects IFC compress mode (enum value 6). */
-	scl_port.compress = (i6_common_compr)6;
+	scl_port.compress = (i6_common_compr)6; /* IFC */
 	printf("> [maruko] SCL port: crop(%u,%u %ux%u) out(%ux%u) "
 		"fmt=%d compress=%d\n",
 		scl_port.crop.x, scl_port.crop.y,
@@ -989,15 +992,21 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 	ctx->cfg.venc_gop_size = pipeline_common_gop_frames(
 		ctx->cfg.venc_gop_seconds, ctx->sensor.fps);
 
-	/* Sample-venc behavior: configure SCL private ring pool
-	 * before SCL device creation. */
-	MI_U16 scl_ring = (MI_U16)(eff_h / 4);
+	/* SCL ring pool uses sensor capture dimensions (ISP output size),
+	 * not the effective/binned output. When sensor has output binning
+	 * (e.g. mode 1: capture 2952x1656, output 2560x1440), the ISP
+	 * still outputs at the capture resolution. */
+	uint32_t capt_w = ctx->sensor.plane.capt.width;
+	uint32_t capt_h = ctx->sensor.plane.capt.height;
+	MI_U16 scl_ring = (MI_U16)(capt_h / 4);
 	if (scl_ring == 0)
 		scl_ring = 1;
 	MI_S32 pool_ret = maruko_config_dev_ring_pool(I6C_SYS_MOD_SCL, 0,
-		(MI_U16)eff_w, (MI_U16)eff_h, scl_ring);
-	printf("> [maruko] SCL ring pool: %ux%u ring=%u ret=%d\n",
-		eff_w, eff_h, scl_ring, pool_ret);
+		(MI_U16)capt_w, (MI_U16)capt_h, scl_ring);
+	printf("> [maruko] SCL ring pool: %ux%u ring=%u ret=%d "
+		"(eff %ux%u out %ux%u)\n",
+		capt_w, capt_h, scl_ring, pool_ret,
+		eff_w, eff_h, out_w, out_h);
 	printf("> [maruko] sensor capt: %ux%u  eff: %ux%u  out: %ux%u\n",
 		ctx->sensor.plane.capt.width, ctx->sensor.plane.capt.height,
 		eff_w, eff_h, out_w, out_h);
