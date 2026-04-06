@@ -765,6 +765,18 @@ apply:
 			}
 		}
 		if (isp_fd >= 0) {
+			/* Allocate data in ISP shared memory pool so the
+			 * ISP RTOS can access it (stack buffers may not
+			 * be in the shared memory region). */
+			void *shm = NULL;
+			if (g_fn_alloc)
+				g_fn_alloc(data_len, &shm);
+			void *data_ptr = shm ? shm : iq_buf;
+			if (shm)
+				memcpy(shm, iq_buf, data_len);
+			if (g_fn_flush && shm)
+				g_fn_flush(shm, data_len);
+
 			struct {
 				uint16_t dev_hi;    /* 0 */
 				uint16_t pad;       /* 0 */
@@ -777,18 +789,38 @@ apply:
 			} iocmd;
 			memset(&iocmd, 0, sizeof(iocmd));
 			iocmd.size_28 = 0x1c;
-			iocmd.data_lo = (uint32_t)(uintptr_t)iq_buf;
+			iocmd.data_lo = (uint32_t)(uintptr_t)data_ptr;
 			iocmd.data_hi = 0;
 			iocmd.head_sz = 0x18;
 			iocmd.data_len = data_len;
 			iocmd.ctrl_id = target->api_id;
 
-			ret = ioctl(isp_fd, 0x401c6911, &iocmd);
-			printf("[iq] %s: ioctl(fd=%d id=0x%x len=%u) "
-				"ret=%d errno=%d\n",
-				param, isp_fd, target->api_id,
-				data_len, ret,
-				ret < 0 ? errno : 0);
+			/* Try MI_ISP_SetIQApiData first (library ioctl wrapper),
+			 * then raw ioctl if library doesn't work. */
+			if (g_fn_api_set) {
+				IspApiHeader hdr = {
+					.u32HeadSize = sizeof(IspApiHeader),
+					.u32DataLen = data_len,
+					.u32CtrlID = target->api_id,
+					.u32Channel = IQ_CHN,
+					.u32DevId = IQ_DEV,
+					.s32Ret = 0,
+				};
+				ret = g_fn_api_set(&hdr, data_ptr);
+				printf("[iq] %s: SetIQApiData(id=0x%x "
+					"len=%u shm=%s) ret=%d hdr.ret=%d "
+					"(0x%x)\n",
+					param, target->api_id, data_len,
+					shm ? "yes" : "no",
+					ret, hdr.s32Ret,
+					(unsigned)hdr.s32Ret);
+			} else {
+				ret = ioctl(isp_fd, 0x401c6911, &iocmd);
+				printf("[iq] %s: ioctl(id=0x%x len=%u) "
+					"ret=%d (0x%x)\n",
+					param, target->api_id, data_len,
+					ret, (unsigned)ret);
+			}
 		} else {
 			/* Fallback to library call */
 			ret = IQ_CALL(target->fn_set, iq_buf);
