@@ -14,11 +14,15 @@
 #include "cJSON.h"
 
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 /* Maruko ISP functions: (dev, channel, data*) */
 typedef int (*iq_fn_t)(uint32_t dev, uint32_t channel, void *param);
@@ -725,21 +729,52 @@ int maruko_iq_set(const char *param, const char *value)
 
 apply:
 	if (target->api_id) {
-		/* Use MI_ISP_IQ_SetAll — the ONLY path majestic uses.
-		 * Majestic does NOT use GetAll, GENERAL_*, SetIQApiData,
-		 * or individual MI_ISP_IQ_Set* functions. */
-		typedef int (*setall_fn_t)(uint32_t, uint32_t,
-			uint16_t, uint32_t, uint8_t *);
-		setall_fn_t fn_sa = (setall_fn_t)dlsym(g_isp_handle,
-			"MI_ISP_IQ_SetAll");
-		if (fn_sa) {
-			ret = fn_sa(IQ_DEV, IQ_CHN, target->api_id,
-				data_len, iq_buf);
-			printf("[iq] %s: IQ_SetAll(id=%u len=%u) "
-				"ret=%d (0x%x)\n",
-				param, target->api_id, data_len,
-				ret, (unsigned)ret);
+		/* Direct ioctl to /dev/mi_isp — same path majestic uses.
+		 * The ioctl cmd struct is 28 bytes. */
+		struct {
+			uint32_t type;      /* 0x18 */
+			uint32_t data_len;
+			uint32_t api_id;
+			uint32_t param;
+			uint32_t channel;
+			uint32_t flags;
+			void    *data_ptr;
+		} iocmd = {
+			.type = 0x18,
+			.data_len = data_len,
+			.api_id = target->api_id,
+			.param = 0,
+			.channel = 0,
+			.flags = 0,
+			.data_ptr = iq_buf,
+		};
+		/* Find existing /dev/mi_isp fd from our process.
+		 * libmi_isp.so opens it during dlopen (typically fd 8). */
+		static int isp_fd = -1;
+		if (isp_fd < 0) {
+			char link[64];
+			for (int f = 3; f < 30; f++) {
+				char path[128];
+				snprintf(link, sizeof(link), "/proc/self/fd/%d", f);
+				int n = readlink(link, path, sizeof(path) - 1);
+				if (n > 0) {
+					path[n] = '\0';
+					if (strcmp(path, "/dev/mi_isp") == 0) {
+						isp_fd = f;
+						printf("[iq] Found /dev/mi_isp at fd %d\n", f);
+						break;
+					}
+				}
+			}
+		}
+		if (isp_fd >= 0) {
+			ret = ioctl(isp_fd, 0x401c6911, &iocmd);
+			printf("[iq] %s: ioctl(fd=%d, 0x401c6911, id=0x%x "
+				"len=%u) ret=%d errno=%d (%s)\n",
+				param, isp_fd, target->api_id, data_len,
+				ret, errno, ret < 0 ? strerror(errno) : "ok");
 		} else {
+			/* Fallback to library call */
 			ret = IQ_CALL(target->fn_set, iq_buf);
 		}
 	} else {
