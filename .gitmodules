@@ -1,0 +1,3 @@
+[submodule "sensors-src"]
+	path = sensors-src
+	url = https://github.com/OpenIPC/sensors.git
