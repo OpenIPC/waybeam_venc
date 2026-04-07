@@ -759,6 +759,22 @@ restart.
 
 See `documentation/SENSOR_UNLOCK_IMX415_IMX335.md` for register details.
 
+## Sensor Driver Sources
+
+Full sensor driver source code is available in the `sensors-src/` submodule
+(from [OpenIPC/sensors](https://github.com/OpenIPC/sensors)). This includes
+drivers for IMX335, IMX415, GC4653, and other SigmaStar Infinity6E sensors.
+
+```sh
+# Fetch the sensor sources (not cloned by default)
+git submodule update --init sensors-src
+
+# Driver sources for Infinity6E
+ls sensors-src/sigmastar/infinity6e/sensor/
+```
+
+Pre-built kernel modules (`.ko`) for IMX335 and IMX415 remain in `sensors/`.
+
 ## Deployment Testing
 
 For the current Star6E bench, use the direct helper against the production
