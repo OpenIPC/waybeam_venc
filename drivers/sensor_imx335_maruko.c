@@ -226,9 +226,8 @@ const static I2C_ARRAY Sensor_init_table_4lane_5m30fps[] = {
     { 0x3032, 0x00 }, // VMAX
     { 0x3034, 0x58 }, // HMAX
     { 0x3035, 0x02 }, // HMAX
-    { 0x305A, 0x00 },
-    { 0x3059, 0x0E },
-    { 0x3058, 0x80 },
+    /* SHR0 writes (0x305A/3059/3058) removed — not in Maruko SDK table.
+     * AE sets SHR0 dynamically via AEStatusNotify. */
     { 0x314C, 0xB0 },
     { 0x315A, 0x02 },
     { 0x3168, 0x8F },
@@ -767,35 +766,26 @@ static int pCus_poweron(ms_cus_sensor* handle, u32 idx)
 {
     ISensorIfAPI* sensor_if = handle->sensor_if_api;
 
-    sensor_if->PowerOff(idx, handle->pwdn_POLARITY);
-    sensor_if->Reset(idx, handle->reset_POLARITY);
+    /* On I6C/Maruko, the sensor is already powered and outputting
+     * MIPI data from kernel boot. Majestic (working reference) does
+     * NOT power-cycle the sensor. Doing the full poweroff→poweron
+     * sequence causes MI_SNR_Disable/Enable to break MIPI sync.
+     *
+     * Only configure the CSI receiver — do NOT toggle power/reset
+     * pins or MCLK, keeping the sensor in its boot state. */
     sensor_if->SetIOPad(idx, handle->sif_bus, handle->interface_attr.attr_mipi.mipi_lane_num);
     sensor_if->SetCSI_Clk(idx, CUS_CSI_CLK_216M);
     sensor_if->SetCSI_Lane(idx, handle->interface_attr.attr_mipi.mipi_lane_num, ENABLE);
     sensor_if->SetCSI_LongPacketType(idx, 0, 0x1C00, 0);
-
-    sensor_if->PowerOff(idx, !handle->pwdn_POLARITY);
-    SENSOR_MSLEEP(31);
-    sensor_if->Reset(idx, !handle->reset_POLARITY);
-    SENSOR_UDELAY(1);
-    sensor_if->MCLK(idx, 1, handle->mclk);
-    SENSOR_UDELAY(20);
-    SENSOR_DMSG("Sensor Power On finished\n");
     return SUCCESS;
 }
 
 static int pCus_poweroff(ms_cus_sensor* handle, u32 idx)
 {
-    ISensorIfAPI* sensor_if = handle->sensor_if_api;
-
-    SENSOR_DMSG("[%s] reset low\n", __FUNCTION__);
-    sensor_if->Reset(idx, handle->reset_POLARITY);
-    SENSOR_MSLEEP(1);
-    sensor_if->PowerOff(idx, handle->pwdn_POLARITY);
-    SENSOR_MSLEEP(1);
-    sensor_if->MCLK(idx, 0, handle->mclk);
-    sensor_if->SetCSI_Clk(idx, CUS_CSI_CLK_DISABLE);
-    handle->orient = SENSOR_ORIT;
+    /* No-op: keep sensor powered to preserve MIPI state.
+     * See pCus_poweron comment. */
+    (void)handle;
+    (void)idx;
     return SUCCESS;
 }
 
@@ -889,7 +879,9 @@ static int pCus_init_mipi4lane_5m30fps_linear(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
 
-    pCus_HardwareReset(handle);
+    /* Use the Maruko SDK register table (matches stock
+     * drv_ms_cus_imx335_MIPI.c exactly — no SHR0 writes,
+     * no hardware reset). */
     if (pCus_CheckSensorProductID(handle) == FAIL)
         return FAIL;
 
