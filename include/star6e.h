@@ -312,6 +312,7 @@ MI_S32 MI_VIF_DisableChnPort(MI_VIF_CHN chn, MI_VIF_PORT port);
 /* MI_VPE — Star6E only (Maruko uses ISP+SCL instead) */
 #if defined(PLATFORM_STAR6E)
 #define MI_VPE_CreateChannel(chn, attr) g_mi_vpe.fnCreateChannel((chn), (attr))
+#define MI_VPE_GetChannelAttr(chn, attr) g_mi_vpe.fnGetChannelAttr((chn), (attr))
 #define MI_VPE_SetChannelAttr(chn, attr) g_mi_vpe.fnSetChannelAttr((chn), (attr))
 #define MI_VPE_DestroyChannel(chn)      g_mi_vpe.fnDestroyChannel((chn))
 #define MI_VPE_StartChannel(chn)        g_mi_vpe.fnStartChannel((chn))
@@ -324,6 +325,7 @@ MI_S32 MI_VIF_DisableChnPort(MI_VIF_CHN chn, MI_VIF_PORT port);
 #elif !defined(PLATFORM_MARUKO)
 /* Test stubs */
 MI_S32 MI_VPE_CreateChannel(MI_VPE_CHANNEL chn, MI_VPE_ChannelAttr_t* attr);
+MI_S32 MI_VPE_GetChannelAttr(MI_VPE_CHANNEL chn, MI_VPE_ChannelAttr_t* attr);
 MI_S32 MI_VPE_SetChannelAttr(MI_VPE_CHANNEL chn, MI_VPE_ChannelAttr_t* attr);
 MI_S32 MI_VPE_DestroyChannel(MI_VPE_CHANNEL chn);
 MI_S32 MI_VPE_StartChannel(MI_VPE_CHANNEL chn);

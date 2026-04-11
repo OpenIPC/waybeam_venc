@@ -41,6 +41,7 @@ typedef struct {
 typedef struct {
 	void *handle;
 	int (*fnCreateChannel)(int chn, void *attr);
+	int (*fnGetChannelAttr)(int chn, void *attr);
 	int (*fnSetChannelAttr)(int chn, void *attr);
 	int (*fnDestroyChannel)(int chn);
 	int (*fnStartChannel)(int chn);

@@ -137,6 +137,8 @@ static int i6e_vpe_load(star6e_vpe_impl *vpe)
 
 	LOAD_SYM(vpe, "libmi_vpe.so", fnCreateChannel,
 		int (*)(int, void *), "MI_VPE_CreateChannel");
+	LOAD_SYM(vpe, "libmi_vpe.so", fnGetChannelAttr,
+		int (*)(int, void *), "MI_VPE_GetChannelAttr");
 	LOAD_SYM(vpe, "libmi_vpe.so", fnSetChannelAttr,
 		int (*)(int, void *), "MI_VPE_SetChannelAttr");
 	LOAD_SYM(vpe, "libmi_vpe.so", fnDestroyChannel,
@@ -156,7 +158,8 @@ static int i6e_vpe_load(star6e_vpe_impl *vpe)
 	LOAD_SYM(vpe, "libmi_vpe.so", fnSetPortCrop,
 		int (*)(int, int, void *), "MI_VPE_SetPortCrop");
 
-	if (!vpe->fnCreateChannel || !vpe->fnSetChannelAttr ||
+	if (!vpe->fnCreateChannel || !vpe->fnGetChannelAttr ||
+	    !vpe->fnSetChannelAttr ||
 	    !vpe->fnDestroyChannel || !vpe->fnStartChannel ||
 	    !vpe->fnStopChannel || !vpe->fnSetChannelParam ||
 	    !vpe->fnSetPortMode || !vpe->fnEnablePort ||

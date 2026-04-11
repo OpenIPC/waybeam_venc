@@ -79,7 +79,11 @@ void star6e_pipeline_vpe_scl_preset_shutdown(void)
 }
 
 /* Called after MI_SYS_Init() to silently tear down any pipeline state left
- * by an unclean previous exit. All errors are ignored. */
+ * by an unclean previous exit. All errors are ignored.
+ *
+ * When MI libs are loaded via dlopen (no direct linking), the vendor VPE
+ * module calls exit(127) on API calls before a channel is created. Guard
+ * VPE teardown with a channel existence check to avoid this. */
 static void star6e_pipeline_pre_init_teardown(void)
 {
 	MI_SYS_ChnPort_t vif_port = {
@@ -93,9 +97,16 @@ static void star6e_pipeline_pre_init_teardown(void)
 	(void)MI_SYS_UnBindChnPort(&vif_port, &vpe_port);
 	(void)MI_VENC_StopRecvPic(0);
 	(void)MI_VENC_DestroyChn(0);
-	(void)MI_VPE_DisablePort(0, 0);
-	(void)MI_VPE_StopChannel(0);
-	(void)MI_VPE_DestroyChannel(0);
+
+	/* VPE: probe channel existence before teardown — MI_VPE_DisablePort
+	 * calls exit(127) when called on a non-existent channel under dlopen. */
+	MI_VPE_ChannelAttr_t probe_attr;
+	if (MI_VPE_GetChannelAttr(0, &probe_attr) == 0) {
+		(void)MI_VPE_DisablePort(0, 0);
+		(void)MI_VPE_StopChannel(0);
+		(void)MI_VPE_DestroyChannel(0);
+	}
+
 	(void)MI_VIF_DisableChnPort(0, 0);
 	(void)MI_VIF_DisableDev(0);
 }
