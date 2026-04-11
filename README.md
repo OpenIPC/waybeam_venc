@@ -775,6 +775,22 @@ ls sensors-src/sigmastar/infinity6e/sensor/
 
 Pre-built kernel modules (`.ko`) for IMX335 and IMX415 remain in `sensors/`.
 
+### Maruko IMX335 Sensor Modes
+
+Custom Maruko driver in `drivers/sensor_imx335_maruko.c` (built via
+`make -C drivers sensor`):
+
+| Mode | Resolution | Max FPS | Verified | Init table |
+|------|-----------|---------|----------|------------|
+| 0 | 1920x1080 | 60 | 59fps | Star6E 120fps windowed |
+| 1 | 1920x1080 | 90 | 89fps | Star6E 120fps windowed |
+
+Deploy: `scp sensor_imx335_maruko.ko root@device:/lib/modules/5.10.61/sigmastar/sensor_imx335_mipi.ko`
+
+The driver uses no-op `pCus_poweroff` (sensor stays powered from boot)
+and a VTS 120% cap to prevent AE from dropping FPS in low light.
+A delayed MI\_SNR\_SetFps kick after ~1s fixes cold-boot FPS lock.
+
 ## Deployment Testing
 
 For the current Star6E bench, use the direct helper against the production

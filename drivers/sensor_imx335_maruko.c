@@ -133,8 +133,8 @@ static struct { // LINEAR
     { LINEAR_RES_2, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },
 };
 
-u32 vts_30fps = 4125;
-u32 Preview_line_period = 8080;
+static u32 vts_30fps = 4125;
+static u32 Preview_line_period = 8080;
 
 ////////////////////////////////////
 // AE Info                        //
@@ -216,6 +216,9 @@ static int pCus_SetAEUSecs(ms_cus_sensor* handle, u32 us);
 //                       adjust parameter                    //
 ///////////////////////////////////////////////////////////////
 
+/* Unused init tables — kept for reference.  Both active modes (60fps,
+ * 90fps) use the Star6E 120fps windowed table below. */
+#if 0
 /* Mode 0: 2560x1920@30fps — full sensor, all-pixel scan */
 const static I2C_ARRAY Sensor_init_table_4lane_5m30fps[] = {
     { 0x3002, 0x01 }, // Master mode stop
@@ -565,8 +568,9 @@ const static I2C_ARRAY Sensor_init_table_4lane_5m90fps[] = {
     { 0x3000, 0x00 },
     { 0x3002, 0x00 },
 };
+#endif /* unused init tables */
 
-/* Mode 3: 1920x1080@120fps — window-cropped */
+/* Mode 3: 1920x1080@120fps — window-cropped (ACTIVE — used by both modes) */
 const static I2C_ARRAY Sensor_init_table_4lane_5m120fps[] = {
     { 0x3002, 0x01 }, // Master mode stop
     { 0xFFFF, 0x14 }, // delay
@@ -875,86 +879,7 @@ static int imx335_SetPatternMode(ms_cus_sensor* handle, u32 mode)
 
 /////////////////// Mode init functions ///////////////////
 
-static int pCus_init_mipi4lane_5m30fps_linear(ms_cus_sensor* handle)
-{
-    int i, cnt = 0;
-
-    /* Write the SDK register table (identical to stock
-     * drv_ms_cus_imx335_MIPI.c 30fps mode). Add extra delay
-     * after start sequence for I6C MIPI PHY re-synchronization. */
-    for (i = 0; i < ARRAY_SIZE(Sensor_init_table_4lane_5m30fps); i++) {
-        if (Sensor_init_table_4lane_5m30fps[i].reg == 0xFFFF) {
-            SENSOR_MSLEEP(Sensor_init_table_4lane_5m30fps[i].data);
-        } else {
-            cnt = 0;
-            while (SensorReg_Write(Sensor_init_table_4lane_5m30fps[i].reg,
-                    Sensor_init_table_4lane_5m30fps[i].data) != SUCCESS) {
-                cnt++;
-                if (cnt >= 10) {
-                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
-                    return FAIL;
-                }
-            }
-        }
-    }
-
-    /* Extra delay for I6C MIPI PHY to lock onto the sensor's
-     * MIPI output after the standby→operating transition. */
-    SENSOR_MSLEEP(100);
-    return SUCCESS;
-}
-
-static int pCus_init_mipi4lane_5m60fps_linear(ms_cus_sensor* handle)
-{
-    int i, cnt = 0;
-
-    /* Hardware reset required: 60fps mode changes MIPI PLL from
-     * 1188Mbps (boot default) to 891Mbps. Without reset, PLL
-     * registers don't take effect and MIPI output stalls. */
-    pCus_HardwareReset(handle);
-
-    for (i = 0; i < ARRAY_SIZE(Sensor_init_table_4lane_5m60fps); i++) {
-        if (Sensor_init_table_4lane_5m60fps[i].reg == 0xFFFF) {
-            SENSOR_MSLEEP(Sensor_init_table_4lane_5m60fps[i].data);
-        } else {
-            cnt = 0;
-            while (SensorReg_Write(Sensor_init_table_4lane_5m60fps[i].reg,
-                    Sensor_init_table_4lane_5m60fps[i].data) != SUCCESS) {
-                cnt++;
-                if (cnt >= 10) {
-                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
-                    return FAIL;
-                }
-            }
-        }
-    }
-    SENSOR_MSLEEP(100);
-    return SUCCESS;
-}
-
-static int pCus_init_mipi4lane_5m90fps_linear(ms_cus_sensor* handle)
-{
-    int i, cnt = 0;
-
-    for (i = 0; i < ARRAY_SIZE(Sensor_init_table_4lane_5m90fps); i++) {
-        if (Sensor_init_table_4lane_5m90fps[i].reg == 0xFFFF) {
-            SENSOR_MSLEEP(Sensor_init_table_4lane_5m90fps[i].data);
-        } else {
-            cnt = 0;
-            while (SensorReg_Write(Sensor_init_table_4lane_5m90fps[i].reg,
-                    Sensor_init_table_4lane_5m90fps[i].data) != SUCCESS) {
-                cnt++;
-                if (cnt >= 10) {
-                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
-                    return FAIL;
-                }
-            }
-        }
-    }
-    SENSOR_MSLEEP(100);
-    return SUCCESS;
-}
-
+/* Active init — used by both mode 0 (60fps) and mode 1 (90fps). */
 static int pCus_init_mipi4lane_5m120fps_linear(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
@@ -1125,7 +1050,7 @@ static int pCus_GetFPS(ms_cus_sensor* handle)
 {
     imx335_params* params = (imx335_params*)handle->private_data;
     u32 max_fps = handle->video_res_supported.res[handle->video_res_supported.ulcur_res].max_fps;
-    u32 tVts = (params->tVts_reg[0].data << 16) | (params->tVts_reg[1].data << 8) | (params->tVts_reg[2].data << 0);
+    u32 tVts = ((u32)(params->tVts_reg[0].data & 0x0F) << 16) | ((u32)(params->tVts_reg[1].data & 0xFF) << 8) | ((u32)(params->tVts_reg[2].data & 0xFF));
 
     if (params->expo.fps >= 1000)
         params->expo.preview_fps = (u32)(((u64)vts_30fps * max_fps * 1000) / tVts);
@@ -1196,11 +1121,11 @@ static int pCus_GetAEUSecs(ms_cus_sensor* handle, u32* us)
     u32 lines = 0;
     imx335_params* params = (imx335_params*)handle->private_data;
 
-    lines |= (u32)(params->tExpo_reg[0].data & 0xff) << 16;
-    lines |= (u32)(params->tExpo_reg[1].data & 0xff) << 8;
-    lines |= (u32)(params->tExpo_reg[2].data & 0xff) << 0;
+    lines |= (u32)(params->tExpo_reg[0].data & 0x0F) << 16;
+    lines |= (u32)(params->tExpo_reg[1].data & 0xFF) << 8;
+    lines |= (u32)(params->tExpo_reg[2].data & 0xFF) << 0;
 
-    *us = (lines * Preview_line_period) / 1000;
+    *us = (u32)(((u64)lines * Preview_line_period) / 1000);
     SENSOR_DMSG("[%s] sensor expo lines/us %u,%u us\n", __FUNCTION__, lines, *us);
     return SUCCESS;
 }
@@ -1212,7 +1137,7 @@ static int pCus_SetAEUSecs(ms_cus_sensor* handle, u32 us)
 
     params->expo.expo_lef_us = us;
 
-    lines = (1000 * us) / Preview_line_period;
+    lines = (u32)(((u64)1000 * us) / Preview_line_period);
     if (lines < 9)
         lines = 9;
     params->expo.expo_lines = lines;
@@ -1271,8 +1196,11 @@ static int pCus_SetAEGain(ms_cus_sensor* handle, u32 gain)
         gain = SENSOR_MAX_GAIN;
 
     gain_double = 20 * (intlog10(gain) - intlog10(1024));
-    params->tGain_reg[0].data = (u16)(((gain_double * 10) >> 24) / 3) & 0x00FF;
-    params->tGain_reg[1].data = (u16)((((gain_double * 10) >> 24) / 3) >> 8) & 0x0007;
+    {
+        u32 gain_val = (u32)(((gain_double * 10) >> 24) / 3);
+        params->tGain_reg[0].data = gain_val & 0xFF;
+        params->tGain_reg[1].data = (gain_val >> 8) & 0x07;
+    }
 
     SENSOR_DMSG("[%s] set gain/reg=%u/0x%x 0x%x\n", __FUNCTION__, gain,
         params->tGain_reg[0].data, params->tGain_reg[1].data);
