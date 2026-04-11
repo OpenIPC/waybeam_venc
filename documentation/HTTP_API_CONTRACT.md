@@ -99,7 +99,7 @@ Response `200`:
     "config": {
       "system": { "webPort": 80, "overclockLevel": 2, "verbose": false },
       "sensor": { "index": -1, "mode": -1, "unlockEnabled": true, "..." : "..." },
-      "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "exposure": 9, "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500 },
+      "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500 },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
       "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2 },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
@@ -134,7 +134,6 @@ Response `200`:
       "video0.scene_threshold": { "mutability": "restart_required", "supported": true },
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
       "system.verbose": { "mutability": "live", "supported": true },
-      "isp.exposure": { "mutability": "live", "supported": true },
       "outgoing.enabled": { "mutability": "live", "supported": true },
       "outgoing.server": { "mutability": "live", "supported": true },
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
@@ -679,9 +678,6 @@ isp_again 1673
 # HELP isp_dgain Digital Gain
 # TYPE isp_dgain gauge
 isp_dgain 1024
-# HELP isp_exposure Exposure
-# TYPE isp_exposure gauge
-isp_exposure 9
 # HELP isp_fps Sensor fps
 # TYPE isp_fps gauge
 isp_fps 90

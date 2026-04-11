@@ -100,7 +100,7 @@ typedef int (*isp_set_exposure_limit_fn_t)(int channel,
 #define ISP_AE_CALL(fn, cfg) fn(0, cfg)
 #endif
 
-int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
+int pipeline_common_cap_exposure_for_fps(uint32_t fps)
 {
 	isp_get_exposure_limit_fn_t fn_get;
 	isp_set_exposure_limit_fn_t fn_set;
@@ -109,7 +109,7 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
 	uint32_t target_us;
 	int ret;
 
-	if (fps == 0 && user_cap_us == 0)
+	if (fps == 0)
 		return 0;
 
 	handle = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
@@ -152,14 +152,10 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
 				break;
 		}
 		if (config.maxShutterUs == 0 && config.maxSensorGain == 0) {
-			/* ISP never populated — use synthetic limits so the
-			 * shutter cap is still applied.  Permissive gain
-			 * defaults let AE compensate; cus3a or ISP bin will
-			 * tighten them once initialised. */
 			fprintf(stderr,
 				"WARNING: ISP exposure limits not populated "
 				"after 500 ms, using synthetic defaults\n");
-			config.maxShutterUs = 1000000;  /* 1 s — will be capped below */
+			config.maxShutterUs = 1000000;
 			config.maxSensorGain = SYNTHETIC_MAX_GAIN;
 			config.maxIspGain = SYNTHETIC_MAX_GAIN;
 		} else {
@@ -168,21 +164,13 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
 		}
 	}
 
-	if (user_cap_us > 0) {
-		target_us = user_cap_us;
-		printf("> Exposure override: maxShutter %uus -> %uus (exposure %ums)\n",
-			config.maxShutterUs, target_us, user_cap_us / 1000);
+	target_us = 1000000 / fps;
+	if (config.maxShutterUs <= target_us) {
+		printf("> Exposure cap: maxShutter %uus (already <= %uus for %u fps), enforcing\n",
+			config.maxShutterUs, target_us, fps);
 	} else {
-		target_us = 1000000 / fps;
-		if (config.maxShutterUs <= target_us) {
-			/* Limit looks OK but the sensor register may disagree
-			 * on cold boot — fall through to set + poll. */
-			printf("> Exposure cap: maxShutter %uus (already <= %uus for %u fps), enforcing\n",
-				config.maxShutterUs, target_us, fps);
-		} else {
-			printf("> Exposure cap: maxShutter %uus -> %uus (for %u fps)\n",
-				config.maxShutterUs, target_us, fps);
-		}
+		printf("> Exposure cap: maxShutter %uus -> %uus (for %u fps)\n",
+			config.maxShutterUs, target_us, fps);
 	}
 
 	config.maxShutterUs = target_us;

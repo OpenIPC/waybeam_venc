@@ -44,7 +44,6 @@ static int test_defaults(void)
 	CHECK("defaults_unlock_reg", cfg.sensor.unlock_reg == 0x300a);
 	CHECK("defaults_unlock_value", cfg.sensor.unlock_value == 0x80);
 
-	CHECK("defaults_exposure", cfg.isp.exposure == 0);
 	CHECK("defaults_mirror", cfg.image.mirror == false);
 	CHECK("defaults_flip", cfg.image.flip == false);
 
@@ -114,7 +113,6 @@ static int test_load_full_json(void)
 	CHECK("load_sensor_mode", cfg.sensor.mode == 3);
 	CHECK("load_unlock_off", cfg.sensor.unlock_enabled == false);
 	CHECK("load_isp_bin", strcmp(cfg.isp.sensor_bin, "/etc/sensors/imx415.bin") == 0);
-	CHECK("load_exposure", cfg.isp.exposure == 5000);
 	CHECK("load_mirror", cfg.image.mirror == true);
 	CHECK("load_flip", cfg.image.flip == true);
 	CHECK("load_codec", strcmp(cfg.video0.codec, "h264") == 0);

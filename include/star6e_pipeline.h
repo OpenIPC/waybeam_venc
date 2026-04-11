@@ -102,6 +102,6 @@ void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 void star6e_pipeline_cus3a_reset(void);
 
 /** Calculate max exposure time to avoid frame drops at target FPS. */
-int star6e_pipeline_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us);
+int star6e_pipeline_cap_exposure_for_fps(uint32_t fps);
 
 #endif /* STAR6E_PIPELINE_H */

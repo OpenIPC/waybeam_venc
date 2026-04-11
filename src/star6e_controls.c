@@ -383,27 +383,6 @@ static int apply_fps(uint32_t fps)
 	return 0;
 }
 
-static int apply_exposure(uint32_t us)
-{
-	uint32_t sensor_fps;
-	uint32_t cap_us;
-
-	if (us == 0) {
-		sensor_fps = g_star6e_control_ctx.sensor_fps;
-		if (sensor_fps == 0)
-			sensor_fps = 30;
-		cap_us = 1000000 / sensor_fps;
-	} else {
-		cap_us = us;
-	}
-
-	/* Keep supervisory AE thread's shutter limit in sync */
-	if (star6e_cus3a_running())
-		star6e_cus3a_set_shutter_max(cap_us);
-
-	return star6e_pipeline_cap_exposure_for_fps(0, cap_us);
-}
-
 static int apply_gain_max(uint32_t gain)
 {
 	if (star6e_cus3a_running())
@@ -665,7 +644,7 @@ static char *query_ae_info(void)
 		"\"expo_mode\":{\"ret\":%d,\"raw\":%d,\"name\":\"%s\"},"
 		"\"metrics\":{\"exposure_us\":%u,\"sensor_gain_x1024\":%u,"
 		"\"isp_gain_x1024\":%u,\"fps\":%u},"
-		"\"runtime\":{\"configured_exposure_ms\":%u,\"sensor_fps\":%u}}}",
+		"\"runtime\":{\"sensor_fps\":%u}}}",
 		snapshot.plane_ret, snapshot.pad_id, snapshot.plane.shutter,
 		snapshot.plane.sensGain, snapshot.plane.compGain,
 		snapshot.limit_ret, snapshot.limit.minShutterUs,
@@ -685,7 +664,6 @@ static char *query_ae_info(void)
 		snapshot.mode_ret, snapshot.ae_mode_raw,
 		ae_expo_mode_name(snapshot.ae_mode_raw),
 		exposure_us, sensor_gain, isp_gain, ae_diag_sensor_fps(),
-		g_star6e_control_ctx.vcfg ? g_star6e_control_ctx.vcfg->isp.exposure : 0,
 		ae_diag_sensor_fps());
 	return strdup(buf);
 }
@@ -1011,7 +989,6 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_gop = apply_gop,
 	.apply_qp_delta = apply_qp_delta,
 	.apply_roi_qp = apply_roi_qp,
-	.apply_exposure = apply_exposure,
 	.apply_gain_max = apply_gain_max,
 	.apply_verbose = apply_verbose,
 	.apply_output_enabled = apply_output_enabled,

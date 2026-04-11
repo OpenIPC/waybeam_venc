@@ -87,7 +87,6 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* isp */
 	cfg->isp.sensor_bin[0] = '\0';
-	cfg->isp.exposure = 0;
 	cfg->isp.legacy_ae = true;
 	cfg->isp.ae_fps = 15;
 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
@@ -238,7 +237,6 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 	if (!obj) return;
 	safe_strcpy(s->sensor_bin, sizeof(s->sensor_bin),
 		json_get_string(obj, "sensorBin", s->sensor_bin));
-	s->exposure = (uint32_t)json_get_int(obj, "exposure", (int)s->exposure);
 	s->legacy_ae = json_get_bool(obj, "legacyAe", s->legacy_ae);
 	s->ae_fps = (uint32_t)json_get_int(obj, "aeFps", (int)s->ae_fps);
 	s->gain_max = (uint32_t)json_get_int(obj, "gainMax", (int)s->gain_max);
@@ -620,7 +618,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	cJSON *isp = cJSON_AddObjectToObject(root, "isp");
 	if (isp) {
 		cJSON_AddStringToObject(isp, "sensorBin", cfg->isp.sensor_bin);
-		cJSON_AddNumberToObject(isp, "exposure", cfg->isp.exposure);
 		cJSON_AddBoolToObject(isp, "legacyAe", cfg->isp.legacy_ae);
 		cJSON_AddNumberToObject(isp, "aeFps", cfg->isp.ae_fps);
 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);

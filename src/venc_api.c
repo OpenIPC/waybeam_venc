@@ -148,7 +148,6 @@ static const FieldDesc g_fields[] = {
 	FIELD(sensor, unlock_dir,      FT_INT,    MUT_RESTART),
 
 	FIELD(isp, sensor_bin,         FT_STRING, MUT_RESTART),
-	FIELD(isp, exposure,           FT_UINT,   MUT_LIVE),
 	FIELD(isp, gain_max,           FT_UINT,   MUT_LIVE),
 	FIELD(isp, awb_mode,           FT_STRING, MUT_LIVE),
 	FIELD(isp, awb_ct,             FT_UINT,   MUT_LIVE),
@@ -571,7 +570,6 @@ typedef enum {
 	LIVE_GROUP_VIDEO_TIMING,
 	LIVE_GROUP_QP_DELTA,
 	LIVE_GROUP_ROI,
-	LIVE_GROUP_EXPOSURE,
 	LIVE_GROUP_GAIN_MAX,
 	LIVE_GROUP_AWB,
 	LIVE_GROUP_VERBOSE,
@@ -722,8 +720,6 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	    strcmp(canonical_key, "fpv.roi_steps") == 0 ||
 	    strcmp(canonical_key, "fpv.roi_center") == 0)
 		return LIVE_GROUP_ROI;
-	if (strcmp(canonical_key, "isp.exposure") == 0)
-		return LIVE_GROUP_EXPOSURE;
 	if (strcmp(canonical_key, "isp.gain_max") == 0)
 		return LIVE_GROUP_GAIN_MAX;
 	if (strcmp(canonical_key, "isp.awb_mode") == 0 ||
@@ -751,8 +747,6 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "video0.qp_delta";
 	case LIVE_GROUP_ROI:
 		return "fpv.roi_*";
-	case LIVE_GROUP_EXPOSURE:
-		return "isp.exposure";
 	case LIVE_GROUP_GAIN_MAX:
 		return "isp.gain_max";
 	case LIVE_GROUP_AWB:
@@ -885,8 +879,6 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_qp_delta != NULL;
 	case LIVE_GROUP_ROI:
 		return g_cb->apply_roi_qp != NULL;
-	case LIVE_GROUP_EXPOSURE:
-		return g_cb->apply_exposure != NULL;
 	case LIVE_GROUP_GAIN_MAX:
 		return g_cb->apply_gain_max != NULL;
 	case LIVE_GROUP_AWB:
@@ -931,9 +923,6 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		dst->fpv.roi_qp = src->fpv.roi_qp;
 		dst->fpv.roi_steps = src->fpv.roi_steps;
 		dst->fpv.roi_center = src->fpv.roi_center;
-		break;
-	case LIVE_GROUP_EXPOSURE:
-		dst->isp.exposure = src->isp.exposure;
 		break;
 	case LIVE_GROUP_GAIN_MAX:
 		dst->isp.gain_max = src->isp.gain_max;
@@ -1019,8 +1008,6 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_qp_delta(cfg->video0.qp_delta);
 	case LIVE_GROUP_ROI:
 		return g_cb->apply_roi_qp(cfg->fpv.roi_qp);
-	case LIVE_GROUP_EXPOSURE:
-		return g_cb->apply_exposure(cfg->isp.exposure * 1000);
 	case LIVE_GROUP_GAIN_MAX:
 		return g_cb->apply_gain_max(cfg->isp.gain_max);
 	case LIVE_GROUP_AWB:
