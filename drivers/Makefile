@@ -1,10 +1,11 @@
-# Maruko IMX415 sensor driver build
+# Maruko sensor driver build (IMX415, IMX335)
 #
 # Build: make -C drivers sensor
 # Requires: kernel source, I6C toolchain
 #
-# The sensor driver is a kernel module (.ko) that must be deployed
-# to /lib/modules/5.10.61/sigmastar/ on the Maruko device.
+# Produces sensor_imx415_maruko.ko and sensor_imx335_maruko.ko.
+# Deploy the one matching your sensor to /lib/modules/5.10.61/sigmastar/
+# as sensor_imx415_mipi.ko or sensor_imx335_mipi.ko.
 # A reboot is required after replacing the driver.
 
 KSRC     ?= $(HOME)/dev/waybeam-coordination/Maruko_work_dir/SourceCode/kernel
@@ -15,7 +16,7 @@ EXTRA_CFLAGS += -DSIGMASTAR_MARUKO
 EXTRA_CFLAGS += -I$(I6C_INC) -I$(KSRC)/drivers/sstar/include
 EXTRA_CFLAGS += -Wno-unused-function
 
-obj-m := sensor_config.o sensor_imx415_maruko.o
+obj-m := sensor_config.o sensor_imx415_maruko.o sensor_imx335_maruko.o
 
 sensor:
 	$(MAKE) ARCH=arm CROSS_COMPILE=$(CROSS) -C $(KSRC) M=$(CURDIR) modules
