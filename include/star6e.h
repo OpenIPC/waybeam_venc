@@ -241,7 +241,15 @@ static inline int _mi_snr_get_plane_mode(int pad, MI_BOOL *out) {
 #define MI_SNR_InitDev(init)           g_mi_snr.fnInitDev(init)
 #define MI_SNR_DeInitDev()             g_mi_snr.fnDeInitDev()
 #define MI_SNR_SetPlaneMode(pad, mode) g_mi_snr.fnSetPlaneMode((pad), (mode))
-#define MI_SNR_GetPlaneMode(pad, mode) g_mi_snr.fnGetPlaneMode((pad), (int *)(mode))
+/* Note: vendor MI_SNR_GetPlaneMode writes an int, but MI_BOOL is _Bool (1 byte).
+ * Use a temp int to avoid writing past the bool boundary. */
+static inline int _s6e_snr_get_plane_mode(int pad, MI_BOOL *out) {
+	int tmp = 0;
+	int ret = g_mi_snr.fnGetPlaneMode(pad, &tmp);
+	if (out) *out = (MI_BOOL)tmp;
+	return ret;
+}
+#define MI_SNR_GetPlaneMode(pad, mode) _s6e_snr_get_plane_mode((pad), (mode))
 #define MI_SNR_SetRes(pad, idx)        g_mi_snr.fnSetRes((pad), (idx))
 #define MI_SNR_GetCurRes(pad, idx, res) g_mi_snr.fnGetCurRes((pad), (idx), (res))
 #define MI_SNR_SetFps(pad, fps)        g_mi_snr.fnSetFps((pad), (fps))

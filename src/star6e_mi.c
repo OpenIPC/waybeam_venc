@@ -22,6 +22,7 @@ star6e_venc_impl g_mi_venc;
 static void *h_cam_os;
 static void *h_ispalgo;
 static void *h_cus3a;
+static void *h_isp;
 
 void *star6e_load_symbol(void *handle, const char *lib_name,
 	const char *sym_name)
@@ -352,7 +353,6 @@ int star6e_mi_init(void)
 			dlerror());
 
 	/* ISP must load before VPE (VPE references MI_ISP_DisableUserspace3A) */
-	static void *h_isp;
 	h_isp = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
 	if (!h_isp)
 		fprintf(stderr, "WARNING: [star6e] dlopen(libmi_isp.so): %s\n",
@@ -390,6 +390,7 @@ void star6e_mi_deinit(void)
 	i6e_vif_unload(&g_mi_vif);
 	i6e_sys_unload(&g_mi_sys);
 
+	if (h_isp)     { dlclose(h_isp);     h_isp = NULL; }
 	if (h_cus3a)   { dlclose(h_cus3a);   h_cus3a = NULL; }
 	if (h_ispalgo) { dlclose(h_ispalgo); h_ispalgo = NULL; }
 	if (h_cam_os)  { dlclose(h_cam_os);  h_cam_os = NULL; }

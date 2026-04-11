@@ -13,8 +13,6 @@ CC_MARUKO_BIN := $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 STAR6E_CC ?= $(TOOLCHAIN_DIR)/bin/arm-openipc-linux-gnueabihf-gcc
 MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
-STAR6E_DRV ?= libs/star6e
-
 OUT_DIR := out/$(SOC_BUILD)
 TARGET := $(OUT_DIR)/venc
 TEST_TARGET := $(OUT_DIR)/snr_toggle_test
@@ -32,11 +30,8 @@ MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/ma
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/imu_bmi270.c src/eis.c src/eis_gyroglide.c src/star6e_iq.c src/debug_osd.c
 LIB_RUNPATH ?= /usr/lib
 COMMON_LDFLAGS := -Wl,-rpath,$(LIB_RUNPATH) -Wl,--no-as-needed
-BASE_LIBS := -Wl,--start-group \
-	-lmi_vif -lmi_vpe -lmi_venc -lmi_isp -lmi_sensor -lmi_sys \
-	-lcus3a -lispalgo -lcam_os_wrapper -lpthread -ldl -lrt \
-	-Wl,--end-group
 
+# BASE_LIBS is set per-SOC below — all MI libs are loaded via dlopen at runtime.
 ifeq ($(SOC_BUILD),maruko)
 CC := $(MARUKO_CC)
 SRC := src/main.c src/backend_maruko.c $(MARUKO_ONLY_SRC) $(HELPER_SRC) $(CONFIG_SRC)
@@ -118,10 +113,10 @@ $(TARGET): $(SRC) include/backend.h include/codec_config.h include/codec_types.h
 	$(CC) $(CFLAGS) $(LDFLAGS) $(SRC) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(if $(DRV),-Ltools,) $(BASE_LIBS) $(SOC_LIBS) -o $@
 
 $(TEST_TARGET): $(TEST_SRC) include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h
-	$(CC) $(CFLAGS) $(LDFLAGS) $(TEST_SRC) -L$(DRV) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(BASE_LIBS) $(SOC_LIBS) -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) $(TEST_SRC) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(BASE_LIBS) $(SOC_LIBS) -o $@
 
 $(PROBE_TARGET): $(PROBE_SRC) include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h
-	$(CC) $(CFLAGS) $(LDFLAGS) $(PROBE_SRC) -L$(DRV) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(BASE_LIBS) $(SOC_LIBS) -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) $(PROBE_SRC) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(BASE_LIBS) $(SOC_LIBS) -o $@
 
 # Host-native timing probe (no cross-compiler or SDK libs needed)
 $(TIMING_PROBE_TARGET): $(TIMING_PROBE_SRC) include/rtp_sidecar.h
@@ -216,7 +211,7 @@ remote-test:
 
 # ── Verification targets ──────────────────────────────────────────────
 
-STAR6E_BINS := out/star6e/venc out/star6e/snr_toggle_test out/star6e/snr_sequence_probe
+STAR6E_BINS := out/star6e/venc
 MARUKO_BINS := out/maruko/venc
 
 verify:
@@ -257,6 +252,5 @@ pre-pr: verify
 clean:
 	rm -rf out/star6e out/maruko
 	rm -f $(TIMING_PROBE_TARGET)
-	rm -f $(MARUKO_SHIM_SO)
 	rm -f $(TEST_RUNNER)
 	rm -f .build_soc
