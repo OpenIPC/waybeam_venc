@@ -31,19 +31,7 @@ typedef struct {
 	char multiPlanes;
 } i6c_isp_port;
 
-typedef struct {
-	void *handle;
-	int (*fnCreateDevice)(int device, unsigned int *combo);
-	int (*fnDestroyDevice)(int device);
-	int (*fnCreateChannel)(int device, int channel, i6c_isp_chn *config);
-	int (*fnDestroyChannel)(int device, int channel);
-	int (*fnSetChannelParam)(int device, int channel, i6c_isp_para *config);
-	int (*fnStartChannel)(int device, int channel);
-	int (*fnStopChannel)(int device, int channel);
-	int (*fnDisablePort)(int device, int channel, int port);
-	int (*fnEnablePort)(int device, int channel, int port);
-	int (*fnSetPortConfig)(int device, int channel, int port, i6c_isp_port *config);
-} i6c_isp_impl;
+/* ISP _impl struct is now in maruko_mi.h (maruko_isp_impl) */
 
 typedef struct {
 	i6_common_rect crop;
@@ -54,54 +42,37 @@ typedef struct {
 	i6_common_compr compress;
 } i6c_scl_port;
 
-typedef struct {
-	void *handle;
-	int (*fnCreateDevice)(int device, unsigned int *binds);
-	int (*fnDestroyDevice)(int device);
-	int (*fnAdjustChannelRotation)(int device, int channel, int *rotate);
-	int (*fnCreateChannel)(int device, int channel, unsigned int *reserved);
-	int (*fnDestroyChannel)(int device, int channel);
-	int (*fnStartChannel)(int device, int channel);
-	int (*fnStopChannel)(int device, int channel);
-	int (*fnDisablePort)(int device, int channel, int port);
-	int (*fnEnablePort)(int device, int channel, int port);
-	int (*fnSetPortConfig)(int device, int channel, int port, i6c_scl_port *config);
-} i6c_scl_impl;
+/* SCL _impl struct is now in maruko_mi.h (maruko_scl_impl) */
 
 typedef int (*maruko_isp_load_bin_fn_t)(MI_U32 dev_id, MI_U32 channel, char *path, MI_U32 key);
 typedef int (*maruko_isp_disable_userspace3a_fn_t)(MI_U32 dev_id, MI_U32 channel);
 
-MI_S32 maruko_mi_venc_create_dev(MI_VENC_DEV dev, i6c_venc_init *init)
-	__asm__("MI_VENC_CreateDev");
-MI_S32 maruko_mi_venc_destroy_dev(MI_VENC_DEV dev) __asm__("MI_VENC_DestroyDev");
-MI_S32 maruko_mi_venc_create_chn(MI_VENC_DEV dev, MI_VENC_CHN chn, i6c_venc_chn *attr)
-	__asm__("MI_VENC_CreateChn");
-MI_S32 maruko_mi_venc_destroy_chn(MI_VENC_DEV dev, MI_VENC_CHN chn)
-	__asm__("MI_VENC_DestroyChn");
-MI_S32 maruko_mi_venc_start_recv(MI_VENC_DEV dev, MI_VENC_CHN chn)
-	__asm__("MI_VENC_StartRecvPic");
-MI_S32 maruko_mi_venc_stop_recv(MI_VENC_DEV dev, MI_VENC_CHN chn)
-	__asm__("MI_VENC_StopRecvPic");
-MI_S32 maruko_mi_venc_query(MI_VENC_DEV dev, MI_VENC_CHN chn, i6c_venc_stat *stat)
-	__asm__("MI_VENC_Query");
-MI_S32 maruko_mi_venc_get_stream(MI_VENC_DEV dev, MI_VENC_CHN chn,
-	i6c_venc_strm *stream, MI_S32 timeout_ms) __asm__("MI_VENC_GetStream");
-MI_S32 maruko_mi_venc_release_stream(MI_VENC_DEV dev, MI_VENC_CHN chn,
-	i6c_venc_strm *stream) __asm__("MI_VENC_ReleaseStream");
-MI_S32 maruko_mi_venc_set_input_source(MI_VENC_DEV dev, MI_VENC_CHN chn,
-	i6c_venc_src_conf *config) __asm__("MI_VENC_SetInputSourceConfig");
-MI_S32 maruko_mi_venc_get_chn_attr(MI_VENC_DEV dev, MI_VENC_CHN chn, i6c_venc_chn *attr)
-	__asm__("MI_VENC_GetChnAttr");
-MI_S32 maruko_mi_venc_set_chn_attr(MI_VENC_DEV dev, MI_VENC_CHN chn, i6c_venc_chn *attr)
-	__asm__("MI_VENC_SetChnAttr");
-MI_S32 maruko_mi_venc_get_rc_param(MI_VENC_DEV dev, MI_VENC_CHN chn,
-	MI_VENC_RcParam_t *param) __asm__("MI_VENC_GetRcParam");
-MI_S32 maruko_mi_venc_set_rc_param(MI_VENC_DEV dev, MI_VENC_CHN chn,
-	MI_VENC_RcParam_t *param) __asm__("MI_VENC_SetRcParam");
-MI_S32 maruko_mi_venc_request_idr(MI_VENC_DEV dev, MI_VENC_CHN chn, MI_BOOL instant)
-	__asm__("MI_VENC_RequestIdr");
-MI_S32 maruko_mi_sys_config_private_pool(MI_U16 soc_id, i6c_sys_pool *config)
-	__asm__("MI_SYS_ConfigPrivateMMAPool");
+/* Maruko VENC/SYS dispatch — routed through dlopen'd function pointers */
+#define maruko_mi_venc_create_dev(dev, init)    g_mi_venc.fnCreateDev((dev), (init))
+#define maruko_mi_venc_destroy_dev(dev)         g_mi_venc.fnDestroyDev((dev))
+#define maruko_mi_venc_create_chn(dev, chn, attr) g_mi_venc.fnCreateChn((dev), (chn), (attr))
+#define maruko_mi_venc_destroy_chn(dev, chn)    g_mi_venc.fnDestroyChn((dev), (chn))
+#define maruko_mi_venc_start_recv(dev, chn)     g_mi_venc.fnStartRecvPic((dev), (chn))
+#define maruko_mi_venc_stop_recv(dev, chn)      g_mi_venc.fnStopRecvPic((dev), (chn))
+#define maruko_mi_venc_query(dev, chn, stat)    g_mi_venc.fnQuery((dev), (chn), (stat))
+#define maruko_mi_venc_get_stream(dev, chn, strm, ms) \
+  g_mi_venc.fnGetStream((dev), (chn), (strm), (ms))
+#define maruko_mi_venc_release_stream(dev, chn, strm) \
+  g_mi_venc.fnReleaseStream((dev), (chn), (strm))
+#define maruko_mi_venc_set_input_source(dev, chn, cfg) \
+  g_mi_venc.fnSetInputSourceConfig((dev), (chn), (cfg))
+#define maruko_mi_venc_get_chn_attr(dev, chn, attr) \
+  g_mi_venc.fnGetChnAttr((dev), (chn), (attr))
+#define maruko_mi_venc_set_chn_attr(dev, chn, attr) \
+  g_mi_venc.fnSetChnAttr((dev), (chn), (attr))
+#define maruko_mi_venc_get_rc_param(dev, chn, param) \
+  g_mi_venc.fnGetRcParam((dev), (chn), (param))
+#define maruko_mi_venc_set_rc_param(dev, chn, param) \
+  g_mi_venc.fnSetRcParam((dev), (chn), (param))
+#define maruko_mi_venc_request_idr(dev, chn, inst) \
+  g_mi_venc.fnRequestIdr((dev), (chn), (inst))
+#define maruko_mi_sys_config_private_pool(soc, cfg) \
+  g_mi_sys.fnConfigPrivateMMAPool((soc), (cfg))
 
 enum {
 	MARUKO_VENC_RC_H264_CBR = 1,

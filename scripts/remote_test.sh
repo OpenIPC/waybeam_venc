@@ -8,7 +8,7 @@ set -euo pipefail
 HOST="${HOST:-root@192.168.1.11}"
 REMOTE_DIR="${REMOTE_DIR:-/tmp/waybeam_venc_test}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-10}"
-RUN_BIN="snr_toggle_test"
+RUN_BIN="venc"
 SOC_BUILD="${SOC_BUILD:-auto}"
 MARUKO_ISP_BIN="${MARUKO_ISP_BIN:-/etc/sensors/imx415.bin}"
 PREWARM_MAJESTIC=0
@@ -39,7 +39,7 @@ Options:
   --soc-build BUILD        auto | star6e | maruko
   --remote-dir DIR         Remote staging dir (default: /tmp/waybeam_venc_test)
   --timeout-sec SEC        Remote run timeout (default: 10)
-  --run-bin BIN            venc | snr_toggle_test | snr_sequence_probe
+  --run-bin BIN            venc (default)
   --prewarm-majestic       Start majestic briefly before the test
   --prewarm-seconds SEC    Prewarm duration (default: 7)
   --no-dmesg               Skip dmesg delta collection
@@ -53,7 +53,7 @@ Options:
 
 Examples:
   scripts/remote_test.sh --host root@192.168.1.13 --soc-build star6e --run-bin venc -- --list-sensor-modes --sensor-index 0
-  scripts/remote_test.sh --host root@192.168.2.12 --soc-build maruko --run-bin snr_toggle_test -- --sensor-index 0 --sensor-mode 1 -f 30
+  scripts/remote_test.sh --host root@192.168.2.12 --soc-build maruko --run-bin venc -- --list-sensor-modes --sensor-index 0
 EOF
 }
 
@@ -137,7 +137,6 @@ STAR6E_CC="${ROOT_DIR}/toolchain/toolchain.sigmastar-infinity6e/bin/arm-openipc-
 SOC_BUILD_RESOLVED=""
 REMOTE_FAMILY=""
 MARUKO_RUNTIME_DIR="${MARUKO_RUNTIME_DIR:-${ROOT_DIR}/libs/maruko}"
-MARUKO_UCLIBC_DIR="${MARUKO_UCLIBC_DIR:-${MARUKO_RUNTIME_DIR}/uclibc}"
 MARUKO_RUNTIME_LIBS=(
   libcam_os_wrapper.so
   libcus3a.so
@@ -150,14 +149,6 @@ MARUKO_RUNTIME_LIBS=(
   libmi_venc.so
   libmi_vif.so
   libmi_vpe.so
-)
-MARUKO_UCLIBC_LIBS=(
-  ld-uClibc-1.0.31.so
-  ld-uClibc.so.1
-  ld-uClibc.so.0
-  libc.so.0
-  libgcc_s.so.1
-  libuClibc-1.0.31.so
 )
 
 # --- SSH ControlMaster multiplexing ---
@@ -397,13 +388,8 @@ deploy_binaries() {
       require_local_file "${MARUKO_RUNTIME_DIR}/${lib}"
       copy_file_ssh "${MARUKO_RUNTIME_DIR}/${lib}" "${REMOTE_DIR}/lib/${lib}"
     done
-    for lib in "${MARUKO_UCLIBC_LIBS[@]}"; do
-      require_local_file "${MARUKO_UCLIBC_DIR}/${lib}"
-      copy_file_ssh "${MARUKO_UCLIBC_DIR}/${lib}" "${REMOTE_DIR}/lib/${lib}"
-    done
-    require_local_file "${ROOT_DIR}/tools/libmaruko_uclibc_shim.so"
-    copy_file_ssh "${ROOT_DIR}/tools/libmaruko_uclibc_shim.so" \
-      "${REMOTE_DIR}/lib/libmaruko_uclibc_shim.so"
+    # uClibc runtime and shim no longer needed — Maruko uses dlopen for
+    # all MI libs, eliminating the musl/uClibc ABI mismatch.
   fi
 }
 

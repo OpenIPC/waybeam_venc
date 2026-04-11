@@ -987,11 +987,17 @@ static int star6e_runner_init(void *opaque)
 	Star6eRunnerContext *ctx = opaque;
 	int ret;
 
+	if (star6e_mi_init() != 0) {
+		fprintf(stderr, "ERROR: MI library load failed\n");
+		return -1;
+	}
+
 	sdk_quiet_begin(&g_sdk_quiet);
 	ret = MI_SYS_Init();
 	sdk_quiet_end(&g_sdk_quiet);
 	if (ret != 0) {
 		fprintf(stderr, "ERROR: MI_SYS_Init failed %d\n", ret);
+		star6e_mi_deinit();
 		return ret;
 	}
 	ctx->system_initialized = 1;
@@ -1144,6 +1150,7 @@ static void star6e_runner_teardown(void *opaque)
 		ctx->system_initialized = 0;
 		star6e_pipeline_vpe_scl_preset_shutdown();
 	}
+	star6e_mi_deinit();
 }
 
 static VencConfig *star6e_config(void *opaque)

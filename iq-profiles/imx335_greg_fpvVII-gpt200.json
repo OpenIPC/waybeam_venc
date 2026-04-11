@@ -1,0 +1,432 @@
+{
+  "ok": true,
+  "data": {
+    "lightness": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 50
+    },
+    "contrast": {
+      "ret": 0,
+      "enabled": false,
+      "op_type": "manual",
+      "value": 0
+    },
+    "brightness": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "manual",
+      "value": 75
+    },
+    "saturation": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "manual",
+      "value": 42
+    },
+    "sharpness": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 10
+    },
+    "hsv": {
+      "ret": 0,
+      "enabled": false,
+      "op_type": "manual",
+      "value": 64
+    },
+    "nr3d": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "manual",
+      "value": 64
+    },
+    "nr3d_ex": {
+      "ret": 0,
+      "enabled": false,
+      "value": 0
+    },
+    "nr_despike": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 4
+    },
+    "nr_luma": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 63
+    },
+    "nr_luma_adv": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 11141297
+    },
+    "nr_chroma": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 30
+    },
+    "nr_chroma_adv": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 255
+    },
+    "false_color": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "manual",
+      "value": 140,
+      "fields": {
+        "freq_thrd": 140,
+        "edge_score_thrd": 8,
+        "chroma_thrd_max": 10,
+        "chroma_thrd_mid": 40,
+        "chroma_thrd_min": 80,
+        "strength_mid": 5,
+        "strength_min": 7
+      }
+    },
+    "crosstalk": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 64,
+      "fields": {
+        "strength": 64,
+        "strength_by_y": [
+          64,
+          64,
+          64,
+          64,
+          64,
+          64,
+          64,
+          255,
+          0,
+          0,
+          0,
+          31,
+          64,
+          64,
+          64
+        ],
+        "threshold": 64,
+        "offset": 16448
+      }
+    },
+    "demosaic": {
+      "ret": 0,
+      "enabled": true,
+      "value": 45,
+      "fields": {
+        "dir_thrd": 45,
+        "edge_smooth_y": 120,
+        "edge_smooth_c": 30
+      }
+    },
+    "obc": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 3200,
+      "fields": {
+        "val_r": 3200,
+        "val_gr": 3200,
+        "val_gb": 3250,
+        "val_b": 3250
+      }
+    },
+    "dynamic_dp": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 230
+    },
+    "dp_cluster": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 26214750
+    },
+    "r2y": {
+      "ret": 0,
+      "enabled": false,
+      "value": 511,
+      "fields": {
+        "matrix": [
+          511,
+          7764,
+          8109,
+          306,
+          601,
+          117,
+          8019,
+          7853,
+          511
+        ],
+        "add_y16": 0
+      }
+    },
+    "colortrans": {
+      "ret": 0,
+      "enabled": true,
+      "value": 200,
+      "fields": {
+        "y_ofst": 200,
+        "u_ofst": 0,
+        "v_ofst": 0,
+        "matrix": [
+          23,
+          45,
+          9,
+          1005,
+          987,
+          56,
+          56,
+          977,
+          1015
+        ]
+      }
+    },
+    "rgb_matrix": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "manual",
+      "value": 1024
+    },
+    "wdr": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 255
+    },
+    "wdr_curve_adv": {
+      "ret": 0,
+      "enabled": false,
+      "op_type": "auto",
+      "value": 10240,
+      "fields": {
+        "slope": 10240,
+        "trans_point_0": 10,
+        "trans_point_1": 50,
+        "saturated_point": 255,
+        "curve_mode_sel": 0
+      }
+    },
+    "pfc": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 255
+    },
+    "pfc_ex": {
+      "ret": 0,
+      "enabled": true,
+      "value": 0
+    },
+    "hdr": {
+      "ret": 0,
+      "enabled": false,
+      "op_type": "auto",
+      "value": 1
+    },
+    "hdr_ex": {
+      "ret": 0,
+      "enabled": false,
+      "value": 16384
+    },
+    "shp_ex": {
+      "ret": 0,
+      "enabled": true,
+      "value": 0
+    },
+    "rgbir": {
+      "ret": 0,
+      "enabled": false,
+      "op_type": "auto",
+      "value": 207
+    },
+    "iq_mode": {
+      "ret": 0,
+      "enabled": false,
+      "op_type": "auto",
+      "value": 0
+    },
+    "lsc": {
+      "ret": 0,
+      "enabled": false,
+      "value": 960
+    },
+    "lsc_ctrl": {
+      "ret": 0,
+      "enabled": false,
+      "value": 128
+    },
+    "alsc": {
+      "ret": 0,
+      "enabled": false,
+      "value": 27
+    },
+    "alsc_ctrl": {
+      "ret": 0,
+      "enabled": false,
+      "value": 128
+    },
+    "obc_p1": {
+      "ret": 0,
+      "enabled": false,
+      "op_type": "auto",
+      "value": 3840,
+      "fields": {
+        "val_r": 3840,
+        "val_gr": 3840,
+        "val_gb": 3840,
+        "val_b": 3840
+      }
+    },
+    "stitch_lpf": {
+      "available": false
+    },
+    "rgb_gamma": {
+      "ret": 0,
+      "value": true
+    },
+    "yuv_gamma": {
+      "ret": 0,
+      "value": false
+    },
+    "wdr_curve_full": {
+      "ret": 0,
+      "value": false
+    },
+    "dummy": {
+      "ret": 0,
+      "value": false
+    },
+    "dummy_ex": {
+      "ret": 0,
+      "value": false
+    },
+    "defog": {
+      "ret": 0,
+      "value": false
+    },
+    "color_to_gray": {
+      "ret": 0,
+      "value": false
+    },
+    "nr3d_p1": {
+      "ret": 0,
+      "value": false
+    },
+    "fpn": {
+      "ret": 0,
+      "value": false
+    },
+    "ae_ev_comp": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 4294967293
+    },
+    "ae_mode": {
+      "ret": 0,
+      "enabled": false,
+      "op_type": "auto",
+      "value": 0
+    },
+    "ae_state": {
+      "ret": 0,
+      "enabled": false,
+      "op_type": "auto",
+      "value": 0
+    },
+    "ae_flicker": {
+      "ret": 0,
+      "enabled": false,
+      "op_type": "auto",
+      "value": 0
+    },
+    "ae_flicker_ex": {
+      "ret": 0,
+      "value": false
+    },
+    "ae_win_wgt_type": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 1
+    },
+    "ae_manual_expo": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 16
+    },
+    "ae_expo_limit": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 150
+    },
+    "ae_stabilizer": {
+      "ret": 0,
+      "value": false
+    },
+    "ae_rgbir": {
+      "ret": 0,
+      "value": false
+    },
+    "ae_hdr": {
+      "ret": 0,
+      "value": true
+    },
+    "awb_attr_ex": {
+      "ret": 0,
+      "value": false
+    },
+    "awb_multi_ls": {
+      "ret": 0,
+      "value": true
+    },
+    "awb_stabilizer": {
+      "ret": 0,
+      "value": false
+    },
+    "awb_ct_cali": {
+      "ret": 0,
+      "enabled": true,
+      "op_type": "auto",
+      "value": 3
+    },
+    "awb_ct_weight": {
+      "ret": 0,
+      "enabled": false,
+      "op_type": "auto",
+      "value": 0
+    },
+    "_diag": {
+      "version": {
+        "ret": 0,
+        "vendor": 0,
+        "major": 1,
+        "minor": 8
+      },
+      "iq_index": {
+        "ret": 0,
+        "value": 4
+      },
+      "ccm": {
+        "ret": 0,
+        "color_temp": 6500
+      }
+    }
+  }
+}
