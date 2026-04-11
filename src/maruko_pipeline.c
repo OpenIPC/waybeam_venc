@@ -101,17 +101,14 @@ static void maruko_enable_cus3a(void)
 	typedef int (*fn_t)(MI_U32 dev_id, MI_U32 channel, void *params);
 	fn_t fn = (fn_t)dlsym(h, "MI_ISP_CUS3A_Enable");
 	if (fn) {
-		/* Enable CUS3A (1,1,1) — this starts the 3A_Proc_0 thread
-		 * in libcus3a.so which processes AE/AWB/AF and applies
-		 * IQ parameter changes. Without this thread, IQ Set calls
-		 * succeed but never reach the ISP hardware. */
+		/* Enable CUS3A AE+AWB only — AF is not needed for fixed-focus
+		 * cameras (IMX415).  Enabling AF causes motor init errors:
+		 * "AF_InitParameters: Error!! Initial motor parameters..." */
 		MI_BOOL p100[3] = {1, 0, 0};
 		MI_BOOL p110[3] = {1, 1, 0};
-		MI_BOOL p111[3] = {1, 1, 1};
 		fn(0, 0, p100);
-		fn(0, 0, p110);
-		MI_S32 ret = fn(0, 0, p111);
-		printf("> [maruko] CUS3A_Enable(1,1,1) ret=%d\n", ret);
+		MI_S32 ret = fn(0, 0, p110);
+		printf("> [maruko] CUS3A_Enable(1,1,0) ret=%d\n", ret);
 	}
 
 	/* Enable Userspace3A — creates the 3A_Proc thread that processes
@@ -160,7 +157,6 @@ static void maruko_post_load_cus3a(const IspRuntimeLib *lib, void *ctx)
 	cus3a_fn_t fn_cus3a;
 	MI_BOOL p100[3] = {1, 0, 0};
 	MI_BOOL p110[3] = {1, 1, 0};
-	MI_BOOL p111[3] = {1, 1, 1};
 
 	(void)ctx;
 	fn_cus3a = (cus3a_fn_t)lib->cus3a_enable;
@@ -169,7 +165,6 @@ static void maruko_post_load_cus3a(const IspRuntimeLib *lib, void *ctx)
 
 	fn_cus3a(0, 0, p100);
 	fn_cus3a(0, 0, p110);
-	fn_cus3a(0, 0, p111);
 }
 
 static int maruko_load_isp_bin(const char *isp_bin_path)
