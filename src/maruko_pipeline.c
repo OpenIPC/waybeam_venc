@@ -1134,6 +1134,9 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 	unsigned int frame_counter = 0;
 	unsigned int idle_counter = 0;
+	/* Cached packet buffer — avoids malloc/free per frame at 90fps. */
+	i6c_venc_pack *cached_packs = NULL;
+	uint32_t cached_packs_cap = 0;
 	StreamMetricsState metrics;
 	if (ctx->cfg.verbose) {
 		struct timespec now;
@@ -1164,38 +1167,42 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 		if (stat.curPacks == 0) {
 			idle_counter++;
-			if ((idle_counter % 10000) == 0)  /* ~1s at 100us sleep */
+			if ((idle_counter % 2000) == 0)  /* ~1s at 500us sleep */
 				printf("> [maruko] waiting for encoder data...\n");
-			if (idle_counter > 200000) {  /* ~20s timeout */
+			if (idle_counter > 40000) {  /* ~20s timeout */
 				fprintf(stderr,
 					"ERROR: [maruko] no encoder data"
 					" received; aborting stream loop\n");
 				return -1;
 			}
-			/* Tight poll: don't sleep when frames are expected soon.
-			 * At 90fps+ the 1ms sleep wastes ~10% of each frame
-			 * period. Use sched_yield for sub-ms yielding. */
-			usleep(100);
+			/* Short poll sleep: 500us is <5% of 11ms frame period
+			 * at 90fps, reducing idle syscalls by ~5x vs 100us
+			 * while keeping frame latency low. */
+			usleep(500);
 			continue;
 		}
 		idle_counter = 0;
 
 		i6c_venc_strm stream = {0};
 		stream.count = stat.curPacks;
-		stream.packet = calloc(stat.curPacks, sizeof(i6c_venc_pack));
-		if (!stream.packet) {
-			fprintf(stderr,
-				"ERROR: [maruko] packet alloc failed\n");
-			return -1;
+		if (stat.curPacks > cached_packs_cap) {
+			free(cached_packs);
+			cached_packs = malloc(stat.curPacks * sizeof(i6c_venc_pack));
+			if (!cached_packs) {
+				cached_packs_cap = 0;
+				fprintf(stderr,
+					"ERROR: [maruko] packet alloc failed\n");
+				return -1;
+			}
+			cached_packs_cap = stat.curPacks;
 		}
+		stream.packet = cached_packs;
 
 		ret = maruko_mi_venc_get_stream(ctx->venc_device,
 			ctx->venc_channel, &stream, 10);
 		if (ret != 0) {
-			free(stream.packet);
-			stream.packet = NULL;
 			if (ret == -EAGAIN || ret == EAGAIN) {
-				idle_wait(&sidecar, 2);
+				usleep(100);
 				continue;
 			}
 			fprintf(stderr,
@@ -1234,10 +1241,10 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 				&ctx->cfg);
 		}
 
-			rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
-				seq_before,
-				(uint16_t)(rtp_state.seq - seq_before),
-				capture_us, ready_us, NULL);
+		rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
+			seq_before,
+			(uint16_t)(rtp_state.seq - seq_before),
+			capture_us, ready_us, NULL);
 
 		if (ctx->cfg.verbose) {
 			StreamMetricsSample sample;
@@ -1259,10 +1266,9 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 		(void)maruko_mi_venc_release_stream(ctx->venc_device,
 			ctx->venc_channel, &stream);
-		free(stream.packet);
-		stream.packet = NULL;
 	}
 
+	free(cached_packs);
 	rtp_sidecar_sender_close(&sidecar);
 	return 0;
 }
