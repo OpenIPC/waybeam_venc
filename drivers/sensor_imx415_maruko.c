@@ -154,8 +154,8 @@ static struct { // LINEAR
      * Mode 1: 1472x816 binned @ 60fps — proven working.
      * Mode 2: 1472x816 binned @ 90fps — proven working.
      * Mode 3: 1472x816 binned @ 120fps — proven working. */
-    { LINEAR_RES_1, { 1920, 1080, 3, 30 }, { 0, 0, 1920, 1080 }, { "1920x1080@30fps" } },
-    { LINEAR_RES_2, { 1472, 816, 3, 60 }, { 0, 0, 1472, 816 }, { "1472x816@60fps" } },
+    { LINEAR_RES_1, { 1920, 1080, 3, 30 }, { 0, 0, 1920, 1080 }, { "1920x1080@30fps" } },      /* binned */
+    { LINEAR_RES_2, { 1920, 1080, 3, 30 }, { 0, 0, 1920, 1080 }, { "1920x1080@30fps_nb" } },  /* non-binned */
     { LINEAR_RES_3, { 1472, 816, 3, 90 }, { 0, 0, 1472, 816 }, { "1472x816@90fps" } },
     { LINEAR_RES_4, { 1472, 816, 3, 120 }, { 0, 0, 1472, 816 }, { "1472x816@120fps" } },
 };
@@ -2110,6 +2110,95 @@ static int pCus_init_1600x900_30fps_mipi4lane_linear(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
+/* Maruko 1920x1080@30fps NON-BINNED — direct crop, 10-bit output.
+ * Based on SDK 3.6m crop pattern: HMAX=1100, no binning, 10-bit.
+ * PIX_HWIDTH=1920 (direct), PIX_VWIDTH=2160 (1080×2 for Bayer). */
+const static I2C_ARRAY Sensor_1080p_nobinning_init_table[] = {
+    { 0x3000, 0x01 }, // Standby
+    { 0x3002, 0x01 }, // Master mode stop
+    { 0x3008, 0x5D }, // BCWAIT_TIME
+    { 0x300A, 0x42 }, // CPWAIT_TIME
+    { 0x301C, 0x04 }, // WINMODE (crop)
+    { 0x3020, 0x00 }, // HADD = no binning (explicit disable)
+    { 0x3021, 0x00 }, // VADD = no binning
+    { 0x3022, 0x00 }, // ADDMODE = no binning
+    { 0x3024, 0xCA }, // VMAX = 2250 (30fps with HMAX=1100)
+    { 0x3025, 0x08 },
+    { 0x3028, 0x4C }, // HMAX = 1100 = 0x044C (SDK non-binned pattern)
+    { 0x3029, 0x04 },
+    { 0x3031, 0x00 }, // ADBIT = 10-bit ADC
+    /* 0x3032 (MDBIT) not set — defaults to 12-bit output like binned mode */
+    { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
+    { 0x3040, 0xCC }, // PIX_HST = 972 = 0x03CC (centered 1920 in 3864)
+    { 0x3041, 0x03 },
+    { 0x3042, 0x80 }, // PIX_HWIDTH = 1920 = 0x0780
+    { 0x3043, 0x07 },
+    { 0x3044, 0x4C }, // PIX_VST = 588 = 0x024C (centered 2160 in ~3336)
+    { 0x3045, 0x02 },
+    { 0x3046, 0x70 }, // PIX_VWIDTH = 2160 = 0x0870
+    { 0x3047, 0x08 },
+    { 0x3050, 0x08 }, // SHR0
+    { 0x30C1, 0x00 },
+    { 0x3116, 0x23 }, // INCKSEL2
+    { 0x3118, 0xC6 }, // INCKSEL3 (I6C clock)
+    { 0x311A, 0xE7 }, // INCKSEL4
+    { 0x311E, 0x23 }, // INCKSEL5
+    { 0x32D4, 0x21 }, { 0x32EC, 0xA1 },
+    { 0x3452, 0x7F }, { 0x3453, 0x03 },
+    { 0x358A, 0x04 }, { 0x35A1, 0x02 }, { 0x36BC, 0x0C },
+    { 0x36CC, 0x53 }, { 0x36CD, 0x00 }, { 0x36CE, 0x3C },
+    { 0x36D0, 0x8C }, { 0x36D1, 0x00 }, { 0x36D2, 0x71 },
+    { 0x36D4, 0x3C }, { 0x36D6, 0x53 }, { 0x36D7, 0x00 },
+    { 0x36D8, 0x71 }, { 0x36DA, 0x8C }, { 0x36DB, 0x00 },
+    { 0x3701, 0x00 },
+    { 0x3724, 0x02 }, { 0x3726, 0x02 }, { 0x3732, 0x02 },
+    { 0x3734, 0x03 }, { 0x3736, 0x03 }, { 0x3742, 0x03 },
+    { 0x3862, 0xE0 }, { 0x38CC, 0x30 }, { 0x38CD, 0x2F },
+    { 0x395C, 0x0C }, { 0x3A42, 0xD1 }, { 0x3A4C, 0x77 },
+    { 0x3AE0, 0x02 }, { 0x3AEC, 0x0C },
+    { 0x3B00, 0x2E }, { 0x3B06, 0x29 },
+    { 0x3B98, 0x25 }, { 0x3B99, 0x21 },
+    { 0x3B9B, 0x13 }, { 0x3B9C, 0x13 }, { 0x3B9D, 0x13 }, { 0x3B9E, 0x13 },
+    { 0x3BA1, 0x00 }, { 0x3BA2, 0x06 }, { 0x3BA3, 0x0B }, { 0x3BA4, 0x10 },
+    { 0x3BA5, 0x14 }, { 0x3BA6, 0x18 }, { 0x3BA7, 0x1A }, { 0x3BA8, 0x1A },
+    { 0x3BA9, 0x1A },
+    { 0x3BAC, 0xED }, { 0x3BAD, 0x01 }, { 0x3BAE, 0xF6 }, { 0x3BAF, 0x02 },
+    { 0x3BB0, 0xA2 }, { 0x3BB1, 0x03 }, { 0x3BB2, 0xE0 }, { 0x3BB3, 0x03 },
+    { 0x3BB4, 0xE0 }, { 0x3BB5, 0x03 }, { 0x3BB6, 0xE0 }, { 0x3BB7, 0x03 },
+    { 0x3BB8, 0xE0 }, { 0x3BBA, 0xE0 }, { 0x3BBC, 0xDA }, { 0x3BBE, 0x88 },
+    { 0x3BC0, 0x44 }, { 0x3BC2, 0x7B }, { 0x3BC4, 0xA2 },
+    { 0x3BC8, 0xBD }, { 0x3BCA, 0xBD },
+    { 0x4004, 0xC0 }, { 0x4005, 0x06 }, { 0x400C, 0x00 },
+    { 0x4018, 0x7F }, { 0x401A, 0x37 }, { 0x401C, 0x37 },
+    { 0x401E, 0xF7 }, { 0x401F, 0x00 }, { 0x4020, 0x3F },
+    { 0x4022, 0x6F }, { 0x4024, 0x3F }, { 0x4026, 0x5F },
+    { 0x4028, 0x2F }, { 0x4074, 0x01 },
+    { 0xFFFF, 0x24 }, { 0x3002, 0x00 }, { 0xFFFF, 0x10 }, { 0x3000, 0x00 },
+};
+
+static int pCus_init_1080p_nobinning(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+    if (pCus_CheckSensorProductID(handle) == FAIL)
+        return FAIL;
+    for (i = 0; i < ARRAY_SIZE(Sensor_1080p_nobinning_init_table); i++) {
+        if (Sensor_1080p_nobinning_init_table[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_1080p_nobinning_init_table[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_1080p_nobinning_init_table[i].reg,
+                    Sensor_1080p_nobinning_init_table[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+    return SUCCESS;
+}
+
 /* Maruko 1080p@60fps binning — tipoman9 I6C init table.
  * Uses I6C-tuned INCKSEL3=0xC6, HMAX=0x1B, VTS=2296. */
 const static I2C_ARRAY Sensor_2m_60fps_init_table_4lane_linear[] = {
@@ -2419,13 +2508,13 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 4882; // same HMAX as 120fps
         break;
 
-    case 1: // 1472x816@60fps — 120fps binning init, extended VTS
+    case 1: // 1920x1080@30fps NON-BINNED — direct crop, 10-bit, HMAX=1100
         handle->video_res_supported.ulcur_res = 1;
-        handle->pCus_sensor_init = pCus_init_1m_120fps_mipi4lane_linear;
-        vts_30fps = 3400;
+        handle->pCus_sensor_init = pCus_init_1080p_nobinning;
+        vts_30fps = 2250;
         params->expo.vts = vts_30fps;
-        params->expo.fps = 60;
-        Preview_line_period = 4882;
+        params->expo.fps = 30;
+        Preview_line_period = 14815; // HMAX=1100 → same as SDK 3.6m mode
         break;
 
     case 2: // 1472x816@90fps — 120fps binning init, extended VTS
