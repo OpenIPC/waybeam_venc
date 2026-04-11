@@ -82,7 +82,9 @@ jobs:
           for backend in star6e maruko; do
             mkdir -p "release/venc-${backend}"
             mv "release/${backend}/venc" "release/venc-${backend}/venc"
-            mv "release/${backend}/lib" "release/venc-${backend}/lib"
+            if [ -d "release/${backend}/lib" ]; then
+              mv "release/${backend}/lib" "release/venc-${backend}/lib"
+            fi
             cp config/venc.default.json "release/venc-${backend}/venc.json"
             chmod +x "release/venc-${backend}/venc"
             tar -czf "release/venc-${backend}.tar.gz" -C release "venc-${backend}"
@@ -107,11 +109,12 @@ jobs:
 
             | File | Backend | SoC | Contents |
             |------|---------|-----|----------|
-            | `venc-star6e.tar.gz` | Star6E | SSC30KQ / SSC338Q (Infinity6E) | `venc` + `lib/` + `venc.json` |
-            | `venc-maruko.tar.gz` | Maruko | SSC378QE (Infinity6C) | `venc` + `lib/` + `venc.json` |
+            | `venc-star6e.tar.gz` | Star6E | SSC30KQ / SSC338Q (Infinity6E) | `venc` + `venc.json` |
+            | `venc-maruko.tar.gz` | Maruko | SSC378QE (Infinity6C) | `venc` + `venc.json` |
 
-            Each archive contains the binary, runtime libraries (`lib/`), and default config.
-            Copy `venc.json` to `/etc/venc.json` and libraries to `/usr/lib/` on the device.
+            Each archive contains the binary and default config. MI vendor libraries
+            are loaded via dlopen at runtime from `/usr/lib/` on the device.
+            Copy `venc.json` to `/etc/venc.json` on the device.
 
             See [README](https://github.com/${{ github.repository }}/blob/master/README.md) for usage.
           files: |
