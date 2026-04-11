@@ -990,11 +990,15 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		} MarukoIspExposureLimit;
 		/* Cap exposure to sensor frame period so AE doesn't limit
 		 * output FPS. Default bin has 14ms → 71fps. For 120fps
-		 * sensor: 1000000/120 = 8333us max shutter → ~110fps. */
+		 * sensor: 1000000/120 = 8333us max shutter → full speed.
+		 * User config can only LOWER the cap, never raise above
+		 * frame period (previous bug: exposure=16 raised cap to
+		 * 16ms, defeating the purpose). */
 		if (ctx->sensor.fps > 0) {
-			uint32_t fps_cap_us = 1000000 / ctx->sensor.fps;
-			/* User config overrides if set (in ms → us) */
-			if (ctx->cfg.exposure_cap_us > 0)
+			uint32_t frame_period_us = 1000000 / ctx->sensor.fps;
+			uint32_t fps_cap_us = frame_period_us;
+			if (ctx->cfg.exposure_cap_us > 0 &&
+			    ctx->cfg.exposure_cap_us < frame_period_us)
 				fps_cap_us = ctx->cfg.exposure_cap_us;
 			typedef int (*ae_get_fn)(uint32_t, uint32_t,
 				MarukoIspExposureLimit *);
@@ -1008,13 +1012,28 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 				MarukoIspExposureLimit lim = {0};
 				if (fn_get(0, 0, &lim) == 0) {
 					printf("> [maruko] Exposure cap: "
-						"%uus -> %uus (for %u fps)\n",
+						"%uus -> %uus (for %u fps, "
+						"frame period %uus)\n",
 						lim.maxShutterUs, fps_cap_us,
-						ctx->sensor.fps);
+						ctx->sensor.fps,
+						frame_period_us);
 					lim.maxShutterUs = fps_cap_us;
 					fn_set(0, 0, &lim);
 				}
 			}
+
+			/* Force sensor timing reconfiguration after AE
+			 * init.  The vendor AE (3A_Proc_0 thread) may
+			 * have extended VTS based on ISP bin defaults;
+			 * MI_SNR_SetFps forces the sensor driver to
+			 * reset VTS to the mode's native value.
+			 * (Ported from Star6E cold-boot fps_kick.) */
+			MI_SNR_SetFps(ctx->sensor.pad_id,
+				ctx->sensor.fps);
+			printf("> [maruko] MI_SNR_SetFps kick: "
+				"pad %d fps %u\n",
+				(int)ctx->sensor.pad_id,
+				ctx->sensor.fps);
 		}
 
 		g_mi_isp_initialized = 1;
