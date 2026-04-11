@@ -356,8 +356,7 @@ static int set_sensor_fps(MI_SNR_PAD_ID_e pad, MI_U32 mode_index,
 	const SensorStrategy *strategy, SensorSelectResult *result)
 {
 	uint32_t requested_fps = target_fps ? target_fps : 30;
-	uint32_t clamped = mode->maxFps ? mode->maxFps
-		: sensor_mode_clamp_fps(mode, requested_fps);
+	uint32_t clamped = sensor_mode_clamp_fps(mode, requested_fps);
 	result->fps = 0;
 
 	MI_S32 err = sensor_try_set_fps(pad, mode_index, clamped, strategy);

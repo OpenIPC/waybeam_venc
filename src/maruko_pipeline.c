@@ -190,7 +190,9 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 	/* Also load via MI_ISP_IQ_ApiCmdLoadBinFile to initialize the
 	 * IQ parameter subsystem. Without this, MI_ISP_IQ_Set* calls
 	 * are accepted but have no effect on the image. The IQ variant
-	 * takes raw bin data (not a file path). */
+	 * takes raw bin data (not a file path).
+	 * NOTE: this second load may reset AE parameters from the API
+	 * bin — testing if skipping it fixes dark image issue. */
 	if (ret == 0) {
 		FILE *f = fopen(isp_bin_path, "rb");
 		if (f) {
@@ -205,10 +207,15 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 					RTLD_DEFAULT,
 					"MI_ISP_IQ_ApiCmdLoadBinFile");
 				if (fn) {
-					int iq_ret = fn(0, 0, buf, 1234);
-					printf("> [maruko] IQ bin load: %s "
-						"(%ld bytes) ret=%d\n",
-						isp_bin_path, sz, iq_ret);
+					/* DISABLED: IQ bin reload may reset
+					 * AE params from API bin load above.
+					 * Testing if this fixes dark image. */
+					printf("> [maruko] IQ bin load: "
+						"SKIPPED (testing AE fix)\n");
+					(void)fn;
+				} else {
+					printf("> [maruko] IQ bin load: "
+						"symbol not found (skipped)\n");
 				}
 			}
 			free(buf);
@@ -847,13 +854,18 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 		&ctx->sensor);
 
 	/* Overscan detection: capture rect > crop rect can cause pipeline
-	 * hangs (e.g. imx415 mode 1). Clamp to crop. */
+	 * hangs (e.g. binning modes report pre-binning capture).
+	 * Clamp to crop and zero offsets — the VIF inputRect must
+	 * match the actual MIPI output, not the pre-binning window. */
 	if (ctx->sensor.mode.crop.width > 0 &&
 	    ctx->sensor.plane.capt.width > ctx->sensor.mode.crop.width) {
 		fprintf(stderr, "WARNING: [maruko] sensor overscan detected: "
-			"capture %ux%u > crop %ux%u — clamping to crop\n",
+			"capture (%u,%u %ux%u) > crop %ux%u — clamping\n",
+			ctx->sensor.plane.capt.x, ctx->sensor.plane.capt.y,
 			ctx->sensor.plane.capt.width, ctx->sensor.plane.capt.height,
 			ctx->sensor.mode.crop.width, ctx->sensor.mode.crop.height);
+		ctx->sensor.plane.capt.x = 0;
+		ctx->sensor.plane.capt.y = 0;
 		ctx->sensor.plane.capt.width = ctx->sensor.mode.crop.width;
 		ctx->sensor.plane.capt.height = ctx->sensor.mode.crop.height;
 	}
@@ -884,6 +896,14 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 	ctx->cfg.image_height = out_h;
 	ctx->cfg.venc_gop_size = pipeline_common_gop_frames(
 		ctx->cfg.venc_gop_seconds, ctx->sensor.fps);
+
+	/* ISP throughput note: the Maruko ISP stalls when the sensor
+	 * pixel throughput exceeds ~144M pix/s.  Mode 3 (1472x816@120fps
+	 * = 144M) works; modes 0-2 (>=1920x1080) stall regardless of
+	 * FPS because the MIPI data rate is set by the sensor mode, not
+	 * the target FPS.  VIF sub-window crop is NOT supported on I6C.
+	 * To enable lower-FPS modes at 1080p, the sensor driver needs
+	 * custom mode entries with appropriate binning/MIPI settings. */
 
 	/* Configure SCL ring pool using sensor capture dimensions.
 	 * Note: majestic skips this, but the SDK sample_venc.c uses it.
@@ -988,14 +1008,20 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			unsigned int minSensorGain, minIspGain;
 			unsigned int maxSensorGain, maxIspGain;
 		} MarukoIspExposureLimit;
-		/* Cap exposure to sensor frame period so AE doesn't limit
-		 * output FPS. Default bin has 14ms → 71fps. For 120fps
-		 * sensor: 1000000/120 = 8333us max shutter → ~110fps. */
+		/* Cap exposure to control AE behavior.
+		 * - exposure=0 (default): auto-cap to frame period for
+		 *   max FPS.  120fps sensor → 8333us cap → 118fps.
+		 * - exposure=N (ms): use N*1000 as cap.  Values above
+		 *   frame period trade FPS for brightness (e.g. 16ms
+		 *   at 120fps mode → ~60fps but brighter image).
+		 *   Values below frame period reduce max exposure. */
 		if (ctx->sensor.fps > 0) {
-			uint32_t fps_cap_us = 1000000 / ctx->sensor.fps;
-			/* User config overrides if set (in ms → us) */
+			uint32_t frame_period_us = 1000000 / ctx->sensor.fps;
+			uint32_t fps_cap_us;
 			if (ctx->cfg.exposure_cap_us > 0)
 				fps_cap_us = ctx->cfg.exposure_cap_us;
+			else
+				fps_cap_us = frame_period_us;
 			typedef int (*ae_get_fn)(uint32_t, uint32_t,
 				MarukoIspExposureLimit *);
 			typedef int (*ae_set_fn)(uint32_t, uint32_t,
@@ -1008,12 +1034,33 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 				MarukoIspExposureLimit lim = {0};
 				if (fn_get(0, 0, &lim) == 0) {
 					printf("> [maruko] Exposure cap: "
-						"%uus -> %uus (for %u fps)\n",
+						"%uus -> %uus (for %u fps, "
+						"frame period %uus)\n",
 						lim.maxShutterUs, fps_cap_us,
-						ctx->sensor.fps);
+						ctx->sensor.fps,
+						frame_period_us);
 					lim.maxShutterUs = fps_cap_us;
 					fn_set(0, 0, &lim);
 				}
+			}
+
+			/* Force sensor timing reconfiguration after AE
+			 * init.  The vendor AE (3A_Proc_0 thread) may
+			 * have extended VTS based on ISP bin defaults;
+			 * MI_SNR_SetFps forces the sensor driver to
+			 * reset VTS to the mode's native value.
+			 * Only kick when auto-capping (exposure=0) —
+			 * when user sets explicit exposure, they want
+			 * to trade FPS for brightness, so let the AE
+			 * extend VTS naturally.
+			 * (Ported from Star6E cold-boot fps_kick.) */
+			if (ctx->cfg.exposure_cap_us == 0) {
+				MI_SNR_SetFps(ctx->sensor.pad_id,
+					ctx->sensor.fps);
+				printf("> [maruko] MI_SNR_SetFps kick: "
+					"pad %d fps %u\n",
+					(int)ctx->sensor.pad_id,
+					ctx->sensor.fps);
 			}
 		}
 
