@@ -987,6 +987,15 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	}
 	ctx->bound_vpe_venc = 1;
 
+	/* Set output port buffer depths to allow pipelining between
+	 * stages.  Without this, the pipeline has zero frame buffering
+	 * and any processing jitter causes frame drops, capping FPS
+	 * well below the sensor's output rate.
+	 * Star6E uses (1, 3) on the VENC port; SDK samples use (2, 4). */
+	(void)MI_SYS_SetChnOutputPortDepth(&ctx->isp_port, 1, 3);
+	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
+	(void)MI_SYS_SetChnOutputPortDepth(&ctx->venc_port, 1, 3);
+
 	/* ISP bin load and CUS3A enable must only run once per process
 	 * lifetime.  On reinit, kernel ISP driver retains CUS3A state;
 	 * re-running the 100->110->111 sequence causes a mutex deadlock. */
@@ -1125,6 +1134,9 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 	unsigned int frame_counter = 0;
 	unsigned int idle_counter = 0;
+	/* Cached packet buffer — avoids malloc/free per frame at 90fps. */
+	i6c_venc_pack *cached_packs = NULL;
+	uint32_t cached_packs_cap = 0;
 	StreamMetricsState metrics;
 	if (ctx->cfg.verbose) {
 		struct timespec now;
@@ -1144,7 +1156,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			ctx->venc_channel, &stat);
 		if (ret != 0) {
 			if (ret == -EAGAIN || ret == EAGAIN) {
-				idle_wait(&sidecar, 2);
+				usleep(100);
 				continue;
 			}
 			fprintf(stderr,
@@ -1155,35 +1167,42 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 		if (stat.curPacks == 0) {
 			idle_counter++;
-			if ((idle_counter % 500) == 0)
+			if ((idle_counter % 2000) == 0)  /* ~1s at 500us sleep */
 				printf("> [maruko] waiting for encoder data...\n");
-			if (idle_counter > 10000) {
+			if (idle_counter > 40000) {  /* ~20s timeout */
 				fprintf(stderr,
 					"ERROR: [maruko] no encoder data"
 					" received; aborting stream loop\n");
 				return -1;
 			}
-			idle_wait(&sidecar, 1);
+			/* Short poll sleep: 500us is <5% of 11ms frame period
+			 * at 90fps, reducing idle syscalls by ~5x vs 100us
+			 * while keeping frame latency low. */
+			usleep(500);
 			continue;
 		}
 		idle_counter = 0;
 
 		i6c_venc_strm stream = {0};
 		stream.count = stat.curPacks;
-		stream.packet = calloc(stat.curPacks, sizeof(i6c_venc_pack));
-		if (!stream.packet) {
-			fprintf(stderr,
-				"ERROR: [maruko] packet alloc failed\n");
-			return -1;
+		if (stat.curPacks > cached_packs_cap) {
+			free(cached_packs);
+			cached_packs = malloc(stat.curPacks * sizeof(i6c_venc_pack));
+			if (!cached_packs) {
+				cached_packs_cap = 0;
+				fprintf(stderr,
+					"ERROR: [maruko] packet alloc failed\n");
+				return -1;
+			}
+			cached_packs_cap = stat.curPacks;
 		}
+		stream.packet = cached_packs;
 
 		ret = maruko_mi_venc_get_stream(ctx->venc_device,
-			ctx->venc_channel, &stream, 40);
+			ctx->venc_channel, &stream, 10);
 		if (ret != 0) {
-			free(stream.packet);
-			stream.packet = NULL;
 			if (ret == -EAGAIN || ret == EAGAIN) {
-				idle_wait(&sidecar, 2);
+				usleep(100);
 				continue;
 			}
 			fprintf(stderr,
@@ -1193,6 +1212,19 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		}
 
 		++frame_counter;
+
+		/* Cold-boot FPS kick: the ISP bin's AE overrides sensor
+		 * timing on first init, locking FPS below target (e.g.
+		 * 74fps instead of 89fps).  Re-kick MI_SNR_SetFps after
+		 * ~1 second of frames to force correct sensor timing.
+		 * Same fix as Star6E CUS3A cold-boot FPS lock. */
+		if (frame_counter == (unsigned int)ctx->sensor.fps) {
+			MI_SNR_SetFps(ctx->sensor.pad_id, ctx->sensor.fps);
+			printf("> [maruko] delayed FPS kick: pad %d fps %u "
+				"(cold-boot fix at frame %u)\n",
+				ctx->sensor.pad_id, ctx->sensor.fps,
+				frame_counter);
+		}
 
 		rtp_sidecar_poll(&sidecar);
 
@@ -1209,10 +1241,10 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 				&ctx->cfg);
 		}
 
-			rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
-				seq_before,
-				(uint16_t)(rtp_state.seq - seq_before),
-				capture_us, ready_us, NULL);
+		rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
+			seq_before,
+			(uint16_t)(rtp_state.seq - seq_before),
+			capture_us, ready_us, NULL);
 
 		if (ctx->cfg.verbose) {
 			StreamMetricsSample sample;
@@ -1234,10 +1266,9 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 		(void)maruko_mi_venc_release_stream(ctx->venc_device,
 			ctx->venc_channel, &stream);
-		free(stream.packet);
-		stream.packet = NULL;
 	}
 
+	free(cached_packs);
 	rtp_sidecar_sender_close(&sidecar);
 	return 0;
 }
