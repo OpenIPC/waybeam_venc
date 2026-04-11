@@ -295,8 +295,8 @@ static int test_select_best_mode(void)
 	CHECK("select_pad", (int)result.pad_id == 0);
 	CHECK("select_mode_1080p", result.mode.crop.width == 1920);
 	CHECK("select_mode_index", result.mode_index == 1);
-	/* Sensor always runs at mode maxFps; downstream bind handles decimation */
-	CHECK("select_fps", result.fps == 60);
+	/* Sensor runs at requested FPS (clamped to mode range) */
+	CHECK("select_fps", result.fps == 30);
 	return failures;
 }
 
@@ -410,8 +410,8 @@ static int test_fps_retry_calls_hook(void)
 	int ret = sensor_select(&cfg, &strategy, &result);
 	CHECK("retry_ok", ret == 0);
 	CHECK("retry_hook_called", g_hook_fps_retry_count == 1);
-	/* Sensor always runs at mode maxFps; downstream bind handles decimation */
-	CHECK("retry_fps_set", result.fps == 60);
+	/* Sensor runs at requested FPS (clamped to mode range) */
+	CHECK("retry_fps_set", result.fps == 30);
 	return failures;
 }
 
