@@ -52,15 +52,13 @@ static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
 
 volatile sig_atomic_t g_maruko_running = 1;
 static volatile sig_atomic_t g_maruko_reinit = 0;
-static int g_maruko_isp_initialized = 0;
-static i6c_isp_impl g_maruko_isp;
-static i6c_scl_impl g_maruko_scl;
-static int g_maruko_isp_loaded = 0;
-static int g_maruko_scl_loaded = 0;
-static int g_maruko_isp_dev_created = 0;
-static int g_maruko_scl_dev_created = 0;
-static int g_maruko_isp_chn_created = 0;
-static int g_maruko_scl_chn_created = 0;
+static int g_mi_isp_initialized = 0;
+static int g_mi_isp_loaded = 0;
+static int g_mi_scl_loaded = 0;
+static int g_mi_isp_dev_created = 0;
+static int g_mi_scl_dev_created = 0;
+static int g_mi_isp_chn_created = 0;
+static int g_mi_scl_chn_created = 0;
 
 static int maruko_config_dev_ring_pool(i6c_sys_mod module, MI_U32 device,
 	MI_U16 max_width, MI_U16 max_height, MI_U16 ring_line)
@@ -225,149 +223,8 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 	return ret;
 }
 
-static void *maruko_load_symbol(void *handle, const char *lib_name,
-	const char *sym_name)
-{
-	void *sym = dlsym(handle, sym_name);
-	if (!sym) {
-		const char *err = dlerror();
-		fprintf(stderr, "ERROR: [maruko] dlsym(%s:%s) failed: %s\n",
-			lib_name, sym_name, err ? err : "unknown");
-	}
-	return sym;
-}
-
-static void i6c_isp_unload(i6c_isp_impl *isp)
-{
-	if (!isp)
-		return;
-	if (isp->handle)
-		dlclose(isp->handle);
-	memset(isp, 0, sizeof(*isp));
-}
-
-static int i6c_isp_load(i6c_isp_impl *isp)
-{
-	if (!isp)
-		return -1;
-	memset(isp, 0, sizeof(*isp));
-	isp->handle = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
-	if (!isp->handle) {
-		const char *err = dlerror();
-		fprintf(stderr,
-			"ERROR: [maruko] dlopen(libmi_isp.so) failed: %s\n",
-			err ? err : "unknown");
-		return -1;
-	}
-
-	isp->fnCreateDevice = (int (*)(int, unsigned int *))
-		maruko_load_symbol(isp->handle, "libmi_isp.so",
-			"MI_ISP_CreateDevice");
-	isp->fnDestroyDevice = (int (*)(int))
-		maruko_load_symbol(isp->handle, "libmi_isp.so",
-			"MI_ISP_DestoryDevice");
-	isp->fnCreateChannel = (int (*)(int, int, i6c_isp_chn *))
-		maruko_load_symbol(isp->handle, "libmi_isp.so",
-			"MI_ISP_CreateChannel");
-	isp->fnDestroyChannel = (int (*)(int, int))
-		maruko_load_symbol(isp->handle, "libmi_isp.so",
-			"MI_ISP_DestroyChannel");
-	isp->fnSetChannelParam = (int (*)(int, int, i6c_isp_para *))
-		maruko_load_symbol(isp->handle, "libmi_isp.so",
-			"MI_ISP_SetChnParam");
-	isp->fnStartChannel = (int (*)(int, int))
-		maruko_load_symbol(isp->handle, "libmi_isp.so",
-			"MI_ISP_StartChannel");
-	isp->fnStopChannel = (int (*)(int, int))
-		maruko_load_symbol(isp->handle, "libmi_isp.so",
-			"MI_ISP_StopChannel");
-	isp->fnDisablePort = (int (*)(int, int, int))
-		maruko_load_symbol(isp->handle, "libmi_isp.so",
-			"MI_ISP_DisableOutputPort");
-	isp->fnEnablePort = (int (*)(int, int, int))
-		maruko_load_symbol(isp->handle, "libmi_isp.so",
-			"MI_ISP_EnableOutputPort");
-	isp->fnSetPortConfig = (int (*)(int, int, int, i6c_isp_port *))
-		maruko_load_symbol(isp->handle, "libmi_isp.so",
-			"MI_ISP_SetOutputPortParam");
-
-	if (!isp->fnCreateDevice || !isp->fnDestroyDevice ||
-	    !isp->fnCreateChannel || !isp->fnDestroyChannel ||
-	    !isp->fnSetChannelParam || !isp->fnStartChannel ||
-	    !isp->fnStopChannel || !isp->fnDisablePort ||
-	    !isp->fnEnablePort || !isp->fnSetPortConfig) {
-		i6c_isp_unload(isp);
-		return -1;
-	}
-
-	return 0;
-}
-
-static void i6c_scl_unload(i6c_scl_impl *scl)
-{
-	if (!scl)
-		return;
-	if (scl->handle)
-		dlclose(scl->handle);
-	memset(scl, 0, sizeof(*scl));
-}
-
-static int i6c_scl_load(i6c_scl_impl *scl)
-{
-	if (!scl)
-		return -1;
-	memset(scl, 0, sizeof(*scl));
-	scl->handle = dlopen("libmi_scl.so", RTLD_LAZY | RTLD_GLOBAL);
-	if (!scl->handle) {
-		const char *err = dlerror();
-		fprintf(stderr,
-			"ERROR: [maruko] dlopen(libmi_scl.so) failed: %s\n",
-			err ? err : "unknown");
-		return -1;
-	}
-
-	scl->fnCreateDevice = (int (*)(int, unsigned int *))
-		maruko_load_symbol(scl->handle, "libmi_scl.so",
-			"MI_SCL_CreateDevice");
-	scl->fnDestroyDevice = (int (*)(int))
-		maruko_load_symbol(scl->handle, "libmi_scl.so",
-			"MI_SCL_DestroyDevice");
-	scl->fnAdjustChannelRotation = (int (*)(int, int, int *))
-		maruko_load_symbol(scl->handle, "libmi_scl.so",
-			"MI_SCL_SetChnParam");
-	scl->fnCreateChannel = (int (*)(int, int, unsigned int *))
-		maruko_load_symbol(scl->handle, "libmi_scl.so",
-			"MI_SCL_CreateChannel");
-	scl->fnDestroyChannel = (int (*)(int, int))
-		maruko_load_symbol(scl->handle, "libmi_scl.so",
-			"MI_SCL_DestroyChannel");
-	scl->fnStartChannel = (int (*)(int, int))
-		maruko_load_symbol(scl->handle, "libmi_scl.so",
-			"MI_SCL_StartChannel");
-	scl->fnStopChannel = (int (*)(int, int))
-		maruko_load_symbol(scl->handle, "libmi_scl.so",
-			"MI_SCL_StopChannel");
-	scl->fnDisablePort = (int (*)(int, int, int))
-		maruko_load_symbol(scl->handle, "libmi_scl.so",
-			"MI_SCL_DisableOutputPort");
-	scl->fnEnablePort = (int (*)(int, int, int))
-		maruko_load_symbol(scl->handle, "libmi_scl.so",
-			"MI_SCL_EnableOutputPort");
-	scl->fnSetPortConfig = (int (*)(int, int, int, i6c_scl_port *))
-		maruko_load_symbol(scl->handle, "libmi_scl.so",
-			"MI_SCL_SetOutputPortParam");
-
-	if (!scl->fnCreateDevice || !scl->fnDestroyDevice ||
-	    !scl->fnAdjustChannelRotation || !scl->fnCreateChannel ||
-	    !scl->fnDestroyChannel || !scl->fnStartChannel ||
-	    !scl->fnStopChannel || !scl->fnDisablePort ||
-	    !scl->fnEnablePort || !scl->fnSetPortConfig) {
-		i6c_scl_unload(scl);
-		return -1;
-	}
-
-	return 0;
-}
+/* maruko_load_symbol, i6c_isp_load/unload, i6c_scl_load/unload moved to
+ * maruko_mi.c — ISP/SCL are loaded centrally via maruko_mi_init(). */
 
 static void maruko_handle_signal(int sig)
 {
@@ -514,47 +371,35 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 	MI_S32 ret = 0;
 	int dev = 0, chn = 0, started = 0, port = 0;
 
-	if (!g_maruko_isp_loaded) {
-		/* Pre-load CUS3A libs with RTLD_GLOBAL BEFORE loading
-		 * libmi_isp.so. This ensures the CUS3A 3A_Proc thread
-		 * starts properly when MI_ISP_CUS3A_Enable is called. */
-		dlopen("libispalgo.so", RTLD_LAZY | RTLD_GLOBAL);
-		dlopen("libcus3a.so", RTLD_LAZY | RTLD_GLOBAL);
+	/* ISP/SCL libs loaded centrally by maruko_mi_init() */
+	g_mi_isp_loaded = 1;
 
-		if (i6c_isp_load(&g_maruko_isp) != 0) {
-			fprintf(stderr,
-				"ERROR: [maruko] failed to load i6c ISP symbols\n");
-			return -1;
-		}
-		g_maruko_isp_loaded = 1;
-	}
-
-	if (!g_maruko_isp_dev_created) {
+	if (!g_mi_isp_dev_created) {
 		unsigned int sensor_mask = (1u << (unsigned int)sensor->pad_id);
-		ret = g_maruko_isp.fnCreateDevice(0, &sensor_mask);
+		ret = g_mi_isp.fnCreateDevice(0, &sensor_mask);
 		if (ret != 0) {
 			fprintf(stderr,
 				"ERROR: [maruko] MI_ISP_CreateDevice failed %d\n", ret);
 			goto fail;
 		}
-		g_maruko_isp_dev_created = 1;
+		g_mi_isp_dev_created = 1;
 	}
 	dev = 1;
 
-	if (!g_maruko_isp_chn_created) {
+	if (!g_mi_isp_chn_created) {
 		i6c_isp_chn isp_chn = {0};
 		/* SigmaStar ISP sensorId is 1-based (pad 0 -> sensorId 1),
 		 * matching majestic behavior. pad_id=0 with sensorId=0
 		 * causes ISP frame processing to stall at larger resolutions. */
 		isp_chn.sensorId = (unsigned int)(sensor->pad_id + 1);
-		ret = g_maruko_isp.fnCreateChannel(0, 0, &isp_chn);
+		ret = g_mi_isp.fnCreateChannel(0, 0, &isp_chn);
 		if (ret != 0) {
 			fprintf(stderr,
 				"ERROR: [maruko] MI_ISP_CreateChannel failed %d\n",
 				ret);
 			goto fail;
 		}
-		g_maruko_isp_chn_created = 1;
+		g_mi_isp_chn_created = 1;
 	}
 	chn = 1;
 
@@ -571,7 +416,7 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 		printf("> [maruko] ISP params: 3DNR=%d hdr=%d yuv2Bayer=%d\n",
 			isp_para.level3DNR, isp_para.hdr,
 			isp_para.yuv2BayerOn);
-		ret = g_maruko_isp.fnSetChannelParam(0, 0, &isp_para);
+		ret = g_mi_isp.fnSetChannelParam(0, 0, &isp_para);
 		if (ret != 0) {
 			fprintf(stderr,
 				"ERROR: [maruko] MI_ISP_SetChnParam failed %d\n",
@@ -580,7 +425,7 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 		}
 	}
 
-	ret = g_maruko_isp.fnStartChannel(0, 0);
+	ret = g_mi_isp.fnStartChannel(0, 0);
 	if (ret != 0) {
 		fprintf(stderr,
 			"ERROR: [maruko] MI_ISP_StartChannel failed %d\n",
@@ -600,7 +445,7 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 		isp_port.crop.x, isp_port.crop.y,
 		isp_port.crop.width, isp_port.crop.height,
 		isp_port.pixFmt, isp_port.compress);
-	ret = g_maruko_isp.fnSetPortConfig(0, 0, 0, &isp_port);
+	ret = g_mi_isp.fnSetPortConfig(0, 0, 0, &isp_port);
 	if (ret != 0) {
 		fprintf(stderr,
 			"ERROR: [maruko] MI_ISP_SetOutputPortParam failed %d\n",
@@ -608,7 +453,7 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 		goto fail;
 	}
 
-	ret = g_maruko_isp.fnEnablePort(0, 0, 0);
+	ret = g_mi_isp.fnEnablePort(0, 0, 0);
 	if (ret != 0) {
 		fprintf(stderr,
 			"ERROR: [maruko] MI_ISP_EnableOutputPort failed %d\n",
@@ -621,13 +466,13 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 
 fail:
 	if (port)
-		(void)g_maruko_isp.fnDisablePort(0, 0, 0);
+		(void)g_mi_isp.fnDisablePort(0, 0, 0);
 	if (started)
-		(void)g_maruko_isp.fnStopChannel(0, 0);
+		(void)g_mi_isp.fnStopChannel(0, 0);
 	if (chn)
-		(void)g_maruko_isp.fnDestroyChannel(0, 0);
+		(void)g_mi_isp.fnDestroyChannel(0, 0);
 	if (dev)
-		(void)g_maruko_isp.fnDestroyDevice(0);
+		(void)g_mi_isp.fnDestroyDevice(0);
 	return ret ? ret : -1;
 }
 
@@ -637,51 +482,45 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	MI_S32 ret = 0;
 	int dev = 0, chn = 0, started = 0, port = 0;
 
-	if (!g_maruko_scl_loaded) {
-		if (i6c_scl_load(&g_maruko_scl) != 0) {
-			fprintf(stderr,
-				"ERROR: [maruko] failed to load i6c SCL symbols\n");
-			return -1;
-		}
-		g_maruko_scl_loaded = 1;
-	}
+	/* SCL lib loaded centrally by maruko_mi_init() */
+	g_mi_scl_loaded = 1;
 
-	if (!g_maruko_scl_dev_created) {
+	if (!g_mi_scl_dev_created) {
 		/* Match majestic: enable all 4 HW scaler ports (bits 0-3). */
 		unsigned int scl_bind = 0xF;
-		ret = g_maruko_scl.fnCreateDevice(0, &scl_bind);
+		ret = g_mi_scl.fnCreateDevice(0, &scl_bind);
 		if (ret != 0) {
 			fprintf(stderr,
 				"ERROR: [maruko] MI_SCL_CreateDevice failed %d\n",
 				ret);
 			goto fail;
 		}
-		g_maruko_scl_dev_created = 1;
+		g_mi_scl_dev_created = 1;
 	}
 	dev = 1;
 
-	if (!g_maruko_scl_chn_created) {
+	if (!g_mi_scl_chn_created) {
 		unsigned int scl_reserved = 0;
-		ret = g_maruko_scl.fnCreateChannel(0, 0, &scl_reserved);
+		ret = g_mi_scl.fnCreateChannel(0, 0, &scl_reserved);
 		if (ret != 0) {
 			fprintf(stderr,
 				"ERROR: [maruko] MI_SCL_CreateChannel failed %d\n",
 				ret);
 			goto fail;
 		}
-		g_maruko_scl_chn_created = 1;
+		g_mi_scl_chn_created = 1;
 	}
 	chn = 1;
 
 	int rotation = 0;
-	ret = g_maruko_scl.fnAdjustChannelRotation(0, 0, &rotation);
+	ret = g_mi_scl.fnAdjustChannelRotation(0, 0, &rotation);
 	if (ret != 0) {
 		fprintf(stderr,
 			"ERROR: [maruko] MI_SCL_SetChnParam failed %d\n", ret);
 		goto fail;
 	}
 
-	ret = g_maruko_scl.fnStartChannel(0, 0);
+	ret = g_mi_scl.fnStartChannel(0, 0);
 	if (ret != 0) {
 		fprintf(stderr,
 			"ERROR: [maruko] MI_SCL_StartChannel failed %d\n",
@@ -705,7 +544,7 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 		scl_port.crop.width, scl_port.crop.height,
 		scl_port.output.width, scl_port.output.height,
 		scl_port.pixFmt, scl_port.compress);
-	ret = g_maruko_scl.fnSetPortConfig(0, 0, 0, &scl_port);
+	ret = g_mi_scl.fnSetPortConfig(0, 0, 0, &scl_port);
 	if (ret != 0) {
 		fprintf(stderr,
 			"ERROR: [maruko] MI_SCL_SetOutputPortParam failed %d\n",
@@ -713,7 +552,7 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 		goto fail;
 	}
 
-	ret = g_maruko_scl.fnEnablePort(0, 0, 0);
+	ret = g_mi_scl.fnEnablePort(0, 0, 0);
 	if (ret != 0) {
 		fprintf(stderr,
 			"ERROR: [maruko] MI_SCL_EnableOutputPort failed %d\n",
@@ -726,13 +565,13 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 
 fail:
 	if (port)
-		(void)g_maruko_scl.fnDisablePort(0, 0, 0);
+		(void)g_mi_scl.fnDisablePort(0, 0, 0);
 	if (started)
-		(void)g_maruko_scl.fnStopChannel(0, 0);
+		(void)g_mi_scl.fnStopChannel(0, 0);
 	if (chn)
-		(void)g_maruko_scl.fnDestroyChannel(0, 0);
+		(void)g_mi_scl.fnDestroyChannel(0, 0);
 	if (dev)
-		(void)g_maruko_scl.fnDestroyDevice(0);
+		(void)g_mi_scl.fnDestroyDevice(0);
 	return ret ? ret : -1;
 }
 
@@ -752,12 +591,11 @@ static int maruko_start_vpe(const SensorSelectResult *sensor,
 
 fail_scl:
 	if (isp_started) {
-		(void)g_maruko_isp.fnDisablePort(0, 0, 0);
-		(void)g_maruko_isp.fnStopChannel(0, 0);
-		(void)g_maruko_isp.fnDestroyChannel(0, 0);
-		(void)g_maruko_isp.fnDestroyDevice(0);
-		i6c_isp_unload(&g_maruko_isp);
-		g_maruko_isp_loaded = 0;
+		(void)g_mi_isp.fnDisablePort(0, 0, 0);
+		(void)g_mi_isp.fnStopChannel(0, 0);
+		(void)g_mi_isp.fnDestroyChannel(0, 0);
+		(void)g_mi_isp.fnDestroyDevice(0);
+		g_mi_isp_loaded = 0;
 	}
 	return -1;
 }
@@ -768,15 +606,15 @@ fail_scl:
  * with "Mutex not initialized" when CUS3A state persists in kernel. */
 static void maruko_stop_vpe_channels(void)
 {
-	if (g_maruko_scl_loaded) {
-		(void)g_maruko_scl.fnDisablePort(0, 0, 0);
-		(void)g_maruko_scl.fnStopChannel(0, 0);
-		(void)g_maruko_scl.fnDestroyChannel(0, 0);
-		g_maruko_scl_chn_created = 0;
+	if (g_mi_scl_loaded) {
+		(void)g_mi_scl.fnDisablePort(0, 0, 0);
+		(void)g_mi_scl.fnStopChannel(0, 0);
+		(void)g_mi_scl.fnDestroyChannel(0, 0);
+		g_mi_scl_chn_created = 0;
 	}
-	if (g_maruko_isp_loaded) {
-		(void)g_maruko_isp.fnDisablePort(0, 0, 0);
-		(void)g_maruko_isp.fnStopChannel(0, 0);
+	if (g_mi_isp_loaded) {
+		(void)g_mi_isp.fnDisablePort(0, 0, 0);
+		(void)g_mi_isp.fnStopChannel(0, 0);
 		/* Skip DestroyChannel — kernel ISP retains CUS3A mutex
 		 * state that crashes on destroy+recreate cycle. */
 	}
@@ -787,23 +625,21 @@ static void maruko_stop_vpe_channels(void)
 static void maruko_stop_vpe(void)
 {
 	maruko_stop_vpe_channels();
-	g_maruko_isp_chn_created = 0;
-	g_maruko_scl_chn_created = 0;
-	if (g_maruko_scl_dev_created) {
-		(void)g_maruko_scl.fnDestroyDevice(0);
-		g_maruko_scl_dev_created = 0;
+	g_mi_isp_chn_created = 0;
+	g_mi_scl_chn_created = 0;
+	if (g_mi_scl_dev_created) {
+		(void)g_mi_scl.fnDestroyDevice(0);
+		g_mi_scl_dev_created = 0;
 	}
-	if (g_maruko_scl_loaded) {
-		i6c_scl_unload(&g_maruko_scl);
-		g_maruko_scl_loaded = 0;
+	if (g_mi_scl_loaded) {
+		g_mi_scl_loaded = 0;
 	}
-	if (g_maruko_isp_dev_created) {
-		(void)g_maruko_isp.fnDestroyDevice(0);
-		g_maruko_isp_dev_created = 0;
+	if (g_mi_isp_dev_created) {
+		(void)g_mi_isp.fnDestroyDevice(0);
+		g_mi_isp_dev_created = 0;
 	}
-	if (g_maruko_isp_loaded) {
-		i6c_isp_unload(&g_maruko_isp);
-		g_maruko_isp_loaded = 0;
+	if (g_mi_isp_loaded) {
+		g_mi_isp_loaded = 0;
 	}
 }
 
@@ -981,10 +817,16 @@ static void maruko_set_hw_clocks(int oc_level, int verbose)
 
 int maruko_pipeline_init(MarukoBackendContext *ctx)
 {
+	if (maruko_mi_init() != 0) {
+		fprintf(stderr, "ERROR: [maruko] MI library load failed\n");
+		return -1;
+	}
+
 	MI_S32 ret = MI_SYS_Init();
 	if (ret != 0) {
 		fprintf(stderr,
 			"ERROR: [maruko] MI_SYS_Init failed %d\n", ret);
+		maruko_mi_deinit();
 		return ret;
 	}
 	ctx->system_initialized = 1;
@@ -1142,7 +984,7 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	/* ISP bin load and CUS3A enable must only run once per process
 	 * lifetime.  On reinit, kernel ISP driver retains CUS3A state;
 	 * re-running the 100->110->111 sequence causes a mutex deadlock. */
-	if (!g_maruko_isp_initialized) {
+	if (!g_mi_isp_initialized) {
 		if (ctx->cfg.isp_bin_path && *ctx->cfg.isp_bin_path) {
 			ret = maruko_load_isp_bin(ctx->cfg.isp_bin_path);
 			if (ret != 0)
@@ -1189,7 +1031,7 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			}
 		}
 
-		g_maruko_isp_initialized = 1;
+		g_mi_isp_initialized = 1;
 	}
 
 	if (ctx->cfg.output_uri.type == VENC_OUTPUT_URI_SHM) {
@@ -1431,4 +1273,5 @@ void maruko_pipeline_teardown(MarukoBackendContext *ctx)
 		ctx->system_initialized = 0;
 		printf("> [maruko] stage teardown: MI_SYS_Exit\n");
 	}
+	maruko_mi_deinit();
 }

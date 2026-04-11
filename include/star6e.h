@@ -152,27 +152,19 @@ typedef int MI_VENC_DEV;
 
 /* MI_SYS ------------------------------------------------------------------ */
 #if defined(PLATFORM_MARUKO)
-MI_S32 MI_SYS_Init_MARUKO(MI_U16 soc_id) __asm__("MI_SYS_Init");
-MI_S32 MI_SYS_Exit_MARUKO(MI_U16 soc_id) __asm__("MI_SYS_Exit");
-MI_S32 MI_SYS_BindChnPort_MARUKO(MI_U16 soc_id, MI_SYS_ChnPort_t* src, MI_SYS_ChnPort_t* dst,
-  MI_U32 src_fps, MI_U32 dst_fps, MI_U32 link_type, MI_U32 link_param) __asm__("MI_SYS_BindChnPort2");
-MI_S32 MI_SYS_UnBindChnPort_MARUKO(MI_U16 soc_id, MI_SYS_ChnPort_t* src, MI_SYS_ChnPort_t* dst)
-  __asm__("MI_SYS_UnBindChnPort");
-MI_S32 MI_SYS_SetChnOutputPortDepth_MARUKO(MI_U16 soc_id, MI_SYS_ChnPort_t* chn_port,
-  MI_U32 user_depth, MI_U32 buf_depth) __asm__("MI_SYS_SetChnOutputPortDepth");
-
-#define MI_SYS_Init() MI_SYS_Init_MARUKO(0)
-#define MI_SYS_Exit() MI_SYS_Exit_MARUKO(0)
+#include "maruko_mi.h"
+#define MI_SYS_Init()  g_mi_sys.fnInit(0)
+#define MI_SYS_Exit()  g_mi_sys.fnExit(0)
 #define MI_SYS_BindChnPort(src, dst, src_fps, dst_fps) \
-  MI_SYS_BindChnPort_MARUKO(0, (MI_SYS_ChnPort_t*)(src), (MI_SYS_ChnPort_t*)(dst), \
+  g_mi_sys.fnBindChnPort2(0, (void *)(src), (void *)(dst), \
     (src_fps), (dst_fps), 0, 0)
 #define MI_SYS_UnBindChnPort(src, dst) \
-  MI_SYS_UnBindChnPort_MARUKO(0, (MI_SYS_ChnPort_t*)(src), (MI_SYS_ChnPort_t*)(dst))
+  g_mi_sys.fnUnBindChnPort(0, (void *)(src), (void *)(dst))
 #define MI_SYS_BindChnPort2(src, dst, src_fps, dst_fps, link_type, link_param) \
-  MI_SYS_BindChnPort_MARUKO(0, (MI_SYS_ChnPort_t*)(src), (MI_SYS_ChnPort_t*)(dst), \
+  g_mi_sys.fnBindChnPort2(0, (void *)(src), (void *)(dst), \
     (src_fps), (dst_fps), (link_type), (link_param))
 #define MI_SYS_SetChnOutputPortDepth(chn_port, user_depth, buf_depth) \
-  MI_SYS_SetChnOutputPortDepth_MARUKO(0, (MI_SYS_ChnPort_t*)(chn_port), (user_depth), (buf_depth))
+  g_mi_sys.fnSetChnOutputPortDepth(0, (void *)(chn_port), (user_depth), (buf_depth))
 #else
 MI_S32 MI_SYS_Init(void);
 MI_S32 MI_SYS_Exit(void);
@@ -207,6 +199,25 @@ typedef struct {
   MI_U8* u8Data;
 } MI_SNR_InitParam_t;
 
+#if defined(PLATFORM_MARUKO)
+#define MI_SNR_InitDev(init)           g_mi_snr.fnInitDev(init)
+#define MI_SNR_DeInitDev()             g_mi_snr.fnDeInitDev()
+#define MI_SNR_SetPlaneMode(pad, mode) g_mi_snr.fnSetPlaneMode((pad), (mode))
+#define MI_SNR_GetPlaneMode(pad, mode) g_mi_snr.fnGetPlaneMode((pad), (int *)(mode))
+#define MI_SNR_SetRes(pad, idx)        g_mi_snr.fnSetRes((pad), (idx))
+#define MI_SNR_GetCurRes(pad, idx, res) g_mi_snr.fnGetCurRes((pad), (idx), (res))
+#define MI_SNR_SetFps(pad, fps)        g_mi_snr.fnSetFps((pad), (fps))
+#define MI_SNR_GetFps(pad, fps)        g_mi_snr.fnGetFps((pad), (fps))
+#define MI_SNR_SetOrien(pad, m, f)     g_mi_snr.fnSetOrien((pad), (m), (f))
+#define MI_SNR_CustFunction(pad, cmd, sz, data, dir) \
+  g_mi_snr.fnCustFunction((pad), (cmd), (sz), (data), (dir))
+#define MI_SNR_QueryResCount(pad, cnt) g_mi_snr.fnQueryResCount((pad), (cnt))
+#define MI_SNR_GetRes(pad, idx, res)   g_mi_snr.fnGetRes((pad), (idx), (res))
+#define MI_SNR_GetPadInfo(pad, info)   g_mi_snr.fnGetPadInfo((pad), (info))
+#define MI_SNR_GetPlaneInfo(pad, pl, info) g_mi_snr.fnGetPlaneInfo((pad), (pl), (info))
+#define MI_SNR_Enable(pad)             g_mi_snr.fnEnable(pad)
+#define MI_SNR_Disable(pad)            g_mi_snr.fnDisable(pad)
+#else
 MI_S32 MI_SNR_InitDev(MI_SNR_InitParam_t* init);
 MI_S32 MI_SNR_DeInitDev(void);
 MI_S32 MI_SNR_SetPlaneMode(MI_SNR_PAD_ID_e pad_id, MI_SNR_PlaneMode_e mode);
@@ -224,26 +235,29 @@ MI_S32 MI_SNR_GetPadInfo(MI_SNR_PAD_ID_e pad_id, MI_SNR_PadInfo_t* info);
 MI_S32 MI_SNR_GetPlaneInfo(MI_SNR_PAD_ID_e pad_id, MI_U32 plane_idx, MI_SNR_PlaneInfo_t* info);
 MI_S32 MI_SNR_Enable(MI_SNR_PAD_ID_e pad_id);
 MI_S32 MI_SNR_Disable(MI_SNR_PAD_ID_e pad_id);
+#endif
 
 /* MI_VIF ------------------------------------------------------------------ */
+#if defined(PLATFORM_MARUKO)
+#define MI_VIF_SetDevAttr(dev, attr)    g_mi_vif.fnSetDevAttr((dev), (attr))
+#define MI_VIF_EnableDev(dev)           g_mi_vif.fnEnableDev(dev)
+#define MI_VIF_DisableDev(dev)          g_mi_vif.fnDisableDev(dev)
+#define MI_VIF_CreateDevGroup(grp, attr) g_mi_vif.fnCreateDevGroup((grp), (attr))
+#define MI_VIF_DestroyDevGroup(grp)     g_mi_vif.fnDestroyDevGroup(grp)
+#define MI_VIF_SetOutputPortAttr(dev, port, attr) \
+  g_mi_vif.fnSetOutputPortAttr((dev), (port), (attr))
+#define MI_VIF_EnableOutputPort(dev, port)  g_mi_vif.fnEnableOutputPort((dev), (port))
+#define MI_VIF_DisableOutputPort(dev, port) g_mi_vif.fnDisableOutputPort((dev), (port))
+#define MI_VIF_SetChnPortAttr(chn, port, attr) \
+  g_mi_vif.fnSetOutputPortAttr((MI_VIF_DEV)(chn), (MI_VIF_PORT)(port), (attr))
+#define MI_VIF_EnableChnPort(chn, port) \
+  g_mi_vif.fnEnableOutputPort((MI_VIF_DEV)(chn), (MI_VIF_PORT)(port))
+#define MI_VIF_DisableChnPort(chn, port) \
+  g_mi_vif.fnDisableOutputPort((MI_VIF_DEV)(chn), (MI_VIF_PORT)(port))
+#else
 MI_S32 MI_VIF_SetDevAttr(MI_VIF_DEV dev, MI_VIF_DevAttr_t* attr);
 MI_S32 MI_VIF_EnableDev(MI_VIF_DEV dev);
 MI_S32 MI_VIF_DisableDev(MI_VIF_DEV dev);
-
-#if defined(PLATFORM_MARUKO)
-MI_S32 MI_VIF_CreateDevGroup(MI_VIF_GROUP group, MI_VIF_GroupAttr_t* attr);
-MI_S32 MI_VIF_DestroyDevGroup(MI_VIF_GROUP group);
-MI_S32 MI_VIF_SetOutputPortAttr(MI_VIF_DEV dev, MI_VIF_PORT port, MI_VIF_OutputPortAttr_t* attr);
-MI_S32 MI_VIF_EnableOutputPort(MI_VIF_DEV dev, MI_VIF_PORT port);
-MI_S32 MI_VIF_DisableOutputPort(MI_VIF_DEV dev, MI_VIF_PORT port);
-
-#define MI_VIF_SetChnPortAttr(chn, port, attr) \
-  MI_VIF_SetOutputPortAttr((MI_VIF_DEV)(chn), (MI_VIF_PORT)(port), (MI_VIF_OutputPortAttr_t*)(attr))
-#define MI_VIF_EnableChnPort(chn, port) \
-  MI_VIF_EnableOutputPort((MI_VIF_DEV)(chn), (MI_VIF_PORT)(port))
-#define MI_VIF_DisableChnPort(chn, port) \
-  MI_VIF_DisableOutputPort((MI_VIF_DEV)(chn), (MI_VIF_PORT)(port))
-#else
 MI_S32 MI_VIF_SetChnPortAttr(MI_VIF_CHN chn, MI_VIF_PORT port, MI_VIF_PortAttr_t* attr);
 MI_S32 MI_VIF_EnableChnPort(MI_VIF_CHN chn, MI_VIF_PORT port);
 MI_S32 MI_VIF_DisableChnPort(MI_VIF_CHN chn, MI_VIF_PORT port);
@@ -369,44 +383,22 @@ typedef struct {
 
 /* MI_VENC ----------------------------------------------------------------- */
 #if defined(PLATFORM_MARUKO)
-MI_S32 MI_VENC_CreateChn_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn, MI_VENC_ChnAttr_t* attr)
-  __asm__("MI_VENC_CreateChn");
-MI_S32 MI_VENC_DestroyChn_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn) __asm__("MI_VENC_DestroyChn");
-MI_S32 MI_VENC_StartRecvPic_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn) __asm__("MI_VENC_StartRecvPic");
-MI_S32 MI_VENC_StopRecvPic_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn) __asm__("MI_VENC_StopRecvPic");
-MI_S32 MI_VENC_GetStream_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn, MI_VENC_Stream_t* stream, MI_S32 timeout_ms)
-  __asm__("MI_VENC_GetStream");
-MI_S32 MI_VENC_ReleaseStream_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn, MI_VENC_Stream_t* stream)
-  __asm__("MI_VENC_ReleaseStream");
-MI_S32 MI_VENC_Query_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn, MI_VENC_Stat_t* stat) __asm__("MI_VENC_Query");
-int MI_VENC_GetFd_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn) __asm__("MI_VENC_GetFd");
-MI_S32 MI_VENC_CloseFd_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn) __asm__("MI_VENC_CloseFd");
-MI_S32 MI_VENC_GetChnAttr_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn, MI_VENC_ChnAttr_t* attr)
-  __asm__("MI_VENC_GetChnAttr");
-MI_S32 MI_VENC_SetChnAttr_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn, MI_VENC_ChnAttr_t* attr)
-  __asm__("MI_VENC_SetChnAttr");
-MI_S32 MI_VENC_RequestIdr_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn, MI_BOOL instant)
-  __asm__("MI_VENC_RequestIdr");
-
-#define MI_VENC_CreateChn(chn, attr) MI_VENC_CreateChn_MARUKO(0, (chn), (attr))
-#define MI_VENC_DestroyChn(chn) MI_VENC_DestroyChn_MARUKO(0, (chn))
-#define MI_VENC_StartRecvPic(chn) MI_VENC_StartRecvPic_MARUKO(0, (chn))
-#define MI_VENC_StopRecvPic(chn) MI_VENC_StopRecvPic_MARUKO(0, (chn))
-#define MI_VENC_GetStream(chn, stream, timeout_ms) MI_VENC_GetStream_MARUKO(0, (chn), (stream), (timeout_ms))
-#define MI_VENC_ReleaseStream(chn, stream) MI_VENC_ReleaseStream_MARUKO(0, (chn), (stream))
-#define MI_VENC_Query(chn, stat) MI_VENC_Query_MARUKO(0, (chn), (stat))
-#define MI_VENC_GetFd(chn) MI_VENC_GetFd_MARUKO(0, (chn))
-#define MI_VENC_CloseFd(chn) MI_VENC_CloseFd_MARUKO(0, (chn))
-#define MI_VENC_GetChnAttr(chn, attr) MI_VENC_GetChnAttr_MARUKO(0, (chn), (attr))
-#define MI_VENC_SetChnAttr(chn, attr) MI_VENC_SetChnAttr_MARUKO(0, (chn), (attr))
-MI_S32 MI_VENC_SetRoiCfg_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn, MI_VENC_RoiCfg_t *cfg)
-  __asm__("MI_VENC_SetRoiCfg");
-MI_S32 MI_VENC_GetRoiCfg_MARUKO(MI_VENC_DEV dev, MI_VENC_CHN chn, MI_U32 idx, MI_VENC_RoiCfg_t *cfg)
-  __asm__("MI_VENC_GetRoiCfg");
-
-#define MI_VENC_RequestIdr(chn, instant) MI_VENC_RequestIdr_MARUKO(0, (chn), (instant))
-#define MI_VENC_SetRoiCfg(chn, cfg) MI_VENC_SetRoiCfg_MARUKO(0, (chn), (cfg))
-#define MI_VENC_GetRoiCfg(chn, idx, cfg) MI_VENC_GetRoiCfg_MARUKO(0, (chn), (idx), (cfg))
+#define MI_VENC_CreateChn(chn, attr)  g_mi_venc.fnCreateChn(0, (chn), (attr))
+#define MI_VENC_DestroyChn(chn)       g_mi_venc.fnDestroyChn(0, (chn))
+#define MI_VENC_StartRecvPic(chn)     g_mi_venc.fnStartRecvPic(0, (chn))
+#define MI_VENC_StopRecvPic(chn)      g_mi_venc.fnStopRecvPic(0, (chn))
+#define MI_VENC_GetStream(chn, strm, ms) g_mi_venc.fnGetStream(0, (chn), (strm), (ms))
+#define MI_VENC_ReleaseStream(chn, strm) g_mi_venc.fnReleaseStream(0, (chn), (strm))
+#define MI_VENC_Query(chn, stat)      g_mi_venc.fnQuery(0, (chn), (stat))
+#define MI_VENC_GetFd(chn)            g_mi_venc.fnGetFd(0, (chn))
+#define MI_VENC_CloseFd(chn)          g_mi_venc.fnCloseFd(0, (chn))
+#define MI_VENC_GetChnAttr(chn, attr) g_mi_venc.fnGetChnAttr(0, (chn), (attr))
+#define MI_VENC_SetChnAttr(chn, attr) g_mi_venc.fnSetChnAttr(0, (chn), (attr))
+#define MI_VENC_RequestIdr(chn, inst) g_mi_venc.fnRequestIdr(0, (chn), (inst))
+#define MI_VENC_SetRoiCfg(chn, cfg)   g_mi_venc.fnSetRoiCfg(0, (chn), (cfg))
+#define MI_VENC_GetRoiCfg(chn, idx, cfg) g_mi_venc.fnGetRoiCfg(0, (chn), (idx), (cfg))
+#define MI_VENC_GetRcParam(chn, param) g_mi_venc.fnGetRcParam(0, (chn), (param))
+#define MI_VENC_SetRcParam(chn, param) g_mi_venc.fnSetRcParam(0, (chn), (param))
 #else
 MI_S32 MI_VENC_CreateChn(MI_VENC_CHN chn, MI_VENC_ChnAttr_t* attr);
 MI_S32 MI_VENC_DestroyChn(MI_VENC_CHN chn);
