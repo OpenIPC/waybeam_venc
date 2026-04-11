@@ -98,7 +98,6 @@ static struct { // LINEAR
     enum { LINEAR_RES_1 = 0,
         LINEAR_RES_2,
         LINEAR_RES_3,
-        LINEAR_RES_4,
         LINEAR_RES_END } mode;
     struct _senout {
         s32 width, height, min_fps, max_fps;
@@ -125,14 +124,15 @@ static struct { // LINEAR
      *    so there is no way to reduce sensor output resolution without
      *    window mode.
      *
-     * Mode 0: 2592x1944@30fps — full-scan, HMAX=600, 1188Mbps (VERIFIED)
-     * Mode 1: 2592x1944@60fps — full-scan, HMAX=304, 891Mbps (tipoman9)
-     * Mode 2: 2400x1350@90fps — Star6E windowed (HMAX=275)
-     * Mode 3: 1920x1080@90fps — Star6E windowed (HMAX=275, ISP max ~71fps) */
+     * Mode 0: 2592x1944@30fps — boot default placeholder.
+     *          Required at index 0 so modes 1-2 trigger a real mode
+     *          change via MI_SNR_SetRes (framework skips init for
+     *          the boot-default index).
+     * Mode 1: 1920x1080@60fps — windowed, HMAX=275. Verified 59fps.
+     * Mode 2: 1920x1080@90fps — windowed, HMAX=275. Verified 89fps. */
     { LINEAR_RES_1, { 2592, 1944, 3, 30 }, { 0, 0, 2592, 1944 }, { "2592x1944@30fps" } },
-    { LINEAR_RES_2, { 2592, 1944, 3, 60 }, { 0, 0, 2592, 1944 }, { "2592x1944@60fps" } },
-    { LINEAR_RES_3, { 2400, 1350, 3, 90 }, { 0, 0, 2560, 1440 }, { "2400x1350@90fps" } },
-    { LINEAR_RES_4, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },
+    { LINEAR_RES_2, { 1920, 1080, 3, 60 }, { 0, 0, 1920, 1080 }, { "1920x1080@60fps" } },
+    { LINEAR_RES_3, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },
 };
 
 u32 vts_30fps = 4125;
@@ -1029,7 +1029,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
     handle->video_res_supported.ulcur_res = res_idx;
 
     switch (res_idx) {
-    case 0: // 2592x1944@30fps — full readout
+    case 0: // 2592x1944@30fps — boot default placeholder
         handle->pCus_sensor_init = pCus_init_mipi4lane_5m30fps_linear;
         vts_30fps = 4125;
         params->expo.vts = vts_30fps;
@@ -1037,25 +1037,17 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 8080;
         break;
 
-    case 1: // 2592x1944@60fps — full-scan, HMAX=304, 891Mbps
-        handle->pCus_sensor_init = pCus_init_mipi4lane_5m60fps_linear;
-        vts_30fps = 4125; // same VMAX as 30fps
+    case 1: // 1920x1080@60fps — windowed (Star6E 120fps table)
+        handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
+        vts_30fps = 4512; // 2256 * 120 / 60
         params->expo.vts = vts_30fps;
         params->expo.fps = 60;
-        Preview_line_period = 4040; // HMAX=304 → half of 8080
+        Preview_line_period = 3694;
         break;
 
-    case 2: // 2400x1350@90fps — windowed crop (HMAX=275)
-        handle->pCus_sensor_init = pCus_init_mipi4lane_5m90fps_linear;
-        vts_30fps = 3016;
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 90;
-        Preview_line_period = 3684;
-        break;
-
-    case 3: // 1920x1080@90fps — windowed (Star6E 120fps table, ISP caps ~71fps)
+    case 2: // 1920x1080@90fps — windowed (Star6E 120fps table)
         handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
-        vts_30fps = 3008; // 2256 * 120 / 90 = 3008
+        vts_30fps = 3008; // 2256 * 120 / 90
         params->expo.vts = vts_30fps;
         params->expo.fps = 90;
         Preview_line_period = 3694;
