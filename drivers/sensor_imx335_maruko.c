@@ -98,6 +98,7 @@ static struct { // LINEAR
     enum { LINEAR_RES_1 = 0,
         LINEAR_RES_2,
         LINEAR_RES_3,
+        LINEAR_RES_4,
         LINEAR_RES_END } mode;
     struct _senout {
         s32 width, height, min_fps, max_fps;
@@ -127,17 +128,11 @@ static struct { // LINEAR
      * Mode 0: 2592x1944@30fps — full-scan, HMAX=600, 1188Mbps (VERIFIED)
      * Mode 1: 2592x1944@60fps — full-scan, HMAX=304, 891Mbps (tipoman9)
      * Mode 2: 2400x1350@90fps — Star6E windowed (HMAX=275)
-     * Mode 0: 2592x1944@30fps — full-scan (verified 30fps)
-     * Mode 1: 1920x1080@60fps — windowed (verified 59fps)
-     * Mode 2: 1920x1080@90fps — windowed (verified 89fps)
-     *
-     * Non-working modes removed:
-     * - 2592x1944@60fps: ISP can't process 5MP@60fps (302 Mpix/s)
-     * - 2400x1350@90fps: ISP can't process (332 Mpix/s)
-     * - 1920x1080@120fps: ISP overflows at >90fps input */
+     * Mode 3: 1920x1080@90fps — Star6E windowed (HMAX=275, ISP max ~71fps) */
     { LINEAR_RES_1, { 2592, 1944, 3, 30 }, { 0, 0, 2592, 1944 }, { "2592x1944@30fps" } },
-    { LINEAR_RES_2, { 1920, 1080, 3, 60 }, { 0, 0, 1920, 1080 }, { "1920x1080@60fps" } },
-    { LINEAR_RES_3, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },
+    { LINEAR_RES_2, { 2592, 1944, 3, 60 }, { 0, 0, 2592, 1944 }, { "2592x1944@60fps" } },
+    { LINEAR_RES_3, { 2400, 1350, 3, 90 }, { 0, 0, 2560, 1440 }, { "2400x1350@90fps" } },
+    { LINEAR_RES_4, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },
 };
 
 u32 vts_30fps = 4125;
@@ -1042,17 +1037,25 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 8080;
         break;
 
-    case 1: // 1920x1080@60fps — windowed (Star6E 120fps table)
-        handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
-        vts_30fps = 4512; // 2256 * 120 / 60
+    case 1: // 2592x1944@60fps — full-scan, HMAX=304, 891Mbps
+        handle->pCus_sensor_init = pCus_init_mipi4lane_5m60fps_linear;
+        vts_30fps = 4125; // same VMAX as 30fps
         params->expo.vts = vts_30fps;
         params->expo.fps = 60;
-        Preview_line_period = 3694;
+        Preview_line_period = 4040; // HMAX=304 → half of 8080
         break;
 
-    case 2: // 1920x1080@90fps — windowed (Star6E 120fps table, ISP max ~90fps)
+    case 2: // 2400x1350@90fps — windowed crop (HMAX=275)
+        handle->pCus_sensor_init = pCus_init_mipi4lane_5m90fps_linear;
+        vts_30fps = 3016;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 90;
+        Preview_line_period = 3684;
+        break;
+
+    case 3: // 1920x1080@90fps — windowed (Star6E 120fps table, ISP caps ~71fps)
         handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
-        vts_30fps = 3008; // 2256 * 120 / 90
+        vts_30fps = 3008; // 2256 * 120 / 90 = 3008
         params->expo.vts = vts_30fps;
         params->expo.fps = 90;
         Preview_line_period = 3694;
@@ -1169,8 +1172,9 @@ static int pCus_SetFPS(ms_cus_sensor* handle, u32 fps)
         return FAIL;
     }
 
-    if (params->expo.expo_lines > params->expo.vts - 2)
+    if (params->expo.expo_lines > params->expo.vts - 2) {
         params->expo.vts = params->expo.expo_lines + 8;
+    }
 
     pCus_SetAEUSecs(handle, params->expo.expo_lef_us);
     params->dirty = true;
