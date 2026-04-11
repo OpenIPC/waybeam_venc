@@ -1001,18 +1001,20 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			unsigned int minSensorGain, minIspGain;
 			unsigned int maxSensorGain, maxIspGain;
 		} MarukoIspExposureLimit;
-		/* Cap exposure to sensor frame period so AE doesn't limit
-		 * output FPS. Default bin has 14ms → 71fps. For 120fps
-		 * sensor: 1000000/120 = 8333us max shutter → full speed.
-		 * User config can only LOWER the cap, never raise above
-		 * frame period (previous bug: exposure=16 raised cap to
-		 * 16ms, defeating the purpose). */
+		/* Cap exposure to control AE behavior.
+		 * - exposure=0 (default): auto-cap to frame period for
+		 *   max FPS.  120fps sensor → 8333us cap → 118fps.
+		 * - exposure=N (ms): use N*1000 as cap.  Values above
+		 *   frame period trade FPS for brightness (e.g. 16ms
+		 *   at 120fps mode → ~60fps but brighter image).
+		 *   Values below frame period reduce max exposure. */
 		if (ctx->sensor.fps > 0) {
 			uint32_t frame_period_us = 1000000 / ctx->sensor.fps;
-			uint32_t fps_cap_us = frame_period_us;
-			if (ctx->cfg.exposure_cap_us > 0 &&
-			    ctx->cfg.exposure_cap_us < frame_period_us)
+			uint32_t fps_cap_us;
+			if (ctx->cfg.exposure_cap_us > 0)
 				fps_cap_us = ctx->cfg.exposure_cap_us;
+			else
+				fps_cap_us = frame_period_us;
 			typedef int (*ae_get_fn)(uint32_t, uint32_t,
 				MarukoIspExposureLimit *);
 			typedef int (*ae_set_fn)(uint32_t, uint32_t,
@@ -1040,13 +1042,19 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			 * have extended VTS based on ISP bin defaults;
 			 * MI_SNR_SetFps forces the sensor driver to
 			 * reset VTS to the mode's native value.
+			 * Only kick when auto-capping (exposure=0) —
+			 * when user sets explicit exposure, they want
+			 * to trade FPS for brightness, so let the AE
+			 * extend VTS naturally.
 			 * (Ported from Star6E cold-boot fps_kick.) */
-			MI_SNR_SetFps(ctx->sensor.pad_id,
-				ctx->sensor.fps);
-			printf("> [maruko] MI_SNR_SetFps kick: "
-				"pad %d fps %u\n",
-				(int)ctx->sensor.pad_id,
-				ctx->sensor.fps);
+			if (ctx->cfg.exposure_cap_us == 0) {
+				MI_SNR_SetFps(ctx->sensor.pad_id,
+					ctx->sensor.fps);
+				printf("> [maruko] MI_SNR_SetFps kick: "
+					"pad %d fps %u\n",
+					(int)ctx->sensor.pad_id,
+					ctx->sensor.fps);
+			}
 		}
 
 		g_mi_isp_initialized = 1;
