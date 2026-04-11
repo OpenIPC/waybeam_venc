@@ -1235,10 +1235,21 @@ static int pCus_SetAEUSecs(ms_cus_sensor* handle, u32 us)
         lines = 9;
     params->expo.expo_lines = lines;
 
-    if (lines > params->expo.vts - 1)
-        vts = lines + 1;
-    else
-        vts = params->expo.vts;
+    /* Allow AE to extend VTS up to 120% of target for exposure
+     * headroom, but no further.  Without any cap, the AE extends
+     * VTS from 3008 (90fps) to ~3800 (71fps) in low light.
+     * With 120% cap: max VTS = 3609 → min ~75fps. */
+    {
+        u32 max_vts = params->expo.vts + params->expo.vts / 5;
+        if (lines > max_vts - 1) {
+            lines = max_vts - 1;
+            params->expo.expo_lines = lines;
+        }
+        if (lines > params->expo.vts - 1)
+            vts = lines + 1;
+        else
+            vts = params->expo.vts;
+    }
 
     SENSOR_DMSG("[%s] us %u, lines %u, vts %u\n", __FUNCTION__, us, lines, params->expo.vts);
 
