@@ -122,6 +122,14 @@ static void maruko_enable_cus3a(void)
 	} else {
 		printf("> [maruko] WARNING: EnableUserspace3A not found\n");
 	}
+
+	/* EnableUserspace3A internally re-enables AF via CUS3A_Enable(1,1,1).
+	 * Override back to AE+AWB only to suppress motor init errors. */
+	if (fn) {
+		MI_BOOL p110[3] = {1, 1, 0};
+		fn(0, 0, p110);
+		printf("> [maruko] CUS3A AF disabled after EnableUserspace3A\n");
+	}
 }
 
 static int maruko_disable_userspace3a(const IspRuntimeLib *lib, void *ctx)
