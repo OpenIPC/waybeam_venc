@@ -155,7 +155,7 @@ static struct { // LINEAR
      * Mode 2: 1472x816 binned @ 90fps — proven working.
      * Mode 3: 1472x816 binned @ 120fps — proven working. */
     { LINEAR_RES_1, { 1920, 1080, 3, 30 }, { 0, 0, 1920, 1080 }, { "1920x1080@30fps" } },      /* binned */
-    { LINEAR_RES_2, { 1920, 1080, 3, 30 }, { 0, 0, 1920, 1080 }, { "1920x1080@30fps_nb" } },  /* non-binned */
+    { LINEAR_RES_2, { 2560, 1440, 3, 30 }, { 0, 0, 2560, 1440 }, { "2560x1440@30fps" } },  /* non-binned QHD */
     { LINEAR_RES_3, { 1472, 816, 3, 90 }, { 0, 0, 1472, 816 }, { "1472x816@90fps" } },
     { LINEAR_RES_4, { 1472, 816, 3, 120 }, { 0, 0, 1472, 816 }, { "1472x816@120fps" } },
 };
@@ -2110,33 +2110,31 @@ static int pCus_init_1600x900_30fps_mipi4lane_linear(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
-/* Maruko 1920x1080@30fps NON-BINNED — direct crop, 10-bit output.
- * Based on SDK 3.6m crop pattern: HMAX=1100, no binning, 10-bit.
- * PIX_HWIDTH=1920 (direct), PIX_VWIDTH=2160 (1080×2 for Bayer). */
+/* Maruko non-binned crop — HMAX=1100, 891Mbps, WINMODE=4.
+ * PIX registers set for 2560x1440 (QHD). */
 const static I2C_ARRAY Sensor_1080p_nobinning_init_table[] = {
     { 0x3000, 0x01 }, // Standby
     { 0x3002, 0x01 }, // Master mode stop
     { 0x3008, 0x5D }, // BCWAIT_TIME
     { 0x300A, 0x42 }, // CPWAIT_TIME
     { 0x301C, 0x04 }, // WINMODE (crop)
-    { 0x3020, 0x00 }, // HADD = no binning (explicit disable)
+    { 0x3020, 0x00 }, // HADD = no binning
     { 0x3021, 0x00 }, // VADD = no binning
     { 0x3022, 0x00 }, // ADDMODE = no binning
     { 0x3024, 0xCA }, // VMAX = 2250 (30fps with HMAX=1100)
     { 0x3025, 0x08 },
-    { 0x3028, 0x4C }, // HMAX = 1100 = 0x044C (SDK non-binned pattern)
+    { 0x3028, 0x4C }, // HMAX = 1100 = 0x044C
     { 0x3029, 0x04 },
     { 0x3031, 0x00 }, // ADBIT = 10-bit ADC
-    /* 0x3032 (MDBIT) not set — defaults to 12-bit output like binned mode */
     { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
-    { 0x3040, 0xCC }, // PIX_HST = 972 = 0x03CC (centered 1920 in 3864)
-    { 0x3041, 0x03 },
-    { 0x3042, 0x80 }, // PIX_HWIDTH = 1920 = 0x0780
-    { 0x3043, 0x07 },
-    { 0x3044, 0x4C }, // PIX_VST = 588 = 0x024C (centered 2160 in ~3336)
-    { 0x3045, 0x02 },
-    { 0x3046, 0x70 }, // PIX_VWIDTH = 2160 = 0x0870
-    { 0x3047, 0x08 },
+    { 0x3040, 0x8C }, // PIX_HST = 652 = 0x028C
+    { 0x3041, 0x02 },
+    { 0x3042, 0x00 }, // PIX_HWIDTH = 2560 = 0x0A00
+    { 0x3043, 0x0A },
+    { 0x3044, 0x86 }, // PIX_VST = 390 = 0x0186
+    { 0x3045, 0x01 },
+    { 0x3046, 0x40 }, // PIX_VWIDTH = 2880 = 0x0B40
+    { 0x3047, 0x0B },
     { 0x3050, 0x08 }, // SHR0
     { 0x30C1, 0x00 },
     { 0x3116, 0x23 }, // INCKSEL2
@@ -2508,13 +2506,13 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 4882; // same HMAX as 120fps
         break;
 
-    case 1: // 1920x1080@30fps NON-BINNED — direct crop, 10-bit, HMAX=1100
+    case 1: // 2560x1440@30fps NON-BINNED — QHD crop
         handle->video_res_supported.ulcur_res = 1;
         handle->pCus_sensor_init = pCus_init_1080p_nobinning;
         vts_30fps = 2250;
         params->expo.vts = vts_30fps;
         params->expo.fps = 30;
-        Preview_line_period = 14815; // HMAX=1100 → same as SDK 3.6m mode
+        Preview_line_period = 14815;
         break;
 
     case 2: // 1472x816@90fps — 120fps binning init, extended VTS
