@@ -15,11 +15,7 @@ MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
 OUT_DIR := out/$(SOC_BUILD)
 TARGET := $(OUT_DIR)/venc
-TEST_TARGET := $(OUT_DIR)/snr_toggle_test
-PROBE_TARGET := $(OUT_DIR)/snr_sequence_probe
 TIMING_PROBE_TARGET := rtp_timing_probe
-TEST_SRC := src/snr_toggle_test.c
-PROBE_SRC := src/snr_sequence_probe.c
 TIMING_PROBE_SRC := tools/rtp_timing_probe.c
 
 VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
@@ -87,9 +83,6 @@ all: build
 
 build: $(TOOLCHAIN_TARGET) check check-soc-stamp | $(OUT_DIR)
 build: $(TARGET)
-# snr_toggle_test and snr_sequence_probe are standalone cross-compiled
-# tools that require direct MI lib linking. Build separately if needed:
-#   make SOC_BUILD=star6e snr-tools
 
 $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
@@ -111,12 +104,6 @@ lint: $(TOOLCHAIN_TARGET) check
 
 $(TARGET): $(SRC) include/backend.h include/codec_config.h include/codec_types.h include/file_util.h include/h26x_param_sets.h include/h26x_util.h include/isp_runtime.h include/maruko_bindings.h include/maruko_config.h include/maruko_controls.h include/maruko_output.h include/maruko_pipeline.h include/maruko_runtime.h include/maruko_video.h include/output_socket.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/sdk_quiet.h include/star6e_audio.h include/star6e_controls.h include/star6e_cus3a.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_pipeline.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_runtime.h include/star6e_video.h include/stream_metrics.h include/venc_config.h include/venc_httpd.h include/venc_api.h include/sensor_select.h include/venc_ring.h include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h include/maruko_mi.h include/star6e_mi.h include/imu_bmi270.h include/eis.h include/eis_ring.h include/eis_gyroglide.h include/debug_osd.h
 	$(CC) $(CFLAGS) $(LDFLAGS) $(SRC) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(if $(DRV),-Ltools,) $(BASE_LIBS) $(SOC_LIBS) -o $@
-
-$(TEST_TARGET): $(TEST_SRC) include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h
-	$(CC) $(CFLAGS) $(LDFLAGS) $(TEST_SRC) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(BASE_LIBS) $(SOC_LIBS) -o $@
-
-$(PROBE_TARGET): $(PROBE_SRC) include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h
-	$(CC) $(CFLAGS) $(LDFLAGS) $(PROBE_SRC) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(BASE_LIBS) $(SOC_LIBS) -o $@
 
 # Host-native timing probe (no cross-compiler or SDK libs needed)
 $(TIMING_PROBE_TARGET): $(TIMING_PROBE_SRC) include/rtp_sidecar.h

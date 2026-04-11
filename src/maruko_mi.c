@@ -287,7 +287,7 @@ static int i6c_isp_load(maruko_isp_impl *isp)
 	LOAD_SYM(isp, "libmi_isp.so", fnCreateDevice,
 		int (*)(int, unsigned int *), "MI_ISP_CreateDevice");
 	LOAD_SYM(isp, "libmi_isp.so", fnDestroyDevice,
-		int (*)(int), "MI_ISP_DestoryDevice");
+		int (*)(int), "MI_ISP_DestoryDevice"); /* vendor typo: "Destory" */
 	LOAD_SYM(isp, "libmi_isp.so", fnCreateChannel,
 		int (*)(int, int, void *), "MI_ISP_CreateChannel");
 	LOAD_SYM(isp, "libmi_isp.so", fnDestroyChannel,

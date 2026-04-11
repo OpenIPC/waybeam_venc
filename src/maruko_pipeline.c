@@ -53,8 +53,6 @@ static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
 volatile sig_atomic_t g_maruko_running = 1;
 static volatile sig_atomic_t g_maruko_reinit = 0;
 static int g_mi_isp_initialized = 0;
-static int g_mi_isp_loaded = 0;
-static int g_mi_scl_loaded = 0;
 static int g_mi_isp_dev_created = 0;
 static int g_mi_scl_dev_created = 0;
 static int g_mi_isp_chn_created = 0;
@@ -96,7 +94,8 @@ static int maruko_config_dev_ring_pool(i6c_sys_mod module, MI_U32 device,
  * without it the ISP FIFO stalls at >=60fps. */
 static void maruko_enable_cus3a(void)
 {
-	void *h = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	/* ISP lib already loaded by maruko_mi_init(); use its handle. */
+	void *h = g_mi_isp.handle;
 	if (!h)
 		return;
 	typedef int (*fn_t)(MI_U32 dev_id, MI_U32 channel, void *params);
@@ -114,24 +113,18 @@ static void maruko_enable_cus3a(void)
 		MI_S32 ret = fn(0, 0, p111);
 		printf("> [maruko] CUS3A_Enable(1,1,1) ret=%d\n", ret);
 	}
-	/* Do NOT dlclose — CUS3A opens /dev/isp_fe which must stay open
-	 * for IQ parameter writes to reach the ISP front-end hardware. */
 
-	/* Enable Userspace3A — this should create the 3A_Proc thread
-	 * that processes AE/AWB and applies IQ parameters. */
-	{
-		typedef int (*us3a_fn_t)(MI_U32, MI_U32);
-		us3a_fn_t fn_us3a = (us3a_fn_t)dlsym(h,
-			"MI_ISP_EnableUserspace3A");
-		if (fn_us3a) {
-			int r = fn_us3a(0, 0);
-			printf("> [maruko] EnableUserspace3A ret=%d\n", r);
-		} else {
-			printf("> [maruko] WARNING: EnableUserspace3A "
-				"not found\n");
-		}
+	/* Enable Userspace3A — creates the 3A_Proc thread that processes
+	 * AE/AWB and applies IQ parameters. */
+	typedef int (*us3a_fn_t)(MI_U32, MI_U32);
+	us3a_fn_t fn_us3a = (us3a_fn_t)dlsym(h,
+		"MI_ISP_EnableUserspace3A");
+	if (fn_us3a) {
+		int r = fn_us3a(0, 0);
+		printf("> [maruko] EnableUserspace3A ret=%d\n", r);
+	} else {
+		printf("> [maruko] WARNING: EnableUserspace3A not found\n");
 	}
-	/* Keep dlopen handle open — do not dlclose */
 }
 
 static int maruko_disable_userspace3a(const IspRuntimeLib *lib, void *ctx)
@@ -371,8 +364,6 @@ static int configure_maruko_isp(const SensorSelectResult *sensor,
 	MI_S32 ret = 0;
 	int dev = 0, chn = 0, started = 0, port = 0;
 
-	/* ISP/SCL libs loaded centrally by maruko_mi_init() */
-	g_mi_isp_loaded = 1;
 
 	if (!g_mi_isp_dev_created) {
 		unsigned int sensor_mask = (1u << (unsigned int)sensor->pad_id);
@@ -482,8 +473,7 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	MI_S32 ret = 0;
 	int dev = 0, chn = 0, started = 0, port = 0;
 
-	/* SCL lib loaded centrally by maruko_mi_init() */
-	g_mi_scl_loaded = 1;
+
 
 	if (!g_mi_scl_dev_created) {
 		/* Match majestic: enable all 4 HW scaler ports (bits 0-3). */
@@ -595,7 +585,6 @@ fail_scl:
 		(void)g_mi_isp.fnStopChannel(0, 0);
 		(void)g_mi_isp.fnDestroyChannel(0, 0);
 		(void)g_mi_isp.fnDestroyDevice(0);
-		g_mi_isp_loaded = 0;
 	}
 	return -1;
 }
@@ -606,13 +595,13 @@ fail_scl:
  * with "Mutex not initialized" when CUS3A state persists in kernel. */
 static void maruko_stop_vpe_channels(void)
 {
-	if (g_mi_scl_loaded) {
+	if (g_mi_scl_chn_created) {
 		(void)g_mi_scl.fnDisablePort(0, 0, 0);
 		(void)g_mi_scl.fnStopChannel(0, 0);
 		(void)g_mi_scl.fnDestroyChannel(0, 0);
 		g_mi_scl_chn_created = 0;
 	}
-	if (g_mi_isp_loaded) {
+	if (g_mi_isp_chn_created) {
 		(void)g_mi_isp.fnDisablePort(0, 0, 0);
 		(void)g_mi_isp.fnStopChannel(0, 0);
 		/* Skip DestroyChannel — kernel ISP retains CUS3A mutex
@@ -631,15 +620,9 @@ static void maruko_stop_vpe(void)
 		(void)g_mi_scl.fnDestroyDevice(0);
 		g_mi_scl_dev_created = 0;
 	}
-	if (g_mi_scl_loaded) {
-		g_mi_scl_loaded = 0;
-	}
 	if (g_mi_isp_dev_created) {
 		(void)g_mi_isp.fnDestroyDevice(0);
 		g_mi_isp_dev_created = 0;
-	}
-	if (g_mi_isp_loaded) {
-		g_mi_isp_loaded = 0;
 	}
 }
 
