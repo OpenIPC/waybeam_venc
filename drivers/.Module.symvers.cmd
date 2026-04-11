@@ -1,0 +1,1 @@
+cmd_/home/snokvist/dev/waybeam-coordination/waybeam_venc/drivers/Module.symvers := sed 's/\.ko$$/\.o/' /home/snokvist/dev/waybeam-coordination/waybeam_venc/drivers/modules.order | scripts/mod/modpost    -w -o /home/snokvist/dev/waybeam-coordination/waybeam_venc/drivers/Module.symvers -e -i Module.symvers   -n -T -

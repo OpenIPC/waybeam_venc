@@ -847,13 +847,18 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 		&ctx->sensor);
 
 	/* Overscan detection: capture rect > crop rect can cause pipeline
-	 * hangs (e.g. imx415 mode 1). Clamp to crop. */
+	 * hangs (e.g. binning modes report pre-binning capture).
+	 * Clamp to crop and zero offsets — the VIF inputRect must
+	 * match the actual MIPI output, not the pre-binning window. */
 	if (ctx->sensor.mode.crop.width > 0 &&
 	    ctx->sensor.plane.capt.width > ctx->sensor.mode.crop.width) {
 		fprintf(stderr, "WARNING: [maruko] sensor overscan detected: "
-			"capture %ux%u > crop %ux%u — clamping to crop\n",
+			"capture (%u,%u %ux%u) > crop %ux%u — clamping\n",
+			ctx->sensor.plane.capt.x, ctx->sensor.plane.capt.y,
 			ctx->sensor.plane.capt.width, ctx->sensor.plane.capt.height,
 			ctx->sensor.mode.crop.width, ctx->sensor.mode.crop.height);
+		ctx->sensor.plane.capt.x = 0;
+		ctx->sensor.plane.capt.y = 0;
 		ctx->sensor.plane.capt.width = ctx->sensor.mode.crop.width;
 		ctx->sensor.plane.capt.height = ctx->sensor.mode.crop.height;
 	}

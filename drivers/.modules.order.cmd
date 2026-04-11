@@ -1,0 +1,1 @@
+cmd_/home/snokvist/dev/waybeam-coordination/waybeam_venc/drivers/modules.order := {   echo /home/snokvist/dev/waybeam-coordination/waybeam_venc/drivers/sensor_config.ko;   echo /home/snokvist/dev/waybeam-coordination/waybeam_venc/drivers/sensor_imx415_maruko.ko; :; } | awk '!x[$$0]++' - > /home/snokvist/dev/waybeam-coordination/waybeam_venc/drivers/modules.order
