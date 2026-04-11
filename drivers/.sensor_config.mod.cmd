@@ -1,1 +1,0 @@
-cmd_/home/snokvist/dev/waybeam-coordination/waybeam_venc/drivers/sensor_config.mod := { echo  /home/snokvist/dev/waybeam-coordination/waybeam_venc/drivers/sensor_config.o;  echo; } > /home/snokvist/dev/waybeam-coordination/waybeam_venc/drivers/sensor_config.mod
