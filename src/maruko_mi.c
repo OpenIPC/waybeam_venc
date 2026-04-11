@@ -179,7 +179,9 @@ static int i6c_snr_load(maruko_snr_impl *snr)
 		int (*)(int), "MI_SNR_Disable");
 
 	if (!snr->fnInitDev || !snr->fnDeInitDev || !snr->fnSetPlaneMode ||
-	    !snr->fnSetRes || !snr->fnSetFps || !snr->fnQueryResCount ||
+	    !snr->fnGetPlaneMode || !snr->fnSetRes || !snr->fnGetCurRes ||
+	    !snr->fnSetFps || !snr->fnGetFps || !snr->fnSetOrien ||
+	    !snr->fnCustFunction || !snr->fnQueryResCount ||
 	    !snr->fnGetRes || !snr->fnGetPadInfo || !snr->fnGetPlaneInfo ||
 	    !snr->fnEnable || !snr->fnDisable) {
 		dlclose(snr->handle);
@@ -253,7 +255,9 @@ static int i6c_venc_load(maruko_venc_impl *venc)
 	    !venc->fnGetStream || !venc->fnReleaseStream ||
 	    !venc->fnQuery || !venc->fnGetFd || !venc->fnCloseFd ||
 	    !venc->fnGetChnAttr || !venc->fnSetChnAttr ||
-	    !venc->fnRequestIdr) {
+	    !venc->fnRequestIdr || !venc->fnSetRoiCfg ||
+	    !venc->fnGetRoiCfg || !venc->fnGetRcParam ||
+	    !venc->fnSetRcParam || !venc->fnSetInputSourceConfig) {
 		dlclose(venc->handle);
 		memset(venc, 0, sizeof(*venc));
 		return -1;
@@ -398,33 +402,38 @@ int maruko_mi_init(void)
 		fprintf(stderr, "WARNING: [maruko] dlopen(libcus3a.so): %s\n",
 			dlerror());
 
-	/* Load modules in dependency order */
+	/* Load modules in dependency order. On failure, maruko_mi_deinit()
+	 * safely unloads any already-loaded modules (handles NULL gracefully). */
 	if (i6c_sys_load(&g_mi_sys) != 0) {
 		fprintf(stderr, "ERROR: [maruko] failed to load MI SYS\n");
-		return -1;
+		goto fail;
 	}
 	if (i6c_vif_load(&g_mi_vif) != 0) {
 		fprintf(stderr, "ERROR: [maruko] failed to load MI VIF\n");
-		return -1;
+		goto fail;
 	}
 	if (i6c_snr_load(&g_mi_snr) != 0) {
 		fprintf(stderr, "ERROR: [maruko] failed to load MI SNR\n");
-		return -1;
+		goto fail;
 	}
 	if (i6c_venc_load(&g_mi_venc) != 0) {
 		fprintf(stderr, "ERROR: [maruko] failed to load MI VENC\n");
-		return -1;
+		goto fail;
 	}
 	if (i6c_isp_load(&g_mi_isp) != 0) {
 		fprintf(stderr, "ERROR: [maruko] failed to load MI ISP\n");
-		return -1;
+		goto fail;
 	}
 	if (i6c_scl_load(&g_mi_scl) != 0) {
 		fprintf(stderr, "ERROR: [maruko] failed to load MI SCL\n");
-		return -1;
+		goto fail;
 	}
 
 	return 0;
+
+fail:
+	maruko_mi_deinit();
+	return -1;
 }
 
 void maruko_mi_deinit(void)

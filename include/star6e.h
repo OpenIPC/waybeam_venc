@@ -203,7 +203,15 @@ typedef struct {
 #define MI_SNR_InitDev(init)           g_mi_snr.fnInitDev(init)
 #define MI_SNR_DeInitDev()             g_mi_snr.fnDeInitDev()
 #define MI_SNR_SetPlaneMode(pad, mode) g_mi_snr.fnSetPlaneMode((pad), (mode))
-#define MI_SNR_GetPlaneMode(pad, mode) g_mi_snr.fnGetPlaneMode((pad), (int *)(mode))
+/* Note: vendor MI_SNR_GetPlaneMode writes an int, but MI_BOOL is _Bool (1 byte).
+ * Use a temp int to avoid writing past the bool boundary. */
+static inline int _mi_snr_get_plane_mode(int pad, MI_BOOL *out) {
+	int tmp = 0;
+	int ret = g_mi_snr.fnGetPlaneMode(pad, &tmp);
+	if (out) *out = (MI_BOOL)tmp;
+	return ret;
+}
+#define MI_SNR_GetPlaneMode(pad, mode) _mi_snr_get_plane_mode((pad), (mode))
 #define MI_SNR_SetRes(pad, idx)        g_mi_snr.fnSetRes((pad), (idx))
 #define MI_SNR_GetCurRes(pad, idx, res) g_mi_snr.fnGetCurRes((pad), (idx), (res))
 #define MI_SNR_SetFps(pad, fps)        g_mi_snr.fnSetFps((pad), (fps))
@@ -215,8 +223,8 @@ typedef struct {
 #define MI_SNR_GetRes(pad, idx, res)   g_mi_snr.fnGetRes((pad), (idx), (res))
 #define MI_SNR_GetPadInfo(pad, info)   g_mi_snr.fnGetPadInfo((pad), (info))
 #define MI_SNR_GetPlaneInfo(pad, pl, info) g_mi_snr.fnGetPlaneInfo((pad), (pl), (info))
-#define MI_SNR_Enable(pad)             g_mi_snr.fnEnable(pad)
-#define MI_SNR_Disable(pad)            g_mi_snr.fnDisable(pad)
+#define MI_SNR_Enable(pad)             g_mi_snr.fnEnable((pad))
+#define MI_SNR_Disable(pad)            g_mi_snr.fnDisable((pad))
 #else
 MI_S32 MI_SNR_InitDev(MI_SNR_InitParam_t* init);
 MI_S32 MI_SNR_DeInitDev(void);
@@ -240,10 +248,10 @@ MI_S32 MI_SNR_Disable(MI_SNR_PAD_ID_e pad_id);
 /* MI_VIF ------------------------------------------------------------------ */
 #if defined(PLATFORM_MARUKO)
 #define MI_VIF_SetDevAttr(dev, attr)    g_mi_vif.fnSetDevAttr((dev), (attr))
-#define MI_VIF_EnableDev(dev)           g_mi_vif.fnEnableDev(dev)
-#define MI_VIF_DisableDev(dev)          g_mi_vif.fnDisableDev(dev)
+#define MI_VIF_EnableDev(dev)           g_mi_vif.fnEnableDev((dev))
+#define MI_VIF_DisableDev(dev)          g_mi_vif.fnDisableDev((dev))
 #define MI_VIF_CreateDevGroup(grp, attr) g_mi_vif.fnCreateDevGroup((grp), (attr))
-#define MI_VIF_DestroyDevGroup(grp)     g_mi_vif.fnDestroyDevGroup(grp)
+#define MI_VIF_DestroyDevGroup(grp)     g_mi_vif.fnDestroyDevGroup((grp))
 #define MI_VIF_SetOutputPortAttr(dev, port, attr) \
   g_mi_vif.fnSetOutputPortAttr((dev), (port), (attr))
 #define MI_VIF_EnableOutputPort(dev, port)  g_mi_vif.fnEnableOutputPort((dev), (port))
@@ -263,7 +271,8 @@ MI_S32 MI_VIF_EnableChnPort(MI_VIF_CHN chn, MI_VIF_PORT port);
 MI_S32 MI_VIF_DisableChnPort(MI_VIF_CHN chn, MI_VIF_PORT port);
 #endif
 
-/* MI_VPE ------------------------------------------------------------------ */
+/* MI_VPE — Star6E only (Maruko uses ISP+SCL instead) */
+#if !defined(PLATFORM_MARUKO)
 MI_S32 MI_VPE_CreateChannel(MI_VPE_CHANNEL chn, MI_VPE_ChannelAttr_t* attr);
 MI_S32 MI_VPE_SetChannelAttr(MI_VPE_CHANNEL chn, MI_VPE_ChannelAttr_t* attr);
 MI_S32 MI_VPE_DestroyChannel(MI_VPE_CHANNEL chn);
@@ -275,6 +284,7 @@ MI_S32 MI_VPE_EnablePort(MI_VPE_CHANNEL chn, MI_VPE_PORT port);
 MI_S32 MI_VPE_DisablePort(MI_VPE_CHANNEL chn, MI_VPE_PORT port);
 MI_S32 MI_VPE_SetPortCrop(MI_VPE_CHANNEL chn, MI_VPE_PORT port,
 	i6_common_rect *crop);
+#endif
 
 /* MI_VENC ROI -------------------------------------------------------------- */
 typedef struct {

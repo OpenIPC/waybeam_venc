@@ -49,7 +49,7 @@ typedef int (*maruko_isp_disable_userspace3a_fn_t)(MI_U32 dev_id, MI_U32 channel
 
 /* Maruko VENC/SYS dispatch — routed through dlopen'd function pointers */
 #define maruko_mi_venc_create_dev(dev, init)    g_mi_venc.fnCreateDev((dev), (init))
-#define maruko_mi_venc_destroy_dev(dev)         g_mi_venc.fnDestroyDev(dev)
+#define maruko_mi_venc_destroy_dev(dev)         g_mi_venc.fnDestroyDev((dev))
 #define maruko_mi_venc_create_chn(dev, chn, attr) g_mi_venc.fnCreateChn((dev), (chn), (attr))
 #define maruko_mi_venc_destroy_chn(dev, chn)    g_mi_venc.fnDestroyChn((dev), (chn))
 #define maruko_mi_venc_start_recv(dev, chn)     g_mi_venc.fnStartRecvPic((dev), (chn))

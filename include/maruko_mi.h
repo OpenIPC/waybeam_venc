@@ -16,13 +16,14 @@
 
 #include <stdint.h>
 
-/* Forward declarations — full types are in sigmastar_types.h / star6e.h */
-struct _i6c_isp_chn;
-struct _i6c_isp_para;
-struct _i6c_isp_port;
-struct _i6c_scl_port;
+/*
+ * All config/attr params use void* — callers must pass the correct MI SDK
+ * struct. This is an inherent consequence of the dlopen/dlsym pattern.
+ *
+ * Init/deinit must be called from a single thread before/after any MI calls.
+ * After init, function pointers are read-only and safe for concurrent access.
+ */
 
-/* Use the typedefs already defined in maruko_bindings.h */
 typedef struct {
 	void *handle;
 	int (*fnCreateDevice)(int device, unsigned int *combo);
