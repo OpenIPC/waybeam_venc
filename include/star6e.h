@@ -165,6 +165,18 @@ typedef int MI_VENC_DEV;
     (src_fps), (dst_fps), (link_type), (link_param))
 #define MI_SYS_SetChnOutputPortDepth(chn_port, user_depth, buf_depth) \
   g_mi_sys.fnSetChnOutputPortDepth(0, (void *)(chn_port), (user_depth), (buf_depth))
+#elif defined(PLATFORM_STAR6E)
+#include "star6e_mi.h"
+#define MI_SYS_Init()  g_mi_sys.fnInit()
+#define MI_SYS_Exit()  g_mi_sys.fnExit()
+#define MI_SYS_BindChnPort(src, dst, sf, df) \
+  g_mi_sys.fnBindChnPort((src), (dst), (sf), (df))
+#define MI_SYS_UnBindChnPort(src, dst) \
+  g_mi_sys.fnUnBindChnPort((src), (dst))
+#define MI_SYS_BindChnPort2(src, dst, sf, df, lt, lp) \
+  g_mi_sys.fnBindChnPort2((src), (dst), (sf), (df), (lt), (lp))
+#define MI_SYS_SetChnOutputPortDepth(p, u, b) \
+  g_mi_sys.fnSetChnOutputPortDepth((p), (u), (b))
 #else
 MI_S32 MI_SYS_Init(void);
 MI_S32 MI_SYS_Exit(void);
@@ -225,6 +237,24 @@ static inline int _mi_snr_get_plane_mode(int pad, MI_BOOL *out) {
 #define MI_SNR_GetPlaneInfo(pad, pl, info) g_mi_snr.fnGetPlaneInfo((pad), (pl), (info))
 #define MI_SNR_Enable(pad)             g_mi_snr.fnEnable((pad))
 #define MI_SNR_Disable(pad)            g_mi_snr.fnDisable((pad))
+#elif defined(PLATFORM_STAR6E)
+#define MI_SNR_InitDev(init)           g_mi_snr.fnInitDev(init)
+#define MI_SNR_DeInitDev()             g_mi_snr.fnDeInitDev()
+#define MI_SNR_SetPlaneMode(pad, mode) g_mi_snr.fnSetPlaneMode((pad), (mode))
+#define MI_SNR_GetPlaneMode(pad, mode) g_mi_snr.fnGetPlaneMode((pad), (int *)(mode))
+#define MI_SNR_SetRes(pad, idx)        g_mi_snr.fnSetRes((pad), (idx))
+#define MI_SNR_GetCurRes(pad, idx, res) g_mi_snr.fnGetCurRes((pad), (idx), (res))
+#define MI_SNR_SetFps(pad, fps)        g_mi_snr.fnSetFps((pad), (fps))
+#define MI_SNR_GetFps(pad, fps)        g_mi_snr.fnGetFps((pad), (fps))
+#define MI_SNR_SetOrien(pad, m, f)     g_mi_snr.fnSetOrien((pad), (m), (f))
+#define MI_SNR_CustFunction(pad, cmd, sz, data, dir) \
+  g_mi_snr.fnCustFunction((pad), (cmd), (sz), (data), (dir))
+#define MI_SNR_QueryResCount(pad, cnt) g_mi_snr.fnQueryResCount((pad), (cnt))
+#define MI_SNR_GetRes(pad, idx, res)   g_mi_snr.fnGetRes((pad), (idx), (res))
+#define MI_SNR_GetPadInfo(pad, info)   g_mi_snr.fnGetPadInfo((pad), (info))
+#define MI_SNR_GetPlaneInfo(pad, pl, info) g_mi_snr.fnGetPlaneInfo((pad), (pl), (info))
+#define MI_SNR_Enable(pad)             g_mi_snr.fnEnable((pad))
+#define MI_SNR_Disable(pad)            g_mi_snr.fnDisable((pad))
 #else
 MI_S32 MI_SNR_InitDev(MI_SNR_InitParam_t* init);
 MI_S32 MI_SNR_DeInitDev(void);
@@ -262,6 +292,14 @@ MI_S32 MI_SNR_Disable(MI_SNR_PAD_ID_e pad_id);
   g_mi_vif.fnEnableOutputPort((MI_VIF_DEV)(chn), (MI_VIF_PORT)(port))
 #define MI_VIF_DisableChnPort(chn, port) \
   g_mi_vif.fnDisableOutputPort((MI_VIF_DEV)(chn), (MI_VIF_PORT)(port))
+#elif defined(PLATFORM_STAR6E)
+#define MI_VIF_SetDevAttr(dev, attr)    g_mi_vif.fnSetDevAttr((dev), (attr))
+#define MI_VIF_EnableDev(dev)           g_mi_vif.fnEnableDev((dev))
+#define MI_VIF_DisableDev(dev)          g_mi_vif.fnDisableDev((dev))
+#define MI_VIF_SetChnPortAttr(chn, port, attr) \
+  g_mi_vif.fnSetChnPortAttr((chn), (port), (attr))
+#define MI_VIF_EnableChnPort(chn, port) g_mi_vif.fnEnableChnPort((chn), (port))
+#define MI_VIF_DisableChnPort(chn, port) g_mi_vif.fnDisableChnPort((chn), (port))
 #else
 MI_S32 MI_VIF_SetDevAttr(MI_VIF_DEV dev, MI_VIF_DevAttr_t* attr);
 MI_S32 MI_VIF_EnableDev(MI_VIF_DEV dev);
@@ -272,7 +310,19 @@ MI_S32 MI_VIF_DisableChnPort(MI_VIF_CHN chn, MI_VIF_PORT port);
 #endif
 
 /* MI_VPE — Star6E only (Maruko uses ISP+SCL instead) */
-#if !defined(PLATFORM_MARUKO)
+#if defined(PLATFORM_STAR6E)
+#define MI_VPE_CreateChannel(chn, attr) g_mi_vpe.fnCreateChannel((chn), (attr))
+#define MI_VPE_SetChannelAttr(chn, attr) g_mi_vpe.fnSetChannelAttr((chn), (attr))
+#define MI_VPE_DestroyChannel(chn)      g_mi_vpe.fnDestroyChannel((chn))
+#define MI_VPE_StartChannel(chn)        g_mi_vpe.fnStartChannel((chn))
+#define MI_VPE_StopChannel(chn)         g_mi_vpe.fnStopChannel((chn))
+#define MI_VPE_SetChannelParam(chn, p)  g_mi_vpe.fnSetChannelParam((chn), (p))
+#define MI_VPE_SetPortMode(chn, port, attr) g_mi_vpe.fnSetPortMode((chn), (port), (attr))
+#define MI_VPE_EnablePort(chn, port)    g_mi_vpe.fnEnablePort((chn), (port))
+#define MI_VPE_DisablePort(chn, port)   g_mi_vpe.fnDisablePort((chn), (port))
+#define MI_VPE_SetPortCrop(chn, port, crop) g_mi_vpe.fnSetPortCrop((chn), (port), (crop))
+#elif !defined(PLATFORM_MARUKO)
+/* Test stubs */
 MI_S32 MI_VPE_CreateChannel(MI_VPE_CHANNEL chn, MI_VPE_ChannelAttr_t* attr);
 MI_S32 MI_VPE_SetChannelAttr(MI_VPE_CHANNEL chn, MI_VPE_ChannelAttr_t* attr);
 MI_S32 MI_VPE_DestroyChannel(MI_VPE_CHANNEL chn);
@@ -409,6 +459,38 @@ typedef struct {
 #define MI_VENC_GetRoiCfg(chn, idx, cfg) g_mi_venc.fnGetRoiCfg(0, (chn), (idx), (cfg))
 #define MI_VENC_GetRcParam(chn, param) g_mi_venc.fnGetRcParam(0, (chn), (param))
 #define MI_VENC_SetRcParam(chn, param) g_mi_venc.fnSetRcParam(0, (chn), (param))
+#elif defined(PLATFORM_STAR6E)
+#define MI_VENC_CreateChn(chn, attr)  g_mi_venc.fnCreateChn((chn), (attr))
+#define MI_VENC_DestroyChn(chn)       g_mi_venc.fnDestroyChn((chn))
+#define MI_VENC_StartRecvPic(chn)     g_mi_venc.fnStartRecvPic((chn))
+#define MI_VENC_StopRecvPic(chn)      g_mi_venc.fnStopRecvPic((chn))
+#define MI_VENC_GetStream(chn, strm, ms) g_mi_venc.fnGetStream((chn), (strm), (ms))
+#define MI_VENC_ReleaseStream(chn, strm) g_mi_venc.fnReleaseStream((chn), (strm))
+#define MI_VENC_Query(chn, stat)      g_mi_venc.fnQuery((chn), (stat))
+#define MI_VENC_GetFd(chn)            g_mi_venc.fnGetFd((chn))
+#define MI_VENC_CloseFd(chn)          g_mi_venc.fnCloseFd((chn))
+#define MI_VENC_GetChnAttr(chn, attr) g_mi_venc.fnGetChnAttr((chn), (attr))
+#define MI_VENC_SetChnAttr(chn, attr) g_mi_venc.fnSetChnAttr((chn), (attr))
+#define MI_VENC_GetRcParam(chn, p)    g_mi_venc.fnGetRcParam((chn), (p))
+#define MI_VENC_SetRcParam(chn, p)    g_mi_venc.fnSetRcParam((chn), (p))
+#define MI_VENC_RequestIdr(chn, inst) g_mi_venc.fnRequestIdr((chn), (inst))
+#define MI_VENC_SetRoiCfg(chn, cfg)   g_mi_venc.fnSetRoiCfg((chn), (cfg))
+#define MI_VENC_GetRoiCfg(chn, idx, cfg) g_mi_venc.fnGetRoiCfg((chn), (idx), (cfg))
+#define MI_VENC_SetFrameLostStrategy(chn, p) g_mi_venc.fnSetFrameLostStrategy((chn), (p))
+#define MI_VENC_GetFrameLostStrategy(chn, p) g_mi_venc.fnGetFrameLostStrategy((chn), (p))
+#define MI_VENC_GetChnDevid(chn, dev) g_mi_venc.fnGetChnDevid((chn), (dev))
+
+/* Frame lost strategy types (needed by both dlopen and test paths) */
+typedef enum {
+	E_MI_VENC_FRMLOST_NORMAL = 0,
+	E_MI_VENC_FRMLOST_PSKIP  = 1,
+} MI_VENC_FrameLostMode_e;
+typedef struct {
+	MI_BOOL                  bFrmLostOpen;
+	MI_U32                   u32FrmLostBpsThr;
+	MI_VENC_FrameLostMode_e  eFrmLostMode;
+	MI_U32                   u32EncFrmGaps;
+} MI_VENC_ParamFrameLost_t;
 #else
 MI_S32 MI_VENC_CreateChn(MI_VENC_CHN chn, MI_VENC_ChnAttr_t* attr);
 MI_S32 MI_VENC_DestroyChn(MI_VENC_CHN chn);
@@ -440,10 +522,7 @@ typedef struct {
 } MI_VENC_ParamFrameLost_t;
 MI_S32 MI_VENC_SetFrameLostStrategy(MI_VENC_CHN chn, MI_VENC_ParamFrameLost_t *p);
 MI_S32 MI_VENC_GetFrameLostStrategy(MI_VENC_CHN chn, MI_VENC_ParamFrameLost_t *p);
-
-#if !defined(PLATFORM_MARUKO)
 MI_S32 MI_VENC_GetChnDevid(MI_VENC_CHN chn, MI_U32* device_id);
-#endif
 #endif
 
 #ifdef __cplusplus
