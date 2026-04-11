@@ -190,7 +190,9 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 	/* Also load via MI_ISP_IQ_ApiCmdLoadBinFile to initialize the
 	 * IQ parameter subsystem. Without this, MI_ISP_IQ_Set* calls
 	 * are accepted but have no effect on the image. The IQ variant
-	 * takes raw bin data (not a file path). */
+	 * takes raw bin data (not a file path).
+	 * NOTE: this second load may reset AE parameters from the API
+	 * bin — testing if skipping it fixes dark image issue. */
 	if (ret == 0) {
 		FILE *f = fopen(isp_bin_path, "rb");
 		if (f) {
@@ -205,10 +207,15 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 					RTLD_DEFAULT,
 					"MI_ISP_IQ_ApiCmdLoadBinFile");
 				if (fn) {
-					int iq_ret = fn(0, 0, buf, 1234);
-					printf("> [maruko] IQ bin load: %s "
-						"(%ld bytes) ret=%d\n",
-						isp_bin_path, sz, iq_ret);
+					/* DISABLED: IQ bin reload may reset
+					 * AE params from API bin load above.
+					 * Testing if this fixes dark image. */
+					printf("> [maruko] IQ bin load: "
+						"SKIPPED (testing AE fix)\n");
+					(void)fn;
+				} else {
+					printf("> [maruko] IQ bin load: "
+						"symbol not found (skipped)\n");
 				}
 			}
 			free(buf);
