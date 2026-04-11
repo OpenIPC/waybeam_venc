@@ -432,6 +432,13 @@ static int configure_selected_sensor(const SensorSelectConfig *cfg,
 		}
 	}
 
+	/* Force a mode transition so the framework always runs
+	 * pCus_sensor_init on MI_SNR_Enable.  The framework skips init
+	 * when SetRes selects the boot-default mode (index 0).  Setting
+	 * a different index first ensures a transition is detected. */
+	if (best_index == 0 && mode_count > 1)
+		(void)MI_SNR_SetRes(best_pad, 1);
+
 	ret = MI_SNR_SetRes(best_pad, (MI_U32)best_index);
 	if (ret != 0) {
 		fprintf(stderr, "ERROR: MI_SNR_SetRes(pad %d, index %d) failed %d\n",

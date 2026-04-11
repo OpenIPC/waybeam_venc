@@ -97,7 +97,6 @@ SENSOR_DRV_ENTRY_IMPL_BEGIN_EX(IMX335_HDR);
 static struct { // LINEAR
     enum { LINEAR_RES_1 = 0,
         LINEAR_RES_2,
-        LINEAR_RES_3,
         LINEAR_RES_END } mode;
     struct _senout {
         s32 width, height, min_fps, max_fps;
@@ -124,15 +123,14 @@ static struct { // LINEAR
      *    so there is no way to reduce sensor output resolution without
      *    window mode.
      *
-     * Mode 0: 2592x1944@30fps — boot default placeholder.
-     *          Required at index 0 so modes 1-2 trigger a real mode
-     *          change via MI_SNR_SetRes (framework skips init for
-     *          the boot-default index).
-     * Mode 1: 1920x1080@60fps — windowed, HMAX=275. Verified 59fps.
-     * Mode 2: 1920x1080@90fps — windowed, HMAX=275. Verified 89fps. */
-    { LINEAR_RES_1, { 2592, 1944, 3, 30 }, { 0, 0, 2592, 1944 }, { "2592x1944@30fps" } },
-    { LINEAR_RES_2, { 1920, 1080, 3, 60 }, { 0, 0, 1920, 1080 }, { "1920x1080@60fps" } },
-    { LINEAR_RES_3, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },
+     * Mode 0: 1920x1080@60fps — windowed, HMAX=275. Verified 59fps.
+     * Mode 1: 1920x1080@90fps — windowed, HMAX=275. Verified 89fps.
+     *
+     * sensor_select forces a mode pre-transition (SetRes to index 1
+     * before index 0) so the framework always runs pCus_sensor_init
+     * even when selecting mode 0. */
+    { LINEAR_RES_1, { 1920, 1080, 3, 60 }, { 0, 0, 1920, 1080 }, { "1920x1080@60fps" } },
+    { LINEAR_RES_2, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },
 };
 
 u32 vts_30fps = 4125;
@@ -1029,15 +1027,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
     handle->video_res_supported.ulcur_res = res_idx;
 
     switch (res_idx) {
-    case 0: // 2592x1944@30fps — boot default placeholder
-        handle->pCus_sensor_init = pCus_init_mipi4lane_5m30fps_linear;
-        vts_30fps = 4125;
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 30;
-        Preview_line_period = 8080;
-        break;
-
-    case 1: // 1920x1080@60fps — windowed (Star6E 120fps table)
+    case 0: // 1920x1080@60fps — windowed (Star6E 120fps table)
         handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
         vts_30fps = 4512; // 2256 * 120 / 60
         params->expo.vts = vts_30fps;
@@ -1045,7 +1035,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 3694;
         break;
 
-    case 2: // 1920x1080@90fps — windowed (Star6E 120fps table)
+    case 1: // 1920x1080@90fps — windowed (Star6E 120fps table)
         handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
         vts_30fps = 3008; // 2256 * 120 / 90
         params->expo.vts = vts_30fps;
@@ -1402,7 +1392,7 @@ int cus_camsensor_init_handle_linear(ms_cus_sensor* drv_handle)
     // Sensor Status Control and Get Info //
     ////////////////////////////////////////
     handle->pCus_sensor_release = cus_camsensor_release_handle;
-    handle->pCus_sensor_init = pCus_init_mipi4lane_5m30fps_linear;
+    handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
     handle->pCus_sensor_poweron = pCus_poweron;
     handle->pCus_sensor_poweroff = pCus_poweroff;
     handle->pCus_sensor_GetSensorID = pCus_GetSensorID;
