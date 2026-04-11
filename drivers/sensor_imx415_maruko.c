@@ -1830,6 +1830,28 @@ static int pCus_poweroff(ms_cus_sensor* handle, u32 idx)
     return SUCCESS;
 }
 
+/* Hardware reset the sensor before each mode init.  Toggles the
+ * RESET pin via poweroff→poweron to clear all I2C register state.
+ * Without this, switching between binned and non-binned modes leaves
+ * stale state (e.g. HADD/VADD, DIG_CLP) that causes dark image or
+ * incorrect output — even across soft reboots since the sensor chip
+ * stays powered. */
+static void pCus_HardwareReset(ms_cus_sensor* handle)
+{
+    ISensorIfAPI* sensor_if = handle->sensor_if_api;
+    u32 idx = 0;
+
+    /* Assert reset (active low for IMX415) */
+    sensor_if->Reset(idx, handle->reset_POLARITY);
+    SENSOR_MSLEEP(5);
+
+    /* Deassert reset */
+    sensor_if->Reset(idx, !handle->reset_POLARITY);
+    SENSOR_MSLEEP(20);
+
+    SENSOR_DMSG("[%s] sensor hardware reset complete\n", __FUNCTION__);
+}
+
 /////////////////// Check Sensor Product ID /////////////////////////
 static int pCus_CheckSensorProductID(ms_cus_sensor* handle)
 {
@@ -1996,7 +2018,7 @@ static int pCus_init_2m_90fps_mipi4lane_linear(ms_cus_sensor* handle)
 static int pCus_init_1m_120fps_mipi4lane_linear(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
-
+    pCus_HardwareReset(handle);
     if (pCus_CheckSensorProductID(handle) == FAIL) {
         return FAIL;
     }
@@ -2090,6 +2112,7 @@ const static I2C_ARRAY Sensor_1600x900_30fps_init_table_4lane_linear[] = {
 static int pCus_init_1600x900_30fps_mipi4lane_linear(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
+    pCus_HardwareReset(handle);
     if (pCus_CheckSensorProductID(handle) == FAIL)
         return FAIL;
     for (i = 0; i < ARRAY_SIZE(Sensor_1600x900_30fps_init_table_4lane_linear); i++) {
@@ -2177,6 +2200,7 @@ const static I2C_ARRAY Sensor_1080p_nobinning_init_table[] = {
 static int pCus_init_1080p_nobinning(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
+    pCus_HardwareReset(handle);
     if (pCus_CheckSensorProductID(handle) == FAIL)
         return FAIL;
     for (i = 0; i < ARRAY_SIZE(Sensor_1080p_nobinning_init_table); i++) {
