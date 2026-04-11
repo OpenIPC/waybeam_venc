@@ -151,24 +151,90 @@ MIPI physical layer:
 
 ## What changes per mode
 
+### Binned modes (2×2 binning, HMAX=365)
+
 | Register | Depends on | Formula |
 |----------|-----------|---------|
-| 0x3040-41 | PIX_HST | (3864 - W×2) / 2 |
+| 0x3040-41 | PIX_HST | (3864 - W×2) / 2, 8-aligned |
 | 0x3042-43 | PIX_HWIDTH | W × 2 |
-| 0x3044-45 | PIX_VST | (3836 - H×4) / 2 |
+| 0x3044-45 | PIX_VST | (3836 - H×4) / 2, 8-aligned |
 | 0x3046-47 | PIX_VWIDTH | H × 4 |
 | VMAX (via VTS) | FPS | 1700 × 120 / fps |
 
+### Non-binned modes (no binning, HMAX=1100)
+
+| Register | Depends on | Formula |
+|----------|-----------|---------|
+| 0x3020-22 | Binning | 0x00 (explicit disable required) |
+| 0x301C | WINMODE | 0x04 (crop) — omit for full 4K |
+| 0x3028-29 | HMAX | 0x044C (1100) |
+| 0x3040-41 | PIX_HST | (3864 - W) / 2, 8-aligned |
+| 0x3042-43 | PIX_HWIDTH | W (direct, no multiplier) |
+| 0x3044-45 | PIX_VST | centered, 8-aligned |
+| 0x3046-47 | PIX_VWIDTH | H × 2 (Bayer row pairs) |
+| VMAX (via VTS) | FPS | 2250 for 30fps |
+
+**Critical: PIX_HST and PIX_VST must be 8-aligned** to preserve
+correct RGGB Bayer pattern at the crop boundary. Misalignment
+causes purple/green color tint.
+
+**Critical: HADD/VADD/ADDMODE must be explicitly set to 0** for
+non-binned modes. The sensor retains register state across soft
+reboots — omitting these registers leaves binning active.
+
+## Hardware reset for mode switching
+
+The sensor retains I2C register values across soft reboots because
+the sensor chip stays powered (separate power rail from SoC). This
+means stale registers from a previous mode (e.g. binning, DIG_CLP)
+persist and cause dark image or incorrect output.
+
+**Fix:** Call `pCus_HardwareReset(handle)` at the start of each
+init function. This toggles the hardware RESET pin via the kernel
+VIF driver:
+
+```c
+static void pCus_HardwareReset(ms_cus_sensor* handle) {
+    ISensorIfAPI* sensor_if = handle->sensor_if_api;
+    sensor_if->Reset(0, handle->reset_POLARITY);   // assert reset
+    SENSOR_MSLEEP(5);
+    sensor_if->Reset(0, !handle->reset_POLARITY);  // deassert
+    SENSOR_MSLEEP(20);
+}
+```
+
+Cost: ~25ms per mode init. Enables reliable switching between any
+modes (binned ↔ non-binned) without power cycle.
+
+## ISP bin and AE behavior
+
+- `MI_ISP_API_CmdLoadBinFile` loads the ISP bin for AE/AWB tuning
+- `MI_ISP_IQ_ApiCmdLoadBinFile` reloads IQ parameters but **resets
+  AE state** — must be SKIPPED to avoid dark image regression
+- The IQ Set/Get API works without the IQ bin reload
+- `exposure: 0` in venc config auto-caps to frame period + SetFps
+  kick for maximum FPS (118fps at 120fps mode)
+- `exposure: N` (ms) allows user to trade FPS for brightness
+
 ## Known ISP limits (SSC378QE firmware)
+
+### Binned modes (HMAX=365)
 
 | Resolution | Status | Notes |
 |-----------|--------|-------|
 | 1472×816 | WORKS | All FPS (30-120) |
 | 1600×900 | WORKS | Tested at 30fps |
-| 1920×1080 | FAILS | ISP Skip IQ, Fcnt=0 |
+| 1920×1080 | WORKS | 30fps, binned from 3840×2160 crop |
 
-The ISP limit is between 1600×900 and 1920×1080. Binary search
-recommended: try 1760×990, then 1680×945 or 1856×1044.
+### Non-binned modes (HMAX=1100)
+
+| Resolution | Status | Notes |
+|-----------|--------|-------|
+| 1920×1080 | WORKS | 30fps, correct color |
+| 2560×1440 | WORKS | 30fps, needs 8-aligned PIX offsets |
+| 3840×2160 | FAILS | ISP stalls (full sensor readout) |
+
+ISP non-binned limit is between 2560×1440 and 3840×2160.
 
 ## Build and deploy
 
@@ -196,6 +262,9 @@ The same approach works for any sensor on this platform:
 3. Keep all other registers (analog, PLL, MIPI) identical
 4. Adjust only the crop window and VTS for new resolution/FPS
 5. Binary search to find the ISP's maximum input resolution
+6. Always 8-align PIX_HST/VST for correct Bayer pattern
+7. Explicitly set binning registers to 0 for non-binned modes
+8. Add hardware reset to init functions for reliable mode switching
 
 The ISP resolution limit is a property of the SSC378QE firmware,
 not the sensor. The same limit applies regardless of sensor model.
