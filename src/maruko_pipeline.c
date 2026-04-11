@@ -1207,6 +1207,19 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 		++frame_counter;
 
+		/* Cold-boot FPS kick: the ISP bin's AE overrides sensor
+		 * timing on first init, locking FPS below target (e.g.
+		 * 74fps instead of 89fps).  Re-kick MI_SNR_SetFps after
+		 * ~1 second of frames to force correct sensor timing.
+		 * Same fix as Star6E CUS3A cold-boot FPS lock. */
+		if (frame_counter == (unsigned int)ctx->sensor.fps) {
+			MI_SNR_SetFps(ctx->sensor.pad_id, ctx->sensor.fps);
+			printf("> [maruko] delayed FPS kick: pad %d fps %u "
+				"(cold-boot fix at frame %u)\n",
+				ctx->sensor.pad_id, ctx->sensor.fps,
+				frame_counter);
+		}
+
 		rtp_sidecar_poll(&sidecar);
 
 		uint32_t frame_rtp_ts = rtp_state.timestamp;
