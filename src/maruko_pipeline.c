@@ -1154,7 +1154,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			ctx->venc_channel, &stat);
 		if (ret != 0) {
 			if (ret == -EAGAIN || ret == EAGAIN) {
-				idle_wait(&sidecar, 2);
+				sched_yield();
 				continue;
 			}
 			fprintf(stderr,
