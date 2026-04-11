@@ -2538,9 +2538,10 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
 
     handle->video_res_supported.ulcur_res = res_idx;
 
+    handle->data_prec = CUS_DATAPRECISION_12;
+
     switch (res_idx) {
     case 0: // 3760x2116@30fps — non-binned, 97% FOV, best quality
-        handle->data_prec = CUS_DATAPRECISION_10;
         handle->video_res_supported.ulcur_res = 0;
         handle->pCus_sensor_init = pCus_init_nobinned_dynamic;
         vts_30fps = 2250; // VTS at 30fps with HMAX=1100
@@ -2550,7 +2551,6 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         break;
 
     case 1: // 3760x1024@59fps — non-binned superwide, 97% H FOV
-        handle->data_prec = CUS_DATAPRECISION_10;
         handle->video_res_supported.ulcur_res = 1;
         handle->pCus_sensor_init = pCus_init_nobinned_dynamic;
         vts_30fps = 1143; // VTS at 59fps: 2250*30/59 ≈ 1143
@@ -2560,7 +2560,6 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         break;
 
     case 2: // 1920x1080@60fps — binned, 99% FOV
-        handle->data_prec = CUS_DATAPRECISION_12;
         handle->video_res_supported.ulcur_res = 2;
         handle->pCus_sensor_init = pCus_init_1080p_binned_mipi4lane_linear;
         vts_30fps = 3400; // 1700 * 120/60
@@ -2570,7 +2569,6 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         break;
 
     case 3: // 1920x1080@90fps — binned, 99% FOV
-        handle->data_prec = CUS_DATAPRECISION_12;
         handle->video_res_supported.ulcur_res = 3;
         handle->pCus_sensor_init = pCus_init_1080p_binned_mipi4lane_linear;
         vts_30fps = 2267; // 1700 * 120/90
@@ -2580,7 +2578,6 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         break;
 
     case 4: // 1472x816@120fps — binned, 76% FOV, ultra-low latency
-        handle->data_prec = CUS_DATAPRECISION_12;
         handle->video_res_supported.ulcur_res = 4;
         handle->pCus_sensor_init = pCus_init_1m_120fps_mipi4lane_linear;
         vts_30fps = 1700;
