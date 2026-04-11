@@ -43,7 +43,7 @@ void *star6e_load_symbol(void *handle, const char *lib_name,
 static int i6e_sys_load(star6e_sys_impl *sys)
 {
 	memset(sys, 0, sizeof(*sys));
-	sys->handle = dlopen("libmi_sys.so", RTLD_LAZY | RTLD_GLOBAL);
+	sys->handle = dlopen("libmi_sys.so", RTLD_NOW | RTLD_GLOBAL);
 	if (!sys->handle) {
 		fprintf(stderr, "ERROR: [star6e] dlopen(libmi_sys.so): %s\n",
 			dlerror());
@@ -87,7 +87,7 @@ static void i6e_sys_unload(star6e_sys_impl *sys)
 static int i6e_vif_load(star6e_vif_impl *vif)
 {
 	memset(vif, 0, sizeof(*vif));
-	vif->handle = dlopen("libmi_vif.so", RTLD_LAZY | RTLD_GLOBAL);
+	vif->handle = dlopen("libmi_vif.so", RTLD_NOW | RTLD_GLOBAL);
 	if (!vif->handle) {
 		fprintf(stderr, "ERROR: [star6e] dlopen(libmi_vif.so): %s\n",
 			dlerror());
@@ -128,7 +128,7 @@ static void i6e_vif_unload(star6e_vif_impl *vif)
 static int i6e_vpe_load(star6e_vpe_impl *vpe)
 {
 	memset(vpe, 0, sizeof(*vpe));
-	vpe->handle = dlopen("libmi_vpe.so", RTLD_LAZY | RTLD_GLOBAL);
+	vpe->handle = dlopen("libmi_vpe.so", RTLD_NOW | RTLD_GLOBAL);
 	if (!vpe->handle) {
 		fprintf(stderr, "ERROR: [star6e] dlopen(libmi_vpe.so): %s\n",
 			dlerror());
@@ -182,7 +182,7 @@ static void i6e_vpe_unload(star6e_vpe_impl *vpe)
 static int i6e_snr_load(star6e_snr_impl *snr)
 {
 	memset(snr, 0, sizeof(*snr));
-	snr->handle = dlopen("libmi_sensor.so", RTLD_LAZY | RTLD_GLOBAL);
+	snr->handle = dlopen("libmi_sensor.so", RTLD_NOW | RTLD_GLOBAL);
 	if (!snr->handle) {
 		fprintf(stderr, "ERROR: [star6e] dlopen(libmi_sensor.so): %s\n",
 			dlerror());
@@ -247,7 +247,7 @@ static void i6e_snr_unload(star6e_snr_impl *snr)
 static int i6e_venc_load(star6e_venc_impl *venc)
 {
 	memset(venc, 0, sizeof(*venc));
-	venc->handle = dlopen("libmi_venc.so", RTLD_LAZY | RTLD_GLOBAL);
+	venc->handle = dlopen("libmi_venc.so", RTLD_NOW | RTLD_GLOBAL);
 	if (!venc->handle) {
 		fprintf(stderr, "ERROR: [star6e] dlopen(libmi_venc.so): %s\n",
 			dlerror());
@@ -319,12 +319,28 @@ static void i6e_venc_unload(star6e_venc_impl *venc)
 
 int star6e_mi_init(void)
 {
-	/* Pre-load transitive dependencies with RTLD_GLOBAL */
-	h_cam_os = dlopen("libcam_os_wrapper.so", RTLD_LAZY | RTLD_GLOBAL);
+	/* Load order matters: vendor libs have cross-library symbol deps.
+	 * With direct linking the dynamic linker resolved these at startup.
+	 * With dlopen we must load in dependency order:
+	 *   cam_os_wrapper → sys → ispalgo → cus3a → isp → vif/vpe/snr/venc
+	 *
+	 * Using RTLD_NOW ensures constructors run with all symbols resolved.
+	 * Using RTLD_GLOBAL makes symbols available to subsequently loaded libs. */
+
+	h_cam_os = dlopen("libcam_os_wrapper.so", RTLD_NOW | RTLD_GLOBAL);
 	if (!h_cam_os)
 		fprintf(stderr, "WARNING: [star6e] dlopen(libcam_os_wrapper.so): %s\n",
 			dlerror());
 
+	/* SYS must load before cus3a (needs MI_SYS_Mmap) */
+	if (i6e_sys_load(&g_mi_sys) != 0) {
+		fprintf(stderr, "ERROR: [star6e] failed to load MI SYS\n");
+		goto fail;
+	}
+
+	/* ISP and CUS3A have circular symbol dependencies — load both with
+	 * RTLD_LAZY first, then their cross-references resolve on first use.
+	 * ispalgo must load before both. */
 	h_ispalgo = dlopen("libispalgo.so", RTLD_LAZY | RTLD_GLOBAL);
 	if (!h_ispalgo)
 		fprintf(stderr, "WARNING: [star6e] dlopen(libispalgo.so): %s\n",
@@ -335,12 +351,13 @@ int star6e_mi_init(void)
 		fprintf(stderr, "WARNING: [star6e] dlopen(libcus3a.so): %s\n",
 			dlerror());
 
-	/* Load modules in dependency order. On failure, star6e_mi_deinit()
-	 * safely unloads any already-loaded modules. */
-	if (i6e_sys_load(&g_mi_sys) != 0) {
-		fprintf(stderr, "ERROR: [star6e] failed to load MI SYS\n");
-		goto fail;
-	}
+	/* ISP must load before VPE (VPE references MI_ISP_DisableUserspace3A) */
+	static void *h_isp;
+	h_isp = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!h_isp)
+		fprintf(stderr, "WARNING: [star6e] dlopen(libmi_isp.so): %s\n",
+			dlerror());
+
 	if (i6e_vif_load(&g_mi_vif) != 0) {
 		fprintf(stderr, "ERROR: [star6e] failed to load MI VIF\n");
 		goto fail;
