@@ -135,6 +135,7 @@ static struct { // LINEAR
         LINEAR_RES_2,
         LINEAR_RES_3,
         LINEAR_RES_4,
+        LINEAR_RES_5,
         LINEAR_RES_END } mode;
     // Sensor Output Image info
     struct _senout {
@@ -149,15 +150,17 @@ static struct { // LINEAR
         const char* strResDesc;
     } senstr;
 } imx415_mipi_linear[] = {
-    /* Maruko (SSC378QE) — optimized mode table.
-     * Mode 0: non-binned near-full sensor, max quality at 30fps (97% FOV).
-     * Mode 1: binned 1080p@60fps, full FOV (99%).
-     * Mode 2: binned 1080p@90fps, full FOV (99%).
-     * Mode 3: binned 816p@120fps, ultra-low latency (76% FOV). */
+    /* Maruko (SSC378QE) — sorted by FPS, lowest to highest.
+     * Mode 0: 3760x2116@30fps  non-binned, 97% FOV, best quality
+     * Mode 1: 3760x1024@59fps  non-binned superwide, 97% H FOV
+     * Mode 2: 1920x1080@60fps  binned, 99% FOV
+     * Mode 3: 1920x1080@90fps  binned, 99% FOV
+     * Mode 4: 1472x816@120fps  binned, 76% FOV, ultra-low latency */
     { LINEAR_RES_1, { 3760, 2116, 3, 30 }, { 0, 0, 3760, 2116 }, { "3760x2116@30fps" } },  /* non-binned */
-    { LINEAR_RES_2, { 1920, 1080, 3, 60 }, { 0, 0, 1920, 1080 }, { "1920x1080@60fps" } },  /* binned */
-    { LINEAR_RES_3, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },  /* binned */
-    { LINEAR_RES_4, { 1472, 816, 3, 120 }, { 0, 0, 1472, 816 }, { "1472x816@120fps" } },   /* binned */
+    { LINEAR_RES_2, { 3760, 1024, 3, 59 }, { 0, 0, 3760, 1024 }, { "3760x1024@59fps" } },  /* non-binned superwide */
+    { LINEAR_RES_3, { 1920, 1080, 3, 60 }, { 0, 0, 1920, 1080 }, { "1920x1080@60fps" } },  /* binned */
+    { LINEAR_RES_4, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },  /* binned */
+    { LINEAR_RES_5, { 1472, 816, 3, 120 }, { 0, 0, 1472, 816 }, { "1472x816@120fps" } },   /* binned */
 };
 
 static struct { // HDR
@@ -2071,6 +2074,106 @@ const static I2C_ARRAY Sensor_nobinned_base_init_table[] = {
     { 0xFFFF, 0x24 }, { 0x3002, 0x00 }, { 0xFFFF, 0x10 }, { 0x3000, 0x00 },
 };
 
+/* Non-binned 60fps base — HMAX=1100 (same as 30fps), I6C clocks.
+ * Height must be < VTS at target FPS (VTS ≈ 1125 at 60fps). */
+const static I2C_ARRAY Sensor_nobinned_60fps_base_init_table[] = {
+    { 0x3000, 0x01 }, // Standby
+    { 0x3002, 0x01 }, // Master mode stop
+    { 0x3008, 0x5D }, // BCWAIT_TIME
+    { 0x300A, 0x42 }, // CPWAIT_TIME
+    { 0x301C, 0x04 }, // WINMODE (crop)
+    { 0x3020, 0x00 }, // HADD = no binning
+    { 0x3021, 0x00 }, // VADD = no binning
+    { 0x3022, 0x00 }, // ADDMODE = no binning
+    { 0x3024, 0xCA }, // VMAX default (overridden by SetFPS)
+    { 0x3025, 0x08 },
+    { 0x3028, 0x4C }, // HMAX = 1100 = 0x044C (non-binned min)
+    { 0x3029, 0x04 },
+    { 0x3031, 0x00 }, // ADBIT = 10-bit ADC
+    { 0x3033, 0x05 }, // SYS_MODE (891 Mbps — I6C proven)
+    { 0x3050, 0x08 }, // SHR0
+    { 0x30C1, 0x00 },
+    { 0x3116, 0x23 }, // INCKSEL2
+    { 0x3118, 0xC6 }, // INCKSEL3 (I6C clock — proven)
+    { 0x311A, 0xE7 }, // INCKSEL4
+    { 0x311E, 0x23 }, // INCKSEL5
+    { 0x32D4, 0x21 }, { 0x32EC, 0xA1 },
+    { 0x3452, 0x7F }, { 0x3453, 0x03 },
+    { 0x358A, 0x04 }, { 0x35A1, 0x02 }, { 0x36BC, 0x0C },
+    { 0x36CC, 0x53 }, { 0x36CD, 0x00 }, { 0x36CE, 0x3C },
+    { 0x36D0, 0x8C }, { 0x36D1, 0x00 }, { 0x36D2, 0x71 },
+    { 0x36D4, 0x3C }, { 0x36D6, 0x53 }, { 0x36D7, 0x00 },
+    { 0x36D8, 0x71 }, { 0x36DA, 0x8C }, { 0x36DB, 0x00 },
+    { 0x3701, 0x00 },
+    { 0x3724, 0x02 }, { 0x3726, 0x02 }, { 0x3732, 0x02 },
+    { 0x3734, 0x03 }, { 0x3736, 0x03 }, { 0x3742, 0x03 },
+    { 0x3862, 0xE0 }, { 0x38CC, 0x30 }, { 0x38CD, 0x2F },
+    { 0x395C, 0x0C }, { 0x3A42, 0xD1 }, { 0x3A4C, 0x77 },
+    { 0x3AE0, 0x02 }, { 0x3AEC, 0x0C },
+    { 0x3B00, 0x2E }, { 0x3B06, 0x29 },
+    { 0x3B98, 0x25 }, { 0x3B99, 0x21 },
+    { 0x3B9B, 0x13 }, { 0x3B9C, 0x13 }, { 0x3B9D, 0x13 }, { 0x3B9E, 0x13 },
+    { 0x3BA1, 0x00 }, { 0x3BA2, 0x06 }, { 0x3BA3, 0x0B }, { 0x3BA4, 0x10 },
+    { 0x3BA5, 0x14 }, { 0x3BA6, 0x18 }, { 0x3BA7, 0x1A }, { 0x3BA8, 0x1A },
+    { 0x3BA9, 0x1A },
+    { 0x3BAC, 0xED }, { 0x3BAD, 0x01 }, { 0x3BAE, 0xF6 }, { 0x3BAF, 0x02 },
+    { 0x3BB0, 0xA2 }, { 0x3BB1, 0x03 }, { 0x3BB2, 0xE0 }, { 0x3BB3, 0x03 },
+    { 0x3BB4, 0xE0 }, { 0x3BB5, 0x03 }, { 0x3BB6, 0xE0 }, { 0x3BB7, 0x03 },
+    { 0x3BB8, 0xE0 }, { 0x3BBA, 0xE0 }, { 0x3BBC, 0xDA }, { 0x3BBE, 0x88 },
+    { 0x3BC0, 0x44 }, { 0x3BC2, 0x7B }, { 0x3BC4, 0xA2 },
+    { 0x3BC8, 0xBD }, { 0x3BCA, 0xBD },
+    { 0x4004, 0xC0 }, { 0x4005, 0x06 }, { 0x400C, 0x00 },
+    { 0x4018, 0x7F }, { 0x401A, 0x37 }, { 0x401C, 0x37 },
+    { 0x401E, 0xF7 }, { 0x401F, 0x00 }, { 0x4020, 0x3F },
+    { 0x4022, 0x6F }, { 0x4024, 0x3F }, { 0x4026, 0x5F },
+    { 0x4028, 0x2F }, { 0x4074, 0x01 },
+    { 0xFFFF, 0x24 }, { 0x3002, 0x00 }, { 0xFFFF, 0x10 }, { 0x3000, 0x00 },
+};
+
+/* Dynamic non-binned 60fps init — same PIX computation, 1485Mbps base. */
+static int pCus_init_nobinned_60fps_dynamic(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+    u32 res_idx = handle->video_res_supported.ulcur_res;
+    u32 w = imx415_mipi_linear[res_idx].senout.width;
+    u32 h = imx415_mipi_linear[res_idx].senout.height;
+    u16 pix_hwidth = w;
+    u16 pix_vwidth = h * 2;
+    u16 pix_hst = ((3864 - pix_hwidth) / 2) & ~7;
+    u16 pix_vst = (pix_vwidth < 4384) ? (((4384 - pix_vwidth) / 2) & ~7) : 0;
+
+    pCus_HardwareReset(handle);
+    if (pCus_CheckSensorProductID(handle) == FAIL)
+        return FAIL;
+
+    for (i = 0; i < ARRAY_SIZE(Sensor_nobinned_60fps_base_init_table); i++) {
+        if (Sensor_nobinned_60fps_base_init_table[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_nobinned_60fps_base_init_table[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_nobinned_60fps_base_init_table[i].reg,
+                    Sensor_nobinned_60fps_base_init_table[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+
+    SensorReg_Write(0x3040, pix_hst & 0xFF);
+    SensorReg_Write(0x3041, (pix_hst >> 8) & 0xFF);
+    SensorReg_Write(0x3042, pix_hwidth & 0xFF);
+    SensorReg_Write(0x3043, (pix_hwidth >> 8) & 0xFF);
+    SensorReg_Write(0x3044, pix_vst & 0xFF);
+    SensorReg_Write(0x3045, (pix_vst >> 8) & 0xFF);
+    SensorReg_Write(0x3046, pix_vwidth & 0xFF);
+    SensorReg_Write(0x3047, (pix_vwidth >> 8) & 0xFF);
+
+    return SUCCESS;
+}
+
 /* Dynamic non-binned init — computes PIX crop from mode table resolution.
  * Non-binned: PIX_HWIDTH=W, PIX_VWIDTH=H*2, centered and 8-aligned. */
 static int pCus_init_nobinned_dynamic(ms_cus_sensor* handle)
@@ -2545,8 +2648,17 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 14815; // HMAX=1100 at INCKSEL3=0xC6
         break;
 
-    case 1: // 1920x1080@60fps — binned, 99% FOV
+    case 1: // 3760x1024@59fps — non-binned superwide, 97% H FOV
         handle->video_res_supported.ulcur_res = 1;
+        handle->pCus_sensor_init = pCus_init_nobinned_60fps_dynamic;
+        vts_30fps = 1143; // VTS at 59fps: 2250*30/59 ≈ 1143
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 59;
+        Preview_line_period = 14815; // HMAX=1100 at INCKSEL3=0xC6
+        break;
+
+    case 2: // 1920x1080@60fps — binned, 99% FOV
+        handle->video_res_supported.ulcur_res = 2;
         handle->pCus_sensor_init = pCus_init_1080p_binned_mipi4lane_linear;
         vts_30fps = 3400; // 1700 * 120/60
         params->expo.vts = vts_30fps;
@@ -2554,8 +2666,8 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 4882;
         break;
 
-    case 2: // 1920x1080@90fps — binned, 99% FOV
-        handle->video_res_supported.ulcur_res = 2;
+    case 3: // 1920x1080@90fps — binned, 99% FOV
+        handle->video_res_supported.ulcur_res = 3;
         handle->pCus_sensor_init = pCus_init_1080p_binned_mipi4lane_linear;
         vts_30fps = 2267; // 1700 * 120/90
         params->expo.vts = vts_30fps;
@@ -2563,8 +2675,8 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 4882;
         break;
 
-    case 3: // 1472x816@120fps — binned, 76% FOV, ultra-low latency
-        handle->video_res_supported.ulcur_res = 3;
+    case 4: // 1472x816@120fps — binned, 76% FOV, ultra-low latency
+        handle->video_res_supported.ulcur_res = 4;
         handle->pCus_sensor_init = pCus_init_1m_120fps_mipi4lane_linear;
         vts_30fps = 1700;
         params->expo.vts = vts_30fps;
