@@ -154,7 +154,7 @@ static struct { // LINEAR
      * Mode 1: 1472x816 binned @ 60fps — proven working.
      * Mode 2: 1472x816 binned @ 90fps — proven working.
      * Mode 3: 1472x816 binned @ 120fps — proven working. */
-    { LINEAR_RES_1, { 1600, 900, 3, 30 }, { 0, 0, 1600, 900 }, { "1600x900@30fps" } },
+    { LINEAR_RES_1, { 1920, 1080, 3, 30 }, { 0, 0, 1920, 1080 }, { "1920x1080@30fps" } },
     { LINEAR_RES_2, { 1472, 816, 3, 60 }, { 0, 0, 1472, 816 }, { "1472x816@60fps" } },
     { LINEAR_RES_3, { 1472, 816, 3, 90 }, { 0, 0, 1472, 816 }, { "1472x816@90fps" } },
     { LINEAR_RES_4, { 1472, 816, 3, 120 }, { 0, 0, 1472, 816 }, { "1472x816@120fps" } },
@@ -2020,10 +2020,9 @@ static int pCus_init_1m_120fps_mipi4lane_linear(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
-/* Maruko 1600x900@30fps binned — empirically derived from 120fps table.
- * Same analog/MIPI/clock config as 120fps, only PIX crop window enlarged
- * to 3200x3600 (binned to 1600x900) and VMAX extended for 30fps.
- * Testing ISP resolution limit between 1472x816 and 1920x1080. */
+/* Maruko 1920x1080@30fps binned — full 1080p via crop+binning.
+ * PIX_HWIDTH=3840(1920×2), PIX_VWIDTH=4320(1080×4).
+ * PIX_HST=12, PIX_VST=0. */
 const static I2C_ARRAY Sensor_1600x900_30fps_init_table_4lane_linear[] = {
     { 0x3000, 0x01 }, // Standby
     { 0x3002, 0x01 }, // Master mode stop
@@ -2039,14 +2038,14 @@ const static I2C_ARRAY Sensor_1600x900_30fps_init_table_4lane_linear[] = {
     { 0x3029, 0x01 },
     { 0x3031, 0x00 }, // ADBIT
     { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
-    { 0x3040, 0x4C }, // PIX_HST = 332 = 0x014C (centered 3200 in 3864)
-    { 0x3041, 0x01 },
-    { 0x3042, 0x80 }, // PIX_HWIDTH = 3200 = 0x0C80
-    { 0x3043, 0x0C },
-    { 0x3044, 0x78 }, // PIX_VST = 120 = 0x0078 (centered 3600 in ~3836)
+    { 0x3040, 0x0C }, // PIX_HST = 12 = 0x000C (centered 3840 in 3864)
+    { 0x3041, 0x00 },
+    { 0x3042, 0x00 }, // PIX_HWIDTH = 3840 = 0x0F00
+    { 0x3043, 0x0F },
+    { 0x3044, 0x00 }, // PIX_VST = 0
     { 0x3045, 0x00 },
-    { 0x3046, 0x10 }, // PIX_VWIDTH = 3600 = 0x0E10
-    { 0x3047, 0x0E },
+    { 0x3046, 0xE0 }, // PIX_VWIDTH = 4320 = 0x10E0 (1080×4)
+    { 0x3047, 0x10 },
     { 0x3050, 0x08 }, // SHR0
     { 0x30C1, 0x00 },
     { 0x30D9, 0x02 }, // DIG_CLP (binning)
@@ -2411,7 +2410,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
     handle->data_prec = CUS_DATAPRECISION_12;
 
     switch (res_idx) {
-    case 0: // 1600x900@30fps — binned, enlarged crop from 120fps base
+    case 0: // 1920x1080@30fps — full 1080p binned
         handle->video_res_supported.ulcur_res = 0;
         handle->pCus_sensor_init = pCus_init_1600x900_30fps_mipi4lane_linear;
         vts_30fps = 6800; // same as 120fps VTS scaled to 30fps
