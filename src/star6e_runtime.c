@@ -372,8 +372,6 @@ static void start_custom_ae(const Star6ePipelineState *ps,
 	ae_cfg.sensor_fps = ps->sensor.fps;
 	if (vcfg->isp.ae_fps > 0)
 		ae_cfg.ae_fps = vcfg->isp.ae_fps;
-	if (vcfg->isp.exposure > 0)
-		ae_cfg.shutter_max_us = vcfg->isp.exposure * 1000;
 	if (vcfg->isp.gain_max > 0)
 		ae_cfg.gain_max = vcfg->isp.gain_max;
 	ae_cfg.verbose = vcfg->system.verbose;

@@ -32,7 +32,6 @@ typedef struct {
 
 typedef struct {
 	char sensor_bin[VENC_CONFIG_STRING_MAX];
-	uint32_t exposure;     /* milliseconds in JSON config, 0 = auto */
 	bool legacy_ae;        /* true = use legacy ISP AE + handoff instead of custom AE */
 	uint32_t ae_fps;       /* custom AE rate in Hz (default 15) */
 	uint32_t gain_max;     /* max sensor gain (0 = use ISP bin default) */

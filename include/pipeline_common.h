@@ -25,10 +25,9 @@ typedef struct {
 	uint16_t x, y, w, h;
 } PipelinePrecropRect;
 
-/** Cap AE max shutter time to avoid frame drops at target FPS.
- * fps = 0 uses only user_cap_us as absolute override.
- * user_cap_us = 0 derives cap from fps. Both zero = no-op. */
-int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us);
+/** Cap AE max shutter time to frame period for target FPS.
+ * fps = 0 is a no-op. */
+int pipeline_common_cap_exposure_for_fps(uint32_t fps);
 
 /** Compute center-crop rectangle to match target aspect ratio.
  * Returns a rectangle that crops the sensor output to the aspect ratio of

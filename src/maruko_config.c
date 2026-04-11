@@ -79,7 +79,6 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->isp_bin_path = vcfg->isp.sensor_bin[0] ?
 		vcfg->isp.sensor_bin : NULL;
 	cfg->vpe_level_3dnr = vcfg->fpv.noise_level;
-	cfg->exposure_cap_us = vcfg->isp.exposure * 1000;
 	cfg->sensor_unlock = (SensorUnlockConfig){
 		.enabled = vcfg->sensor.unlock_enabled ? 1 : 0,
 		.cmd_id = vcfg->sensor.unlock_cmd,

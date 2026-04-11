@@ -546,12 +546,6 @@ int star6e_cus3a_running(void)
 	return g_cus3a.running;
 }
 
-void star6e_cus3a_set_shutter_max(uint32_t max_us)
-{
-	if (max_us > 0)
-		g_cus3a.shutter_max_us = max_us;
-}
-
 void star6e_cus3a_set_gain_max(uint32_t gain)
 {
 	g_cus3a.gain_max = gain;

@@ -33,7 +33,6 @@ typedef struct {
 	int forced_sensor_mode;
 	const char *isp_bin_path;
 	int vpe_level_3dnr;
-	uint32_t exposure_cap_us;
 	SensorUnlockConfig sensor_unlock;
 	int oc_level;
 	int verbose;

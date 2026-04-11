@@ -16,7 +16,6 @@ typedef struct {
 	int (*apply_gop)(uint32_t gop_size);
 	int (*apply_qp_delta)(int delta);
 	int (*apply_roi_qp)(int qp);
-	int (*apply_exposure)(uint32_t us);
 	int (*apply_gain_max)(uint32_t gain);
 	int (*apply_verbose)(bool on);
 	int (*apply_output_enabled)(bool on);

@@ -87,7 +87,6 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* isp */
 	cfg->isp.sensor_bin[0] = '\0';
-	cfg->isp.exposure = 0;
 	cfg->isp.legacy_ae = true;
 	cfg->isp.ae_fps = 15;
 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
@@ -102,8 +101,8 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->video0.codec, sizeof(cfg->video0.codec), "h265");
 	safe_strcpy(cfg->video0.rc_mode, sizeof(cfg->video0.rc_mode), "cbr");
 	cfg->video0.fps = 60;
-	cfg->video0.width = 1920;
-	cfg->video0.height = 1080;
+	cfg->video0.width = 0;
+	cfg->video0.height = 0;
 	cfg->video0.bitrate = 8192;
 	cfg->video0.gop_size = 1.0;
 	cfg->video0.qp_delta = -4;
@@ -238,7 +237,6 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 	if (!obj) return;
 	safe_strcpy(s->sensor_bin, sizeof(s->sensor_bin),
 		json_get_string(obj, "sensorBin", s->sensor_bin));
-	s->exposure = (uint32_t)json_get_int(obj, "exposure", (int)s->exposure);
 	s->legacy_ae = json_get_bool(obj, "legacyAe", s->legacy_ae);
 	s->ae_fps = (uint32_t)json_get_int(obj, "aeFps", (int)s->ae_fps);
 	s->gain_max = (uint32_t)json_get_int(obj, "gainMax", (int)s->gain_max);
@@ -264,17 +262,17 @@ static void load_image(const cJSON *root, VencConfigImage *s)
 
 static int parse_resolution(const char *str, uint32_t *w, uint32_t *h)
 {
-	/* Accept "WxH", "720p", "1080p", "4MP" */
+	/* Accept "auto", "WxH", "720p", "1080p" */
+	if (!strcmp(str, "auto")) {
+		*w = 0; *h = 0;
+		return 0;
+	}
 	if (!strcmp(str, "720p")) {
 		*w = 1280; *h = 720;
 		return 0;
 	}
 	if (!strcmp(str, "1080p")) {
 		*w = 1920; *h = 1080;
-		return 0;
-	}
-	if (!strcmp(str, "4MP")) {
-		*w = 2688; *h = 1520;
 		return 0;
 	}
 	if (sscanf(str, "%ux%u", w, h) == 2)
@@ -620,7 +618,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	cJSON *isp = cJSON_AddObjectToObject(root, "isp");
 	if (isp) {
 		cJSON_AddStringToObject(isp, "sensorBin", cfg->isp.sensor_bin);
-		cJSON_AddNumberToObject(isp, "exposure", cfg->isp.exposure);
 		cJSON_AddBoolToObject(isp, "legacyAe", cfg->isp.legacy_ae);
 		cJSON_AddNumberToObject(isp, "aeFps", cfg->isp.ae_fps);
 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);
@@ -642,10 +639,14 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(vid, "codec", cfg->video0.codec);
 		cJSON_AddStringToObject(vid, "rcMode", cfg->video0.rc_mode);
 		cJSON_AddNumberToObject(vid, "fps", cfg->video0.fps);
-		char size_buf[32];
-		snprintf(size_buf, sizeof(size_buf), "%ux%u",
-			cfg->video0.width, cfg->video0.height);
-		cJSON_AddStringToObject(vid, "size", size_buf);
+		if (cfg->video0.width > 0 && cfg->video0.height > 0) {
+			char size_buf[32];
+			snprintf(size_buf, sizeof(size_buf), "%ux%u",
+				cfg->video0.width, cfg->video0.height);
+			cJSON_AddStringToObject(vid, "size", size_buf);
+		} else {
+			cJSON_AddStringToObject(vid, "size", "auto");
+		}
 		cJSON_AddNumberToObject(vid, "bitrate", cfg->video0.bitrate);
 		cJSON_AddNumberToObject(vid, "gopSize", cfg->video0.gop_size);
 		cJSON_AddNumberToObject(vid, "qpDelta", cfg->video0.qp_delta);

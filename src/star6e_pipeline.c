@@ -333,9 +333,9 @@ void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 	g_cus3a_handoff_done = 1;
 }
 
-int star6e_pipeline_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
+int star6e_pipeline_cap_exposure_for_fps(uint32_t fps)
 {
-	return pipeline_common_cap_exposure_for_fps(fps, user_cap_us);
+	return pipeline_common_cap_exposure_for_fps(fps);
 }
 
 static void star6e_pipeline_stop_sensor(MI_SNR_PAD_ID_e pad_id)
@@ -777,17 +777,11 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 		return -1;
 	}
 
-	/* When legacyAe is active and no explicit exposure cap is set, the
-	 * ISP bin's built-in AE ignores SetExposureLimit for the physical
-	 * sensor register.  Auto-derive a cap from the sensor fps so the
-	 * shutter never exceeds the frame period.  Without this, the AE
-	 * converges on a long exposure that locks fps below the target. */
-	if (vcfg->isp.exposure > 0)
-		pconf->exposure_cap_us = vcfg->isp.exposure * 1000;
-	else if (vcfg->isp.legacy_ae && pconf->sensor_framerate > 0)
-		pconf->exposure_cap_us = 1000000 / pconf->sensor_framerate;
-	else
-		pconf->exposure_cap_us = 0;
+	/* Auto-cap exposure to frame period so the AE shutter never exceeds
+	 * the frame period.  Without this, the AE converges on a long
+	 * exposure that locks fps below the target. */
+	pconf->exposure_cap_us = (pconf->sensor_framerate > 0) ?
+		1000000 / pconf->sensor_framerate : 0;
 	pconf->image_mirror    = vcfg->image.mirror ? 1 : 0;
 	pconf->image_flip      = vcfg->image.flip   ? 1 : 0;
 	pconf->vpe_level_3dnr  = vcfg->fpv.noise_level;
@@ -858,6 +852,11 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	pconf->sensor_framerate = state->sensor.fps;
 	pconf->venc_gop_size = pipeline_common_gop_frames(vcfg->video0.gop_size,
 		pconf->sensor_framerate);
+	/* Auto resolution: 0x0 means use sensor native dimensions */
+	if (pconf->image_width == 0 || pconf->image_height == 0) {
+		pconf->image_width = sensor_width;
+		pconf->image_height = sensor_height;
+	}
 	pipeline_common_clamp_image_size("", sensor_width, sensor_height,
 		&pconf->image_width, &pconf->image_height);
 	state->image_width  = pconf->image_width;
@@ -964,8 +963,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	 * can converge on a shutter time longer than the frame period during
 	 * the ISP bin load + CUS3A init window, locking the pipeline at a
 	 * lower framerate until reinit. */
-	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate,
-		pconf->exposure_cap_us);
+	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate);
 
 	bind_src_fps = state->sensor.mode.maxFps ?
 		state->sensor.mode.maxFps : pconf->sensor_framerate;
@@ -1009,8 +1007,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	}
 	/* Reapply exposure cap after ISP bin load — the bin may reset AE
 	 * limits to its own defaults which could exceed the frame period. */
-	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate,
-		pconf->exposure_cap_us);
+	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate);
 
 	/* Cold-boot fix: with legacyAe the ISP bin's AE may initialize the
 	 * sensor at a shutter exceeding the frame period.  SetExposureLimit
@@ -1336,6 +1333,12 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 	prev_image_width  = state->image_width;
 	prev_image_height = state->image_height;
 
+	/* Auto resolution: 0x0 means keep dimensions from initial sensor
+	 * selection rather than re-deriving from raw capture size. */
+	if (pconf.image_width == 0 || pconf.image_height == 0) {
+		pconf.image_width = state->image_width;
+		pconf.image_height = state->image_height;
+	}
 	pipeline_common_clamp_image_size("",
 		state->sensor.plane.capt.width,
 		state->sensor.plane.capt.height,
