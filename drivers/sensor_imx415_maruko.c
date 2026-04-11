@@ -2084,8 +2084,8 @@ static int pCus_init_nobinned_dynamic(ms_cus_sensor* handle)
     u32 res_idx = handle->video_res_supported.ulcur_res;
     u32 w = imx415_mipi_linear[res_idx].senout.width;
     u32 h = imx415_mipi_linear[res_idx].senout.height;
-    u16 pix_hwidth = w;
-    u16 pix_vwidth = h * 2;
+    u16 pix_hwidth = (w <= 3864) ? (u16)w : 3864;
+    u16 pix_vwidth = (h * 2 <= 4384) ? (u16)(h * 2) : 4384;
     u16 pix_hst = ((3864 - pix_hwidth) / 2) & ~7; /* 8-aligned center */
     u16 pix_vst = (pix_vwidth < 4384) ? (((4384 - pix_vwidth) / 2) & ~7) : 0;
 
@@ -2538,10 +2538,9 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
 
     handle->video_res_supported.ulcur_res = res_idx;
 
-    handle->data_prec = CUS_DATAPRECISION_12;
-
     switch (res_idx) {
     case 0: // 3760x2116@30fps — non-binned, 97% FOV, best quality
+        handle->data_prec = CUS_DATAPRECISION_10;
         handle->video_res_supported.ulcur_res = 0;
         handle->pCus_sensor_init = pCus_init_nobinned_dynamic;
         vts_30fps = 2250; // VTS at 30fps with HMAX=1100
@@ -2551,6 +2550,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         break;
 
     case 1: // 3760x1024@59fps — non-binned superwide, 97% H FOV
+        handle->data_prec = CUS_DATAPRECISION_10;
         handle->video_res_supported.ulcur_res = 1;
         handle->pCus_sensor_init = pCus_init_nobinned_dynamic;
         vts_30fps = 1143; // VTS at 59fps: 2250*30/59 ≈ 1143
@@ -2560,6 +2560,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         break;
 
     case 2: // 1920x1080@60fps — binned, 99% FOV
+        handle->data_prec = CUS_DATAPRECISION_12;
         handle->video_res_supported.ulcur_res = 2;
         handle->pCus_sensor_init = pCus_init_1080p_binned_mipi4lane_linear;
         vts_30fps = 3400; // 1700 * 120/60
@@ -2569,6 +2570,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         break;
 
     case 3: // 1920x1080@90fps — binned, 99% FOV
+        handle->data_prec = CUS_DATAPRECISION_12;
         handle->video_res_supported.ulcur_res = 3;
         handle->pCus_sensor_init = pCus_init_1080p_binned_mipi4lane_linear;
         vts_30fps = 2267; // 1700 * 120/90
@@ -2578,6 +2580,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         break;
 
     case 4: // 1472x816@120fps — binned, 76% FOV, ultra-low latency
+        handle->data_prec = CUS_DATAPRECISION_12;
         handle->video_res_supported.ulcur_res = 4;
         handle->pCus_sensor_init = pCus_init_1m_120fps_mipi4lane_linear;
         vts_30fps = 1700;
@@ -3209,7 +3212,7 @@ int cus_camsensor_init_handle_linear(ms_cus_sensor* drv_handle)
     ////////////////////////////////////
     //    sensor model ID             //
     ////////////////////////////////////
-    sprintf(handle->model_id, "IMX415_MIPI");
+    snprintf(handle->model_id, sizeof(handle->model_id), "IMX415_MIPI");
 
     ////////////////////////////////////
     //    i2c config                  //
@@ -3259,7 +3262,7 @@ int cus_camsensor_init_handle_linear(ms_cus_sensor* drv_handle)
         handle->video_res_supported.res[res].crop_start_y = imx415_mipi_linear[res].senif.crop_start_y;
         handle->video_res_supported.res[res].nOutputWidth = imx415_mipi_linear[res].senout.width;
         handle->video_res_supported.res[res].nOutputHeight = imx415_mipi_linear[res].senout.height;
-        sprintf(handle->video_res_supported.res[res].strResDesc, imx415_mipi_linear[res].senstr.strResDesc);
+        snprintf(handle->video_res_supported.res[res].strResDesc, sizeof(handle->video_res_supported.res[res].strResDesc), "%s", imx415_mipi_linear[res].senstr.strResDesc);
     }
 
     ////////////////////////////////////
@@ -3356,7 +3359,7 @@ int cus_camsensor_init_handle_hdr_dol_sef(ms_cus_sensor* drv_handle)
     ////////////////////////////////////
     //    sensor model ID             //
     ////////////////////////////////////
-    sprintf(handle->model_id, "IMX415_MIPI_HDR_SEF");
+    snprintf(handle->model_id, sizeof(handle->model_id), "IMX415_MIPI_HDR_SEF");
 
     ////////////////////////////////////
     //    i2c config                  //
@@ -3403,7 +3406,7 @@ int cus_camsensor_init_handle_hdr_dol_sef(ms_cus_sensor* drv_handle)
         handle->video_res_supported.res[res].crop_start_y = imx415_mipi_hdr[res].senif.crop_start_y;
         handle->video_res_supported.res[res].nOutputWidth = imx415_mipi_hdr[res].senout.width;
         handle->video_res_supported.res[res].nOutputHeight = imx415_mipi_hdr[res].senout.height;
-        sprintf(handle->video_res_supported.res[res].strResDesc, imx415_mipi_hdr[res].senstr.strResDesc);
+        snprintf(handle->video_res_supported.res[res].strResDesc, sizeof(handle->video_res_supported.res[res].strResDesc), "%s", imx415_mipi_hdr[res].senstr.strResDesc);
     }
 
     ////////////////////////////////////
@@ -3658,7 +3661,7 @@ static int pCus_SetAEGainHDR_DOL_LEF(ms_cus_sensor* handle, u32 gain)
     params->tGain_hdr_dol_lef_reg[0].data = gain_reg & 0xff;
     params->tGain_hdr_dol_lef_reg[1].data = (gain_reg >> 8) & 0xff;
 
-    SENSOR_DMSG("[%s] set gain/reg=%u/0x%x\n", __FUNCTION__, gain, params->tGain_hdr_dol_lef_reg[0].data, params->tGain_hdr_dol_lef_reg[1].data);
+    SENSOR_DMSG("[%s] set gain/reg=%u/0x%x 0x%x\n", __FUNCTION__, gain, params->tGain_hdr_dol_lef_reg[0].data, params->tGain_hdr_dol_lef_reg[1].data);
 
     params->dirty = true;
     return SUCCESS;
@@ -3728,7 +3731,7 @@ static int cus_camsensor_init_handle_hdr_dol_lef(ms_cus_sensor* drv_handle)
     ////////////////////////////////////
     //    sensor model ID             //
     ////////////////////////////////////
-    sprintf(handle->model_id, "IMX415_MIPI_HDR_LEF");
+    snprintf(handle->model_id, sizeof(handle->model_id), "IMX415_MIPI_HDR_LEF");
 
     ////////////////////////////////////
     //    i2c config                  //
@@ -3778,7 +3781,7 @@ static int cus_camsensor_init_handle_hdr_dol_lef(ms_cus_sensor* drv_handle)
         handle->video_res_supported.res[res].crop_start_y = imx415_mipi_hdr[res].senif.crop_start_y;
         handle->video_res_supported.res[res].nOutputWidth = imx415_mipi_hdr[res].senout.width;
         handle->video_res_supported.res[res].nOutputHeight = imx415_mipi_hdr[res].senout.height;
-        sprintf(handle->video_res_supported.res[res].strResDesc, imx415_mipi_hdr[res].senstr.strResDesc);
+        snprintf(handle->video_res_supported.res[res].strResDesc, sizeof(handle->video_res_supported.res[res].strResDesc), "%s", imx415_mipi_hdr[res].senstr.strResDesc);
     }
 
     ////////////////////////////////////
