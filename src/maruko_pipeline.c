@@ -987,6 +987,15 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	}
 	ctx->bound_vpe_venc = 1;
 
+	/* Set output port buffer depths to allow pipelining between
+	 * stages.  Without this, the pipeline has zero frame buffering
+	 * and any processing jitter causes frame drops, capping FPS
+	 * well below the sensor's output rate.
+	 * Star6E uses (1, 3) on the VENC port; SDK samples use (2, 4). */
+	(void)MI_SYS_SetChnOutputPortDepth(&ctx->isp_port, 1, 3);
+	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
+	(void)MI_SYS_SetChnOutputPortDepth(&ctx->venc_port, 1, 3);
+
 	/* ISP bin load and CUS3A enable must only run once per process
 	 * lifetime.  On reinit, kernel ISP driver retains CUS3A state;
 	 * re-running the 100->110->111 sequence causes a mutex deadlock. */
