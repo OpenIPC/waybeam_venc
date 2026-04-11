@@ -365,6 +365,8 @@ static char *field_to_json_value_from_cfg(const VencConfig *cfg,
 	}
 	case FT_SIZE: {
 		const uint32_t *wh = (const uint32_t *)ptr;
+		if (wh[0] == 0 && wh[1] == 0)
+			return strdup("\"auto\"");
 		snprintf(buf, sizeof(buf), "\"%ux%u\"", wh[0], wh[1]);
 		return strdup(buf);
 	}
@@ -444,9 +446,9 @@ static int field_from_string_cfg(VencConfig *cfg, const FieldDesc *f,
 		break;
 	case FT_SIZE: {
 		uint32_t w, h;
-		if (!strcmp(val, "720p")) { w = 1280; h = 720; }
+		if (!strcmp(val, "auto")) { w = 0; h = 0; }
+		else if (!strcmp(val, "720p")) { w = 1280; h = 720; }
 		else if (!strcmp(val, "1080p")) { w = 1920; h = 1080; }
-		else if (!strcmp(val, "4MP")) { w = 2688; h = 1520; }
 		else if (sscanf(val, "%ux%u", &w, &h) != 2) return -1;
 		uint32_t *wh = (uint32_t *)ptr;
 		wh[0] = w;

@@ -852,6 +852,11 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	pconf->sensor_framerate = state->sensor.fps;
 	pconf->venc_gop_size = pipeline_common_gop_frames(vcfg->video0.gop_size,
 		pconf->sensor_framerate);
+	/* Auto resolution: 0x0 means use sensor native dimensions */
+	if (pconf->image_width == 0 || pconf->image_height == 0) {
+		pconf->image_width = sensor_width;
+		pconf->image_height = sensor_height;
+	}
 	pipeline_common_clamp_image_size("", sensor_width, sensor_height,
 		&pconf->image_width, &pconf->image_height);
 	state->image_width  = pconf->image_width;
@@ -1328,6 +1333,12 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 	prev_image_width  = state->image_width;
 	prev_image_height = state->image_height;
 
+	/* Auto resolution: 0x0 means keep dimensions from initial sensor
+	 * selection rather than re-deriving from raw capture size. */
+	if (pconf.image_width == 0 || pconf.image_height == 0) {
+		pconf.image_width = state->image_width;
+		pconf.image_height = state->image_height;
+	}
 	pipeline_common_clamp_image_size("",
 		state->sensor.plane.capt.width,
 		state->sensor.plane.capt.height,

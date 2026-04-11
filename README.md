@@ -102,7 +102,7 @@ template is provided at `config/venc.default.json`.
   },
   "image": { "mirror": false, "flip": false, "rotate": 0 },
   "video0": {
-    "codec": "h265", "rcMode": "cbr", "fps": 30, "size": "1920x1080",
+    "codec": "h265", "rcMode": "cbr", "fps": 30,
     "bitrate": 8192, "gopSize": 1.0,
     "qpDelta": -4
   },
@@ -361,7 +361,7 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 | `video0.codec` | string | restart | `"h265"` (Maruko also supports `"h264"`; Star6E RTP remains h265-only) |
 | `video0.rc_mode` | string | restart | `"cbr"`, `"vbr"`, `"avbr"`, `"fixqp"` |
 | `video0.fps` | uint | live | Output frame rate |
-| `video0.size` | WxH | restart | Encode resolution (e.g., `"1920x1080"`) |
+| `video0.size` | string | restart | Encode resolution: `"auto"` (default, uses sensor native), `"1920x1080"`, `"720p"`, `"1080p"` |
 | `video0.bitrate` | uint | live | Target bitrate in kbps |
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |

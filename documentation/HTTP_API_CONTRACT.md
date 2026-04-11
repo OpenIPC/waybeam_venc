@@ -101,7 +101,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1, "unlockEnabled": true, "..." : "..." },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500 },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2 },
+      "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2 },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -258,10 +258,12 @@ pipeline reinit (sensor→VIF→VPE→VENC teardown and rebuild):
 # Change resolution (single call, triggers one pipeline reinit)
 curl "http://<device-ip>/api/v1/set?video0.size=1280x720"
 
+# Use sensor native resolution (default — no downscaling)
+curl "http://<device-ip>/api/v1/set?video0.size=auto"
+
 # Preset shortcuts also work
 curl "http://<device-ip>/api/v1/set?video0.size=720p"
 curl "http://<device-ip>/api/v1/set?video0.size=1080p"
-curl "http://<device-ip>/api/v1/set?video0.size=4MP"
 
 # Enable Star6E scene-change IDR control
 curl "http://<device-ip>/api/v1/set?video0.scene_threshold=150"
@@ -915,6 +917,11 @@ Behavior:
 - `0.1.3`:
   - Documented live FPS control behavior (hardware bind decimation, clamping, mode switching limitation).
   - `video0.fps` set via API now uses MI_SYS_BindChnPort2 rebind instead of /proc write.
+  - Removed `isp.exposure` config field, capability, and Prometheus metric.
+    Auto-cap to frame period (1/fps) is now the only exposure mode.
+  - Changed `video0.size` default from `"1920x1080"` to `"auto"` (use sensor
+    native resolution). Added `"auto"` preset to size parser.
+  - Removed `"4MP"` size preset (sensor-specific, not a standard resolution).
 - `0.1.2`:
   - Updated to reflect actual implemented API (was draft, now active).
   - All endpoints use GET method (BusyBox wget compatibility).

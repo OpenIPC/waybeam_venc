@@ -50,8 +50,8 @@ static int test_defaults(void)
 	CHECK("defaults_codec", strcmp(cfg.video0.codec, "h265") == 0);
 	CHECK("defaults_rc_mode", strcmp(cfg.video0.rc_mode, "cbr") == 0);
 	CHECK("defaults_fps", cfg.video0.fps == 60);
-	CHECK("defaults_width", cfg.video0.width == 1920);
-	CHECK("defaults_height", cfg.video0.height == 1080);
+	CHECK("defaults_width_auto", cfg.video0.width == 0);
+	CHECK("defaults_height_auto", cfg.video0.height == 0);
 	CHECK("defaults_bitrate", cfg.video0.bitrate == 8192);
 	CHECK("defaults_gop_size", cfg.video0.gop_size == 1.0);
 	CHECK("defaults_qp_delta", cfg.video0.qp_delta == -4);
@@ -86,7 +86,7 @@ static int test_load_full_json(void)
 		"{"
 		"  \"system\": { \"webPort\": 8080, \"overclockLevel\": 1, \"verbose\": true },"
 		"  \"sensor\": { \"index\": 2, \"mode\": 3, \"unlockEnabled\": false },"
-		"  \"isp\": { \"sensorBin\": \"/etc/sensors/imx415.bin\", \"exposure\": 5000 },"
+		"  \"isp\": { \"sensorBin\": \"/etc/sensors/imx415.bin\" },"
 		"  \"image\": { \"mirror\": true, \"flip\": true },"
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
@@ -351,15 +351,15 @@ static int test_resolution_aliases(void)
 	CHECK("1080p_width", cfg.video0.width == 1920);
 	CHECK("1080p_height", cfg.video0.height == 1080);
 
-	/* 4MP alias */
-	const char *json_4mp = "{ \"video0\": { \"size\": \"4MP\" } }";
-	path = write_temp_json(json_4mp);
+	/* auto alias */
+	const char *json_auto = "{ \"video0\": { \"size\": \"auto\" } }";
+	path = write_temp_json(json_auto);
 	venc_config_defaults(&cfg);
 	venc_config_load(path, &cfg);
 	unlink(path);
 	free(path);
-	CHECK("4mp_width", cfg.video0.width == 2688);
-	CHECK("4mp_height", cfg.video0.height == 1520);
+	CHECK("auto_width", cfg.video0.width == 0);
+	CHECK("auto_height", cfg.video0.height == 0);
 
 	/* WxH format */
 	const char *json_wxh = "{ \"video0\": { \"size\": \"640x480\" } }";

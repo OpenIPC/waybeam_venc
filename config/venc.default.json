@@ -19,7 +19,6 @@
     "codec": "h265",
     "rcMode": "cbr",
     "fps": 60,
-    "size": "1920x1080",
     "bitrate": 8192,
     "gopSize": 1.0,
     "qpDelta": -4,
