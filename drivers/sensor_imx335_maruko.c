@@ -96,6 +96,9 @@ SENSOR_DRV_ENTRY_IMPL_BEGIN_EX(IMX335_HDR);
 ////////////////////////////////////
 static struct { // LINEAR
     enum { LINEAR_RES_1 = 0,
+        LINEAR_RES_2,
+        LINEAR_RES_3,
+        LINEAR_RES_4,
         LINEAR_RES_END } mode;
     struct _senout {
         s32 width, height, min_fps, max_fps;
@@ -122,12 +125,18 @@ static struct { // LINEAR
      *    so there is no way to reduce sensor output resolution without
      *    window mode.
      *
-     * Result: single mode — 2592x1944@30fps (all-pixel, HMAX=600).
-     * The sensor's native full-pixel output is 2592x1944 (5MP), NOT
-     * 2560x1920 as used by the Star6E driver. Using wrong dimensions
-     * causes VIF frame parsing failure (ISP fence timeout).
-     * Lower output resolutions via ISP/SCL downscaling (video0.size). */
+     * Mode 0: 2592x1944@30fps — full-readout, HMAX=600 (VERIFIED 30fps)
+     * Mode 1: 2592x1944@60fps — windowed (EXCEEDS ISP budget at 5MP)
+     * Mode 2: 2400x1350@90fps — windowed (EXCEEDS ISP budget)
+     * Mode 3: 1920x1080@120fps — windowed, HMAX=275 (VERIFIED 71fps)
+     *
+     * ISP throughput ceiling: ~148 Mpix/s on I6C with IMX335.
+     * Modes 1-2 stall because input resolution × FPS exceeds this.
+     * Use video0.size to downscale modes 1-2 if needed. */
     { LINEAR_RES_1, { 2592, 1944, 3, 30 }, { 0, 0, 2592, 1944 }, { "2592x1944@30fps" } },
+    { LINEAR_RES_2, { 2592, 1944, 3, 60 }, { 0, 0, 2592, 1944 }, { "2592x1944@60fps" } },
+    { LINEAR_RES_3, { 2400, 1350, 3, 90 }, { 0, 0, 2560, 1440 }, { "2400x1350@90fps" } },
+    { LINEAR_RES_4, { 1920, 1080, 3, 120 }, { 0, 0, 1920, 1080 }, { "1920x1080@120fps" } },
 };
 
 u32 vts_30fps = 4125;
@@ -319,11 +328,7 @@ const static I2C_ARRAY Sensor_init_table_4lane_5m30fps[] = {
     { 0x3002, 0x00 }, // Master mode start
 };
 
-/* Window-cropped modes — DO NOT WORK on I6C ISP.
- * Kept for reference; the I6C ISP hangs when the sensor uses
- * window mode (0x3018=0x04). All active modes use mode 0's
- * full-readout table above with VTS adjustment for FPS. */
-#if 0  /* disabled: window mode incompatible with I6C ISP */
+/* Window-cropped modes from Star6E — re-testing with skip-Disable fix. */
 const static I2C_ARRAY Sensor_init_table_4lane_5m60fps[] = {
     { 0x3002, 0x01 }, // Master mode stop
     { 0xFFFF, 0x14 }, // delay
@@ -682,7 +687,6 @@ const static I2C_ARRAY Sensor_init_table_4lane_5m120fps[] = {
     { 0x3000, 0x00 },
     { 0x3002, 0x00 },
 };
-#endif  /* disabled window mode tables */
 
 const static I2C_ARRAY Sensor_id_table[] = {
     { 0x3003, 0x00 },
@@ -904,6 +908,75 @@ static int pCus_init_mipi4lane_5m30fps_linear(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
+static int pCus_init_mipi4lane_5m60fps_linear(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+
+    for (i = 0; i < ARRAY_SIZE(Sensor_init_table_4lane_5m60fps); i++) {
+        if (Sensor_init_table_4lane_5m60fps[i].reg == 0xFFFF) {
+            SENSOR_MSLEEP(Sensor_init_table_4lane_5m60fps[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_init_table_4lane_5m60fps[i].reg,
+                    Sensor_init_table_4lane_5m60fps[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+    SENSOR_MSLEEP(100);
+    return SUCCESS;
+}
+
+static int pCus_init_mipi4lane_5m90fps_linear(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+
+    for (i = 0; i < ARRAY_SIZE(Sensor_init_table_4lane_5m90fps); i++) {
+        if (Sensor_init_table_4lane_5m90fps[i].reg == 0xFFFF) {
+            SENSOR_MSLEEP(Sensor_init_table_4lane_5m90fps[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_init_table_4lane_5m90fps[i].reg,
+                    Sensor_init_table_4lane_5m90fps[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+    SENSOR_MSLEEP(100);
+    return SUCCESS;
+}
+
+static int pCus_init_mipi4lane_5m120fps_linear(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+
+    for (i = 0; i < ARRAY_SIZE(Sensor_init_table_4lane_5m120fps); i++) {
+        if (Sensor_init_table_4lane_5m120fps[i].reg == 0xFFFF) {
+            SENSOR_MSLEEP(Sensor_init_table_4lane_5m120fps[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_init_table_4lane_5m120fps[i].reg,
+                    Sensor_init_table_4lane_5m120fps[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+    SENSOR_MSLEEP(100);
+    return SUCCESS;
+}
+
 /////////////////// Resolution functions ///////////////////
 
 static int pCus_GetVideoResNum(ms_cus_sensor* handle, u32* ulres_num)
@@ -952,13 +1025,42 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
 
     handle->video_res_supported.ulcur_res = res_idx;
 
-    /* Single mode: 2560x1920@30fps full-readout, HMAX=600 */
-    handle->video_res_supported.ulcur_res = 0;
-    handle->pCus_sensor_init = pCus_init_mipi4lane_5m30fps_linear;
-    vts_30fps = 4125;
-    params->expo.vts = vts_30fps;
-    params->expo.fps = 30;
-    Preview_line_period = 8080;
+    switch (res_idx) {
+    case 0: // 2592x1944@30fps — full readout
+        handle->pCus_sensor_init = pCus_init_mipi4lane_5m30fps_linear;
+        vts_30fps = 4125;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 30;
+        Preview_line_period = 8080;
+        break;
+
+    case 1: // 2592x1944@60fps — windowed (HMAX=314)
+        handle->pCus_sensor_init = pCus_init_mipi4lane_5m60fps_linear;
+        vts_30fps = 3936;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 60;
+        Preview_line_period = 4234;
+        break;
+
+    case 2: // 2400x1350@90fps — windowed crop (HMAX=275)
+        handle->pCus_sensor_init = pCus_init_mipi4lane_5m90fps_linear;
+        vts_30fps = 3016;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 90;
+        Preview_line_period = 3684;
+        break;
+
+    case 3: // 1920x1080@120fps — windowed (Star6E table)
+        handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
+        vts_30fps = 2256;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 120;
+        Preview_line_period = 3694;
+        break;
+
+    default:
+        break;
+    }
 
     return SUCCESS;
 }
