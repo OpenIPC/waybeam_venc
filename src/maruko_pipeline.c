@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1164,15 +1165,18 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 		if (stat.curPacks == 0) {
 			idle_counter++;
-			if ((idle_counter % 500) == 0)
+			if ((idle_counter % 5000) == 0)
 				printf("> [maruko] waiting for encoder data...\n");
-			if (idle_counter > 10000) {
+			if (idle_counter > 100000) {
 				fprintf(stderr,
 					"ERROR: [maruko] no encoder data"
 					" received; aborting stream loop\n");
 				return -1;
 			}
-			idle_wait(&sidecar, 1);
+			/* Tight poll: don't sleep when frames are expected soon.
+			 * At 90fps+ the 1ms sleep wastes ~10% of each frame
+			 * period. Use sched_yield for sub-ms yielding. */
+			sched_yield();
 			continue;
 		}
 		idle_counter = 0;
@@ -1187,7 +1191,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		}
 
 		ret = maruko_mi_venc_get_stream(ctx->venc_device,
-			ctx->venc_channel, &stream, 40);
+			ctx->venc_channel, &stream, 10);
 		if (ret != 0) {
 			free(stream.packet);
 			stream.packet = NULL;
