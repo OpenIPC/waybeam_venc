@@ -165,11 +165,10 @@ after all output. This is the preferred way for agents to consume results:
 
 ### Quick-Deploy Modes
 
-Star6E runtime libs already live in `/usr/lib` on the target, so Star6E
-deployment only transfers test binaries (`venc`, `snr_toggle_test`,
-`snr_sequence_probe`). Maruko deployments also transfer the vendored Maruko
-runtime bundle and uClibc loader/runtime from this repo unless
-`--skip-deploy` is used. Use these flags to skip unnecessary work:
+Both backends use dlopen for all MI vendor libs at runtime. Star6E runtime
+libs live in `/usr/lib` on the target firmware. Maruko deployments transfer
+the vendored MI SDK libs (from `libs/maruko/`) via `remote_test.sh`.
+Use these flags to skip unnecessary work:
 
 | Flag | What it skips | When to use |
 |------|---------------|-------------|

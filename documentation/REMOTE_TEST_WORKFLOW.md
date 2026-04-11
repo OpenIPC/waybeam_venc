@@ -43,8 +43,8 @@ useful for sensor mode discovery, max-FPS sweeps, and auxiliary test binaries.
 
 1. Build locally: `make build`
 2. Upload test artifacts to target `/tmp/waybeam_venc_test`.
-   Star6E only uploads the test binary. Maruko uploads the test binary plus
-   the vendored Maruko SDK libs, uClibc runtime, and shim into
+   Star6E only uploads the test binary (MI libs are on firmware).
+   Maruko uploads the test binary plus the vendored MI SDK libs into
    `/tmp/waybeam_venc_test/lib`.
 3. Run tests with bounded timeout.
 4. Check SSH liveness immediately after each run.

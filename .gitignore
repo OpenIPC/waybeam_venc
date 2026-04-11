@@ -6,7 +6,6 @@ out/
 .vscode/settings.json
 
 tools/ioctl_trace_preload.so
-tools/libmaruko_uclibc_shim.so
 
 tests/test_runner
 tests/test_imu_ring
