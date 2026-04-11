@@ -885,6 +885,14 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 	ctx->cfg.venc_gop_size = pipeline_common_gop_frames(
 		ctx->cfg.venc_gop_seconds, ctx->sensor.fps);
 
+	/* ISP throughput note: the Maruko ISP stalls when the sensor
+	 * pixel throughput exceeds ~144M pix/s.  Mode 3 (1472x816@120fps
+	 * = 144M) works; modes 0-2 (>=1920x1080) stall regardless of
+	 * FPS because the MIPI data rate is set by the sensor mode, not
+	 * the target FPS.  VIF sub-window crop is NOT supported on I6C.
+	 * To enable lower-FPS modes at 1080p, the sensor driver needs
+	 * custom mode entries with appropriate binning/MIPI settings. */
+
 	/* Configure SCL ring pool using sensor capture dimensions.
 	 * Note: majestic skips this, but the SDK sample_venc.c uses it.
 	 * Use capture (ISP output) size, not effective/binned size. */

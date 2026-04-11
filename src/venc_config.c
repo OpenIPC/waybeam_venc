@@ -304,6 +304,9 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 				"keeping %ux%u\n", size, v->width, v->height);
 		}
 	}
+	/* Also accept separate width/height fields (override size if both present) */
+	v->width = (uint32_t)json_get_int(obj, "width", (int)v->width);
+	v->height = (uint32_t)json_get_int(obj, "height", (int)v->height);
 
 	v->bitrate = (uint32_t)json_get_int(obj, "bitrate", (int)v->bitrate);
 	v->gop_size = json_get_double(obj, "gopSize", v->gop_size);
