@@ -268,16 +268,14 @@ static void star6e_pipeline_enable_cus3a(SdkQuietState *sdk_quiet)
 	if (fn) {
 		int p100[13] = {1, 0, 0};
 		int p110[13] = {1, 1, 0};
-		int p111[13] = {1, 1, 1};
 		MI_S32 ret;
 
 		sdk_quiet_begin(sdk_quiet);
 		fn(0, p100);
-		fn(0, p110);
-		ret = fn(0, p111);
+		ret = fn(0, p110);
 		sdk_quiet_end(sdk_quiet);
 		if (ret != 0)
-			fprintf(stderr, "WARNING: MI_ISP_CUS3A_Enable(1,1,1) failed %d\n", ret);
+			fprintf(stderr, "WARNING: MI_ISP_CUS3A_Enable(1,1,0) failed %d\n", ret);
 	}
 
 	dlclose(handle);
