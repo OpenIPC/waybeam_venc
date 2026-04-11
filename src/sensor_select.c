@@ -299,8 +299,10 @@ char *sensor_modes_json(int forced_pad, int selected_pad, int selected_mode)
 /* ── Core selection ──────────────────────────────────────────────────── */
 
 static int find_best_mode(const SensorSelectConfig *cfg,
-	MI_SNR_PAD_ID_e *best_pad, MI_S32 *best_index, MI_SNR_Res_t *best_mode)
+	MI_SNR_PAD_ID_e *best_pad, MI_S32 *best_index, MI_SNR_Res_t *best_mode,
+	MI_U32 *out_mode_count)
 {
+	*out_mode_count = 0;
 	int best_class = -1;
 	uint64_t best_cost = ~(uint64_t)0;
 
@@ -337,6 +339,7 @@ static int find_best_mode(const SensorSelectConfig *cfg,
 				*best_pad = (MI_SNR_PAD_ID_e)p;
 				*best_mode = res;
 				*best_index = (MI_S32)idx;
+				*out_mode_count = count;
 			}
 		}
 	}
@@ -389,15 +392,33 @@ static int set_sensor_fps(MI_SNR_PAD_ID_e pad, MI_U32 mode_index,
 
 static int configure_selected_sensor(const SensorSelectConfig *cfg,
 	const SensorStrategy *strategy, MI_SNR_PAD_ID_e best_pad,
-	MI_S32 best_index, const MI_SNR_Res_t *best_mode, SensorSelectResult *result)
+	MI_S32 best_index, const MI_SNR_Res_t *best_mode,
+	MI_U32 mode_count, SensorSelectResult *result)
 {
 	result->pad_id = best_pad;
 	result->mode = *best_mode;
 	result->mode_index = best_index;
 
-	(void)MI_SNR_Disable(best_pad);
+	/* Single-mode sensors (e.g. IMX335 on I6C) are already running
+	 * in their only mode from kernel boot.  The Disable→Enable cycle
+	 * power-cycles the sensor, which breaks MIPI sync on some I6C
+	 * sensors whose init sequence doesn't fully restore MIPI state.
+	 * Skip the full reconfiguration when the boot-time default is
+	 * already correct: mode_count==1 and best_index==0. */
+	int skip_reinit = (mode_count == 1 && best_index == 0);
+	MI_S32 ret;
 
-	MI_S32 ret = MI_SNR_SetPlaneMode(best_pad, E_MI_SNR_PLANE_MODE_LINEAR);
+	if (skip_reinit) {
+		/* Single-mode sensor: skip MI_SNR_Disable to avoid breaking
+		 * MIPI sync.  Still call SetPlaneMode/SetRes/Enable so the MI
+		 * framework formally registers the sensor as active. */
+		printf("> [sensor_select] single-mode sensor — "
+			"skipping MI_SNR_Disable\n");
+	} else {
+		(void)MI_SNR_Disable(best_pad);
+	}
+
+	ret = MI_SNR_SetPlaneMode(best_pad, E_MI_SNR_PLANE_MODE_LINEAR);
 	if (ret != 0) {
 		fprintf(stderr, "ERROR: MI_SNR_SetPlaneMode(pad %d) failed %d\n", best_pad, ret);
 		return ret;
@@ -467,11 +488,13 @@ int sensor_select(const SensorSelectConfig *cfg,
 	MI_SNR_PAD_ID_e best_pad = E_MI_SNR_PAD_ID_0;
 	MI_S32 best_index = -1;
 	MI_SNR_Res_t best_mode = {0};
+	MI_U32 mode_count = 0;
 
-	int err = find_best_mode(cfg, &best_pad, &best_index, &best_mode);
+	int err = find_best_mode(cfg, &best_pad, &best_index, &best_mode,
+		&mode_count);
 	if (err != 0)
 		return err;
 
 	return configure_selected_sensor(cfg, strategy, best_pad, best_index,
-		&best_mode, result);
+		&best_mode, mode_count, result);
 }

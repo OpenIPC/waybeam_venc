@@ -879,12 +879,9 @@ static int pCus_init_mipi4lane_5m30fps_linear(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
 
-    /* Use the Maruko SDK register table (matches stock
-     * drv_ms_cus_imx335_MIPI.c exactly — no SHR0 writes,
-     * no hardware reset). */
-    if (pCus_CheckSensorProductID(handle) == FAIL)
-        return FAIL;
-
+    /* Write the SDK register table (identical to stock
+     * drv_ms_cus_imx335_MIPI.c 30fps mode). Add extra delay
+     * after start sequence for I6C MIPI PHY re-synchronization. */
     for (i = 0; i < ARRAY_SIZE(Sensor_init_table_4lane_5m30fps); i++) {
         if (Sensor_init_table_4lane_5m30fps[i].reg == 0xFFFF) {
             SENSOR_MSLEEP(Sensor_init_table_4lane_5m30fps[i].data);
@@ -900,6 +897,10 @@ static int pCus_init_mipi4lane_5m30fps_linear(ms_cus_sensor* handle)
             }
         }
     }
+
+    /* Extra delay for I6C MIPI PHY to lock onto the sensor's
+     * MIPI output after the standby→operating transition. */
+    SENSOR_MSLEEP(100);
     return SUCCESS;
 }
 
