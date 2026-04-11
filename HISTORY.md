@@ -1,5 +1,43 @@
 # History
 
+## [0.7.0] - 2026-04-11
+
+- **dlopen migration (both backends):** Both Star6E and Maruko now load all
+  MI vendor libraries (SYS, VIF, VPE, VENC, ISP, SCL, SNR) at runtime via
+  dlopen/dlsym instead of direct linking. Function pointers are dispatched
+  through `_impl` structs (`g_mi_sys`, `g_mi_vif`, etc.) with macro wrappers
+  so call sites are unchanged. Three-way preprocessor guards
+  (`PLATFORM_STAR6E` / `PLATFORM_MARUKO` / test stubs) keep all paths clean.
+  - Star6E: dependency-ordered loading (cam_os_wrapper → SYS → ISP/CUS3A
+    with RTLD_LAZY for circular deps → VIF/VPE/SNR/VENC with RTLD_NOW).
+  - Maruko: eliminated uClibc shim and 3+ MB of redundant libs on device.
+  - New files: `star6e_mi.h/.c`, `maruko_mi.h/.c`.
+  - Removed: `-lmi_*` link flags, `MARUKO_UCLIBC_DIR`, shim build rules.
+- **Maruko IQ parameter system:** Full 60-parameter ISP image quality API
+  for Maruko (Phase 2), matching Star6E's existing IQ support. Includes
+  multi-field struct params (colortrans, r2y, OBC, etc.), dot-notation
+  set, and export/import. New files: `maruko_iq.h/.c`.
+- **Maruko sensor mode diagnostics:** Auto-cap exposure to sensor FPS
+  for reliable 120fps cold-boot. Fix SCL clock configuration. Gain
+  control and exposure callback improvements.
+- **Disable AF in CUS3A:** Fixed-focus cameras (IMX415) no longer trigger
+  AF motor init errors. All CUS3A enable sequences changed from
+  `{1,1,1}` (AE+AWB+AF) to `{1,1,0}` (AE+AWB only). Post-override
+  after EnableUserspace3A which internally re-enables AF.
+- **Star6E VPE exit(127) fix:** Under dlopen, vendor MI_VPE_DisablePort
+  calls exit(127) on non-existent channel. Fixed by probing channel
+  with MI_VPE_GetChannelAttr before VPE teardown.
+- **Bool cast safety:** MI_SNR_GetPlaneMode vendor function writes 4 bytes
+  through a `_Bool*` pointer. Fixed with temp-int wrappers on both backends.
+- **Known issues documented:** Maruko encoder stall after output
+  disable/re-enable (`documentation/KNOWN_ISSUES.md`).
+- **Build cleanup:** Removed dead `snr_toggle_test` and `snr_sequence_probe`
+  build recipes (unbuildable without direct MI linking). Removed stale
+  uClibc references from deploy scripts and docs.
+- Added `sensors-src` submodule pointing to OpenIPC/sensors for sensor
+  driver source reference.
+- Added IMX335 IQ profile (`iq-profiles/imx335_greg_fpvVII-gpt200.json`).
+
 ## [0.6.1] - 2026-04-03
 
 - Fix cold-boot 54fps lock with legacyAe: call MI_SNR_SetFps during

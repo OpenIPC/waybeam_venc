@@ -64,16 +64,12 @@ jobs:
       - name: Verify outputs
         run: |
           test -x out/star6e/venc
-          test -x out/star6e/snr_toggle_test
-          test -x out/star6e/snr_sequence_probe
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: star6e-standalone-binaries
           path: |
             out/star6e/venc
-            out/star6e/snr_toggle_test
-            out/star6e/snr_sequence_probe
 
   build-maruko:
     runs-on: ubuntu-latest

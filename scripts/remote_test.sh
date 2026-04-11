@@ -8,7 +8,7 @@ set -euo pipefail
 HOST="${HOST:-root@192.168.1.11}"
 REMOTE_DIR="${REMOTE_DIR:-/tmp/waybeam_venc_test}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-10}"
-RUN_BIN="snr_toggle_test"
+RUN_BIN="venc"
 SOC_BUILD="${SOC_BUILD:-auto}"
 MARUKO_ISP_BIN="${MARUKO_ISP_BIN:-/etc/sensors/imx415.bin}"
 PREWARM_MAJESTIC=0
@@ -39,7 +39,7 @@ Options:
   --soc-build BUILD        auto | star6e | maruko
   --remote-dir DIR         Remote staging dir (default: /tmp/waybeam_venc_test)
   --timeout-sec SEC        Remote run timeout (default: 10)
-  --run-bin BIN            venc | snr_toggle_test | snr_sequence_probe
+  --run-bin BIN            venc (default)
   --prewarm-majestic       Start majestic briefly before the test
   --prewarm-seconds SEC    Prewarm duration (default: 7)
   --no-dmesg               Skip dmesg delta collection
@@ -53,7 +53,7 @@ Options:
 
 Examples:
   scripts/remote_test.sh --host root@192.168.1.13 --soc-build star6e --run-bin venc -- --list-sensor-modes --sensor-index 0
-  scripts/remote_test.sh --host root@192.168.2.12 --soc-build maruko --run-bin snr_toggle_test -- --sensor-index 0 --sensor-mode 1 -f 30
+  scripts/remote_test.sh --host root@192.168.2.12 --soc-build maruko --run-bin venc -- --list-sensor-modes --sensor-index 0
 EOF
 }
 

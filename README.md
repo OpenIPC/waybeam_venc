@@ -14,7 +14,7 @@ via HTTP API.
 - Compact UDP streaming mode (raw NAL units)
 - Built-in web dashboard at `/` for configuration, API docs, and IQ tuning
 - HTTP API for live parameter tuning without pipeline restart
-- ISP IQ parameter system: 62 params with multi-field structs, export/import
+- ISP IQ parameter system: 60+ params with multi-field structs, export/import (both backends)
 - Custom 3A: built-in AE and AWB with configurable gain limits and convergence
 - ISP control: exposure, AWB mode, color temperature
 - ROI-based QP gradient for FPV center-priority encoding
@@ -23,7 +23,7 @@ via HTTP API.
 - SD card recording: MPEG-TS mux (HEVC + PCM audio), power-loss safe
 - Gemini mode: dual VENC for concurrent stream + high-quality record
 - Adaptive recording bitrate: auto-reduces if SD card can't keep up
-- Dual-backend: Star6E and Maruko from shared codebase
+- Dual-backend: Star6E and Maruko from shared codebase (dlopen for all MI libs)
 - BMI270 IMU driver with frame-synced FIFO (Star6E only)
 - GyroGlide-Lite: gyro-based electronic image stabilization (Star6E only)
 

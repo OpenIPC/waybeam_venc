@@ -84,7 +84,6 @@ Use `make remote-test` for bounded CLI validation:
 
 - sensor capability discovery (`--list-sensor-modes`)
 - max-FPS sweeps across reported modes
-- auxiliary test binaries such as `snr_toggle_test` and `snr_sequence_probe`
 - Maruko runtime deployment runs that still depend on `/tmp` staging
 
 For each host row that uses `remote-test`, first probe sensor capabilities
@@ -542,8 +541,6 @@ Each backend builds to its own directory under `out/`:
 
 ```
 out/star6e/venc                  ← Star6E binary
-out/star6e/snr_toggle_test       ← Star6E test tools
-out/star6e/snr_sequence_probe
 out/maruko/venc                  ← Maruko binary
 ```
 
