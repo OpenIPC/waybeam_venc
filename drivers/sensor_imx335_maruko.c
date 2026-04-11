@@ -125,14 +125,10 @@ static struct { // LINEAR
      *    so there is no way to reduce sensor output resolution without
      *    window mode.
      *
-     * Mode 0: 2592x1944@30fps — full-readout, HMAX=600 (VERIFIED 30fps)
-     * Mode 1: 2592x1944@60fps — windowed (EXCEEDS ISP budget at 5MP)
-     * Mode 2: 2400x1350@90fps — windowed (EXCEEDS ISP budget)
-     * Mode 3: 1920x1080@120fps — windowed, HMAX=275 (VERIFIED 71fps)
-     *
-     * ISP throughput ceiling: ~148 Mpix/s on I6C with IMX335.
-     * Modes 1-2 stall because input resolution × FPS exceeds this.
-     * Use video0.size to downscale modes 1-2 if needed. */
+     * Mode 0: 2592x1944@30fps — full-scan, HMAX=600, 1188Mbps (VERIFIED)
+     * Mode 1: 2592x1944@60fps — full-scan, HMAX=304, 891Mbps (tipoman9)
+     * Mode 2: 2400x1350@90fps — Star6E windowed (HMAX=275)
+     * Mode 3: 1920x1080@120fps — Star6E windowed (HMAX=275, VERIFIED) */
     { LINEAR_RES_1, { 2592, 1944, 3, 30 }, { 0, 0, 2592, 1944 }, { "2592x1944@30fps" } },
     { LINEAR_RES_2, { 2592, 1944, 3, 60 }, { 0, 0, 2592, 1944 }, { "2592x1944@60fps" } },
     { LINEAR_RES_3, { 2400, 1350, 3, 90 }, { 0, 0, 2560, 1440 }, { "2400x1350@90fps" } },
@@ -328,60 +324,53 @@ const static I2C_ARRAY Sensor_init_table_4lane_5m30fps[] = {
     { 0x3002, 0x00 }, // Master mode start
 };
 
-/* Window-cropped modes from Star6E — re-testing with skip-Disable fix. */
+/* Mode 1: 2592x1944@60fps — full-scan, HMAX=304, 891Mbps MIPI.
+ * From tipoman9/star6c_sensor (proven on SSC377/378).
+ * Key: HMAX halved (600→304) doubles FPS; MIPI downclocked to
+ * 891Mbps; MIPI timing registers (0x3A18-0x3A28) explicitly set. */
 const static I2C_ARRAY Sensor_init_table_4lane_5m60fps[] = {
-    { 0x3002, 0x01 }, // Master mode stop
-    { 0xFFFF, 0x14 }, // delay
+    { 0x3004, 0x04 },
+    { 0x3004, 0x00 },
     { 0x3000, 0x01 }, // standby
-    { 0xFFFF, 0x14 }, // delay
+    { 0x3002, 0x01 }, // master mode stop
+    { 0x3004, 0x04 },
+    { 0x3004, 0x00 },
+    { 0x3000, 0x01 }, // standby
     { 0x300C, 0x42 },
     { 0x300D, 0x2E },
-    { 0x3018, 0x04 }, // window mode
-    { 0x302C, 0x48 }, // HTRIMMING
+    { 0x3018, 0x00 }, // window mode: all-pixel (NOT cropping)
+    { 0x302C, 0x30 }, // HTRIMMING start
     { 0x302D, 0x00 },
-    { 0x302E, 0x20 }, // HNUM
+    { 0x302E, 0x20 }, // HNUM = 2592
     { 0x302F, 0x0A },
-    { 0x3030, 0x60 }, // VMAX
-    { 0x3031, 0x0F },
+    { 0x3030, 0x1D }, // VMAX = 4125 (same as 30fps)
+    { 0x3031, 0x10 },
     { 0x3032, 0x00 },
-    { 0x3034, 0x3A }, // HMAX
+    { 0x3034, 0x30 }, // HMAX = 304 (0x0130) — halved from 600
     { 0x3035, 0x01 },
-    { 0x3056, 0x80 }, // Y_OUT_SIZE
-    { 0x3057, 0x07 },
-    { 0x3074, 0xC8 }, // AREA3_ST_Addr
-    { 0x3075, 0x00 },
-    { 0x3076, 0x00 }, // AREA3_WIDTH_1
-    { 0x3077, 0x0F },
     { 0x3050, 0x00 },
     { 0x30C6, 0x00 }, // Black Offset
     { 0x30CE, 0x00 }, // UNRD_Line_Max
     { 0x30D8, 0x4C }, // UNREAD_ED_ADR
     { 0x30D9, 0x10 },
-    { 0x314C, 0xB0 },
-    { 0x315A, 0x02 },
+    { 0x314C, 0x08 }, // 891Mbps MIPI (was 0xB0 for 1188Mbps)
+    { 0x314D, 0x01 }, // 891Mbps
+    { 0x315A, 0x06 }, // 891Mbps (was 0x02 for 1188Mbps)
     { 0x3168, 0x8F },
     { 0x316A, 0x7E },
-    { 0x319D, 0x00 }, // MDBIT 0:10Bit
-    { 0x31A0, 0x2A },
+    { 0x319D, 0x00 }, // 10-bit
+    { 0x319E, 0x02 }, // SYS_MODE = 891Mbps
     { 0x31A1, 0x00 },
-    { 0x31A4, 0x00 },
-    { 0x31A5, 0x00 },
-    { 0x31A6, 0x00 },
-    { 0x31A8, 0x00 },
-    { 0x31AC, 0x00 },
-    { 0x31AD, 0x00 },
-    { 0x31AE, 0x00 },
-    { 0x31D4, 0x00 },
-    { 0x31D5, 0x00 },
     { 0x31D7, 0x00 },
-    { 0x31E4, 0x01 },
-    { 0x31F3, 0x01 },
     { 0x3288, 0x21 },
     { 0x328A, 0x02 },
     { 0x3414, 0x05 },
     { 0x3416, 0x18 },
     { 0x341C, 0xFF }, // 10-bit
-    { 0x341D, 0x01 }, // 10-bit
+    { 0x341D, 0x01 },
+    { 0x3058, 0x80 }, // SHR0 default
+    { 0x3059, 0x0E },
+    { 0x305A, 0x00 },
     { 0x3648, 0x01 },
     { 0x364A, 0x04 },
     { 0x364C, 0x04 },
@@ -444,8 +433,19 @@ const static I2C_ARRAY Sensor_init_table_4lane_5m60fps[] = {
     { 0x3792, 0x43 },
     { 0x3794, 0x7A },
     { 0x3796, 0xA1 },
-    { 0x3000, 0x00 },
-    { 0x3002, 0x00 },
+    /* MIPI CSI-2 timing — required for 891Mbps on I6C */
+    { 0x3A18, 0x7F }, // TCLKPOST
+    { 0x3A1A, 0x37 }, // TCLKPREPARE
+    { 0x3A1C, 0x37 }, // TCLKTRAIL
+    { 0x3A1E, 0xF7 }, // TCLKZERO
+    { 0x3A1F, 0x00 },
+    { 0x3A20, 0x3F }, // THSPREPARE
+    { 0x3A22, 0x6F }, // THSZERO
+    { 0x3A24, 0x3F }, // THSTRAIL
+    { 0x3A26, 0x5F }, // THSEXIT
+    { 0x3A28, 0x2F }, // TLPX
+    { 0x3000, 0x00 }, // Standby cancel
+    { 0x3002, 0x00 }, // Master mode start
 };
 
 /* Mode 2: 2400x1350@90fps — crop(2560x1440) → output(2400x1350) */
@@ -770,17 +770,15 @@ static int pCus_poweron(ms_cus_sensor* handle, u32 idx)
 {
     ISensorIfAPI* sensor_if = handle->sensor_if_api;
 
-    /* On I6C/Maruko, the sensor is already powered and outputting
-     * MIPI data from kernel boot. Majestic (working reference) does
-     * NOT power-cycle the sensor. Doing the full poweroff→poweron
-     * sequence causes MI_SNR_Disable/Enable to break MIPI sync.
-     *
-     * Only configure the CSI receiver — do NOT toggle power/reset
-     * pins or MCLK, keeping the sensor in its boot state. */
+    /* Configure CSI receiver. Do NOT toggle power/reset pins here —
+     * the sensor stays powered from boot. Mode init functions that
+     * need a hardware reset (e.g. 60fps PLL change) call
+     * pCus_HardwareReset() explicitly. */
     sensor_if->SetIOPad(idx, handle->sif_bus, handle->interface_attr.attr_mipi.mipi_lane_num);
     sensor_if->SetCSI_Clk(idx, CUS_CSI_CLK_216M);
     sensor_if->SetCSI_Lane(idx, handle->interface_attr.attr_mipi.mipi_lane_num, ENABLE);
     sensor_if->SetCSI_LongPacketType(idx, 0, 0x1C00, 0);
+    sensor_if->MCLK(idx, 1, handle->mclk);
     return SUCCESS;
 }
 
@@ -912,6 +910,11 @@ static int pCus_init_mipi4lane_5m60fps_linear(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
 
+    /* Hardware reset required: 60fps mode changes MIPI PLL from
+     * 1188Mbps (boot default) to 891Mbps. Without reset, PLL
+     * registers don't take effect and MIPI output stalls. */
+    pCus_HardwareReset(handle);
+
     for (i = 0; i < ARRAY_SIZE(Sensor_init_table_4lane_5m60fps); i++) {
         if (Sensor_init_table_4lane_5m60fps[i].reg == 0xFFFF) {
             SENSOR_MSLEEP(Sensor_init_table_4lane_5m60fps[i].data);
@@ -1034,12 +1037,12 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 8080;
         break;
 
-    case 1: // 2592x1944@60fps — windowed (HMAX=314)
+    case 1: // 2592x1944@60fps — full-scan, HMAX=304, 891Mbps
         handle->pCus_sensor_init = pCus_init_mipi4lane_5m60fps_linear;
-        vts_30fps = 3936;
+        vts_30fps = 4125; // same VMAX as 30fps
         params->expo.vts = vts_30fps;
         params->expo.fps = 60;
-        Preview_line_period = 4234;
+        Preview_line_period = 4040; // HMAX=304 → half of 8080
         break;
 
     case 2: // 2400x1350@90fps — windowed crop (HMAX=275)
