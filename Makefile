@@ -14,11 +14,6 @@ STAR6E_CC ?= $(TOOLCHAIN_DIR)/bin/arm-openipc-linux-gnueabihf-gcc
 MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
 STAR6E_DRV ?= libs/star6e
-MARUKO_DRV ?= libs/maruko
-MARUKO_UCLIBC_DIR ?= libs/maruko/uclibc
-# Backward-compatible overrides:
-MARUKO_MI_LIB_DIR ?= $(MARUKO_DRV)
-MARUKO_COMMON_LIB_DIR ?= $(MARUKO_DRV)
 
 OUT_DIR := out/$(SOC_BUILD)
 TARGET := $(OUT_DIR)/venc
@@ -28,8 +23,6 @@ TIMING_PROBE_TARGET := rtp_timing_probe
 TEST_SRC := src/snr_toggle_test.c
 PROBE_SRC := src/snr_sequence_probe.c
 TIMING_PROBE_SRC := tools/rtp_timing_probe.c
-MARUKO_SHIM_SRC := tools/maruko_uclibc_shim.c
-MARUKO_SHIM_SO := tools/libmaruko_uclibc_shim.so
 
 VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
 COMMON_CFLAGS := -Os -s -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VERSION=\"$(VENC_VERSION)\"
@@ -55,7 +48,6 @@ SOC_LDFLAGS :=
 SOC_LIBS := -lm
 BASE_LIBS := -Wl,--start-group -lpthread -ldl -lrt -Wl,--end-group
 BUILD_TESTS := 0
-BUILD_MARUKO_SHIM := 0
 TOOLCHAIN_TARGET := toolchain-maruko
 else ifeq ($(SOC_BUILD),star6e)
 CC := $(STAR6E_CC)
@@ -67,7 +59,6 @@ SOC_DEFS := -DPLATFORM_STAR6E -DHAVE_BACKEND_STAR6E=1
 SOC_LDFLAGS := -Wl,-rpath-link,$(DRV)
 SOC_LIBS := -lm
 BUILD_TESTS := 1
-BUILD_MARUKO_SHIM := 0
 TOOLCHAIN_TARGET := toolchain
 else
 $(error Unsupported SOC_BUILD '$(SOC_BUILD)'; expected 'star6e' or 'maruko')
@@ -103,9 +94,6 @@ build: $(TARGET)
 ifeq ($(BUILD_TESTS),1)
 build: $(TEST_TARGET) $(PROBE_TARGET)
 endif
-ifeq ($(BUILD_MARUKO_SHIM),1)
-build: $(MARUKO_SHIM_SO)
-endif
 
 $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
@@ -121,14 +109,11 @@ check:
 	@if [ -n "$(DRV_EXTRA)" ]; then \
 		test -d "$(DRV_EXTRA)" || { echo "Extra library dir missing: $(DRV_EXTRA)"; exit 1; }; \
 	fi
-	@if [ "$(BUILD_MARUKO_SHIM)" = "1" ]; then \
-		test -d "$(MARUKO_UCLIBC_DIR)" || { echo "uClibc runtime dir missing: $(MARUKO_UCLIBC_DIR)"; exit 1; }; \
-	fi
 
 lint: $(TOOLCHAIN_TARGET) check
 	$(CC) $(CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -Wno-old-style-declaration -fsyntax-only $(SRC)
 
-$(TARGET): $(SRC) include/backend.h include/codec_config.h include/codec_types.h include/file_util.h include/h26x_param_sets.h include/h26x_util.h include/isp_runtime.h include/maruko_bindings.h include/maruko_config.h include/maruko_controls.h include/maruko_output.h include/maruko_pipeline.h include/maruko_runtime.h include/maruko_video.h include/output_socket.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/sdk_quiet.h include/star6e_audio.h include/star6e_controls.h include/star6e_cus3a.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_pipeline.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_runtime.h include/star6e_video.h include/stream_metrics.h include/venc_config.h include/venc_httpd.h include/venc_api.h include/sensor_select.h include/venc_ring.h include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h include/maruko_mi.h include/imu_bmi270.h include/eis.h include/eis_ring.h include/eis_gyroglide.h include/debug_osd.h $(if $(filter 1,$(BUILD_MARUKO_SHIM)),$(MARUKO_SHIM_SO),)
+$(TARGET): $(SRC) include/backend.h include/codec_config.h include/codec_types.h include/file_util.h include/h26x_param_sets.h include/h26x_util.h include/isp_runtime.h include/maruko_bindings.h include/maruko_config.h include/maruko_controls.h include/maruko_output.h include/maruko_pipeline.h include/maruko_runtime.h include/maruko_video.h include/output_socket.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/sdk_quiet.h include/star6e_audio.h include/star6e_controls.h include/star6e_cus3a.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_pipeline.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_runtime.h include/star6e_video.h include/stream_metrics.h include/venc_config.h include/venc_httpd.h include/venc_api.h include/sensor_select.h include/venc_ring.h include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h include/maruko_mi.h include/imu_bmi270.h include/eis.h include/eis_ring.h include/eis_gyroglide.h include/debug_osd.h
 	$(CC) $(CFLAGS) $(LDFLAGS) $(SRC) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(if $(DRV),-Ltools,) $(BASE_LIBS) $(SOC_LIBS) -o $@
 
 $(TEST_TARGET): $(TEST_SRC) include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h
@@ -141,17 +126,10 @@ $(PROBE_TARGET): $(PROBE_SRC) include/star6e.h include/sigmastar_types.h include
 $(TIMING_PROBE_TARGET): $(TIMING_PROBE_SRC) include/rtp_sidecar.h
 	$(HOST_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE -Iinclude $(TIMING_PROBE_SRC) -lm -o $@
 
-$(MARUKO_SHIM_SO): $(MARUKO_SHIM_SRC)
-	$(CC) -shared -fPIC -O2 $(MARUKO_SHIM_SRC) -o $(MARUKO_SHIM_SO)
-
 stage: build
 	mkdir -p $(OUT_DIR)/lib
-	cp -f $(DRV)/*.so $(OUT_DIR)/lib/
+	@if [ -n "$(DRV)" ]; then cp -f $(DRV)/*.so $(OUT_DIR)/lib/; fi
 	@if [ -n "$(DRV_EXTRA)" ]; then cp -f "$(DRV_EXTRA)"/*.so $(OUT_DIR)/lib/; fi
-ifeq ($(BUILD_MARUKO_SHIM),1)
-	cp -f $(MARUKO_SHIM_SO) $(OUT_DIR)/lib/libmaruko_uclibc_shim.so
-	cp -f $(MARUKO_UCLIBC_DIR)/* $(OUT_DIR)/lib/
-endif
 
 print-config:
 	@echo "SOC_BUILD=$(SOC_BUILD)"
