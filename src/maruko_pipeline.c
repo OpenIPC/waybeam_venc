@@ -654,18 +654,86 @@ static void fill_maruko_rc_attr(i6c_venc_chn *attr,
 	const MarukoBackendConfig *cfg, uint32_t gop, MI_U32 bit_rate_bits,
 	uint32_t framerate)
 {
+	/* rc_mode values come from codec_config_resolve_codec_rc():
+	 *   cbr=3, h265 vbr=4 avbr=5 qvbr=6, h264 vbr=2 avbr=0 qvbr=1. */
 	if (cfg->rc_codec == PT_H265) {
-		attr->rate.mode = MARUKO_VENC_RC_H265_CBR;
-		attr->rate.h265Cbr = (i6c_venc_rate_h26xcbr){
-			.gop = gop, .statTime = 1, .fpsNum = framerate,
-			.fpsDen = 1, .bitrate = bit_rate_bits, .avgLvl = 1,
-		};
+		switch (cfg->rc_mode) {
+		case 4: /* VBR */
+			attr->rate.mode = MARUKO_VENC_RC_H265_VBR;
+			attr->rate.h265Vbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 45, .minQual = 20,
+			};
+			break;
+		case 5: /* AVBR */
+			attr->rate.mode = MARUKO_VENC_RC_H265_AVBR;
+			attr->rate.h265Avbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 45, .minQual = 20,
+			};
+			break;
+		case 6: /* QVBR: VBR with tighter QP range */
+			attr->rate.mode = MARUKO_VENC_RC_H265_VBR;
+			attr->rate.h265Vbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 40, .minQual = 28,
+			};
+			break;
+		case 3: /* CBR */
+		default:
+			attr->rate.mode = MARUKO_VENC_RC_H265_CBR;
+			attr->rate.h265Cbr = (i6c_venc_rate_h26xcbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.bitrate = bit_rate_bits, .avgLvl = 1,
+			};
+			break;
+		}
 	} else {
-		attr->rate.mode = MARUKO_VENC_RC_H264_CBR;
-		attr->rate.h264Cbr = (i6c_venc_rate_h26xcbr){
-			.gop = gop, .statTime = 1, .fpsNum = framerate,
-			.fpsDen = 1, .bitrate = bit_rate_bits, .avgLvl = 1,
-		};
+		switch (cfg->rc_mode) {
+		case 2: /* VBR */
+			attr->rate.mode = MARUKO_VENC_RC_H264_VBR;
+			attr->rate.h264Vbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 45, .minQual = 20,
+			};
+			break;
+		case 0: /* AVBR */
+			attr->rate.mode = MARUKO_VENC_RC_H264_AVBR;
+			attr->rate.h264Avbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 45, .minQual = 20,
+			};
+			break;
+		case 1: /* QVBR */
+			attr->rate.mode = MARUKO_VENC_RC_H264_VBR;
+			attr->rate.h264Vbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 40, .minQual = 28,
+			};
+			break;
+		case 3: /* CBR */
+		default:
+			attr->rate.mode = MARUKO_VENC_RC_H264_CBR;
+			attr->rate.h264Cbr = (i6c_venc_rate_h26xcbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.bitrate = bit_rate_bits, .avgLvl = 1,
+			};
+			break;
+		}
 	}
 }
 
@@ -747,6 +815,24 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 			*dev_created = 0;
 		}
 		return ret;
+	}
+
+	/* Frame-lost safety net — must be after StartRecvPic.  Overshoot
+	 * margin = max(20%, 512 kbit/s) lets I-frames spike without drops. */
+	if (cfg->frame_lost) {
+		MI_VENC_ParamFrameLost_t lost = {0};
+		MI_U32 bits = cfg->venc_max_rate * 1024;
+		MI_U32 margin = bits / 5;
+		if (margin < 512 * 1024)
+			margin = 512 * 1024;
+		lost.bFrmLostOpen = 1;
+		lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
+		lost.u32FrmLostBpsThr = bits + margin;
+		lost.u32EncFrmGaps = 0;
+		MI_S32 fl_ret = maruko_mi_venc_set_frame_lost(venc_dev, *chn,
+			&lost);
+		printf("> [maruko] SetFrameLostStrategy: thr=%u ret=%d\n",
+			lost.u32FrmLostBpsThr, fl_ret);
 	}
 
 	return 0;
@@ -1114,6 +1200,45 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	return 0;
 }
 
+/* ── Scene-detector stream decoders (i6c_venc_strm) ──────────────────── */
+
+static uint32_t maruko_scene_frame_size(const i6c_venc_strm *s)
+{
+	uint32_t t = 0;
+	unsigned int i;
+	if (!s || !s->packet) return 0;
+	for (i = 0; i < s->count; i++) t += s->packet[i].length;
+	return t;
+}
+
+static uint8_t maruko_scene_is_idr(const i6c_venc_strm *s, int codec)
+{
+	unsigned int i;
+	if (!s || !s->packet) return 0;
+	for (i = 0; i < s->count; i++) {
+		const i6c_venc_pack *p = &s->packet[i];
+		unsigned int k, n = p->packNum > 8 ? 8 : p->packNum;
+		if (n > 0) {
+			for (k = 0; k < n; k++) {
+				if (codec == 0 && p->packetInfo[k].packType.h264Nalu == 5)
+					return 1;
+				if (codec != 0 && p->packetInfo[k].packType.h265Nalu == 19)
+					return 1;
+			}
+		} else {
+			if (codec == 0 && p->naluType.h264Nalu == 5) return 1;
+			if (codec != 0 && p->naluType.h265Nalu == 19) return 1;
+		}
+	}
+	return 0;
+}
+
+static void maruko_scene_request_idr(void *ctx_ptr)
+{
+	MarukoBackendContext *ctx = ctx_ptr;
+	maruko_mi_venc_request_idr(ctx->venc_device, ctx->venc_channel, 1);
+}
+
 int maruko_pipeline_run(MarukoBackendContext *ctx)
 {
 	if (!ctx || (ctx->output.socket_handle < 0 && !ctx->output.ring))
@@ -1234,6 +1359,14 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		uint64_t capture_us = (stream.count > 0 && stream.packet)
 			? stream.packet[0].timestamp : 0;
 
+		int codec = (ctx->cfg.rc_codec == PT_H265) ? 1 : 0;
+		uint32_t frame_size = maruko_scene_frame_size(&stream);
+		uint8_t is_idr = maruko_scene_is_idr(&stream, codec);
+		scene_update(&ctx->scene, frame_size, is_idr,
+			maruko_scene_request_idr, ctx);
+		RtpSidecarEncInfo enc_info;
+		scene_fill_sidecar(&ctx->scene, &enc_info);
+
 		size_t total_bytes = 0;
 		if (ctx->output_enabled) {
 			total_bytes = maruko_video_send_frame(&stream,
@@ -1244,7 +1377,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
 			seq_before,
 			(uint16_t)(rtp_state.seq - seq_before),
-			capture_us, ready_us, NULL);
+			capture_us, ready_us, &enc_info);
 
 		if (ctx->cfg.verbose) {
 			StreamMetricsSample sample;

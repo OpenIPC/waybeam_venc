@@ -87,6 +87,9 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 		.dir = (MI_SNR_CustDir_e)vcfg->sensor.unlock_dir,
 	};
 	cfg->oc_level = vcfg->system.overclock_level;
+	cfg->scene_threshold = vcfg->video0.scene_threshold;
+	cfg->scene_holdoff = vcfg->video0.scene_holdoff;
+	cfg->frame_lost = vcfg->video0.frame_lost ? 1 : 0;
 	cfg->verbose = vcfg->system.verbose ? 1 : 0;
 
 	return 0;

@@ -4,6 +4,7 @@
 #include "maruko_bindings.h"
 #include "maruko_config.h"
 #include "maruko_output.h"
+#include "scene_detector.h"
 #include "sensor_select.h"
 
 #include <signal.h>
@@ -30,6 +31,7 @@ typedef struct {
   MI_SYS_ChnPort_t venc_port;
   SensorSelectResult sensor;
   MarukoBackendConfig cfg;
+  SceneDetector scene;
 } MarukoBackendContext;
 
 /** Initialize Maruko pipeline state and load SDK libraries. */

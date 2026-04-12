@@ -163,22 +163,22 @@ static int maruko_apply_rc_qp_delta(const i6c_venc_chn *attr, MI_VENC_RcParam_t 
 		return -1;
 
 	switch (attr->rate.mode) {
-	case I6C_VENC_RATEMODE_H265CBR:
+	case MARUKO_VENC_RC_H265_CBR:
 		param->stParamH265Cbr.s32IPQPDelta = delta;
 		return 0;
-	case I6C_VENC_RATEMODE_H264CBR:
+	case MARUKO_VENC_RC_H264_CBR:
 		param->stParamH264Cbr.s32IPQPDelta = delta;
 		return 0;
-	case I6C_VENC_RATEMODE_H265VBR:
+	case MARUKO_VENC_RC_H265_VBR:
 		param->stParamH265Vbr.s32IPQPDelta = delta;
 		return 0;
-	case I6C_VENC_RATEMODE_H264VBR:
+	case MARUKO_VENC_RC_H264_VBR:
 		param->stParamH264VBR.s32IPQPDelta = delta;
 		return 0;
-	case I6C_VENC_RATEMODE_H265AVBR:
+	case MARUKO_VENC_RC_H265_AVBR:
 		param->stParamH265Avbr.s32IPQPDelta = delta;
 		return 0;
-	case I6C_VENC_RATEMODE_H264AVBR:
+	case MARUKO_VENC_RC_H264_AVBR:
 		param->stParamH264Avbr.s32IPQPDelta = delta;
 		return 0;
 	default:
@@ -196,17 +196,17 @@ static int maruko_apply_bitrate(uint32_t kbps)
 		return -1;
 	unsigned int bits = kbps * 1024;
 	switch (attr.rate.mode) {
-	case I6C_VENC_RATEMODE_H265CBR:
+	case MARUKO_VENC_RC_H265_CBR:
 		attr.rate.h265Cbr.bitrate = bits; break;
-	case I6C_VENC_RATEMODE_H264CBR:
+	case MARUKO_VENC_RC_H264_CBR:
 		attr.rate.h264Cbr.bitrate = bits; break;
-	case I6C_VENC_RATEMODE_H265VBR:
+	case MARUKO_VENC_RC_H265_VBR:
 		attr.rate.h265Vbr.maxBitrate = bits; break;
-	case I6C_VENC_RATEMODE_H264VBR:
+	case MARUKO_VENC_RC_H264_VBR:
 		attr.rate.h264Vbr.maxBitrate = bits; break;
-	case I6C_VENC_RATEMODE_H265AVBR:
+	case MARUKO_VENC_RC_H265_AVBR:
 		attr.rate.h265Avbr.maxBitrate = bits; break;
-	case I6C_VENC_RATEMODE_H264AVBR:
+	case MARUKO_VENC_RC_H264_AVBR:
 		attr.rate.h264Avbr.maxBitrate = bits; break;
 	default:
 		return -1;
@@ -222,12 +222,12 @@ static int maruko_apply_gop(uint32_t gop_size)
 	    g_ctx.venc_chn, &attr) != 0)
 		return -1;
 	switch (attr.rate.mode) {
-	case I6C_VENC_RATEMODE_H265CBR: attr.rate.h265Cbr.gop = gop_size; break;
-	case I6C_VENC_RATEMODE_H264CBR: attr.rate.h264Cbr.gop = gop_size; break;
-	case I6C_VENC_RATEMODE_H265VBR: attr.rate.h265Vbr.gop = gop_size; break;
-	case I6C_VENC_RATEMODE_H264VBR: attr.rate.h264Vbr.gop = gop_size; break;
-	case I6C_VENC_RATEMODE_H265AVBR: attr.rate.h265Avbr.gop = gop_size; break;
-	case I6C_VENC_RATEMODE_H264AVBR: attr.rate.h264Avbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H265_CBR: attr.rate.h265Cbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H264_CBR: attr.rate.h264Cbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H265_VBR: attr.rate.h265Vbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H264_VBR: attr.rate.h264Vbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H265_AVBR: attr.rate.h265Avbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H264_AVBR: attr.rate.h264Avbr.gop = gop_size; break;
 	default: return -1;
 	}
 	return maruko_mi_venc_set_chn_attr(g_ctx.venc_dev,
@@ -288,17 +288,17 @@ static int maruko_apply_fps(uint32_t fps)
 	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
 	    g_ctx.venc_chn, &attr) == 0) {
 		switch (attr.rate.mode) {
-		case I6C_VENC_RATEMODE_H265CBR:
+		case MARUKO_VENC_RC_H265_CBR:
 			attr.rate.h265Cbr.fpsNum = fps; break;
-		case I6C_VENC_RATEMODE_H264CBR:
+		case MARUKO_VENC_RC_H264_CBR:
 			attr.rate.h264Cbr.fpsNum = fps; break;
-		case I6C_VENC_RATEMODE_H265VBR:
+		case MARUKO_VENC_RC_H265_VBR:
 			attr.rate.h265Vbr.fpsNum = fps; break;
-		case I6C_VENC_RATEMODE_H264VBR:
+		case MARUKO_VENC_RC_H264_VBR:
 			attr.rate.h264Vbr.fpsNum = fps; break;
-		case I6C_VENC_RATEMODE_H265AVBR:
+		case MARUKO_VENC_RC_H265_AVBR:
 			attr.rate.h265Avbr.fpsNum = fps; break;
-		case I6C_VENC_RATEMODE_H264AVBR:
+		case MARUKO_VENC_RC_H264_AVBR:
 			attr.rate.h264Avbr.fpsNum = fps; break;
 		default:
 			break;
@@ -334,12 +334,12 @@ static uint32_t maruko_query_live_fps(void)
 		return 0;
 
 	switch (attr.rate.mode) {
-	case I6C_VENC_RATEMODE_H265CBR: return attr.rate.h265Cbr.fpsNum;
-	case I6C_VENC_RATEMODE_H264CBR: return attr.rate.h264Cbr.fpsNum;
-	case I6C_VENC_RATEMODE_H265VBR: return attr.rate.h265Vbr.fpsNum;
-	case I6C_VENC_RATEMODE_H264VBR: return attr.rate.h264Vbr.fpsNum;
-	case I6C_VENC_RATEMODE_H265AVBR: return attr.rate.h265Avbr.fpsNum;
-	case I6C_VENC_RATEMODE_H264AVBR: return attr.rate.h264Avbr.fpsNum;
+	case MARUKO_VENC_RC_H265_CBR: return attr.rate.h265Cbr.fpsNum;
+	case MARUKO_VENC_RC_H264_CBR: return attr.rate.h264Cbr.fpsNum;
+	case MARUKO_VENC_RC_H265_VBR: return attr.rate.h265Vbr.fpsNum;
+	case MARUKO_VENC_RC_H264_VBR: return attr.rate.h264Vbr.fpsNum;
+	case MARUKO_VENC_RC_H265_AVBR: return attr.rate.h265Avbr.fpsNum;
+	case MARUKO_VENC_RC_H264_AVBR: return attr.rate.h264Avbr.fpsNum;
 	default: return 0;
 	}
 }
