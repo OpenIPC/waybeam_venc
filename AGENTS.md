@@ -564,3 +564,12 @@ between them.  `make build` (default) always produces `out/star6e/venc`.
 - Do NOT add or remove a config field without updating all four layers: C struct/parser,
   API field+alias tables, WebUI SECTIONS, and default config file. See
   **Config / WebUI / API Sync Rules** above.
+
+## Codex delegation
+
+OpenAI Codex is available via the `codex@openai-codex` Claude Code plugin for
+verification and token offload. Use `/codex:review` or
+`/codex:adversarial-review` for second-opinion passes, and `/codex:rescue`
+(optionally `--background`) to delegate heavy reads, full-repo greps, or
+self-contained investigations. The workflow spec lives in the coordination
+repo at `docs/codex-workflow.md`.
