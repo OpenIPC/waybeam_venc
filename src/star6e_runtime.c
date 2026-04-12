@@ -718,6 +718,15 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		star6e_ts_recorder_write_stream(&ps->ts_recorder, &stream);
 	}
 
+	/* Release the encoder stream as soon as the last consumer of the
+	 * stream payload (recorder writes above) is done. Everything
+	 * below — HTTP record control, verbose IMU/EIS output, debug OSD —
+	 * only reads independent state, so releasing here frees the VENC
+	 * output slot for the next frame instead of waiting on blocking
+	 * work (stdout printf, OSD draw) that can otherwise push send
+	 * spread past a full frame period at 120 fps. */
+	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
+
 	/* Check HTTP record control flags.
 	 * In dual mode, the recording thread owns the ts_recorder
 	 * exclusively — skip HTTP record start/stop to prevent races. */
@@ -837,8 +846,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 
 		debug_osd_end_frame(ps->debug_osd);
 	}
-
-	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
 
 	/* ch1 frames are now drained by the dedicated recording thread
 	 * (dual_rec_thread_fn) — no polling needed here. */

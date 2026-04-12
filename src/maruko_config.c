@@ -35,6 +35,7 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->isp_bin_path = NULL;
 	cfg->vpe_level_3dnr = 1;
 	cfg->verbose = 0;
+	cfg->connected_udp = 1;  /* match VencConfig default */
 }
 
 int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
@@ -91,6 +92,7 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->scene_holdoff = vcfg->video0.scene_holdoff;
 	cfg->frame_lost = vcfg->video0.frame_lost ? 1 : 0;
 	cfg->verbose = vcfg->system.verbose ? 1 : 0;
+	cfg->connected_udp = vcfg->outgoing.connected_udp ? 1 : 0;
 
 	return 0;
 }

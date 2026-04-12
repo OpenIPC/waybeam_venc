@@ -6,7 +6,8 @@
 #include <string.h>
 #include <unistd.h>
 
-int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri)
+int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
+	int requested_connected_udp)
 {
 	if (!output)
 		return -1;
@@ -18,9 +19,12 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri)
 	output->dst_len = 0;
 	output->transport = VENC_OUTPUT_URI_UDP;
 	memset(&output->dst, 0, sizeof(output->dst));
+	output->requested_connected_udp = requested_connected_udp ? 1 : 0;
+	output->connected_udp = 0;
 
 	return output_socket_configure(&output->socket_handle, &output->dst,
-		&output->dst_len, &output->transport, uri, 0, NULL);
+		&output->dst_len, &output->transport, uri,
+		output->requested_connected_udp, &output->connected_udp);
 }
 
 int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
@@ -36,6 +40,8 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
 	output->dst_len = 0;
 	output->transport = VENC_OUTPUT_URI_UDP;
 	memset(&output->dst, 0, sizeof(output->dst));
+	output->requested_connected_udp = 0;
+	output->connected_udp = 0;
 
 	slot_data = (uint32_t)max_payload + 12;
 	output->ring = venc_ring_create(shm_name, 512, slot_data);
@@ -71,7 +77,8 @@ int maruko_output_apply_server(MarukoOutput *output, const char *uri)
 	}
 
 	return output_socket_configure(&output->socket_handle, &output->dst,
-		&output->dst_len, &output->transport, &parsed, 0, NULL);
+		&output->dst_len, &output->transport, &parsed,
+		output->requested_connected_udp, &output->connected_udp);
 }
 
 void maruko_output_teardown(MarukoOutput *output)

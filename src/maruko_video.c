@@ -14,6 +14,7 @@ typedef struct {
 	int socket_handle;
 	const struct sockaddr_storage *dst;
 	socklen_t dst_len;
+	int connected_udp;
 	venc_ring_t *ring;
 } MarukoRtpWriteContext;
 
@@ -49,7 +50,9 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 	}
 
 	/* Socket path */
-	if (ctx->socket_handle < 0 || !ctx->dst || ctx->dst_len == 0)
+	if (ctx->socket_handle < 0)
+		return -1;
+	if (!ctx->connected_udp && (!ctx->dst || ctx->dst_len == 0))
 		return -1;
 
 	vec[0].iov_base = (void *)header;
@@ -64,8 +67,13 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 	}
 
 	memset(&msg, 0, sizeof(msg));
-	msg.msg_name = (void *)ctx->dst;
-	msg.msg_namelen = ctx->dst_len;
+	if (ctx->connected_udp) {
+		msg.msg_name = NULL;
+		msg.msg_namelen = 0;
+	} else {
+		msg.msg_name = (void *)ctx->dst;
+		msg.msg_namelen = ctx->dst_len;
+	}
 	msg.msg_iov = vec;
 	msg.msg_iovlen = iovcnt;
 	return sendmsg(ctx->socket_handle, &msg, 0) < 0 ? -1 : 0;
@@ -169,14 +177,15 @@ static size_t maruko_send_frame_hevc(const i6c_venc_strm *stream,
 
 static size_t maruko_send_frame_rtp(const i6c_venc_strm *stream,
 	int socket_handle, const struct sockaddr_storage *dst,
-	socklen_t dst_len, venc_ring_t *ring, MarukoRtpState *rtp,
-	H26xParamSets *params, PAYLOAD_TYPE_E codec, size_t max_payload,
-	HevcRtpStats *stats)
+	socklen_t dst_len, int connected_udp, venc_ring_t *ring,
+	MarukoRtpState *rtp, H26xParamSets *params, PAYLOAD_TYPE_E codec,
+	size_t max_payload, HevcRtpStats *stats)
 {
 	MarukoRtpWriteContext ctx = {
 		.socket_handle = socket_handle,
 		.dst = dst,
 		.dst_len = dst_len,
+		.connected_udp = connected_udp,
 		.ring = ring,
 	};
 	size_t total_bytes;
@@ -202,20 +211,31 @@ static size_t maruko_send_frame_rtp(const i6c_venc_strm *stream,
 
 static size_t maruko_send_udp_chunks(const uint8_t *data, size_t length,
 	int socket_handle, const struct sockaddr_storage *dst,
-	socklen_t dst_len, uint32_t max_size)
+	socklen_t dst_len, int connected_udp, uint32_t max_size)
 {
 	size_t total_sent = 0;
 	size_t chunk_cap;
 
-	if (!data || length == 0 || socket_handle < 0 || !dst || dst_len == 0)
+	if (!data || length == 0 || socket_handle < 0)
+		return 0;
+	if (!connected_udp && (!dst || dst_len == 0))
 		return 0;
 
 	chunk_cap = max_size ? max_size : 1400;
 	while (total_sent < length) {
 		size_t remaining = length - total_sent;
 		size_t chunk = remaining > chunk_cap ? chunk_cap : remaining;
-		ssize_t rc = sendto(socket_handle, data + total_sent, chunk, 0,
-			(const struct sockaddr *)dst, dst_len);
+		ssize_t rc;
+
+		if (connected_udp) {
+			/* Connected UDP socket: destination was set at
+			 * connect() time. Passing a sockaddr here would
+			 * return EISCONN on some kernels. */
+			rc = send(socket_handle, data + total_sent, chunk, 0);
+		} else {
+			rc = sendto(socket_handle, data + total_sent, chunk, 0,
+				(const struct sockaddr *)dst, dst_len);
+		}
 
 		if (rc < 0)
 			break;
@@ -226,12 +246,14 @@ static size_t maruko_send_udp_chunks(const uint8_t *data, size_t length,
 
 static size_t maruko_send_frame_compact(const i6c_venc_strm *stream,
 	int socket_handle, const struct sockaddr_storage *dst,
-	socklen_t dst_len, uint32_t max_size)
+	socklen_t dst_len, int connected_udp, uint32_t max_size)
 {
 	size_t total_bytes = 0;
 	unsigned int i;
 
-	if (!stream || !dst)
+	if (!stream)
+		return 0;
+	if (!connected_udp && !dst)
 		return 0;
 
 	for (i = 0; i < stream->count; ++i) {
@@ -259,14 +281,15 @@ static size_t maruko_send_frame_compact(const i6c_venc_strm *stream,
 					continue;
 				total_bytes += maruko_send_udp_chunks(
 					pack->data + offset, length,
-					socket_handle, dst, dst_len, max_size);
+					socket_handle, dst, dst_len,
+					connected_udp, max_size);
 			}
 		} else if (pack->length > pack->offset) {
 			MI_U32 length = pack->length - pack->offset;
 
 			total_bytes += maruko_send_udp_chunks(pack->data +
 				pack->offset, length, socket_handle, dst,
-				dst_len, max_size);
+				dst_len, connected_udp, max_size);
 		}
 	}
 
@@ -295,12 +318,13 @@ size_t maruko_video_send_frame(const i6c_venc_strm *stream,
 
 	if (cfg->stream_mode == MARUKO_STREAM_RTP) {
 		total_bytes = maruko_send_frame_rtp(stream, output->socket_handle,
-			&output->dst, output->dst_len, output->ring, rtp, params,
+			&output->dst, output->dst_len, output->connected_udp,
+			output->ring, rtp, params,
 			cfg->rc_codec, cfg->rtp_payload_size, stats);
 	} else if (!output->ring) {
 		total_bytes = maruko_send_frame_compact(stream,
 			output->socket_handle, &output->dst, output->dst_len,
-			cfg->max_frame_size);
+			output->connected_udp, cfg->max_frame_size);
 	} else {
 		/* Compact mode not supported over SHM */
 		return 0;

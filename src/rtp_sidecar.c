@@ -42,15 +42,16 @@ static uint64_t now_us(void)
 
 /* ── Subscriber helpers ──────────────────────────────────────────────── */
 
-static int sub_active(const RtpSidecarSender *s)
+static int sub_active_at(const RtpSidecarSender *s, uint64_t now)
 {
-	return s->sub_expires_us != 0 && now_us() < s->sub_expires_us;
+	return s->sub_expires_us != 0 && now < s->sub_expires_us;
 }
 
-static void sub_refresh(RtpSidecarSender *s, const struct sockaddr_in *src)
+static void sub_refresh_at(RtpSidecarSender *s, const struct sockaddr_in *src,
+	uint64_t now)
 {
 	s->subscriber    = *src;
-	s->sub_expires_us = now_us() + RTP_SIDECAR_SUB_TTL_US;
+	s->sub_expires_us = now + RTP_SIDECAR_SUB_TTL_US;
 }
 
 /* ── Lifecycle ───────────────────────────────────────────────────────── */
@@ -122,6 +123,11 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 	 * Drain all pending datagrams in one call so we don't fall behind
 	 * at high subscribe/sync rates, but cap iterations to avoid
 	 * spending too long in the encode loop.
+	 *
+	 * One `now_us()` sample per drained datagram is enough — control
+	 * traffic is rare (subscribe every 2 s, sync every 200-10000 ms).
+	 * Only the SYNC_RESP case still needs an extra sample for t3 since
+	 * it represents "just before sendto".
 	 */
 	for (int iter = 0; iter < 8; iter++) {
 		uint8_t buf[64];
@@ -143,15 +149,16 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 			continue;
 
 		uint8_t msg_type = buf[5];
+		uint64_t now = now_us();
 
 		switch (msg_type) {
 
 		case RTP_SIDECAR_MSG_SUBSCRIBE:
 			/* Any subscribe (including keepalive) refreshes the TTL */
-			if (!sub_active(s))
+			if (!sub_active_at(s, now))
 				fprintf(stderr, "[sidecar] probe subscribed from %s:%u\n",
 				        inet_ntoa(src.sin_addr), ntohs(src.sin_port));
-			sub_refresh(s, &src);
+			sub_refresh_at(s, &src, now);
 			break;
 
 		case RTP_SIDECAR_MSG_SYNC_REQ:
@@ -159,7 +166,6 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 				continue;
 			{
 				const RtpSidecarSyncReq *req = (const RtpSidecarSyncReq *)buf;
-				uint64_t t2 = now_us();
 
 				RtpSidecarSyncResp resp;
 				resp.magic    = htonl(RTP_SIDECAR_MAGIC);
@@ -168,13 +174,13 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 				resp._pad[0]  = 0;
 				resp._pad[1]  = 0;
 				resp.t1_us    = req->t1_us;  /* echo verbatim */
-				resp.t2_us    = sidecar_htobe64(t2);
+				resp.t2_us    = sidecar_htobe64(now);
 				resp.t3_us    = sidecar_htobe64(now_us());
 
 				sendto(s->fd, &resp, sizeof(resp), MSG_DONTWAIT,
 				       (struct sockaddr *)&src, src_len);
 				/* Also refresh subscriber so sync acts as keepalive */
-				sub_refresh(s, &src);
+				sub_refresh_at(s, &src, now);
 			}
 			break;
 
@@ -194,7 +200,14 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 {
 	if (!s || s->fd < 0)
 		return 0;  /* disabled */
-	if (!sub_active(s))
+
+	/* One clock sample covers both the subscription check and the
+	 * last_pkt_send_us field. The caller has just returned from the
+	 * last RTP sendmsg(), so sampling at function entry is what we
+	 * want — not sampling again a few microseconds later inside the
+	 * serialiser. Saves one clock_gettime per frame. */
+	uint64_t now = now_us();
+	if (!sub_active_at(s, now))
 		return 0;  /* no subscriber — channel stays silent */
 
 	RtpSidecarFrameExt msg;
@@ -213,7 +226,7 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 	msg.frame.seq_first        = htons(seq_first);
 	msg.frame.seq_count        = htons(seq_count);
 	msg.frame.capture_us       = sidecar_htobe64(capture_us);
-	msg.frame.last_pkt_send_us = sidecar_htobe64(now_us());
+	msg.frame.last_pkt_send_us = sidecar_htobe64(now);
 
 	if (enc_info) {
 		msg.frame.flags |= RTP_SIDECAR_FLAG_ENC_INFO;

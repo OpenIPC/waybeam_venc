@@ -14,10 +14,13 @@ typedef struct {
 	socklen_t dst_len;
 	VencOutputUriType transport;
 	venc_ring_t *ring;
+	int requested_connected_udp; /* user preference, persisted for apply_server */
+	int connected_udp;           /* actual kernel state — set by configure() */
 } MarukoOutput;
 
 /** Initialize UDP or Unix socket output from a parsed URI. */
-int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri);
+int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
+	int requested_connected_udp);
 
 /** Initialize SHM output: create shared memory ring buffer. */
 int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,

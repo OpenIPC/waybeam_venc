@@ -21,9 +21,17 @@ int output_socket_configure(int *socket_handle, struct sockaddr_storage *dst,
 	const VencOutputUri *uri, int requested_connected_udp,
 	int *connected_udp);
 
-/** Send one datagram composed of a header and up to two payload fragments. */
+/** Send one datagram composed of a header and up to two payload fragments.
+ *
+ *  When @p connected_udp is non-zero the socket is assumed to be connected
+ *  (via connect()) and the destination pointer is skipped — the kernel
+ *  routes to the connected peer and avoids the per-datagram destination
+ *  lookup work. @p dst / @p dst_len may still be passed (they are ignored)
+ *  so callers can keep a single parameter list.
+ */
 int output_socket_send_parts(int socket_handle,
 	const struct sockaddr_storage *dst, socklen_t dst_len,
+	int connected_udp,
 	const uint8_t *header, size_t header_len,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len);

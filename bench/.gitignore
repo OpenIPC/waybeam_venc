@@ -1,0 +1,6 @@
+*.tsv
+!baseline-master-*.tsv
+!tier-*.tsv
+!control-*.tsv
+!final-*.tsv
+!review-fix-*.tsv

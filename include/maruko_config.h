@@ -39,6 +39,7 @@ typedef struct {
 	uint8_t scene_holdoff;
 	uint8_t frame_lost;
 	int verbose;
+	int connected_udp;
 } MarukoBackendConfig;
 
 /** Fill config with compiled-in defaults for Maruko backend. */

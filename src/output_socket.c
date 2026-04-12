@@ -31,9 +31,16 @@ static int fill_unix_destination(const char *name,
 	return 0;
 }
 
+/* Size the kernel send buffer for one IDR burst at stress-level bitrates
+ * (25+ Mbps at 120 fps). Embedded defaults can be well under 64 KiB and
+ * would cause head-of-line blocking on IDR frames. Raising here is
+ * advisory — setsockopt failure is non-fatal. */
+#define OUTPUT_SOCKET_SNDBUF_BYTES (512 * 1024)
+
 static int open_socket(int *socket_handle, VencOutputUriType type)
 {
 	int domain;
+	int sndbuf;
 
 	if (!socket_handle)
 		return -1;
@@ -55,6 +62,13 @@ static int open_socket(int *socket_handle, VencOutputUriType type)
 		fprintf(stderr, "[output_socket] socket() failed: %s\n",
 			strerror(errno));
 		return -1;
+	}
+
+	sndbuf = OUTPUT_SOCKET_SNDBUF_BYTES;
+	if (setsockopt(*socket_handle, SOL_SOCKET, SO_SNDBUF,
+		&sndbuf, sizeof(sndbuf)) != 0) {
+		fprintf(stderr, "[output_socket] SO_SNDBUF(%d) failed: %s "
+			"(keeping kernel default)\n", sndbuf, strerror(errno));
 	}
 
 	return 0;
@@ -168,6 +182,7 @@ int output_socket_configure(int *socket_handle, struct sockaddr_storage *dst,
 
 int output_socket_send_parts(int socket_handle,
 	const struct sockaddr_storage *dst, socklen_t dst_len,
+	int connected_udp,
 	const uint8_t *header, size_t header_len,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len)
@@ -177,10 +192,12 @@ int output_socket_send_parts(int socket_handle,
 	int iovcnt;
 	ssize_t sent;
 
-	if (socket_handle < 0 || !dst || dst_len == 0 || !header || !payload1 ||
+	if (socket_handle < 0 || !header || !payload1 ||
 	    header_len == 0 || payload1_len == 0) {
 		return -1;
 	}
+	if (!connected_udp && (!dst || dst_len == 0))
+		return -1;
 
 	vec[0].iov_base = (void *)header;
 	vec[0].iov_len = header_len;
@@ -194,8 +211,13 @@ int output_socket_send_parts(int socket_handle,
 	}
 
 	memset(&msg, 0, sizeof(msg));
-	msg.msg_name = (void *)dst;
-	msg.msg_namelen = dst_len;
+	if (connected_udp) {
+		msg.msg_name = NULL;
+		msg.msg_namelen = 0;
+	} else {
+		msg.msg_name = (void *)dst;
+		msg.msg_namelen = dst_len;
+	}
 	msg.msg_iov = vec;
 	msg.msg_iovlen = iovcnt;
 	sent = sendmsg(socket_handle, &msg, 0);
