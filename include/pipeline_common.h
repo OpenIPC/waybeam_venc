@@ -29,6 +29,12 @@ typedef struct {
  * fps = 0 is a no-op. */
 int pipeline_common_cap_exposure_for_fps(uint32_t fps);
 
+/** Compute frame-lost overshoot threshold in bits/s from target bitrate.
+ * Formula: bits + max(20%% margin, 512 kbit/s).  Low bitrates need the
+ * absolute floor so I-frames in VBR/AVBR don't trip frame drops.
+ * Clamps kbps to 200000 to keep kbps*1024 inside uint32_t. */
+uint32_t pipeline_common_frame_lost_threshold(uint32_t kbps);
+
 /** Compute center-crop rectangle to match target aspect ratio.
  * Returns a rectangle that crops the sensor output to the aspect ratio of
  * image_w x image_h, with 2-pixel alignment. */

@@ -175,27 +175,13 @@ int star6e_controls_apply_frame_lost_threshold(MI_VENC_CHN chn, bool enabled,
 	uint32_t kbps)
 {
 	MI_VENC_ParamFrameLost_t lost = {0};
-	MI_U32 bits, margin;
 
 	if (!enabled)
 		return 0;
 
-	/* Clamp to prevent overflow in kbps * 1024 (wraps above 4194303). */
-	if (kbps > 200000)
-		kbps = 200000;
-
-	/* At low bitrates (< ~2500 kbps), a 20% margin is too tight —
-	 * I-frames in VBR/AVBR easily exceed 120% of target, causing
-	 * unnecessary frame drops right after keyframes.  Use a minimum
-	 * absolute margin of 512 kbit/s so low-bitrate streams get enough
-	 * headroom for I-frame bursts. */
-	bits = kbps * 1024;
-	margin = bits / 5;
-	if (margin < 512 * 1024)
-		margin = 512 * 1024;
 	lost.bFrmLostOpen = 1;
 	lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
-	lost.u32FrmLostBpsThr = bits + margin;
+	lost.u32FrmLostBpsThr = pipeline_common_frame_lost_threshold(kbps);
 	lost.u32EncFrmGaps = 0;
 
 	return MI_VENC_SetFrameLostStrategy(chn, &lost) == 0 ? 0 : -1;

@@ -119,6 +119,8 @@ typedef struct {
 	int (*fnGetRcParam)(int dev, int chn, void *param);
 	int (*fnSetRcParam)(int dev, int chn, void *param);
 	int (*fnSetInputSourceConfig)(int dev, int chn, void *cfg);
+	int (*fnSetFrameLostStrategy)(int dev, int chn, void *strategy);
+	int (*fnGetFrameLostStrategy)(int dev, int chn, void *strategy);
 } maruko_venc_impl;
 
 /* Global instances — defined in maruko_mi.c */

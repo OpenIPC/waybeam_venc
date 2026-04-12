@@ -26,6 +26,22 @@ static int is_another_venc_running(void)
       continue;
     }
 
+    /* Skip kernel threads (empty /proc/PID/cmdline).  Prevents a stale
+     * "[venc]" MI_VENC kernel worker — left behind when MI_SYS_Exit is
+     * bypassed by SIGKILL/OOM/panic — from blocking restart until
+     * reboot.  Userspace processes always have argv[0]\0 in cmdline. */
+    char cmdline_path[64];
+    snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%ld/cmdline", pid);
+    FILE* cf = fopen(cmdline_path, "r");
+    if (!cf) {
+      continue;
+    }
+    int cmdline_empty = (fgetc(cf) == EOF);
+    fclose(cf);
+    if (cmdline_empty) {
+      continue;
+    }
+
     char path[64];
     snprintf(path, sizeof(path), "/proc/%ld/comm", pid);
     FILE* f = fopen(path, "r");

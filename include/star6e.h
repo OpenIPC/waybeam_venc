@@ -451,6 +451,23 @@ typedef struct {
 	void *pRcParam;
 } MI_VENC_RcParam_t;
 
+/* Frame-lost strategy types — identical layout on star6e (i6) and maruko
+ * (i6c), declared once here so both backends compile with or without dlopen.
+ * ABI guard: a future SDK update that changes this layout on either platform
+ * would silently corrupt at runtime, so assert the expected size. */
+typedef enum {
+	E_MI_VENC_FRMLOST_NORMAL = 0,
+	E_MI_VENC_FRMLOST_PSKIP  = 1,
+} MI_VENC_FrameLostMode_e;
+typedef struct {
+	MI_BOOL                  bFrmLostOpen;
+	MI_U32                   u32FrmLostBpsThr;
+	MI_VENC_FrameLostMode_e  eFrmLostMode;
+	MI_U32                   u32EncFrmGaps;
+} MI_VENC_ParamFrameLost_t;
+_Static_assert(sizeof(MI_VENC_ParamFrameLost_t) == 16,
+	"MI_VENC_ParamFrameLost_t layout changed — verify SDK match");
+
 /* MI_VENC ----------------------------------------------------------------- */
 #if defined(PLATFORM_MARUKO)
 #define MI_VENC_CreateChn(chn, attr)  g_mi_venc.fnCreateChn(0, (chn), (attr))
@@ -489,18 +506,6 @@ typedef struct {
 #define MI_VENC_SetFrameLostStrategy(chn, p) g_mi_venc.fnSetFrameLostStrategy((chn), (p))
 #define MI_VENC_GetFrameLostStrategy(chn, p) g_mi_venc.fnGetFrameLostStrategy((chn), (p))
 #define MI_VENC_GetChnDevid(chn, dev) g_mi_venc.fnGetChnDevid((chn), (dev))
-
-/* Frame lost strategy types (needed by both dlopen and test paths) */
-typedef enum {
-	E_MI_VENC_FRMLOST_NORMAL = 0,
-	E_MI_VENC_FRMLOST_PSKIP  = 1,
-} MI_VENC_FrameLostMode_e;
-typedef struct {
-	MI_BOOL                  bFrmLostOpen;
-	MI_U32                   u32FrmLostBpsThr;
-	MI_VENC_FrameLostMode_e  eFrmLostMode;
-	MI_U32                   u32EncFrmGaps;
-} MI_VENC_ParamFrameLost_t;
 #else
 MI_S32 MI_VENC_CreateChn(MI_VENC_CHN chn, MI_VENC_ChnAttr_t* attr);
 MI_S32 MI_VENC_DestroyChn(MI_VENC_CHN chn);
@@ -519,17 +524,6 @@ MI_S32 MI_VENC_RequestIdr(MI_VENC_CHN chn, MI_BOOL instant);
 MI_S32 MI_VENC_SetRoiCfg(MI_VENC_CHN chn, MI_VENC_RoiCfg_t *cfg);
 MI_S32 MI_VENC_GetRoiCfg(MI_VENC_CHN chn, MI_U32 idx, MI_VENC_RoiCfg_t *cfg);
 
-/* Frame lost strategy */
-typedef enum {
-	E_MI_VENC_FRMLOST_NORMAL = 0,
-	E_MI_VENC_FRMLOST_PSKIP  = 1,
-} MI_VENC_FrameLostMode_e;
-typedef struct {
-	MI_BOOL                  bFrmLostOpen;
-	MI_U32                   u32FrmLostBpsThr;
-	MI_VENC_FrameLostMode_e  eFrmLostMode;
-	MI_U32                   u32EncFrmGaps;
-} MI_VENC_ParamFrameLost_t;
 MI_S32 MI_VENC_SetFrameLostStrategy(MI_VENC_CHN chn, MI_VENC_ParamFrameLost_t *p);
 MI_S32 MI_VENC_GetFrameLostStrategy(MI_VENC_CHN chn, MI_VENC_ParamFrameLost_t *p);
 MI_S32 MI_VENC_GetChnDevid(MI_VENC_CHN chn, MI_U32* device_id);

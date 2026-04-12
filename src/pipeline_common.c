@@ -5,6 +5,19 @@
 #include <string.h>
 #include <unistd.h>
 
+uint32_t pipeline_common_frame_lost_threshold(uint32_t kbps)
+{
+	uint32_t bits, margin;
+
+	if (kbps > 200000U)
+		kbps = 200000U;
+	bits = kbps * 1024U;
+	margin = bits / 5U;
+	if (margin < 524288U)
+		margin = 524288U;
+	return bits + margin;
+}
+
 uint32_t pipeline_common_gop_frames(double gop_seconds, uint32_t fps)
 {
 	uint32_t gop_fps = fps ? fps : 30;

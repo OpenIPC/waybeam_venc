@@ -35,6 +35,9 @@ typedef struct {
 	int vpe_level_3dnr;
 	SensorUnlockConfig sensor_unlock;
 	int oc_level;
+	uint16_t scene_threshold;
+	uint8_t scene_holdoff;
+	uint8_t frame_lost;
 	int verbose;
 } MarukoBackendConfig;
 

@@ -4,6 +4,7 @@
 #include "maruko_controls.h"
 #include "maruko_iq.h"
 #include "maruko_pipeline.h"
+#include "scene_detector.h"
 #include "venc_api.h"
 #include "venc_config.h"
 #include "venc_httpd.h"
@@ -19,6 +20,12 @@ typedef struct {
 static void maruko_bind_controls(MarukoRunnerContext *ctx)
 {
 	maruko_controls_bind(&ctx->backend, &ctx->vcfg);
+}
+
+static void maruko_reset_scene(MarukoBackendContext *backend)
+{
+	scene_init(&backend->scene, backend->cfg.scene_threshold,
+		backend->cfg.scene_holdoff);
 }
 
 static int maruko_runner_init(void *opaque)
@@ -39,6 +46,7 @@ static int maruko_runner_init(void *opaque)
 
 	maruko_iq_init();
 	maruko_bind_controls(ctx);
+	maruko_reset_scene(backend);
 	venc_api_register(&ctx->vcfg, "maruko", maruko_controls_callbacks());
 	if (ctx->vcfg.video0.qp_delta != 0 &&
 	    maruko_controls_callbacks()->apply_qp_delta) {
@@ -109,6 +117,7 @@ static int maruko_reinit_pipeline(MarukoRunnerContext *ctx)
 		return ret;
 
 	maruko_bind_controls(ctx);
+	maruko_reset_scene(backend);
 	if (ctx->vcfg.video0.qp_delta != 0 &&
 	    maruko_controls_callbacks()->apply_qp_delta) {
 		maruko_controls_callbacks()->apply_qp_delta(
