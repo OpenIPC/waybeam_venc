@@ -1716,16 +1716,23 @@ static int handle_iq_set(int fd, const HttpRequest *req, void *ctx)
 #if HAVE_BACKEND_STAR6E
 extern int star6e_iq_import(const char *json_str);
 #endif
+#if HAVE_BACKEND_MARUKO
+extern int maruko_iq_import(const char *json_str);
+#endif
 
 static int handle_iq_import(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)ctx;
-#if HAVE_BACKEND_STAR6E
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
 	if (req->body_len <= 0 || !req->body[0]) {
 		return httpd_send_error(fd, 400, "invalid_request",
 			"POST JSON body required (output of /api/v1/iq)");
 	}
+#if HAVE_BACKEND_STAR6E
 	int ret = star6e_iq_import(req->body);
+#else
+	int ret = maruko_iq_import(req->body);
+#endif
 	if (ret != 0)
 		return httpd_send_error(fd, 500, "import_partial",
 			"some parameters failed to apply");
