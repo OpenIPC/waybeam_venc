@@ -817,22 +817,25 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 		return ret;
 	}
 
-	/* Frame-lost safety net — must be after StartRecvPic.  Overshoot
-	 * margin = max(20%, 512 kbit/s) lets I-frames spike without drops. */
+	/* Frame-lost safety net — must be after StartRecvPic. */
 	if (cfg->frame_lost) {
 		MI_VENC_ParamFrameLost_t lost = {0};
-		MI_U32 bits = cfg->venc_max_rate * 1024;
-		MI_U32 margin = bits / 5;
-		if (margin < 512 * 1024)
-			margin = 512 * 1024;
 		lost.bFrmLostOpen = 1;
 		lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
-		lost.u32FrmLostBpsThr = bits + margin;
+		lost.u32FrmLostBpsThr =
+			pipeline_common_frame_lost_threshold(cfg->venc_max_rate);
 		lost.u32EncFrmGaps = 0;
 		MI_S32 fl_ret = maruko_mi_venc_set_frame_lost(venc_dev, *chn,
 			&lost);
-		printf("> [maruko] SetFrameLostStrategy: thr=%u ret=%d\n",
-			lost.u32FrmLostBpsThr, fl_ret);
+		if (fl_ret != 0) {
+			fprintf(stderr,
+				"WARNING: [maruko] SetFrameLostStrategy"
+				" thr=%u ret=%d (overshoot protection disabled)\n",
+				lost.u32FrmLostBpsThr, fl_ret);
+		} else {
+			printf("> [maruko] SetFrameLostStrategy: thr=%u ret=0\n",
+				lost.u32FrmLostBpsThr);
+		}
 	}
 
 	return 0;
@@ -1241,6 +1244,8 @@ static void maruko_scene_request_idr(void *ctx_ptr)
 
 int maruko_pipeline_run(MarukoBackendContext *ctx)
 {
+	int result = -1;
+
 	if (!ctx || (ctx->output.socket_handle < 0 && !ctx->output.ring))
 		return -1;
 
@@ -1272,8 +1277,8 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		if (g_maruko_reinit || venc_api_get_reinit()) {
 			g_maruko_reinit = 0;
 			printf("> [maruko] reinit requested, breaking stream loop\n");
-			rtp_sidecar_sender_close(&sidecar);
-			return 1;
+			result = 1;
+			goto cleanup;
 		}
 
 		i6c_venc_stat stat = {0};
@@ -1287,7 +1292,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			fprintf(stderr,
 				"ERROR: [maruko] MI_VENC_Query failed %d\n",
 				ret);
-			return -1;
+			goto cleanup;
 		}
 
 		if (stat.curPacks == 0) {
@@ -1298,7 +1303,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 				fprintf(stderr,
 					"ERROR: [maruko] no encoder data"
 					" received; aborting stream loop\n");
-				return -1;
+				goto cleanup;
 			}
 			/* Short poll sleep: 500us is <5% of 11ms frame period
 			 * at 90fps, reducing idle syscalls by ~5x vs 100us
@@ -1317,7 +1322,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 				cached_packs_cap = 0;
 				fprintf(stderr,
 					"ERROR: [maruko] packet alloc failed\n");
-				return -1;
+				goto cleanup;
 			}
 			cached_packs_cap = stat.curPacks;
 		}
@@ -1333,7 +1338,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			fprintf(stderr,
 				"ERROR: [maruko] MI_VENC_GetStream failed %d\n",
 				ret);
-			return -1;
+			goto cleanup;
 		}
 
 		++frame_counter;
@@ -1364,7 +1369,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		uint8_t is_idr = maruko_scene_is_idr(&stream, codec);
 		scene_update(&ctx->scene, frame_size, is_idr,
 			maruko_scene_request_idr, ctx);
-		RtpSidecarEncInfo enc_info;
+		RtpSidecarEncInfo enc_info = {0};
 		scene_fill_sidecar(&ctx->scene, &enc_info);
 
 		size_t total_bytes = 0;
@@ -1400,10 +1405,12 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		(void)maruko_mi_venc_release_stream(ctx->venc_device,
 			ctx->venc_channel, &stream);
 	}
+	result = 0;
 
+cleanup:
 	free(cached_packs);
 	rtp_sidecar_sender_close(&sidecar);
-	return 0;
+	return result;
 }
 
 void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)

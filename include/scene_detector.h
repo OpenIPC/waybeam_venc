@@ -5,9 +5,6 @@
 
 #include <stdint.h>
 
-#define SCENE_FRAME_P   0
-#define SCENE_FRAME_IDR 2
-
 /*
  * Lightweight scene-change IDR detector shared by star6e and maruko backends.
  *

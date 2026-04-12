@@ -22,6 +22,12 @@ static void maruko_bind_controls(MarukoRunnerContext *ctx)
 	maruko_controls_bind(&ctx->backend, &ctx->vcfg);
 }
 
+static void maruko_reset_scene(MarukoBackendContext *backend)
+{
+	scene_init(&backend->scene, backend->cfg.scene_threshold,
+		backend->cfg.scene_holdoff);
+}
+
 static int maruko_runner_init(void *opaque)
 {
 	MarukoRunnerContext *ctx = opaque;
@@ -40,8 +46,7 @@ static int maruko_runner_init(void *opaque)
 
 	maruko_iq_init();
 	maruko_bind_controls(ctx);
-	scene_init(&backend->scene, backend->cfg.scene_threshold,
-		backend->cfg.scene_holdoff);
+	maruko_reset_scene(backend);
 	venc_api_register(&ctx->vcfg, "maruko", maruko_controls_callbacks());
 	if (ctx->vcfg.video0.qp_delta != 0 &&
 	    maruko_controls_callbacks()->apply_qp_delta) {
@@ -112,8 +117,7 @@ static int maruko_reinit_pipeline(MarukoRunnerContext *ctx)
 		return ret;
 
 	maruko_bind_controls(ctx);
-	scene_init(&backend->scene, backend->cfg.scene_threshold,
-		backend->cfg.scene_holdoff);
+	maruko_reset_scene(backend);
 	if (ctx->vcfg.video0.qp_delta != 0 &&
 	    maruko_controls_callbacks()->apply_qp_delta) {
 		maruko_controls_callbacks()->apply_qp_delta(

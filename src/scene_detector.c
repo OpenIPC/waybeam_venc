@@ -24,7 +24,7 @@ void scene_update(SceneDetector *sd, uint32_t frame_size, uint8_t is_idr,
 	size_fp8 = frame_size << 8;
 
 	sd->last_frame_size = frame_size;
-	sd->last_frame_type = is_idr ? SCENE_FRAME_IDR : SCENE_FRAME_P;
+	sd->last_frame_type = is_idr ? RTP_SIDECAR_FRAME_IDR : RTP_SIDECAR_FRAME_P;
 
 	if (sd->frame_count < UINT32_MAX) sd->frame_count++;
 	sd->idr_inserted = 0;
@@ -85,7 +85,8 @@ void scene_update(SceneDetector *sd, uint32_t frame_size, uint8_t is_idr,
 		}
 	} else {
 		if (ratio_x100 >= sd->threshold) {
-			sd->consecutive_spikes++;
+			if (sd->consecutive_spikes < UINT8_MAX)
+				sd->consecutive_spikes++;
 			if (sd->consecutive_spikes >= sd->holdoff)
 				sd->spike_pending = 1;
 		} else {

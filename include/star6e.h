@@ -452,7 +452,9 @@ typedef struct {
 } MI_VENC_RcParam_t;
 
 /* Frame-lost strategy types — identical layout on star6e (i6) and maruko
- * (i6c), declared once here so both backends compile with or without dlopen. */
+ * (i6c), declared once here so both backends compile with or without dlopen.
+ * ABI guard: a future SDK update that changes this layout on either platform
+ * would silently corrupt at runtime, so assert the expected size. */
 typedef enum {
 	E_MI_VENC_FRMLOST_NORMAL = 0,
 	E_MI_VENC_FRMLOST_PSKIP  = 1,
@@ -463,6 +465,8 @@ typedef struct {
 	MI_VENC_FrameLostMode_e  eFrmLostMode;
 	MI_U32                   u32EncFrmGaps;
 } MI_VENC_ParamFrameLost_t;
+_Static_assert(sizeof(MI_VENC_ParamFrameLost_t) == 16,
+	"MI_VENC_ParamFrameLost_t layout changed — verify SDK match");
 
 /* MI_VENC ----------------------------------------------------------------- */
 #if defined(PLATFORM_MARUKO)
