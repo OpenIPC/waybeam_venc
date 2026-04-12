@@ -19,6 +19,7 @@ extern int test_pipeline_common(void);
 extern int test_codec_config(void);
 extern int test_sdk_quiet(void);
 extern int test_rtp_packetizer(void);
+extern int test_hevc_rtp(void);
 extern int test_isp_runtime(void);
 extern int test_rtp_session(void);
 extern int test_stream_metrics(void);
@@ -76,6 +77,9 @@ int main(void)
 
 	printf("\n--- test_rtp_packetizer ---\n");
 	failures += test_rtp_packetizer();
+
+	printf("\n--- test_hevc_rtp ---\n");
+	failures += test_hevc_rtp();
 
 	printf("\n--- test_isp_runtime ---\n");
 	failures += test_isp_runtime();
