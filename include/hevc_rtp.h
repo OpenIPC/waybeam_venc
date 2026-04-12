@@ -17,16 +17,19 @@ typedef struct {
 	uint32_t rtp_payload_bytes;
 } HevcRtpStats;
 
-/* Aggregation-packet builder.  Struct laid bare so callers stack-allocate
- * and call hevc_rtp_ap_reset() before use; field access is internal. */
+/* Aggregation-packet builder.  Layout is exposed only so callers can
+ * stack-allocate; fields under _internal are implementation detail and
+ * must be accessed only through hevc_rtp_* helpers. */
 typedef struct {
-	uint8_t payload[RTP_BUFFER_MAX];
-	size_t payload_len;
-	size_t nal_bytes;
-	uint16_t nal_count;
-	uint8_t forbidden_zero;
-	uint8_t layer_id;
-	uint8_t tid_plus1;
+	struct {
+		uint8_t payload[RTP_BUFFER_MAX];
+		size_t payload_len;
+		size_t nal_bytes;
+		uint16_t nal_count;
+		uint8_t forbidden_zero;
+		uint8_t layer_id;
+		uint8_t tid_plus1;
+	} _internal;
 } HevcApBuilder;
 
 void hevc_rtp_ap_reset(HevcApBuilder *ap);

@@ -2,7 +2,7 @@
 
 ## [0.7.1] - 2026-04-12
 
-- **Phase 5 — Maruko HEVC RTP parity (PR #??):** Extracted the HEVC RTP
+- **Phase 5 — Maruko HEVC RTP parity (PR #32):** Extracted the HEVC RTP
   output stage into a shared `hevc_rtp` module (`include/hevc_rtp.h` +
   `src/hevc_rtp.c`). Both Star6E and Maruko now go through the same
   Aggregation Packet (type 48) builder, FU-A fragmentation, VPS/SPS/PPS

@@ -169,6 +169,105 @@ static int test_hevc_rtp_prepend_param_sets_on_idr(void)
 	return failures;
 }
 
+/* A small NAL followed by a large NAL in the same frame: the AP must be
+ * flushed (as a single-RTP since it had only one queued NAL) before the
+ * large NAL goes out as FU-A.  The FU-A tail must carry the marker bit. */
+static int test_hevc_rtp_mixed_small_then_large(void)
+{
+	static const uint8_t small[] = { 0x02, 0x01, 0x33, 0x44 };
+	static uint8_t big[3000];
+	CaptureCtx capture = {0};
+	HevcApBuilder ap;
+	HevcRtpStats stats = {0};
+	RtpPacketizerState rtp = { .seq = 0x400, .timestamp = 0x4000,
+		.ssrc = 0xBEEF, .payload_type = 97 };
+	size_t i;
+	size_t total;
+	int failures = 0;
+
+	big[0] = (uint8_t)(1 << 1);
+	big[1] = 0x01;
+	for (i = 2; i < sizeof(big); ++i)
+		big[i] = (uint8_t)(i & 0xFF);
+
+	hevc_rtp_ap_reset(&ap);
+	total = hevc_rtp_send_nal(&ap, small, sizeof(small), &rtp, capture_write,
+		&capture, 0, 1400, &stats);
+	total += hevc_rtp_send_nal(&ap, big, sizeof(big), &rtp, capture_write,
+		&capture, 1, 1400, &stats);
+
+	CHECK("hevc_rtp mixed total bytes", total == sizeof(small) + sizeof(big));
+	CHECK("hevc_rtp mixed multiple packets", capture.count >= 3);
+	CHECK("hevc_rtp mixed first is single (not AP)",
+		capture.count > 0 &&
+		(capture.packets[0].payload[0] >> 1 & 0x3F) != 48);
+	CHECK("hevc_rtp mixed last marker",
+		capture.count > 0 &&
+		rtp_marker_set(capture.packets[capture.count - 1].header));
+	CHECK("hevc_rtp mixed stats split",
+		stats.total_nals == 2 && stats.single_packets == 1 &&
+		stats.ap_packets == 0 && stats.fu_packets >= 2);
+	return failures;
+}
+
+/* Passing stats=NULL must be safe at every entry point. */
+static int test_hevc_rtp_null_stats(void)
+{
+	static const uint8_t vps[] = { 0x40, 0x01, 0xAA };
+	static const uint8_t sps[] = { 0x42, 0x01, 0xBB };
+	CaptureCtx capture = {0};
+	HevcApBuilder ap;
+	RtpPacketizerState rtp = { .seq = 0x500, .timestamp = 0x5000,
+		.ssrc = 0xABCD, .payload_type = 97 };
+	H26xParamSets params = {0};
+	size_t total;
+	int failures = 0;
+
+	h26x_param_sets_update(&params, PT_H265, 32, vps, sizeof(vps));
+	h26x_param_sets_update(&params, PT_H265, 33, sps, sizeof(sps));
+
+	hevc_rtp_ap_reset(&ap);
+	total = hevc_rtp_send_nal(&ap, vps, sizeof(vps), &rtp, capture_write,
+		&capture, 0, 1400, NULL);
+	total += hevc_rtp_send_nal(&ap, sps, sizeof(sps), &rtp, capture_write,
+		&capture, 1, 1400, NULL);
+	CHECK("hevc_rtp null-stats send ok", total == sizeof(vps) + sizeof(sps));
+
+	hevc_rtp_ap_reset(&ap);
+	total = hevc_rtp_prepend_param_sets(&params, 19, &ap, &rtp,
+		capture_write, &capture, 1400, NULL);
+	total += hevc_rtp_ap_flush(&ap, &rtp, capture_write, &capture, 1, NULL);
+	CHECK("hevc_rtp null-stats prepend+flush ok",
+		total == sizeof(vps) + sizeof(sps));
+	return failures;
+}
+
+/* hevc_rtp_send_nal with is_last=1 on a lone small NAL must emit a single
+ * RTP packet with the marker bit set. */
+static int test_hevc_rtp_single_marker_on_last(void)
+{
+	static const uint8_t nal[] = { 0x02, 0x01, 0x77, 0x88, 0x99 };
+	CaptureCtx capture = {0};
+	HevcApBuilder ap;
+	HevcRtpStats stats = {0};
+	RtpPacketizerState rtp = { .seq = 0x600, .timestamp = 0x6000,
+		.ssrc = 0x1234, .payload_type = 97 };
+	size_t total;
+	int failures = 0;
+
+	hevc_rtp_ap_reset(&ap);
+	total = hevc_rtp_send_nal(&ap, nal, sizeof(nal), &rtp, capture_write,
+		&capture, 1, 1400, &stats);
+	CHECK("hevc_rtp single total", total == sizeof(nal));
+	CHECK("hevc_rtp single one packet", capture.count == 1);
+	CHECK("hevc_rtp single marker set",
+		capture.count > 0 && rtp_marker_set(capture.packets[0].header));
+	CHECK("hevc_rtp single stats",
+		stats.total_nals == 1 && stats.single_packets == 1 &&
+		stats.ap_packets == 0 && stats.fu_packets == 0);
+	return failures;
+}
+
 int test_hevc_rtp(void)
 {
 	int failures = 0;
@@ -176,5 +275,8 @@ int test_hevc_rtp(void)
 	failures += test_hevc_rtp_aggregates_small_nals();
 	failures += test_hevc_rtp_fallback_to_fu();
 	failures += test_hevc_rtp_prepend_param_sets_on_idr();
+	failures += test_hevc_rtp_mixed_small_then_large();
+	failures += test_hevc_rtp_null_stats();
+	failures += test_hevc_rtp_single_marker_on_last();
 	return failures;
 }

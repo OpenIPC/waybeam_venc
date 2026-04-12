@@ -1250,6 +1250,15 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 	if (!ctx || (ctx->output.socket_handle < 0 && !ctx->output.ring))
 		return -1;
 
+	if (ctx->cfg.stream_mode == MARUKO_STREAM_RTP &&
+	    ctx->cfg.rc_codec != PT_H265) {
+		fprintf(stderr,
+			"ERROR: [maruko] RTP output mode requires codec=h265;"
+			" rc_codec=%d not supported — aborting pipeline\n",
+			(int)ctx->cfg.rc_codec);
+		return -1;
+	}
+
 	if (ctx->cfg.stream_mode == MARUKO_STREAM_RTP)
 		printf("> [maruko] RTP packetizer enabled\n");
 	printf("> [maruko] entering stream loop\n");
@@ -1270,8 +1279,9 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 	uint32_t cached_packs_cap = 0;
 	StreamMetricsState metrics;
 	HevcRtpStats pktzr_interval = {0};
-	int pktzr_verbose = ctx->cfg.verbose && ctx->cfg.rc_codec == PT_H265 &&
-		ctx->cfg.stream_mode == MARUKO_STREAM_RTP;
+#define PKTZR_VERBOSE_ACTIVE() (ctx->cfg.verbose && \
+		ctx->cfg.rc_codec == PT_H265 && \
+		ctx->cfg.stream_mode == MARUKO_STREAM_RTP)
 	if (ctx->cfg.verbose) {
 		struct timespec now;
 		clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1382,7 +1392,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			total_bytes = maruko_video_send_frame(&stream,
 				&ctx->output, &rtp_state, &param_sets,
 				&ctx->cfg,
-				pktzr_verbose ? &frame_pktzr : NULL);
+				PKTZR_VERBOSE_ACTIVE() ? &frame_pktzr : NULL);
 		}
 
 		rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
@@ -1395,7 +1405,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			struct timespec verbose_ts_now;
 
 			stream_metrics_record_frame(&metrics, total_bytes);
-			if (pktzr_verbose) {
+			if (PKTZR_VERBOSE_ACTIVE()) {
 				pktzr_interval.total_nals += frame_pktzr.total_nals;
 				pktzr_interval.single_packets += frame_pktzr.single_packets;
 				pktzr_interval.ap_packets += frame_pktzr.ap_packets;
@@ -1413,7 +1423,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 					sample.uptime_s, sample.fps,
 					sample.kbps, frame_counter,
 					sample.avg_bytes, stream.count);
-				if (pktzr_verbose) {
+				if (PKTZR_VERBOSE_ACTIVE()) {
 					unsigned int avg_rtp_payload =
 						pktzr_interval.rtp_packets > 0
 						? (unsigned int)(pktzr_interval.rtp_payload_bytes /
@@ -1441,6 +1451,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 cleanup:
 	free(cached_packs);
 	rtp_sidecar_sender_close(&sidecar);
+#undef PKTZR_VERBOSE_ACTIVE
 	return result;
 }
 
