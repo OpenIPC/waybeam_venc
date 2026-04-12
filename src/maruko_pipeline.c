@@ -1,5 +1,6 @@
 #include "maruko_pipeline.h"
 
+#include "hevc_rtp.h"
 #include "isp_runtime.h"
 #include "maruko_bindings.h"
 #include "maruko_config.h"
@@ -1268,6 +1269,9 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 	i6c_venc_pack *cached_packs = NULL;
 	uint32_t cached_packs_cap = 0;
 	StreamMetricsState metrics;
+	HevcRtpStats pktzr_interval = {0};
+	int pktzr_verbose = ctx->cfg.verbose && ctx->cfg.rc_codec == PT_H265 &&
+		ctx->cfg.stream_mode == MARUKO_STREAM_RTP;
 	if (ctx->cfg.verbose) {
 		struct timespec now;
 		clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1373,10 +1377,12 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		scene_fill_sidecar(&ctx->scene, &enc_info);
 
 		size_t total_bytes = 0;
+		HevcRtpStats frame_pktzr = {0};
 		if (ctx->output_enabled) {
 			total_bytes = maruko_video_send_frame(&stream,
 				&ctx->output, &rtp_state, &param_sets,
-				&ctx->cfg);
+				&ctx->cfg,
+				pktzr_verbose ? &frame_pktzr : NULL);
 		}
 
 		rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
@@ -1389,6 +1395,15 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			struct timespec verbose_ts_now;
 
 			stream_metrics_record_frame(&metrics, total_bytes);
+			if (pktzr_verbose) {
+				pktzr_interval.total_nals += frame_pktzr.total_nals;
+				pktzr_interval.single_packets += frame_pktzr.single_packets;
+				pktzr_interval.ap_packets += frame_pktzr.ap_packets;
+				pktzr_interval.ap_nals += frame_pktzr.ap_nals;
+				pktzr_interval.fu_packets += frame_pktzr.fu_packets;
+				pktzr_interval.rtp_packets += frame_pktzr.rtp_packets;
+				pktzr_interval.rtp_payload_bytes += frame_pktzr.rtp_payload_bytes;
+			}
 			clock_gettime(CLOCK_MONOTONIC, &verbose_ts_now);
 			if (stream_metrics_sample(&metrics, &verbose_ts_now,
 			    &sample)) {
@@ -1398,6 +1413,22 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 					sample.uptime_s, sample.fps,
 					sample.kbps, frame_counter,
 					sample.avg_bytes, stream.count);
+				if (pktzr_verbose) {
+					unsigned int avg_rtp_payload =
+						pktzr_interval.rtp_packets > 0
+						? (unsigned int)(pktzr_interval.rtp_payload_bytes /
+							pktzr_interval.rtp_packets) : 0;
+					printf("[pktzr] nals %u | rtp %u | fill %u B"
+						" | single %u | ap %u/%u | fu %u\n",
+						pktzr_interval.total_nals,
+						pktzr_interval.rtp_packets,
+						avg_rtp_payload,
+						pktzr_interval.single_packets,
+						pktzr_interval.ap_packets,
+						pktzr_interval.ap_nals,
+						pktzr_interval.fu_packets);
+					memset(&pktzr_interval, 0, sizeof(pktzr_interval));
+				}
 				fflush(stdout);
 			}
 		}

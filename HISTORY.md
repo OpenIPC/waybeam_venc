@@ -1,5 +1,33 @@
 # History
 
+## [0.7.1] - 2026-04-12
+
+- **Phase 5 — Maruko HEVC RTP parity (PR #??):** Extracted the HEVC RTP
+  output stage into a shared `hevc_rtp` module (`include/hevc_rtp.h` +
+  `src/hevc_rtp.c`). Both Star6E and Maruko now go through the same
+  Aggregation Packet (type 48) builder, FU-A fragmentation, VPS/SPS/PPS
+  prepend-on-IDR, and per-frame `HevcRtpStats`. `star6e_hevc_rtp.c` is
+  now a thin stream-iteration wrapper (227 lines → 111 lines);
+  `Star6eHevcRtpStats` becomes a typedef alias of `HevcRtpStats` so
+  existing call sites are unchanged. Maruko's RTP output gets standards-
+  compliant AP aggregation for the first time: hardware-validated on
+  SSC378QE at H.265 CBR 118 fps / 8 Mbps — IDR frames pack
+  VPS+SPS+PPS+IDR as a single AP packet (`ap 1/6` in `[pktzr]` verbose
+  line) instead of 4 separate RTP datagrams.
+- **`[pktzr]` verbose line on Maruko:** Matches Star6E's exact format
+  (`nals N | rtp N | fill N B | single N | ap N/N | fu N`) so log
+  tooling works across both backends.
+- **H.264 RTP output removed from Maruko:** Maruko ships H.265-only on
+  the RTP wire path. The H.264 path was never hardware-verified and
+  Maruko's FPV use case is H.265 exclusive. Channel creation still
+  accepts `codec=h264` for forward compatibility, but the frame sender
+  emits a warning and drops output. Net -~130 lines in `maruko_video.c`.
+- **New `test_hevc_rtp` suite** (3 tests, 16 assertions): AP packing of
+  small NALs, AP→FU-A fallback on oversized NALs, VPS/SPS/PPS prepend
+  behavior — uses a capture-callback harness (no sockets) so tests run
+  in <1 ms. Existing Star6E AP/FU-A test still passes unchanged as
+  regression guard.
+
 ## [0.7.0] - 2026-04-11
 
 - **dlopen migration (both backends):** Both Star6E and Maruko now load all
