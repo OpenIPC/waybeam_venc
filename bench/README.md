@@ -536,7 +536,67 @@ No send errors, no decode issues, venc stable through the full run,
 `VmRSS` unchanged from Tier A+B+C (the snapshot fields are a few
 dozen bytes added to the existing batch struct).
 
+## Maruko Tier C port (sendmmsg batching)
 
+Follow-up to the Star6E Tier ABC PR — port the same sendmmsg batch
+pattern to the Maruko backend (`src/maruko_video.c` +
+`src/maruko_output.c`). Branch: `feature/maruko-tier-c-sendmmsg`.
 
+### Target
 
+- Host: `root@192.168.2.12` (SSC378QE + IMX415), hub not running
+- Sensor mode: `3760x1024@59fps`
+- Codec: H.265, CBR, sidecar port 5602
+- Bitrate: 25 Mbps (persisted in `/etc/venc.json`)
+- Probe: `tools/rtp_timing_probe --venc-ip 192.168.2.12 --sidecar-port 5602`
+- Duration: 60 s (3660 frames at 59 fps, ~39 RTP pkts/frame)
+
+### Comparison (tight run-order, second master sample used for variance)
+
+| Metric | Master A+B (run 2) | Tier A+B+C | Δ |
+|---|---:|---:|---:|
+| User CPU (proc/pid stat) | 6.6 % | 6.3 % | −5 % (noise) |
+| Sys CPU (proc/pid stat) | 20.1 % | 20.1 % | 0 % |
+| ctxt/s (system-wide) | 3 403 | 3 398 | 0 % |
+| Send spread mean | 1 014 µs | 981 µs | **−3.3 %** |
+| Send spread P95 | 1 210 µs | 1 158 µs | **−4.3 %** |
+| Send spread P99 | 1 287 µs | 1 227 µs | **−4.7 %** |
+| Send spread max | 1 487 µs | 1 394 µs | **−6.3 %** |
+| Encode duration mean | 4 507 µs | 4 526 µs | 0 % |
+
+First master sample came in at 3 844 µs encode mean (vs 4 507 µs on
+run 2); a second master run was taken to pin the encode-duration
+variance — confirms run-to-run swing of ~15 % unrelated to Tier C.
+
+### Interpretation
+
+**Send spread tightened** consistently across all percentiles (−3 to
+−6 %). This is the expected effect of collapsing ~39 per-frame
+`sendmsg()` calls into one `sendmmsg()` flush — all packets leave
+the NIC queue together instead of interleaved with other syscalls.
+Tight send pacing helps wfb-ng FEC block alignment.
+
+**User CPU did not drop** the way it did on Star6E (−18 %). Why:
+Maruko in this configuration runs at 59 fps vs Star6E's 120 fps, so
+the per-second syscall count is ~2 300 on both and the send path is
+already a smaller fraction of total CPU on Maruko (sys CPU dominated
+by encoder SDK + ISP at 20 %). There isn't enough send-path CPU left
+to shave.
+
+**No regressions:** no send errors in `/tmp/venc.log`, no decode
+gaps, bitrate holds steady at 25 Mbps, venc stable across the swap
+cycles. Binary grew 4 KB (~100 KB batch scratch lives in BSS —
+same shape as Star6E).
+
+### Files
+
+- `bench/maruko-master-59fps-25mbps.{tsv,summary,kpi}`
+- `bench/maruko-master-run2-59fps-25mbps.{tsv,summary,kpi}`
+- `bench/maruko-tier-c-59fps-25mbps.{tsv,summary,kpi}`
+
+### Ship verdict
+
+Merge. The send-spread improvement is real and the change mirrors
+a pattern already shipped on Star6E. Expect a bigger CPU win once
+Maruko is driven at >100 fps or the ISP/encoder share drops.
 

@@ -11,10 +11,7 @@
 #include <sys/uio.h>
 
 typedef struct {
-	int socket_handle;
-	const struct sockaddr_storage *dst;
-	socklen_t dst_len;
-	int connected_udp;
+	MarukoOutput *output;
 	venc_ring_t *ring;
 } MarukoRtpWriteContext;
 
@@ -23,6 +20,7 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 	const uint8_t *payload2, size_t payload2_len, void *opaque)
 {
 	const MarukoRtpWriteContext *ctx = opaque;
+	MarukoOutput *output;
 	struct iovec vec[3];
 	struct msghdr msg;
 	int iovcnt;
@@ -49,10 +47,28 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 			payload1, (uint16_t)payload1_len);
 	}
 
-	/* Socket path */
-	if (ctx->socket_handle < 0)
+	output = ctx->output;
+	if (!output)
 		return -1;
-	if (!ctx->connected_udp && (!ctx->dst || ctx->dst_len == 0))
+
+	/* Batched path: enqueue into sendmmsg() batch when active. */
+	if (output->batch.active) {
+		if (maruko_output_batch_enqueue(output, header, header_len,
+		    payload1, payload1_len, payload2, payload2_len) == 0)
+			return 0;
+		/* Scratch slot too small for this packet — flush anything
+		 * already queued (to preserve ordering), then fall through to
+		 * immediate send. */
+		(void)maruko_output_end_frame(output);
+		/* Reopen the batch for subsequent packets in this frame. */
+		maruko_output_begin_frame(output);
+	}
+
+	/* Fallback: either batch inactive or packet too big for scratch —
+	 * send immediately via sendmsg(). */
+	if (output->socket_handle < 0)
+		return -1;
+	if (!output->connected_udp && output->dst_len == 0)
 		return -1;
 
 	vec[0].iov_base = (void *)header;
@@ -67,16 +83,20 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 	}
 
 	memset(&msg, 0, sizeof(msg));
-	if (ctx->connected_udp) {
+	if (output->connected_udp) {
 		msg.msg_name = NULL;
 		msg.msg_namelen = 0;
 	} else {
-		msg.msg_name = (void *)ctx->dst;
-		msg.msg_namelen = ctx->dst_len;
+		msg.msg_name = (void *)&output->dst;
+		msg.msg_namelen = output->dst_len;
 	}
 	msg.msg_iov = vec;
 	msg.msg_iovlen = iovcnt;
-	return sendmsg(ctx->socket_handle, &msg, 0) < 0 ? -1 : 0;
+	if (sendmsg(output->socket_handle, &msg, 0) < 0) {
+		output->send_errors++;
+		return -1;
+	}
+	return 0;
 }
 
 /* H.265-only frame sender: iterates the stream, delegates AP aggregation
@@ -176,21 +196,16 @@ static size_t maruko_send_frame_hevc(const i6c_venc_strm *stream,
 }
 
 static size_t maruko_send_frame_rtp(const i6c_venc_strm *stream,
-	int socket_handle, const struct sockaddr_storage *dst,
-	socklen_t dst_len, int connected_udp, venc_ring_t *ring,
-	MarukoRtpState *rtp, H26xParamSets *params, PAYLOAD_TYPE_E codec,
-	size_t max_payload, HevcRtpStats *stats)
+	MarukoOutput *output, MarukoRtpState *rtp, H26xParamSets *params,
+	PAYLOAD_TYPE_E codec, size_t max_payload, HevcRtpStats *stats)
 {
 	MarukoRtpWriteContext ctx = {
-		.socket_handle = socket_handle,
-		.dst = dst,
-		.dst_len = dst_len,
-		.connected_udp = connected_udp,
-		.ring = ring,
+		.output = output,
+		.ring = output ? output->ring : NULL,
 	};
 	size_t total_bytes;
 
-	if (!stream || !dst || !rtp)
+	if (!stream || !output || !rtp)
 		return 0;
 	if (codec != PT_H265) {
 		static int warned;
@@ -203,8 +218,11 @@ static size_t maruko_send_frame_rtp(const i6c_venc_strm *stream,
 		return 0;
 	}
 
+	/* Open sendmmsg batch for UDP; no-op for SHM. */
+	maruko_output_begin_frame(output);
 	total_bytes = maruko_send_frame_hevc(stream, &ctx, rtp, params,
 		max_payload, stats);
+	(void)maruko_output_end_frame(output);
 	rtp->timestamp += rtp->frame_ticks;
 	return total_bytes;
 }
@@ -306,7 +324,7 @@ void maruko_video_init_rtp_state(MarukoRtpState *rtp,
 }
 
 size_t maruko_video_send_frame(const i6c_venc_strm *stream,
-	const MarukoOutput *output, MarukoRtpState *rtp,
+	MarukoOutput *output, MarukoRtpState *rtp,
 	H26xParamSets *params, MarukoBackendConfig *cfg, HevcRtpStats *stats)
 {
 	size_t total_bytes;
@@ -317,9 +335,7 @@ size_t maruko_video_send_frame(const i6c_venc_strm *stream,
 		return 0;
 
 	if (cfg->stream_mode == MARUKO_STREAM_RTP) {
-		total_bytes = maruko_send_frame_rtp(stream, output->socket_handle,
-			&output->dst, output->dst_len, output->connected_udp,
-			output->ring, rtp, params,
+		total_bytes = maruko_send_frame_rtp(stream, output, rtp, params,
 			cfg->rc_codec, cfg->rtp_payload_size, stats);
 	} else if (!output->ring) {
 		total_bytes = maruko_send_frame_compact(stream,

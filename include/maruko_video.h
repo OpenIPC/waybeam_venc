@@ -20,7 +20,7 @@ void maruko_video_init_rtp_state(MarukoRtpState *rtp,
  *  If stats is non-NULL and the stream is H.265 in RTP mode, per-frame
  *  packetizer counters are accumulated into *stats. */
 size_t maruko_video_send_frame(const i6c_venc_strm *stream,
-	const MarukoOutput *output, MarukoRtpState *rtp,
+	MarukoOutput *output, MarukoRtpState *rtp,
 	H26xParamSets *params, MarukoBackendConfig *cfg, HevcRtpStats *stats);
 
 #endif /* MARUKO_VIDEO_H */
