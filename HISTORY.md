@@ -1,5 +1,23 @@
 # History
 
+## [0.7.3] - 2026-04-14
+
+- **Star6E sidecar gate (parity with Maruko PR #37):** Gated the per-frame
+  `rtp_sidecar_poll` / `monotonic_us` / `rtp_sidecar_send_frame` work in
+  `star6e_video_send_frame` on `state->sidecar.fd >= 0`.  When the
+  sidecar feature is disabled (port 0), these calls are now skipped
+  entirely rather than relying on each callee's early return.
+- **SHM write: iovec-style 3-segment ring put (`venc_ring.h`, both backends):**
+  Added `venc_ring_write3(hdr, p1, p2)` so the producer no longer has to
+  pre-flatten `payload1 + payload2` into an 8 KB `flat[]` stack buffer
+  before calling `venc_ring_write`.  Drops one memcpy per fragmented RTP
+  packet (H.265 FU), removes the 8 KB stack allocation, and eliminates
+  the `RTP_BUFFER_MAX` size clamp on the SHM write path.
+  Applied to `src/star6e_output.c::star6e_output_send_rtp_parts` and
+  `src/maruko_video.c::maruko_video_send_rtp_parts`.
+  `venc_ring_write` is preserved as a thin wrapper for existing callers
+  (C and C++, including the wfb_tx patched consumer).
+
 ## [0.7.1] - 2026-04-12
 
 - **Phase 5 — Maruko HEVC RTP parity (PR #32):** Extracted the HEVC RTP

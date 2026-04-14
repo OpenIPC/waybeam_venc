@@ -109,11 +109,16 @@ static inline venc_ring_slot_t *venc_ring_slot_at(const venc_ring_t *r,
 	return (venc_ring_slot_t *)(r->slots_base + (uint64_t)idx * r->slot_stride);
 }
 
-static inline int venc_ring_write(venc_ring_t *r,
+/* 3-segment write: header + payload1 + optional payload2.  p2 may be NULL
+ * / p2_len == 0 to write only 2 segments.  Lets callers avoid pre-
+ * flattening fragmented RTP payloads (H.265 FU) into a stack buffer
+ * before the ring write. */
+static inline int venc_ring_write3(venc_ring_t *r,
     const void *hdr, uint16_t hdr_len,
-    const void *payload, uint16_t payload_len)
+    const void *p1, uint16_t p1_len,
+    const void *p2, uint16_t p2_len)
 {
-	uint32_t total = (uint32_t)hdr_len + (uint32_t)payload_len;
+	uint32_t total = (uint32_t)hdr_len + (uint32_t)p1_len + (uint32_t)p2_len;
 	if (total > r->slot_data_size) {
 		r->stats.oversize_drops++;
 		return -1;
@@ -132,8 +137,10 @@ static inline int venc_ring_write(venc_ring_t *r,
 	slot->length = (uint16_t)total;
 	if (hdr_len)
 		memcpy(slot->data, hdr, hdr_len);
-	if (payload_len)
-		memcpy(slot->data + hdr_len, payload, payload_len);
+	if (p1_len)
+		memcpy(slot->data + hdr_len, p1, p1_len);
+	if (p2_len)
+		memcpy(slot->data + hdr_len + p1_len, p2, p2_len);
 
 	__atomic_store_n(&r->hdr->write_idx, w + 1, __ATOMIC_RELEASE);
 	r->stats.writes++;
@@ -146,6 +153,13 @@ static inline int venc_ring_write(venc_ring_t *r,
 #endif
 
 	return 0;
+}
+
+static inline int venc_ring_write(venc_ring_t *r,
+    const void *hdr, uint16_t hdr_len,
+    const void *payload, uint16_t payload_len)
+{
+	return venc_ring_write3(r, hdr, hdr_len, payload, payload_len, NULL, 0);
 }
 
 /* ── Inline read (consumer) ──────────────────────────────────────────── */
