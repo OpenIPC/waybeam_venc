@@ -47,10 +47,17 @@ typedef struct __attribute__((aligned(64))) {
 	uint8_t  _pad2[52];
 } venc_ring_hdr_t;
 
+#ifdef __cplusplus
+static_assert(sizeof(venc_ring_hdr_t) == 192,
+              "venc_ring_hdr_t must be exactly 192 bytes (3 cache lines)");
+static_assert(__alignof__(venc_ring_hdr_t) == 64,
+              "venc_ring_hdr_t must be 64-byte aligned");
+#else
 _Static_assert(sizeof(venc_ring_hdr_t) == 192,
                "venc_ring_hdr_t must be exactly 192 bytes (3 cache lines)");
 _Static_assert(__alignof__(venc_ring_hdr_t) == 64,
                "venc_ring_hdr_t must be 64-byte aligned");
+#endif
 
 /* Per-slot layout: 2-byte length prefix + data */
 typedef struct {
