@@ -28,23 +28,15 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 	if (!ctx || !header || !payload1 || header_len == 0 || payload1_len == 0)
 		return -1;
 
-	/* SHM path: write RTP packet to ring buffer (flatten payload parts) */
+	/* SHM path: write RTP packet to ring buffer (zero pre-flatten copy). */
 	if (ctx->ring) {
 		size_t total_payload = payload1_len + payload2_len;
 		if (header_len > UINT16_MAX || total_payload > UINT16_MAX)
 			return -1;
-		if (payload2 && payload2_len > 0) {
-			uint8_t flat[RTP_BUFFER_MAX];
-			if (total_payload > sizeof(flat))
-				return -1;
-			memcpy(flat, payload1, payload1_len);
-			memcpy(flat + payload1_len, payload2, payload2_len);
-			return venc_ring_write(ctx->ring, header,
-				(uint16_t)header_len, flat,
-				(uint16_t)total_payload);
-		}
-		return venc_ring_write(ctx->ring, header, (uint16_t)header_len,
-			payload1, (uint16_t)payload1_len);
+		return venc_ring_write3(ctx->ring,
+			header, (uint16_t)header_len,
+			payload1, (uint16_t)payload1_len,
+			payload2, (uint16_t)payload2_len);
 	}
 
 	output = ctx->output;
