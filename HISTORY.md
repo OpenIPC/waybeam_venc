@@ -1,5 +1,41 @@
 # History
 
+## [0.7.8] - 2026-04-18
+
+- **WebUI reinit + IDR fixes.** Four related bugs in the reinit/save
+  path and one missing IDR-on-bitrate behaviour.
+- **Fix #1 — FPS kick on live reinit.** `star6e_pipeline_reinit`
+  (`src/star6e_pipeline.c`) now re-kicks `MI_SNR_SetFps` at the end so
+  a live FPS change actually reconfigures sensor timing.  Previously
+  the kick only fired during the initial `star6e_pipeline_start_vpe`
+  legacyAe branch and the once-per-process CUS3A `fps_kick_done`
+  gate — neither re-armed on reinit, so the sensor stayed stuck at
+  its cold-boot timing (e.g. 100 fps when 120 was requested).
+- **Fix #2 — Save & Restart actually saves.** Added
+  `venc_api_set_config_path()` (called by star6e_runtime and
+  maruko_runtime with `VENC_CONFIG_DEFAULT_PATH`).  `handle_restart`
+  and `process_restart_set_query` now call `venc_config_save()` before
+  triggering reinit, so `MUT_RESTART` field changes and the explicit
+  "Save & Restart" button both persist to `/etc/venc.json` before the
+  reload-from-disk round-trip.
+- **Fix #3 — Restore Defaults actually restores.** New
+  `GET /api/v1/defaults` endpoint (`handle_defaults`) writes
+  compiled-in defaults to disk and triggers reinit.  WebUI JS
+  `restoreDefaults()` rewired from `/api/v1/restart` to the new
+  endpoint (embedded gzip regenerated).  Previously the button just
+  reloaded the on-disk config — misleading, and did nothing if the
+  file already matched in-memory state.
+- **Fix #5 — IDR on bitrate change.** `apply_bitrate` in both
+  `src/star6e_controls.c` and `src/maruko_controls.c` now issues
+  `MI_VENC_RequestIdr` after `MI_VENC_SetChnAttr`, gated through the
+  existing `idr_rate_limit_allow` so storm callers stay coalesced.
+  The decoder now gets a fresh keyframe to resync against the new
+  rate-control state instead of drifting on stale P-frames.
+- **Fix #4 — image.mirror / image.flip** deferred to hardware
+  verification.  The reinit + save path is now reachable (fixes #1
+  and #2), so a set+restart round-trip should apply these.  No code
+  change this PR; follow-up on 192.168.1.13.
+
 ## [0.7.7] - 2026-04-18
 
 - **Perf-series PR-C.1 — port MI_VENC_GetFd + poll() blocking wait to
