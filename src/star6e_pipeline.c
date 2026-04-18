@@ -468,6 +468,13 @@ static int star6e_pipeline_start_vpe(const SensorSelectResult *sensor,
 		return ret;
 	}
 
+	/* Sensor-level orientation.  VPE digital flip is unreliable on some
+	 * sensor combos; MI_SNR_SetOrien programs the sensor's own flip
+	 * register which is what actually inverts scan-line order.  Applied
+	 * after MI_VPE_SetChannelParam so both paths agree. */
+	(void)MI_SNR_SetOrien(sensor->pad_id,
+		mirror ? 1 : 0, flip ? 1 : 0);
+
 	ret = MI_VPE_StartChannel(0);
 	if (ret != 0) {
 		fprintf(stderr, "ERROR: MI_VPE_StartChannel failed %d\n", ret);
@@ -1512,12 +1519,20 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 		return ret;
 	}
 
-	/* Re-apply VPE channel params (mirror, flip, 3DNR).  These are only
-	 * plumbed via MI_VPE_SetChannelParam during VPE creation in
-	 * star6e_pipeline_start_vpe — the non-AR-change reinit path above
-	 * skips VPE rebuild, so without this re-apply step an image.mirror /
-	 * image.flip toggle would persist to disk and log "reinit complete"
-	 * but never actually affect the output. */
+	/* Re-apply orientation on reinit.  Two layers are involved:
+	 *   (1) VPE channel-level (MI_VPE_SetChannelParam) — digital mirror
+	 *       works reliably; digital flip is unreliable on some
+	 *       sensor/pipeline combos (reported: mirror toggles in live
+	 *       preview, flip does not).
+	 *   (2) Sensor-level (MI_SNR_SetOrien) — programs the sensor's own
+	 *       orientation registers.  For IMX335-class sensors the flip
+	 *       register is what actually inverts the scan-line order;
+	 *       without this call the image stays upright even though the
+	 *       config reports flip=true.
+	 * We apply both.  Each is independent and non-fatal.  Neither is
+	 * plumbed by the non-AR-change reinit path otherwise, so without
+	 * this block an image.mirror / image.flip toggle would persist to
+	 * disk and log "reinit complete" but never affect the output. */
 	{
 		MI_VPE_ChannelParam_t vpe_param = {0};
 		vpe_param.hdr = I6_HDR_OFF;
@@ -1527,6 +1542,9 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 		vpe_param.lensAdjOn = 0;
 		(void)MI_VPE_SetChannelParam(0, &vpe_param);
 	}
+	(void)MI_SNR_SetOrien(state->sensor.pad_id,
+		pconf.image_mirror ? 1 : 0,
+		pconf.image_flip   ? 1 : 0);
 
 	/* Re-kick sensor timing on reinit.  The ISP AE can leave the sensor
 	 * register at stale exposure/timing when we rebuild only VENC (common
