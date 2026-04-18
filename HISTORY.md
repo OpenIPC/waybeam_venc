@@ -1,5 +1,30 @@
 # History
 
+## [0.7.7] - 2026-04-18
+
+- **Perf-series PR-C.1 — port MI_VENC_GetFd + poll() blocking wait to
+  the Maruko main encoder loop.** Follow-up to PR-C (Star6E dual_rec
+  only).  Maruko's main encoder loop in `maruko_pipeline_run`
+  (`src/maruko_pipeline.c:1291`) was spinning on `maruko_mi_venc_query
+  + usleep(500)` — ~2000 syscalls/s during idle gaps.  Replaced with
+  `poll(MI_VENC_GetFd, 1000 ms)` and a wall-clock idle-abort timer
+  (20 s of no frames → abort, preserved from the original
+  `idle_counter * 500us` logic).
+- **Fallback preserved:** if `MI_VENC_GetFd` returns < 0 on an unknown
+  BSP variant, the loop falls back to the original Query+usleep(500)
+  spin.  POLLERR/POLLHUP/POLLNVAL on the fd path drops into the
+  fallback for the rest of the run.
+- **Lifecycle:** `MI_VENC_CloseFd` called at cleanup when the fd was
+  acquired.  The fd function pointers were already loaded by
+  `maruko_mi.c` (dlsym'd but unused before this PR).
+- **New bindings** (`include/maruko_bindings.h`): `maruko_mi_venc_get_fd`
+  and `maruko_mi_venc_close_fd` macros alongside the existing
+  MI_VENC_* wrappers.
+- **Wall-clock idle timeout** consolidates the old dual idle paths
+  (500us-keyed counter) into a single `wb_monotonic_us()`-based
+  deadline that works identically on both the fd path (rare wakeups)
+  and the fallback spin path (frequent wakeups).
+
 ## [0.7.6] - 2026-04-18
 
 - **Perf-series PR-C — dual_rec_thread blocking wait via MI_VENC_GetFd.**

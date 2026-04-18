@@ -1266,7 +1266,6 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 	}
 
 	unsigned int frame_counter = 0;
-	unsigned int idle_counter = 0;
 	/* Cached packet buffer — avoids malloc/free per frame at 90fps. */
 	i6c_venc_pack *cached_packs = NULL;
 	uint32_t cached_packs_cap = 0;
@@ -1280,12 +1279,62 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		stream_metrics_start(&metrics, &now);
 	}
+
+	/* Block on MI_VENC_GetFd(chn) via poll() instead of spinning on
+	 * Query + usleep(500).  The fd signals POLLIN when a frame is
+	 * ready, so the thread wakes ~fps-times/s instead of ~2000/s.
+	 * If the SDK returns fd < 0 on an unknown BSP variant, fall back
+	 * to the original spin loop. */
+	int venc_fd = maruko_mi_venc_get_fd(ctx->venc_device,
+		ctx->venc_channel);
+	/* Idle-detection timeout: 20 s of no encoder data → abort.
+	 * Wall-clock based so semantics are preserved across both the
+	 * fd path (sparse wakeups) and the fallback spin path. */
+	const uint64_t IDLE_ABORT_US = 20ULL * 1000000ULL;
+	const uint64_t IDLE_WARN_US = 1000000ULL;
+	uint64_t last_activity_us = wb_monotonic_us();
+	uint64_t last_warn_us = last_activity_us;
+
 	while (g_maruko_running) {
 		if (g_maruko_reinit || venc_api_get_reinit()) {
 			g_maruko_reinit = 0;
 			printf("> [maruko] reinit requested, breaking stream loop\n");
 			result = 1;
 			goto cleanup;
+		}
+
+		if (venc_fd >= 0) {
+			/* 1 s timeout caps the g_maruko_running cancellation
+			 * latency without wasting cycles on short periodic
+			 * wakes.  Frames at ≥60 fps arrive well within this. */
+			struct pollfd pfd = { .fd = venc_fd, .events = POLLIN };
+			(void)poll(&pfd, 1, 1000);
+			/* POLLERR/POLLHUP/POLLNVAL: the SDK closed the fd
+			 * under us (BSP quirk, pipeline reinit, VPE unbind).
+			 * Fall back to the Query+usleep path for the rest
+			 * of the loop's lifetime. */
+			if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				maruko_mi_venc_close_fd(ctx->venc_device,
+					ctx->venc_channel);
+				venc_fd = -1;
+				usleep(1000);
+				continue;
+			}
+			if (!(pfd.revents & POLLIN)) {
+				/* poll timeout — check wall-clock idle abort */
+				uint64_t now_us = wb_monotonic_us();
+				if (now_us - last_warn_us >= IDLE_WARN_US) {
+					printf("> [maruko] waiting for encoder data...\n");
+					last_warn_us = now_us;
+				}
+				if (now_us - last_activity_us >= IDLE_ABORT_US) {
+					fprintf(stderr,
+						"ERROR: [maruko] no encoder data"
+						" received; aborting stream loop\n");
+					goto cleanup;
+				}
+				continue;
+			}
 		}
 
 		i6c_venc_stat stat = {0};
@@ -1303,22 +1352,27 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		}
 
 		if (stat.curPacks == 0) {
-			idle_counter++;
-			if ((idle_counter % 2000) == 0)  /* ~1s at 500us sleep */
+			uint64_t now_us = wb_monotonic_us();
+			if (now_us - last_warn_us >= IDLE_WARN_US) {
 				printf("> [maruko] waiting for encoder data...\n");
-			if (idle_counter > 40000) {  /* ~20s timeout */
+				last_warn_us = now_us;
+			}
+			if (now_us - last_activity_us >= IDLE_ABORT_US) {
 				fprintf(stderr,
 					"ERROR: [maruko] no encoder data"
 					" received; aborting stream loop\n");
 				goto cleanup;
 			}
-			/* Short poll sleep: 500us is <5% of 11ms frame period
-			 * at 90fps, reducing idle syscalls by ~5x vs 100us
-			 * while keeping frame latency low. */
-			usleep(500);
+			/* On the fd path this means spurious POLLIN (rare).
+			 * On the fallback spin path, sleep 500us: <5 % of the
+			 * 11 ms frame period at 90 fps, keeps frame latency
+			 * low while reducing idle syscalls. */
+			if (venc_fd < 0)
+				usleep(500);
 			continue;
 		}
-		idle_counter = 0;
+		last_activity_us = wb_monotonic_us();
+		last_warn_us = last_activity_us;
 
 		i6c_venc_strm stream = {0};
 		stream.count = stat.curPacks;
@@ -1448,6 +1502,8 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 	result = 0;
 
 cleanup:
+	if (venc_fd >= 0)
+		maruko_mi_venc_close_fd(ctx->venc_device, ctx->venc_channel);
 	free(cached_packs);
 	rtp_sidecar_sender_close(&sidecar);
 #undef PKTZR_VERBOSE_ACTIVE

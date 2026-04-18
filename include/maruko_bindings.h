@@ -59,6 +59,8 @@ typedef int (*maruko_isp_disable_userspace3a_fn_t)(MI_U32 dev_id, MI_U32 channel
   g_mi_venc.fnGetStream((dev), (chn), (strm), (ms))
 #define maruko_mi_venc_release_stream(dev, chn, strm) \
   g_mi_venc.fnReleaseStream((dev), (chn), (strm))
+#define maruko_mi_venc_get_fd(dev, chn)         g_mi_venc.fnGetFd((dev), (chn))
+#define maruko_mi_venc_close_fd(dev, chn)       g_mi_venc.fnCloseFd((dev), (chn))
 #define maruko_mi_venc_set_input_source(dev, chn, cfg) \
   g_mi_venc.fnSetInputSourceConfig((dev), (chn), (cfg))
 #define maruko_mi_venc_get_chn_attr(dev, chn, attr) \
