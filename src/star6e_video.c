@@ -2,22 +2,10 @@
 #include "star6e_audio.h"
 
 #include "rtp_session.h"
+#include "timing.h"
 
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
-
-static uint64_t monotonic_us(void)
-{
-	struct timespec ts;
-#ifdef CLOCK_MONOTONIC_RAW
-	clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-#else
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-#endif
-	return (uint64_t)ts.tv_sec * 1000000ULL +
-	       (uint64_t)(ts.tv_nsec / 1000);
-}
 
 typedef struct {
 	RtpPacketizerState *rtp;
@@ -106,7 +94,7 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 		/* Sidecar work — poll, timestamp snapshot, send — is only
 		 * meaningful when the sidecar socket is configured.  Gating
 		 * on sidecar.fd >= 0 avoids one recvfrom syscall, one
-		 * monotonic_us() read, and the sidecar send argument setup
+		 * wb_monotonic_us() read, and the sidecar send argument setup
 		 * per frame when the sidecar feature is disabled.  Mirrors
 		 * the Maruko gate from PR #37. */
 		int sidecar_active = (state->sidecar.fd >= 0);
@@ -120,7 +108,7 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 			rtp_sidecar_poll(&state->sidecar);
 			frame_rtp_ts = state->rtp_state.timestamp;
 			seq_before = state->rtp_state.seq;
-			ready_us = monotonic_us();
+			ready_us = wb_monotonic_us();
 			capture_us = (stream->count > 0 && stream->packet)
 				? stream->packet[0].timestamp : 0;
 		}

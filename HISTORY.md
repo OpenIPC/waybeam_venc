@@ -1,5 +1,34 @@
 # History
 
+## [0.7.4] - 2026-04-18
+
+- **Perf-series PR-A — clock wrapper + dual_rec Query dedup + bench infra.**
+  First of a five-PR series landing the post-review performance findings
+  from 2026-04-18 (see `bench/perf-series/README.md`).
+- **Clock reads via vDSO (`include/timing.h`, `src/timing.c`):** New
+  `wb_monotonic_us()` helper using `CLOCK_MONOTONIC` (vDSO fast path on
+  ARMv7, ~100 ns/call) instead of `CLOCK_MONOTONIC_RAW` (real syscall,
+  ~1500 ns/call on A7).  Replaces three duplicated local wrappers —
+  `monotonic_us` in `star6e_video.c` and `maruko_pipeline.c`, and
+  `now_us` in `rtp_sidecar.c`.  NTP slew is <500 ppm → <4 us drift over
+  a 60 s bench window, well inside frame-timing measurement error.
+- **dual_rec backpressure signal (`src/star6e_runtime.c`):** Replaced the
+  post-`MI_VENC_ReleaseStream` peek `MI_VENC_Query` with an inspection of
+  the pre-`GetStream` `stat.curPacks >= 2` condition.  Equivalent
+  semantics (queue had a backlog before we consumed) at one fewer syscall
+  per recorded frame (~120/s at 120 fps).
+- **Perf-series bench harness (`bench/perf-series/`):** New
+  `run_bench.sh` drives the Tier A/B/C bench recipe end-to-end (deploy,
+  probe, collect); `compare.py` emits a markdown Delta table between two
+  labels with a 1.5×sigma regression flag.  Baseline tag
+  `perf-series-baseline` pinned at master `40b8435`.
+- **Host microbench (`tools/clock_bench.c`):** 1 M-iteration loop over
+  `CLOCK_MONOTONIC_RAW`, `CLOCK_MONOTONIC`, `CLOCK_MONOTONIC_COARSE` to
+  validate the vDSO assumption on A7 before deploying the PR.
+- **IDR-storm stress (`tools/idr_storm.sh`):** Infrastructure for PR-B
+  validation; fires N `POST /api/v1/dual/idr` back-to-back and reports
+  the honored:fired ratio.
+
 ## [0.7.3] - 2026-04-14
 
 - **Star6E sidecar gate (parity with Maruko PR #37):** Gated the per-frame

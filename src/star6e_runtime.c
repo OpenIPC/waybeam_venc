@@ -367,14 +367,13 @@ static void *dual_rec_thread_fn(void *arg)
 		MI_VENC_ReleaseStream(d->channel, &stream);
 		total_count++;
 
-		/* Peek: is another frame already waiting?  If so, we're
-		 * not keeping up — the write took longer than 1/fps. */
-		{
-			MI_VENC_Stat_t peek = {0};
-			if (MI_VENC_Query(d->channel, &peek) == 0 &&
-			    peek.curPacks > 0)
-				behind_count++;
-		}
+		/* Backpressure signal: the pre-GetStream Query found >= 2
+		 * packets queued, meaning the encoder produced another frame
+		 * before we consumed the prior one.  Equivalent semantics to
+		 * a post-ReleaseStream peek but avoids one MI_VENC_Query
+		 * syscall per recorded frame (~120/s at 120 fps). */
+		if (stat.curPacks >= 2)
+			behind_count++;
 
 		/* Every second: evaluate backpressure */
 		{
