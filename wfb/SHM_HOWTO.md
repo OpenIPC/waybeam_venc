@@ -308,7 +308,12 @@ wfb_tx_cmd 8000 get_mbit             # read back
 
 ## Partial-block parity ratio (`-r`)
 
-**Default: 0.5** (matches `-k 8 -n 12`, the recommended FEC config).
+**Default: auto-scale** — `-r` tracks `(n − k) / k` of the current FEC
+config automatically unless you pass an explicit value on the CLI or
+via `wfb_tx_cmd set_mbit -r`.  Auto-mode re-derives the ratio on every
+`init_session()` / `CMD_SET_FEC`, so a dynamic controller calling
+`set_fec k n` at runtime does not also need to push a matching
+`set_mbit -r`.
 
 ### Mental model — two independent knobs
 
@@ -354,17 +359,52 @@ below.
 Match it to `(n − k) / k` of your FEC config for **proportional
 partial-block protection** — same parity-to-data ratio as a full block:
 
-| `-k` / `-n` | `(n − k)/k` | Recommended `-r` | Full-block overhead | Partial-block behaviour at default `-r` |
+Auto-scale default (no `-r` on CLI) picks `(n − k)/k` automatically;
+explicit overrides are listed below.  At very small `fec_k` the
+computed value is floored at `1/256` so partials always emit ≥ 1
+parity.
+
+| `-k` / `-n` | `(n − k)/k` | Auto default | Full-block overhead | Partial-block behaviour |
 |---|---|---|---|---|
-| `-k 8 -n 12` | 0.5 | **`-r 0.5`** (default) | 50 % parity | 1-2 parity + padding to `fec_k`; partial always emits 8 wire packets |
+| `-k 8 -n 12` | 0.5 | `-r 0.5` | 50 % parity | 1-2 parity + padding to `fec_k`; partial always emits 8 wire packets |
 | `-k 6 -n 12` | 1.0 | `-r 1.0` | 100 % parity (2× coverage) | 3-6 parity; partial often emits `actual_k + parity_count` without padding |
 | `-k 4 -n 12` | 2.0 | `-r 2.0` | 200 % parity | parity saturates at `n − k = 8`; long-range configs |
+| `-k 2 -n 12` | 5.0 | `-r 5.0` | 500 % parity | parity saturates at `n − k = 10`; extreme FEC |
 | `-k 6 -n 18` | 2.0 | `-r 2.0` | 200 % parity | heavy FEC |
 | `-k 10 -n 30` | 2.0 | `-r 2.0` | same | heavy FEC |
-| any | n/a | `-r 0` | (unchanged) | minimum-parity partial — zero margin on tail block |
+| any | n/a | override with `-r 0` | (unchanged) | minimum-parity partial — zero margin on tail block |
 
 The ratio is Q8.8 fixed-point internally; floats are accepted on the CLI
 with resolution ≈ 0.004. Examples: `-r 0.5`, `-r 1.25`, `-r 2.0`.
+
+### Auto-scale mode
+
+When you start `wfb_tx` without `-r`, auto-scale is enabled and the
+startup banner prints `parity_ratio=X.XXXX (auto)`.  Passing any `-r`
+value flips auto off and the banner shows `(explicit)`.
+
+At runtime:
+
+```bash
+wfb_tx_cmd 8000 get_mbit_auto        # read current mode (0=explicit, 1=auto)
+wfb_tx_cmd 8000 set_mbit_auto -v 1   # enable auto (recomputes from current k/n)
+wfb_tx_cmd 8000 set_mbit_auto -v 0   # freeze current ratio, stop tracking
+wfb_tx_cmd 8000 set_mbit -r 0.25     # explicit ratio — also flips auto off
+```
+
+The lifecycle semantics:
+
+| Starting state | Event | Result |
+|---|---|---|
+| auto=1 | `set_fec` | ratio recomputed from new `(n−k)/k`, auto stays 1 |
+| auto=1 | `set_mbit -r V` | ratio = V, auto → 0 (explicit commit) |
+| auto=0 | `set_fec` | ratio unchanged (operator kept control) |
+| auto=0 | `set_mbit_auto -v 1` | auto → 1, ratio recomputed from current k/n |
+
+The auto formula is `max(1, round((n − k) / k × 256))` in Q8.8.  The
+`max(1, …)` floor prevents configs like `-k 4 -n 5` from rounding to
+zero parity on very small `actual_k`.
+
 
 ### How to raise FEC coverage
 
@@ -410,12 +450,13 @@ learned headroom tracker.  Today it runs as a read-only observer; when
 it's activated as an authoritative controller it will issue
 `wfb_tx_cmd set_fec <k> <n>` calls as workload shifts.
 
-`-r` is still static config today.  Future controller work (see
-`docs/variable-payload-next-steps.md` section C) will likely auto-scale
-`-r` to track the current `-k` so the two-knob model remains
-self-consistent when `-k` moves during a session.  Operators should
-set `-r` once to match the **baseline** `-k` and accept that
-intermediate values may be suboptimal during k-transitions.
+**`-r` auto-tracks `-k` already** (enabled by default — see "Auto-scale
+mode" above).  Once the controller is wired in, every `set_fec` it
+issues will trigger a matching `(n − k)/k` recomputation on the
+partial-block parity ratio — no additional `set_mbit` call from the
+controller needed.  Operators who want an explicit, frozen `-r` can
+still pass it on the CLI or flip auto off via
+`wfb_tx_cmd set_mbit_auto -v 0`.
 
 ### Worked examples at `-k 8 -n 12`, typical partial `actual_k = 3`
 
