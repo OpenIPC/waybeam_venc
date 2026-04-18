@@ -1,11 +1,11 @@
 #include "rtp_sidecar.h"
+#include "timing.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 /* htobe64 requires _DEFAULT_SOURCE on glibc / musl under -std=c99.
@@ -25,19 +25,6 @@ static inline uint64_t sidecar_htobe64(uint64_t v)
 	uint64_t r;
 	memcpy(&r, b, sizeof(r));
 	return r;
-}
-
-/* ── Clock helper ────────────────────────────────────────────────────── */
-
-static uint64_t now_us(void)
-{
-	struct timespec ts;
-#ifdef CLOCK_MONOTONIC_RAW
-	clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-#else
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-#endif
-	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000);
 }
 
 /* ── Subscriber helpers ──────────────────────────────────────────────── */
@@ -124,7 +111,7 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 	 * at high subscribe/sync rates, but cap iterations to avoid
 	 * spending too long in the encode loop.
 	 *
-	 * One `now_us()` sample per drained datagram is enough — control
+	 * One `wb_monotonic_us()` sample per drained datagram is enough — control
 	 * traffic is rare (subscribe every 2 s, sync every 200-10000 ms).
 	 * Only the SYNC_RESP case still needs an extra sample for t3 since
 	 * it represents "just before sendto".
@@ -149,7 +136,7 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 			continue;
 
 		uint8_t msg_type = buf[5];
-		uint64_t now = now_us();
+		uint64_t now = wb_monotonic_us();
 
 		switch (msg_type) {
 
@@ -175,7 +162,7 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 				resp._pad[1]  = 0;
 				resp.t1_us    = req->t1_us;  /* echo verbatim */
 				resp.t2_us    = sidecar_htobe64(now);
-				resp.t3_us    = sidecar_htobe64(now_us());
+				resp.t3_us    = sidecar_htobe64(wb_monotonic_us());
 
 				sendto(s->fd, &resp, sizeof(resp), MSG_DONTWAIT,
 				       (struct sockaddr *)&src, src_len);
@@ -206,7 +193,7 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 	 * last RTP sendmsg(), so sampling at function entry is what we
 	 * want — not sampling again a few microseconds later inside the
 	 * serialiser. Saves one clock_gettime per frame. */
-	uint64_t now = now_us();
+	uint64_t now = wb_monotonic_us();
 	if (!sub_active_at(s, now))
 		return 0;  /* no subscriber — channel stays silent */
 

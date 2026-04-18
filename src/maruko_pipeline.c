@@ -28,17 +28,7 @@
 #include <time.h>
 #include <unistd.h>
 
-static uint64_t monotonic_us(void)
-{
-	struct timespec ts;
-#ifdef CLOCK_MONOTONIC_RAW
-	clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-#else
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-#endif
-	return (uint64_t)ts.tv_sec * 1000000ULL +
-	       (uint64_t)(ts.tv_nsec / 1000);
-}
+#include "timing.h"
 
 static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
 {
@@ -1375,7 +1365,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 		uint32_t frame_rtp_ts = rtp_state.timestamp;
 		uint16_t seq_before = rtp_state.seq;
-		uint64_t ready_us = monotonic_us();
+		uint64_t ready_us = wb_monotonic_us();
 		uint64_t capture_us = (stream.count > 0 && stream.packet)
 			? stream.packet[0].timestamp : 0;
 
