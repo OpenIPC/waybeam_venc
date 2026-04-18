@@ -2,6 +2,32 @@
 
 ## [0.7.8] - 2026-04-18
 
+Pre-merge review fixes folded in (see PR-47 review notes):
+
+- **Atomic config write.** `venc_config_save()` now writes to `<path>.tmp`,
+  fsyncs the file, renames over the target, and fsyncs the containing
+  directory.  Power cut mid-write (a real failure mode on FPV hardware)
+  no longer truncates `/etc/venc.json` — you always get either the old
+  or the new copy, never a partial.
+- **Flash-write guard.** `venc_api_save_config_to_disk()` caches the
+  last successfully-saved VencConfig and skips the write when the
+  candidate is byte-identical.  Hot loops (adaptive-link re-asserting
+  the same kbps, WebUI sliders landing on their current value) no
+  longer wear flash.
+- **Save errors surface.** `venc_config_save()` return value is now
+  honored.  `/api/v1/defaults` response gains `"saved":bool`.  LIVE /
+  RESTART `/api/v1/set` paths log a `WARNING: config save to X failed
+  — in-memory change committed but on-disk copy is stale` to stderr so
+  operators catch disk-full / readonly-FS conditions from the venc log.
+- **SDK call return values logged.** `MI_SNR_SetOrien`,
+  `MI_VPE_SetChannelParam` (reinit), and `MI_SNR_SetFps` (reinit) now
+  log non-zero returns so BSP regressions surface instead of silently
+  leaving the image upside-down or the sensor stuck at the wrong FPS.
+- **Dashboard source tracked.** HTML authored in `web/dashboard.html`;
+  `tools/build_webui.py` regenerates the embedded gzip deterministically
+  (mtime=0, compresslevel=9).  New `make webui` and `make webui-check`
+  targets; `make verify` runs `webui-check` to catch drift.
+
 - **WebUI reinit + IDR fixes.** Four related bugs in the reinit/save
   path and one missing IDR-on-bitrate behaviour.
 - **Fix #1 — FPS kick on live reinit.** `star6e_pipeline_reinit`

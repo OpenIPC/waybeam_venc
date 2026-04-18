@@ -473,7 +473,10 @@ Response `200`:
 Overwrite the in-memory config with compiled-in defaults, persist to `/etc/venc.json`,
 then trigger a full pipeline reinit. Drives the "Restore Defaults" button in the WebUI.
 
-Added in v0.7.8.
+Added in v0.7.8. The `saved` field in the response reflects whether persistence
+actually succeeded — `false` means the runtime is at defaults but the on-disk copy is
+stale (e.g. disk full, readonly FS, permission error); check the venc log for the
+`[venc_config] ERROR:` line.
 
 ```bash
 curl http://<device-ip>/api/v1/defaults
@@ -481,7 +484,7 @@ curl http://<device-ip>/api/v1/defaults
 
 Response `200`:
 ```json
-{"ok":true,"data":{"defaults":true,"reinit":true}}
+{"ok":true,"data":{"defaults":true,"reinit":true,"saved":true}}
 ```
 
 ### `GET /api/v1/ae`

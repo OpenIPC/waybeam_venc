@@ -234,7 +234,12 @@ static int apply_bitrate(uint32_t kbps)
 		return -1;
 	/* Force an IDR after a bitrate change so the decoder resyncs against
 	 * the new rate-control state.  Goes through the rate-limit gate so
-	 * bitrate-storm calls can't DoS the stream. */
+	 * bitrate-storm calls can't DoS the stream.  Tight bitrate ramps
+	 * (e.g. 100-step adaptive-link ladders inside the gate's min-spacing
+	 * window, default 100 ms) will only IDR on the first step and again
+	 * after the window expires — acceptable because the encoder rate
+	 * controller absorbs small between-IDR changes without decoder
+	 * resync. */
 	if (idr_rate_limit_allow(g_star6e_control_ctx.venc_chn))
 		(void)MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1);
 	return 0;

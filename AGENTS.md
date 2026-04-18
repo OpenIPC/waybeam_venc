@@ -459,9 +459,13 @@ The config system spans three layers that MUST stay in sync:
 2. **API field table + alias table** (`src/venc_api.c`) — `g_fields[]` maps
    `section.snake_case` names to struct offsets; `g_aliases[]` maps camelCase
    webui keys to snake_case API keys.
-3. **WebUI dashboard** (`src/venc_webui.c`, embedded gzip) — `SECTIONS[]` lists
+3. **WebUI dashboard** — authored as plain HTML/JS in `web/dashboard.html`
+   and embedded as a gzip blob in `src/venc_webui.c`.  `SECTIONS[]` lists
    every field the UI exposes, using camelCase keys that must match either the
    config JSON key names (for value lookup) or the alias table (for API set calls).
+   Regenerate the embedded blob deterministically with `make webui`
+   (or `python3 tools/build_webui.py`).  CI runs `make webui-check` via
+   `make verify` to catch drift between source and embedded blob.
 4. **Default config file** (`config/venc.default.json`) — reference config
    showing all available options with sensible defaults.
 
@@ -470,9 +474,9 @@ When adding or removing a config field, update ALL FOUR locations in the same PR
 - Add the field to `VencConfig` struct and set its default in `venc_config_defaults()`
 - Add parsing in the `load_<section>()` function and serialization in `venc_config_to_json()`
 - Add a `FIELD()` entry in `g_fields[]` and a camelCase alias in `g_aliases[]` if needed
-- Add the key to the appropriate `SECTIONS[]` entry in the dashboard HTML
+- Add the key to the appropriate `SECTIONS[]` entry in `web/dashboard.html`
 - Add the key with its default value to `config/venc.default.json`
-- Regenerate the embedded gzip: update `venc_webui.c` after HTML changes
+- Regenerate the embedded gzip: `make webui` (runs `tools/build_webui.py`)
 
 Key naming conventions:
 - C struct fields: `snake_case` (e.g., `sample_rate_hz`)

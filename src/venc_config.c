@@ -4,9 +4,12 @@
 #include "../lib/cJSON.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* Round a float to 6 significant digits before cJSON serialization.
  * Prevents artifacts like 0.001f -> 0.0010000000474974513 in JSON. */
@@ -762,16 +765,76 @@ int venc_config_save(const char *path, const VencConfig *cfg)
 	cJSON_Delete(root);
 	if (!json) return -1;
 
-	FILE *f = fopen(path, "w");
-	if (!f) {
-		fprintf(stderr, "[venc_config] ERROR: cannot write %s: %s\n",
-			path, strerror(errno));
+	/* Atomic write: write to temp file in the same directory, fsync, then
+	 * rename over the target.  Survives power cut mid-write (a real failure
+	 * mode on FPV hardware) — we always end up with either the old or the
+	 * new config on disk, never a truncated/empty file. */
+	size_t path_len = strlen(path);
+	char tmp_path[512];
+	if (path_len + 8 >= sizeof(tmp_path)) {
+		fprintf(stderr, "[venc_config] ERROR: path too long: %s\n", path);
 		free(json);
 		return -1;
 	}
-	fprintf(f, "%s\n", json);
-	fclose(f);
+	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+
+	int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		fprintf(stderr, "[venc_config] ERROR: cannot open %s: %s\n",
+			tmp_path, strerror(errno));
+		free(json);
+		return -1;
+	}
+
+	size_t json_len = strlen(json);
+	ssize_t wrote = 0;
+	while ((size_t)wrote < json_len) {
+		ssize_t n = write(fd, json + wrote, json_len - (size_t)wrote);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			fprintf(stderr, "[venc_config] ERROR: write %s: %s\n",
+				tmp_path, strerror(errno));
+			close(fd);
+			unlink(tmp_path);
+			free(json);
+			return -1;
+		}
+		wrote += n;
+	}
+	/* trailing newline */
+	const char nl = '\n';
+	(void)write(fd, &nl, 1);
+
+	if (fsync(fd) != 0) {
+		fprintf(stderr, "[venc_config] ERROR: fsync %s: %s\n",
+			tmp_path, strerror(errno));
+		close(fd);
+		unlink(tmp_path);
+		free(json);
+		return -1;
+	}
+	close(fd);
 	free(json);
+
+	if (rename(tmp_path, path) != 0) {
+		fprintf(stderr, "[venc_config] ERROR: rename %s -> %s: %s\n",
+			tmp_path, path, strerror(errno));
+		unlink(tmp_path);
+		return -1;
+	}
+
+	/* fsync the containing directory so the rename itself is durable. */
+	char dir_buf[512];
+	snprintf(dir_buf, sizeof(dir_buf), "%s", path);
+	char *slash = strrchr(dir_buf, '/');
+	const char *dir_path = slash ? (*slash = '\0', dir_buf) : ".";
+	int dfd = open(dir_path, O_RDONLY);
+	if (dfd >= 0) {
+		(void)fsync(dfd);
+		close(dfd);
+	}
+
 	fprintf(stderr, "[venc_config] Config saved to %s\n", path);
 	return 0;
 }

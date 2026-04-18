@@ -216,7 +216,8 @@ static int maruko_apply_bitrate(uint32_t kbps)
 	    g_ctx.venc_chn, &attr) != 0)
 		return -1;
 	/* Force an IDR after a bitrate change so the decoder resyncs against
-	 * the new rate-control state.  Rate-limit gated to coalesce storms. */
+	 * the new rate-control state.  Rate-limit gated to coalesce storms;
+	 * see the matching note in src/star6e_controls.c apply_bitrate(). */
 	if (idr_rate_limit_allow(g_ctx.venc_chn))
 		maruko_mi_venc_request_idr(g_ctx.venc_dev,
 			g_ctx.venc_chn, 1);

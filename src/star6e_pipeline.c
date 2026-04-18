@@ -471,9 +471,20 @@ static int star6e_pipeline_start_vpe(const SensorSelectResult *sensor,
 	/* Sensor-level orientation.  VPE digital flip is unreliable on some
 	 * sensor combos; MI_SNR_SetOrien programs the sensor's own flip
 	 * register which is what actually inverts scan-line order.  Applied
-	 * after MI_VPE_SetChannelParam so both paths agree. */
-	(void)MI_SNR_SetOrien(sensor->pad_id,
-		mirror ? 1 : 0, flip ? 1 : 0);
+	 * after MI_VPE_SetChannelParam so both paths agree.  Non-fatal: some
+	 * sensor drivers may reject mid-stream orientation changes; we log
+	 * so BSP regressions surface instead of silently leaving the image
+	 * upside down. */
+	{
+		MI_S32 orien_ret = MI_SNR_SetOrien(sensor->pad_id,
+			mirror ? 1 : 0, flip ? 1 : 0);
+		if (orien_ret != 0)
+			fprintf(stderr, "[pipeline] WARNING: "
+				"MI_SNR_SetOrien(pad=%d mirror=%d flip=%d) "
+				"returned %d\n",
+				(int)sensor->pad_id, mirror ? 1 : 0,
+				flip ? 1 : 0, (int)orien_ret);
+	}
 
 	ret = MI_VPE_StartChannel(0);
 	if (ret != 0) {
@@ -1535,24 +1546,48 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 	 * disk and log "reinit complete" but never affect the output. */
 	{
 		MI_VPE_ChannelParam_t vpe_param = {0};
+		MI_S32 vpe_ret;
 		vpe_param.hdr = I6_HDR_OFF;
 		vpe_param.level3DNR = pconf.vpe_level_3dnr;
 		vpe_param.mirror = pconf.image_mirror ? 1 : 0;
 		vpe_param.flip = pconf.image_flip ? 1 : 0;
 		vpe_param.lensAdjOn = 0;
-		(void)MI_VPE_SetChannelParam(0, &vpe_param);
+		vpe_ret = MI_VPE_SetChannelParam(0, &vpe_param);
+		if (vpe_ret != 0)
+			fprintf(stderr, "[pipeline] WARNING: reinit "
+				"MI_VPE_SetChannelParam(mirror=%d flip=%d) "
+				"returned %d\n",
+				vpe_param.mirror, vpe_param.flip,
+				(int)vpe_ret);
 	}
-	(void)MI_SNR_SetOrien(state->sensor.pad_id,
-		pconf.image_mirror ? 1 : 0,
-		pconf.image_flip   ? 1 : 0);
+	{
+		MI_S32 orien_ret = MI_SNR_SetOrien(state->sensor.pad_id,
+			pconf.image_mirror ? 1 : 0,
+			pconf.image_flip   ? 1 : 0);
+		if (orien_ret != 0)
+			fprintf(stderr, "[pipeline] WARNING: reinit "
+				"MI_SNR_SetOrien(pad=%d mirror=%d flip=%d) "
+				"returned %d\n",
+				(int)state->sensor.pad_id,
+				pconf.image_mirror ? 1 : 0,
+				pconf.image_flip ? 1 : 0,
+				(int)orien_ret);
+	}
 
 	/* Re-kick sensor timing on reinit.  The ISP AE can leave the sensor
 	 * register at stale exposure/timing when we rebuild only VENC (common
 	 * path).  MI_SNR_SetFps forces the sensor driver to reconfigure its
 	 * timing registers so a FPS target change (e.g. 100 -> 120) actually
 	 * takes effect.  Fires for both legacyAe and CUS3A. */
-	if (pconf.sensor_framerate > 0)
-		MI_SNR_SetFps(state->sensor.pad_id, pconf.sensor_framerate);
+	if (pconf.sensor_framerate > 0) {
+		MI_S32 fps_ret = MI_SNR_SetFps(state->sensor.pad_id,
+			pconf.sensor_framerate);
+		if (fps_ret != 0)
+			fprintf(stderr, "[pipeline] WARNING: reinit "
+				"MI_SNR_SetFps(pad=%d fps=%u) returned %d\n",
+				(int)state->sensor.pad_id,
+				pconf.sensor_framerate, (int)fps_ret);
+	}
 
 	return 0;
 }

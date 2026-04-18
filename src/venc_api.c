@@ -24,8 +24,21 @@ static int g_api_routes_registered = 0;
 /* Mutex protecting g_cfg field access from the httpd thread.
  * All handle_set/handle_get calls run on the httpd pthread; the main
  * streaming thread reads config fields concurrently.  This mutex
- * serializes field reads/writes to prevent torn values on ARM. */
+ * serializes field reads/writes to prevent torn values on ARM.  It also
+ * guards g_config_path and the g_last_saved cache below (the httpd is
+ * single-threaded so no handler-vs-handler race, but the main thread
+ * calls venc_api_set_config_path at startup). */
 static pthread_mutex_t g_cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Last config snapshot that was successfully persisted, used to skip
+ * redundant flash writes when /api/v1/set changes nothing (e.g. a
+ * slider that lands back on its current value, or an adaptive-bitrate
+ * loop re-asserting the same kbps).  memcmp is safe because both the
+ * saved copy and the candidate are produced by byte-wise struct copies
+ * (`*g_cfg = new_cfg` and `actual_cfg = *g_cfg`), so any padding bytes
+ * are bit-identical. */
+static VencConfig g_last_saved;
+static int g_last_saved_valid = 0;
 
 void venc_api_set_config_path(const char *path)
 {
@@ -34,21 +47,50 @@ void venc_api_set_config_path(const char *path)
 		snprintf(g_config_path, sizeof(g_config_path), "%s", path);
 	else
 		g_config_path[0] = '\0';
+	/* Path change invalidates the last-saved cache so the first save to
+	 * the new path is unconditional. */
+	g_last_saved_valid = 0;
 	pthread_mutex_unlock(&g_cfg_mutex);
 }
 
-/* Persist current config to disk if a config path was registered.
- * Caller must NOT hold g_cfg_mutex (this function takes it). */
-static void venc_api_save_config_to_disk(const VencConfig *cfg_snapshot)
+/* Persist current config to disk if a config path was registered and the
+ * snapshot differs from the last-saved copy.  Caller must NOT hold
+ * g_cfg_mutex (this function takes it).
+ * Returns:
+ *   0  — saved successfully, or skipped because content is unchanged
+ *  -1  — save failed (disk full, readonly FS, permission, fsync error).
+ *        In-memory state was already committed before this call; callers
+ *        should surface the failure so operators know the runtime and
+ *        on-disk config have diverged. */
+static int venc_api_save_config_to_disk(const VencConfig *cfg_snapshot)
 {
 	char path[sizeof(g_config_path)];
+	int is_same = 0;
+	int rc;
 
 	pthread_mutex_lock(&g_cfg_mutex);
 	snprintf(path, sizeof(path), "%s", g_config_path);
+	if (g_last_saved_valid &&
+	    memcmp(&g_last_saved, cfg_snapshot, sizeof(*cfg_snapshot)) == 0)
+		is_same = 1;
 	pthread_mutex_unlock(&g_cfg_mutex);
 	if (!path[0])
-		return;
-	(void)venc_config_save(path, cfg_snapshot);
+		return 0;  /* no path registered — silently no-op */
+	if (is_same)
+		return 0;  /* identical to last save — skip flash write */
+
+	rc = venc_config_save(path, cfg_snapshot);
+	if (rc == 0) {
+		pthread_mutex_lock(&g_cfg_mutex);
+		g_last_saved = *cfg_snapshot;
+		g_last_saved_valid = 1;
+		pthread_mutex_unlock(&g_cfg_mutex);
+	} else {
+		fprintf(stderr, "[venc_api] WARNING: config save to %s failed — "
+			"in-memory change committed but on-disk copy is stale\n",
+			path);
+	}
+	return rc;
 }
 
 /* ── Sensor info (set by backend after sensor_select) ─────────────────── */
@@ -1377,8 +1419,11 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	pthread_mutex_unlock(&g_cfg_mutex);
 	/* Persist LIVE changes too.  Matches user expectation that a
 	 * /api/v1/set round-trip (WebUI slider, curl, etc.) survives restart.
-	 * Done after the mutex is released to avoid holding it across fsync. */
-	venc_api_save_config_to_disk(&actual_cfg);
+	 * Done after the mutex is released to avoid holding it across fsync.
+	 * The helper already logs failures to stderr and caches the
+	 * last-saved snapshot, so repeated identical sets skip the flash
+	 * write entirely. */
+	(void)venc_api_save_config_to_disk(&actual_cfg);
 	return 0;
 }
 
@@ -1444,8 +1489,9 @@ static int process_restart_set_query(const SetQueryParam *param,
 	pthread_mutex_unlock(&g_cfg_mutex);
 	/* Persist to disk so the change survives restart/crash.  The reinit
 	 * uses the in-memory snapshot we just committed; the on-disk copy now
-	 * matches. */
-	venc_api_save_config_to_disk(&new_cfg);
+	 * matches.  Failure is logged by the helper — leave as void since the
+	 * reinit is still the right next step even if persistence stalled. */
+	(void)venc_api_save_config_to_disk(&new_cfg);
 	venc_api_request_reinit(2);
 	if (!jval) {
 		*status_code = 500;
@@ -1815,20 +1861,30 @@ static int handle_isp_metrics(int fd, const HttpRequest *req, void *ctx)
 static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
 {
 	VencConfig snapshot;
+	VencConfig fresh;
+	int save_rc;
+	char resp[80];
 
 	(void)req; (void)ctx;
+	/* Build defaults in a local first, then swap under the lock.  Keeps
+	 * the critical section short so live readers of g_cfg fields see a
+	 * consistent commit point rather than a half-mutated mid-memset. */
+	venc_config_defaults(&fresh);
 	pthread_mutex_lock(&g_cfg_mutex);
 	if (!g_cfg) {
 		pthread_mutex_unlock(&g_cfg_mutex);
 		return httpd_send_error(fd, 500, "internal_error",
 			"config not registered");
 	}
-	venc_config_defaults(g_cfg);
-	snapshot = *g_cfg;
+	*g_cfg = fresh;
+	snapshot = fresh;
 	pthread_mutex_unlock(&g_cfg_mutex);
-	venc_api_save_config_to_disk(&snapshot);
+	save_rc = venc_api_save_config_to_disk(&snapshot);
 	venc_api_request_reinit(1);
-	return httpd_send_ok(fd, "{\"defaults\":true,\"reinit\":true}");
+	snprintf(resp, sizeof(resp),
+		"{\"defaults\":true,\"reinit\":true,\"saved\":%s}",
+		save_rc == 0 ? "true" : "false");
+	return httpd_send_ok(fd, resp);
 }
 
 static int handle_restart(int fd, const HttpRequest *req, void *ctx)

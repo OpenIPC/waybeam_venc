@@ -60,7 +60,8 @@ CFLAGS += $(COMMON_CFLAGS) $(SOC_CFLAGS) $(SOC_DEFS)
 LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
 
 .PHONY: help all build lint stage clean toolchain toolchain-maruko remote-test verify pre-pr \
-        check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci
+        check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
+        webui webui-check
 
 help:
 	@echo "Targets:"
@@ -78,6 +79,8 @@ help:
 	@echo "  scripts/star6e_direct_deploy.sh cycle  Preferred Star6E venc deploy+HTTP smoke test"
 	@echo "  make verify      Build both backends and verify binaries exist"
 	@echo "  make pre-pr      Full pre-PR checklist (version, changelog, build)"
+	@echo "  make webui       Regenerate src/venc_webui.c from web/dashboard.html"
+	@echo "  make webui-check Fail if src/venc_webui.c is stale vs HTML source"
 
 all: build
 
@@ -203,7 +206,13 @@ remote-test:
 STAR6E_BINS := out/star6e/venc
 MARUKO_BINS := out/maruko/venc
 
-verify:
+webui:
+	python3 tools/build_webui.py
+
+webui-check:
+	python3 tools/build_webui.py --check
+
+verify: webui-check
 	@echo "=== Building Maruko backend ==="
 	$(MAKE) build SOC_BUILD=maruko
 	@echo ""
