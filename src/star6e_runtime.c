@@ -353,6 +353,17 @@ static void *dual_rec_thread_fn(void *arg)
 			 * long before this timeout expires. */
 			struct pollfd pfd = { .fd = venc_fd, .events = POLLIN };
 			(void)poll(&pfd, 1, 1000);
+			/* POLLERR/POLLHUP/POLLNVAL: the SDK closed the fd
+			 * under us (BSP quirk, pipeline reinit, VPE unbind).
+			 * Fall back to the Query+usleep path for the rest
+			 * of the thread's lifetime — don't busy-loop on a
+			 * dead fd. */
+			if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				MI_VENC_CloseFd(d->channel);
+				venc_fd = -1;
+				usleep(1000);
+				continue;
+			}
 			if (!(pfd.revents & POLLIN))
 				continue;  /* timeout / spurious wake */
 		}
@@ -375,7 +386,10 @@ static void *dual_rec_thread_fn(void *arg)
 		ret = MI_VENC_GetStream(d->channel, &stream,
 			g_running ? 40 : 0);
 		if (ret != 0) {
-			if ((ret == -EAGAIN || ret == EAGAIN) && venc_fd < 0)
+			/* EAGAIN on either path: sleep briefly before
+			 * retrying so we don't spin if Query said
+			 * stat.curPacks>0 but GetStream keeps contending. */
+			if (ret == -EAGAIN || ret == EAGAIN)
 				usleep(1000);
 			continue;
 		}
