@@ -1375,6 +1375,10 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	}
 
 	pthread_mutex_unlock(&g_cfg_mutex);
+	/* Persist LIVE changes too.  Matches user expectation that a
+	 * /api/v1/set round-trip (WebUI slider, curl, etc.) survives restart.
+	 * Done after the mutex is released to avoid holding it across fsync. */
+	venc_api_save_config_to_disk(&actual_cfg);
 	return 0;
 }
 
@@ -1829,22 +1833,14 @@ static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
 
 static int handle_restart(int fd, const HttpRequest *req, void *ctx)
 {
-	VencConfig snapshot;
-
 	(void)req; (void)ctx;
-	/* Persist the current in-memory config before reloading from disk, so
-	 * staged LIVE-field edits that never hit MUT_RESTART don't get lost
-	 * when reinit_mode=1 re-reads the file. */
-	pthread_mutex_lock(&g_cfg_mutex);
-	if (g_cfg)
-		snapshot = *g_cfg;
-	else
-		memset(&snapshot, 0, sizeof(snapshot));
-	pthread_mutex_unlock(&g_cfg_mutex);
-	if (g_cfg)
-		venc_api_save_config_to_disk(&snapshot);
+	/* /api/v1/restart is pure "reload from disk + reinit" (like SIGHUP).
+	 * We do NOT write the in-memory config back to disk here, so that a
+	 * manual file swap (scp, editor) followed by /api/v1/restart reloads
+	 * exactly what the operator put on disk.  Persistence happens at the
+	 * /api/v1/set level (LIVE and RESTART both now save per set). */
 	venc_api_request_reinit(1);
-	return httpd_send_ok(fd, "{\"reinit\":true,\"saved\":true}");
+	return httpd_send_ok(fd, "{\"reinit\":true}");
 }
 
 static int handle_idr(int fd, const HttpRequest *req, void *ctx)

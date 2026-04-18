@@ -1512,6 +1512,22 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 		return ret;
 	}
 
+	/* Re-apply VPE channel params (mirror, flip, 3DNR).  These are only
+	 * plumbed via MI_VPE_SetChannelParam during VPE creation in
+	 * star6e_pipeline_start_vpe — the non-AR-change reinit path above
+	 * skips VPE rebuild, so without this re-apply step an image.mirror /
+	 * image.flip toggle would persist to disk and log "reinit complete"
+	 * but never actually affect the output. */
+	{
+		MI_VPE_ChannelParam_t vpe_param = {0};
+		vpe_param.hdr = I6_HDR_OFF;
+		vpe_param.level3DNR = pconf.vpe_level_3dnr;
+		vpe_param.mirror = pconf.image_mirror ? 1 : 0;
+		vpe_param.flip = pconf.image_flip ? 1 : 0;
+		vpe_param.lensAdjOn = 0;
+		(void)MI_VPE_SetChannelParam(0, &vpe_param);
+	}
+
 	/* Re-kick sensor timing on reinit.  The ISP AE can leave the sensor
 	 * register at stale exposure/timing when we rebuild only VENC (common
 	 * path).  MI_SNR_SetFps forces the sensor driver to reconfigure its

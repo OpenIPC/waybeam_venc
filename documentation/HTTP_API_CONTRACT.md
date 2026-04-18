@@ -449,12 +449,15 @@ restart the venc process to change sensor modes.
 
 ### `GET /api/v1/restart`
 
-Persist the current in-memory config to `/etc/venc.json`, then trigger a full pipeline
-reinit that reloads that same file and rebuilds the pipeline. Equivalent to "Save &
-Restart" in the WebUI and to sending `SIGHUP` after saving.
+Reload `/etc/venc.json` from disk and rebuild the pipeline. Equivalent to sending
+`SIGHUP`. This endpoint does NOT write the in-memory config back to disk, so a manual
+file swap (editor, scp, json_cli) followed by `/api/v1/restart` reloads exactly what
+was placed on disk.
 
-Prior to v0.7.8 this endpoint reloaded the on-disk file without first saving, so staged
-live edits were lost on reinit; the save step now makes the round-trip idempotent.
+In v0.7.8 persistence moved into the `/api/v1/set` layer — every set (LIVE or RESTART)
+now saves to disk before returning, so the WebUI "Save & Restart" flow (applyChanges
+→ /api/v1/restart) ends with the on-disk copy already matching memory before the
+reload runs.
 
 ```bash
 curl http://<device-ip>/api/v1/restart
@@ -462,7 +465,7 @@ curl http://<device-ip>/api/v1/restart
 
 Response `200`:
 ```json
-{"ok":true,"data":{"reinit":true,"saved":true}}
+{"ok":true,"data":{"reinit":true}}
 ```
 
 ### `GET /api/v1/defaults`

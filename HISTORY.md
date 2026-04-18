@@ -13,11 +13,15 @@
   its cold-boot timing (e.g. 100 fps when 120 was requested).
 - **Fix #2 — Save & Restart actually saves.** Added
   `venc_api_set_config_path()` (called by star6e_runtime and
-  maruko_runtime with `VENC_CONFIG_DEFAULT_PATH`).  `handle_restart`
-  and `process_restart_set_query` now call `venc_config_save()` before
-  triggering reinit, so `MUT_RESTART` field changes and the explicit
-  "Save & Restart" button both persist to `/etc/venc.json` before the
-  reload-from-disk round-trip.
+  maruko_runtime with `VENC_CONFIG_DEFAULT_PATH`).  Both LIVE
+  (`apply_live_set_query`) and RESTART (`process_restart_set_query`)
+  set paths now call `venc_config_save()` before returning, so every
+  `/api/v1/set` round-trip persists to `/etc/venc.json`.  `handle_restart`
+  is intentionally left pure (reload-from-disk only, matching SIGHUP);
+  the per-set save takes care of persistence so the WebUI "Save &
+  Restart" flow ends with the on-disk copy already matching memory.
+  Bonus: manual file swaps (e.g. scp of a config backup) followed by
+  `/api/v1/restart` reload exactly what was written.
 - **Fix #3 — Restore Defaults actually restores.** New
   `GET /api/v1/defaults` endpoint (`handle_defaults`) writes
   compiled-in defaults to disk and triggers reinit.  WebUI JS
@@ -31,10 +35,15 @@
   existing `idr_rate_limit_allow` so storm callers stay coalesced.
   The decoder now gets a fresh keyframe to resync against the new
   rate-control state instead of drifting on stale P-frames.
-- **Fix #4 — image.mirror / image.flip** deferred to hardware
-  verification.  The reinit + save path is now reachable (fixes #1
-  and #2), so a set+restart round-trip should apply these.  No code
-  change this PR; follow-up on 192.168.1.13.
+- **Fix #4 — image.mirror / image.flip** now re-apply on reinit.
+  `MI_VPE_SetChannelParam` is only invoked during VPE creation inside
+  `star6e_pipeline_start_vpe`; the non-aspect-ratio reinit path skipped
+  VPE rebuild, so a mirror/flip toggle would persist to disk and log
+  "Pipeline reinit complete" but never actually change the output.
+  Added an unconditional `MI_VPE_SetChannelParam(0, ...)` at the end
+  of `star6e_pipeline_reinit` carrying the current mirror/flip/3DNR
+  params.  Config round-trip verified on 192.168.1.13; visual flip
+  verification requires a live decoder (operator check).
 
 ## [0.7.7] - 2026-04-18
 
