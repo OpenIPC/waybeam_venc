@@ -136,6 +136,7 @@ wfb_tx -H venc_wfb \
        -k 8 -n 12 \
        -p 0 \
        -B 20 -M 3 \
+       -r 0.5 \
        wlan0
 ```
 
@@ -146,11 +147,25 @@ wfb_tx -H venc_wfb \
 | `-k 8 -n 12` | FEC: 8 data + 4 recovery packets |
 | `-p 0` | Radio port (channel ID) |
 | `-B 20 -M 3` | Bandwidth 20 MHz, MCS index 3 |
+| `-r 0.5` | Partial-block parity ratio (matches `(n-k)/k=4/8=0.5`); see "Runtime tuning" below |
 | `wlan0` | WiFi interface in monitor mode |
 
 wfb_tx attaches to the ring, reads RTP packets via `venc_ring_read()`, and
 injects them over WiFi. The control channel (FEC/radio commands via UDP)
-continues working normally.
+continues working normally. If the SHM ring isn't available yet wfb_tx will
+log `SHM ring 'venc_wfb' not available, waiting for producer...` and retry
+every 500 ms instead of aborting — so start order is no longer strict.
+
+Additional flags available from this patch (see full table in "Runtime
+tuning"):
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `-b 0\|1` | `1` | M-bit FEC block close (frame-aligned blocks) |
+| `-r RATIO` | `0.5` | Partial-block parity:data scaling |
+| `-x` | off | Plaintext data fragments (video only — session still signed) |
+
+All three are also runtime-tunable via `wfb_tx_cmd` (see below).
 
 ## Step 7: Verify
 
@@ -197,11 +212,12 @@ SHM input mode: reading from ring 'venc_wfb'
 
 ## Startup order
 
-**venc must start before wfb_tx.** The SHM ring is created by venc
-(`venc_ring_create`) and attached by wfb_tx (`venc_ring_attach`). If wfb_tx
-starts first, it will fail with "Failed to attach to SHM ring".
+Start order is **no longer strict** — wfb_tx retries attach every 500 ms
+until the ring exists, and automatically reattaches if venc restarts (see
+"Crashed producer" in Troubleshooting). Any order works; the sleep is
+optional.
 
-Recommended init script order:
+Recommended init script:
 
 ```bash
 #!/bin/sh
@@ -215,10 +231,9 @@ iw dev wlan0 set channel 149 HT20
 # 2. Start venc (creates the SHM ring)
 # Config must already have server: "shm://venc_wfb" in /etc/venc.json
 venc &
-sleep 1  # wait for ring creation
 
-# 3. Start wfb_tx (attaches to the ring)
-wfb_tx -H venc_wfb -K /etc/drone.key -k 8 -n 12 -p 0 -B 20 -M 3 wlan0 &
+# 3. Start wfb_tx — attaches immediately if venc is up, else retries
+wfb_tx -H venc_wfb -K /etc/drone.key -k 8 -n 12 -p 0 -B 20 -M 3 -r 0.5 wlan0 &
 ```
 
 ## Switching back to UDP mode
@@ -242,12 +257,14 @@ wfb_tx -u 5600 -K /etc/drone.key -k 8 -n 12 -p 0 wlan0
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `Failed to attach to SHM ring` | venc not running or wrong name | Start venc first; check `ls /dev/shm/` |
+| `SHM ring '...' not available, waiting for producer` | venc not running or wrong name | Start venc; wfb_tx will attach automatically once the ring appears |
 | `ring FULL` (lag=512) | wfb_tx not consuming fast enough | Check wfb_tx is running; reduce bitrate or FEC overhead |
 | High lag but not full | Momentary burst; should recover | Normal during keyframes; monitor over time |
 | `shm_ring_stats` shows `write_idx=0` | venc not encoding | Check venc logs; verify sensor/ISP init |
+| `SHM producer stalled` | venc crashed without cleanup (watchdog kicked in at 3 s frozen write_idx) | wfb_tx auto-detaches; restart venc, wfb_tx will reattach |
 | Audio not working | `audioPort=0` disables audio in SHM mode | Set `audioPort: 5601` and run separate `wfb_tx -u 5601` for audio |
-| venc exits, ring disappears | `shm_unlink` on cleanup | wfb_tx will error on next read — restart both |
+| Video comes up but is black on ground | AEAD-mode mismatch (only one side has `-x`) | Check RX logs for `packets dropped (AEAD-mode mismatch, check -x flag on both sides)` — set or clear `-x` to match |
+| `Invalid fragment_idx: N` at startup | Pre-session data packets (RX hasn't received session packet yet) — fixed in current build | None needed; the guard is automatic. Log should stop within 1 s |
 | Segfault when running `wfb_tx` with no args | Upstream wfb-ng bug (not SHM patch) | Always pass a wlan interface. The unpatched binary has the same crash — `RawSocketTransmitter` constructor segfaults on empty wlans vector before the usage text prints |
 
 ## Ring parameters
@@ -259,3 +276,200 @@ wfb_tx -u 5600 -K /etc/drone.key -k 8 -n 12 -p 0 wlan0
 | Total SHM size | ~724 KB | `sizeof(header) + 512 × stride` |
 | Synchronization | Lock-free SPSC | `__atomic` acquire/release on indices |
 | Consumer wake | Linux futex | Zero syscalls in steady state; futex only when ring empty |
+
+---
+
+# Runtime tuning: M-bit FEC close, parity ratio, cleartext mode
+
+These features are layered on top of the base SHM input patch and work
+for both SHM input (`-H`) and UDP input (`-u`).
+
+## M-bit FEC block close (`-b`)
+
+**Default: on.** When enabled, the RX M-bit (the last-packet-of-frame
+marker in the H.264/H.265 RTP payload format) closes the current FEC
+block at the frame boundary. Result: **one frame fits in one or more
+complete FEC blocks, never spanning across two.** A block loss at the
+boundary damages at most one frame instead of two.
+
+- **On** (`-b 1`, default) — frame-aligned FEC. Slightly higher airtime
+  on partial blocks; dramatically lower inter-frame loss correlation.
+- **Off** (`-b 0`) — legacy wfb-ng behaviour. Blocks sized strictly by
+  `k`; frames span block boundaries; single block loss can damage two
+  adjacent frames.
+
+Toggle at runtime:
+
+```bash
+wfb_tx_cmd 8000 set_mbit -e 0        # disable (legacy)
+wfb_tx_cmd 8000 set_mbit -e 1        # enable (default)
+wfb_tx_cmd 8000 get_mbit             # read back
+```
+
+## Partial-block parity ratio (`-r`)
+
+**Default: 0.5** (matches `-k 8 -n 12`, the recommended FEC config).
+
+When M-bit fires on a partial block (say `actual_k=3` out of `fec_k=8`),
+the emitter needs to decide how many parity packets to send:
+
+```
+parity_count = max(fec_k - actual_k, min(fec_n - fec_k, round(actual_k × ratio)))
+```
+
+- **Lower bound** `fec_k - actual_k` guarantees RX reaches its
+  `has_fragments == fec_k` trigger and decodes the block.
+- **Upper bound** `fec_n - fec_k` never exceeds the session's parity
+  budget.
+- **Target** `actual_k × ratio` scales proportional to the partial size.
+
+### Picking `ratio`
+
+Match it to `(n - k) / k` of your FEC config for **proportional
+partial-block protection** — the same parity-to-data ratio as a full
+block:
+
+| `-k` / `-n` | `(n − k)/k` | Recommended `-r` | Behavior |
+|---|---|---|---|
+| `-k 8 -n 12` | 0.5 | **`-r 0.5`** (default) | Typical: ~33 % parity overhead |
+| `-k 6 -n 18` | 2.0 | `-r 2.0` | Heavy FEC (200 % overhead, long-range) |
+| `-k 10 -n 30` | 2.0 | `-r 2.0` | Heavy FEC |
+| `-k 4 -n 12` | 2.0 | `-r 2.0` | Heavy FEC, smaller blocks |
+| any | n/a | `-r 0` | Minimum-parity partial (zero margin, lowest CPU) |
+
+The ratio is Q8.8 fixed-point internally; floats are accepted on the CLI
+with resolution ≈ 0.004. Examples: `-r 0.5`, `-r 1.25`, `-r 2.0`.
+
+The flag only affects **partial blocks** (when M-bit fires mid-block).
+Full blocks always emit `n - k` parity regardless of `-r`.
+
+### Performance impact (measured)
+
+On SigmaStar Infinity6E, 25 Mbps / 120 fps H.265, `-k 8 -n 12`:
+
+| Config | wfb_cpu | Tasklet rate /s | Wire overhead on partials |
+|---|---|---|---|
+| `-b 0` (no M-bit) | baseline | baseline | 0 (natural behaviour) |
+| `-b 1 -r 0.5` (default) | ~+4 pp | ~+60 | +50 % wire per partial block |
+| `-b 1 -r 0` | ~+3 pp | ~+40 | +30 % wire per partial block |
+| `-b 1 -r 2.0` (over-protected) | ~+5 pp | ~+100 | +100 % wire per partial block |
+
+`-r 0.5` is the sweet spot for `-k 8 -n 12` — proportional protection
+with minimal overhead.
+
+Toggle at runtime:
+
+```bash
+wfb_tx_cmd 8000 set_mbit -e 1 -r 0.5         # set both in one call
+wfb_tx_cmd 8000 set_mbit -e 1 -r 0.25        # cut partial-block parity in half
+```
+
+### Sanity checks
+
+- `-r 0` with `-b 1` → partial blocks get zero extra parity beyond the
+  RX-trigger minimum. Any single packet loss on a partial block's wire
+  is unrecoverable. Accepted but warn-worthy for bursty links.
+- `-r > (n - k)` — saturates at `fec_n - fec_k`; no harm, no additional
+  protection. Wasted CLI-side effort.
+- Changing `-b` mid-session via `wfb_tx_cmd` is safe; RX doesn't need
+  any knowledge of this setting (it's a TX-side emission policy only).
+
+## Cleartext data mode (`-x`)
+
+**Default: off (AEAD on).** Opt-in for one-way broadcast workloads
+(consumer FPV video) where per-fragment ChaCha20-Poly1305 AEAD is
+overhead without meaningful security benefit.
+
+**Wire format change:**
+
+- AEAD mode: `wblock_hdr_t` → AEAD(wpacket_hdr_t + payload) + 16 B tag
+- Plain mode: `wblock_hdr_t` → wpacket_hdr_t + payload (no tag)
+
+Both sides must match or packets are silently dropped. The
+`count_p_mode_mismatch` stat on RX surfaces misconfigured deploys.
+
+### What `-x` keeps
+
+- **Session packet authentication.** fec_k, fec_n, epoch, channel_id are
+  still protected by the pre-shared `tx.key`/`rx.key` keypair. An
+  attacker can't inject a fake session packet to reconfigure RX.
+- **Replay dedup.** RX's `count_p_uniq` set filters by
+  `(block_idx, fragment_idx)` nonce, so exact replays are still
+  rejected.
+
+### What `-x` removes
+
+- **Per-fragment authentication.** Anyone on the channel can inject
+  fragments that RX accepts (subject to FEC decode succeeding).
+- **Per-fragment integrity.** A single-bit flip that slips past FEC
+  reaches the video decoder. For H.264/H.265 this is usually a glitch,
+  not a crash.
+- **Per-fragment confidentiality.** Video content visible to anyone in
+  RF range.
+
+### When `-x` makes sense
+
+- One-way broadcast (video from drone to ground)
+- Consumer/hobbyist use where opsec isn't load-bearing
+- CPU/airtime matters (saves ~4 pp wfb_cpu + 16 B × pkt/s on wire)
+
+### When to keep AEAD on
+
+- **Bidirectional tunnel** (RC control, telemetry) — injected control
+  packets are an actual attack vector
+- **Commercial deploys** with compliance requirements
+- Any scenario where integrity of the stream matters
+
+### Usage
+
+```bash
+# TX side (vehicle)
+wfb_tx -H venc_wfb -K /etc/drone.key -k 8 -n 12 -p 0 -r 0.5 -x wlan0
+
+# RX side (ground station)
+sudo wfb_rx -K /etc/gs.key -i 0 -p 0 -x wlxHHHHHHHHHHHH
+```
+
+No wfb_tx_cmd for this — switching mid-session would invalidate RX's
+session-key state. Choose at startup.
+
+### Verifying
+
+TX startup logs:
+
+```
+Startup: AEAD=off (DATA_PLAIN), M-bit close=on, parity_ratio=0.5000, k=8, n=12, channel_id=0x0000cf
+Note: RX must run with -x too; DATA_PLAIN packets are silently dropped in AEAD mode.
+```
+
+RX startup logs:
+
+```
+Startup: AEAD=off (expects DATA_PLAIN), channel_id=0x0000cf, rx_mode=local
+Note: TX must run with -x too; AEAD DATA packets are silently dropped in plain mode.
+```
+
+If modes disagree, RX log will include per-interval:
+
+```
+N packets dropped (AEAD-mode mismatch, check -x flag on both sides)
+```
+
+## Quick reference — recommended FPV config
+
+For a typical 25 Mbps H.265 FPV video stream (vehicle → ground, one-way):
+
+```bash
+# Vehicle
+wfb_tx -K /etc/drone.key -M 5 -B 20 -k 8 -n 12 -P 1 -Q -S 1 -L 1 \
+       -C 8000 -H venc_wfb -R 2097152 -s 2097152 -l 1000 -i 0 -p 0 \
+       -r 0.5 -x wlan0
+
+# Ground
+sudo wfb_rx -K /etc/gs.key -i 0 -p 0 -x wlxHHHHHHHHHHHH
+
+# Runtime tuning on vehicle (examples)
+wfb_tx_cmd 8000 get_mbit                     # enable=1, parity_ratio=0.5000
+wfb_tx_cmd 8000 set_mbit -e 1 -r 0.5         # proportional parity (default)
+wfb_tx_cmd 8000 set_fec -k 10 -n 15          # change FEC live
+```
