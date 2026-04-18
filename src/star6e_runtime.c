@@ -332,14 +332,35 @@ static void *dual_rec_thread_fn(void *arg)
 
 	clock_gettime(CLOCK_MONOTONIC, &interval_start);
 
+	/* Block on MI_VENC_GetFd(chn) via poll() instead of spinning on
+	 * MI_VENC_Query + usleep(1000).  The fd signals POLLIN when a
+	 * frame is ready, so we wake exactly once per frame (~120/s at
+	 * 120 fps) instead of ~1000/s from the old 1 ms spin.  If the
+	 * SDK returns fd < 0 (unknown BSP variant), fall back to the
+	 * original polling loop. */
+	int venc_fd = MI_VENC_GetFd(d->channel);
+
 	while (d->rec_running) {
 		MI_VENC_Stat_t stat = {0};
 		MI_VENC_Stream_t stream = {0};
 		int ret;
 
+		if (venc_fd >= 0) {
+			/* POLL_TIMEOUT_MS = 1000 is large on purpose — it
+			 * caps the rec_running cancellation latency
+			 * without wasting cycles on short periodic wakes.
+			 * Encoder frames arrive every 8-9 ms at 120 fps,
+			 * long before this timeout expires. */
+			struct pollfd pfd = { .fd = venc_fd, .events = POLLIN };
+			(void)poll(&pfd, 1, 1000);
+			if (!(pfd.revents & POLLIN))
+				continue;  /* timeout / spurious wake */
+		}
+
 		ret = MI_VENC_Query(d->channel, &stat);
 		if (ret != 0 || stat.curPacks == 0) {
-			usleep(1000);
+			if (venc_fd < 0)
+				usleep(1000);
 			continue;
 		}
 
@@ -354,7 +375,7 @@ static void *dual_rec_thread_fn(void *arg)
 		ret = MI_VENC_GetStream(d->channel, &stream,
 			g_running ? 40 : 0);
 		if (ret != 0) {
-			if (ret == -EAGAIN || ret == EAGAIN)
+			if ((ret == -EAGAIN || ret == EAGAIN) && venc_fd < 0)
 				usleep(1000);
 			continue;
 		}
@@ -416,6 +437,9 @@ static void *dual_rec_thread_fn(void *arg)
 			}
 		}
 	}
+
+	if (venc_fd >= 0)
+		MI_VENC_CloseFd(d->channel);
 
 	return NULL;
 }

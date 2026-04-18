@@ -1,5 +1,22 @@
 # History
 
+## [0.7.6] - 2026-04-18
+
+- **Perf-series PR-C — dual_rec_thread blocking wait via MI_VENC_GetFd.**
+  Third of the 2026-04-18 perf series.  Replaces the 1-ms `usleep` spin
+  in the dual-recorder thread with a `poll()` on the VENC channel's
+  kernel fd (`MI_VENC_GetFd`).  The fd signals `POLLIN` when a frame is
+  ready, so the thread wakes once per frame (~120/s at 120 fps) instead
+  of ~1000/s from the old 1 ms spin — ~88 % fewer syscalls during
+  recording.
+- **Fallback preserved:** if `MI_VENC_GetFd` returns < 0 on an unknown
+  BSP variant, the thread falls back to the original
+  `MI_VENC_Query + usleep(1000)` loop — zero behaviour change on SDKs
+  that don't expose the fd.
+- **Lifecycle:** `MI_VENC_CloseFd` is called on thread exit when the fd
+  was acquired.  The fd function pointers were already loaded by
+  `star6e_mi.c` / `maruko_mi.c` (dlsym'd but unused before this PR).
+
 ## [0.7.5] - 2026-04-18
 
 - **Perf-series PR-B — IDR request rate-limit gate.** Second of the
