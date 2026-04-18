@@ -48,6 +48,7 @@ static int maruko_runner_init(void *opaque)
 	maruko_bind_controls(ctx);
 	maruko_reset_scene(backend);
 	venc_api_register(&ctx->vcfg, "maruko", maruko_controls_callbacks());
+	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
 	if (ctx->vcfg.video0.qp_delta != 0 &&
 	    maruko_controls_callbacks()->apply_qp_delta) {
 		maruko_controls_callbacks()->apply_qp_delta(

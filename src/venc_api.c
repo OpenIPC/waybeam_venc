@@ -18,6 +18,7 @@
 static VencConfig *g_cfg;
 static const VencApplyCallbacks *g_cb;
 static char g_backend[32];
+static char g_config_path[256];
 static int g_api_routes_registered = 0;
 
 /* Mutex protecting g_cfg field access from the httpd thread.
@@ -25,6 +26,30 @@ static int g_api_routes_registered = 0;
  * streaming thread reads config fields concurrently.  This mutex
  * serializes field reads/writes to prevent torn values on ARM. */
 static pthread_mutex_t g_cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void venc_api_set_config_path(const char *path)
+{
+	pthread_mutex_lock(&g_cfg_mutex);
+	if (path)
+		snprintf(g_config_path, sizeof(g_config_path), "%s", path);
+	else
+		g_config_path[0] = '\0';
+	pthread_mutex_unlock(&g_cfg_mutex);
+}
+
+/* Persist current config to disk if a config path was registered.
+ * Caller must NOT hold g_cfg_mutex (this function takes it). */
+static void venc_api_save_config_to_disk(const VencConfig *cfg_snapshot)
+{
+	char path[sizeof(g_config_path)];
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	snprintf(path, sizeof(path), "%s", g_config_path);
+	pthread_mutex_unlock(&g_cfg_mutex);
+	if (!path[0])
+		return;
+	(void)venc_config_save(path, cfg_snapshot);
+}
 
 /* ── Sensor info (set by backend after sensor_select) ─────────────────── */
 
@@ -1411,9 +1436,13 @@ static int process_restart_set_query(const SetQueryParam *param,
 	}
 
 	*g_cfg = new_cfg;
-	venc_api_request_reinit(2);
 	jval = field_to_json_value_from_cfg(&new_cfg, param->field);
 	pthread_mutex_unlock(&g_cfg_mutex);
+	/* Persist to disk so the change survives restart/crash.  The reinit
+	 * uses the in-memory snapshot we just committed; the on-disk copy now
+	 * matches. */
+	venc_api_save_config_to_disk(&new_cfg);
+	venc_api_request_reinit(2);
 	if (!jval) {
 		*status_code = 500;
 		return make_error_json("internal_error", "out of memory",
@@ -1779,11 +1808,43 @@ static int handle_isp_metrics(int fd, const HttpRequest *req, void *ctx)
 	return ret;
 }
 
+static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
+{
+	VencConfig snapshot;
+
+	(void)req; (void)ctx;
+	pthread_mutex_lock(&g_cfg_mutex);
+	if (!g_cfg) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return httpd_send_error(fd, 500, "internal_error",
+			"config not registered");
+	}
+	venc_config_defaults(g_cfg);
+	snapshot = *g_cfg;
+	pthread_mutex_unlock(&g_cfg_mutex);
+	venc_api_save_config_to_disk(&snapshot);
+	venc_api_request_reinit(1);
+	return httpd_send_ok(fd, "{\"defaults\":true,\"reinit\":true}");
+}
+
 static int handle_restart(int fd, const HttpRequest *req, void *ctx)
 {
+	VencConfig snapshot;
+
 	(void)req; (void)ctx;
+	/* Persist the current in-memory config before reloading from disk, so
+	 * staged LIVE-field edits that never hit MUT_RESTART don't get lost
+	 * when reinit_mode=1 re-reads the file. */
+	pthread_mutex_lock(&g_cfg_mutex);
+	if (g_cfg)
+		snapshot = *g_cfg;
+	else
+		memset(&snapshot, 0, sizeof(snapshot));
+	pthread_mutex_unlock(&g_cfg_mutex);
+	if (g_cfg)
+		venc_api_save_config_to_disk(&snapshot);
 	venc_api_request_reinit(1);
-	return httpd_send_ok(fd, "{\"reinit\":true}");
+	return httpd_send_ok(fd, "{\"reinit\":true,\"saved\":true}");
 }
 
 static int handle_idr(int fd, const HttpRequest *req, void *ctx)
@@ -2195,6 +2256,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/fps/config",   handle_fps_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/fps/live",     handle_fps_live, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/restart",      handle_restart, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/defaults",     handle_defaults, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/ae",           handle_ae, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/awb",          handle_awb, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/iq/set",       handle_iq_set, NULL);

@@ -212,8 +212,15 @@ static int maruko_apply_bitrate(uint32_t kbps)
 	default:
 		return -1;
 	}
-	return maruko_mi_venc_set_chn_attr(g_ctx.venc_dev,
-		g_ctx.venc_chn, &attr) == 0 ? 0 : -1;
+	if (maruko_mi_venc_set_chn_attr(g_ctx.venc_dev,
+	    g_ctx.venc_chn, &attr) != 0)
+		return -1;
+	/* Force an IDR after a bitrate change so the decoder resyncs against
+	 * the new rate-control state.  Rate-limit gated to coalesce storms. */
+	if (idr_rate_limit_allow(g_ctx.venc_chn))
+		maruko_mi_venc_request_idr(g_ctx.venc_dev,
+			g_ctx.venc_chn, 1);
+	return 0;
 }
 
 static int maruko_apply_gop(uint32_t gop_size)

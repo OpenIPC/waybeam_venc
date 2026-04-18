@@ -232,6 +232,11 @@ static int apply_bitrate(uint32_t kbps)
 	if (star6e_controls_apply_frame_lost_threshold(g_star6e_control_ctx.venc_chn,
 	    frame_lost_enabled, kbps) != 0)
 		return -1;
+	/* Force an IDR after a bitrate change so the decoder resyncs against
+	 * the new rate-control state.  Goes through the rate-limit gate so
+	 * bitrate-storm calls can't DoS the stream. */
+	if (idr_rate_limit_allow(g_star6e_control_ctx.venc_chn))
+		(void)MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1);
 	return 0;
 }
 

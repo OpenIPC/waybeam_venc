@@ -45,6 +45,10 @@ typedef struct {
 int venc_api_register(VencConfig *cfg, const char *backend_name,
 	const VencApplyCallbacks *cb);
 
+/* Register the config path so restart-required sets can persist to disk
+ * before triggering reinit.  Pass NULL to disable save-on-restart. */
+void venc_api_set_config_path(const char *path);
+
 /* Return 1 if a config field is supported on the named backend.
  * field_key may be canonical (video0.scene_threshold) or an accepted
  * alias (video0.sceneThreshold). */

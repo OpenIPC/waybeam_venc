@@ -1512,6 +1512,14 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 		return ret;
 	}
 
+	/* Re-kick sensor timing on reinit.  The ISP AE can leave the sensor
+	 * register at stale exposure/timing when we rebuild only VENC (common
+	 * path).  MI_SNR_SetFps forces the sensor driver to reconfigure its
+	 * timing registers so a FPS target change (e.g. 100 -> 120) actually
+	 * takes effect.  Fires for both legacyAe and CUS3A. */
+	if (pconf.sensor_framerate > 0)
+		MI_SNR_SetFps(state->sensor.pad_id, pconf.sensor_framerate);
+
 	return 0;
 }
 

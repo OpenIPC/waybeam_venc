@@ -449,8 +449,12 @@ restart the venc process to change sensor modes.
 
 ### `GET /api/v1/restart`
 
-Trigger a full pipeline reinit: reload config from disk (`/etc/venc.json`) and rebuild
-the pipeline. Equivalent to sending `SIGHUP` to the process.
+Persist the current in-memory config to `/etc/venc.json`, then trigger a full pipeline
+reinit that reloads that same file and rebuilds the pipeline. Equivalent to "Save &
+Restart" in the WebUI and to sending `SIGHUP` after saving.
+
+Prior to v0.7.8 this endpoint reloaded the on-disk file without first saving, so staged
+live edits were lost on reinit; the save step now makes the round-trip idempotent.
 
 ```bash
 curl http://<device-ip>/api/v1/restart
@@ -458,7 +462,23 @@ curl http://<device-ip>/api/v1/restart
 
 Response `200`:
 ```json
-{"ok":true,"data":{"reinit":true}}
+{"ok":true,"data":{"reinit":true,"saved":true}}
+```
+
+### `GET /api/v1/defaults`
+
+Overwrite the in-memory config with compiled-in defaults, persist to `/etc/venc.json`,
+then trigger a full pipeline reinit. Drives the "Restore Defaults" button in the WebUI.
+
+Added in v0.7.8.
+
+```bash
+curl http://<device-ip>/api/v1/defaults
+```
+
+Response `200`:
+```json
+{"ok":true,"data":{"defaults":true,"reinit":true}}
 ```
 
 ### `GET /api/v1/ae`
