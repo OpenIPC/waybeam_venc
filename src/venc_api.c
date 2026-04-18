@@ -2094,7 +2094,10 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 
 static int handle_idr_stats(int fd, const HttpRequest *req, void *ctx)
 {
-	char buf[512];
+	/* 8 channels × ~40 B/entry + envelope ≈ 360 B worst case; 768 B
+	 * leaves comfortable headroom and avoids the tight `sizeof(buf)-16`
+	 * break margin needing to match the 3-byte `"]}}"` tail exactly. */
+	char buf[768];
 	size_t n = 0;
 
 	(void)req; (void)ctx;
