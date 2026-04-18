@@ -1,5 +1,6 @@
 #include "star6e_controls.h"
 
+#include "idr_rate_limit.h"
 #include "pipeline_common.h"
 #include "star6e_audio.h"
 #include "star6e_cus3a.h"
@@ -384,7 +385,10 @@ static int apply_verbose(bool on)
 
 static int request_idr(void)
 {
-	return MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1) == 0 ? 0 : -1;
+	int chn = g_star6e_control_ctx.venc_chn;
+	if (!idr_rate_limit_allow(chn))
+		return 0;  /* coalesced — not an error */
+	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
 /* Compute one horizontal ROI band for step index of steps.

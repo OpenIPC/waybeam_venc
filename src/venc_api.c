@@ -1,4 +1,5 @@
 #include "venc_api.h"
+#include "idr_rate_limit.h"
 #include "pipeline_common.h"
 #include "sensor_select.h"
 #include "star6e_recorder.h"
@@ -2091,6 +2092,34 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 		"Supported: bitrate, gop");
 }
 
+static int handle_idr_stats(int fd, const HttpRequest *req, void *ctx)
+{
+	char buf[512];
+	size_t n = 0;
+
+	(void)req; (void)ctx;
+
+	n += (size_t)snprintf(buf + n, sizeof(buf) - n,
+		"{\"ok\":true,\"data\":{\"min_spacing_us\":%u,"
+		"\"channels\":[",
+		IDR_RATE_LIMIT_MIN_SPACING_US);
+	for (int chn = 0; chn < IDR_RATE_LIMIT_MAX_CHANNELS; chn++) {
+		uint32_t h = idr_rate_limit_honored(chn);
+		uint32_t d = idr_rate_limit_dropped(chn);
+		if (h == 0 && d == 0)
+			continue;  /* skip inactive channels */
+		if (n > 0 && buf[n - 1] != '[')
+			n += (size_t)snprintf(buf + n, sizeof(buf) - n, ",");
+		n += (size_t)snprintf(buf + n, sizeof(buf) - n,
+			"{\"idx\":%d,\"honored\":%u,\"dropped\":%u}",
+			chn, h, d);
+		if (n >= sizeof(buf) - 16)
+			break;
+	}
+	(void)snprintf(buf + n, sizeof(buf) - n, "]}}");
+	return httpd_send_json(fd, 200, buf);
+}
+
 static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 {
 	MI_VENC_CHN ch;
@@ -2106,6 +2135,10 @@ static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 	}
 	ch = g_dual.channel;
 	pthread_mutex_unlock(&g_dual_mutex);
+
+	if (!idr_rate_limit_allow((int)ch))
+		return httpd_send_json(fd, 200,
+			"{\"ok\":true,\"data\":{\"idr\":true,\"coalesced\":true}}");
 
 	ret = MI_VENC_RequestIdr(ch, 1);
 	if (ret != 0)
@@ -2173,6 +2206,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/status", handle_dual_status, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/set",    handle_dual_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
 	r |= venc_webui_register();
 	if (r != 0) {
 		pthread_mutex_lock(&g_cfg_mutex);

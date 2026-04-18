@@ -15,25 +15,33 @@ set -euo pipefail
 
 COUNT="${1:-100}"
 HOST="${2:-http://192.168.1.13}"
-ENDPOINT_IDR="$HOST/api/v1/dual/idr"
-ENDPOINT_STATS="$HOST/api/v1/stats"
+ENDPOINT_IDR="$HOST/request/idr"
+ENDPOINT_STATS="$HOST/api/v1/idr/stats"
 
-idr_count_in_stats() {
-	# Accepts either JSON with "idr_count":<n> or a plaintext stats block.
+# Extract combined honored count across all channels from /api/v1/idr/stats.
+# Returns 0 on any parse failure so the diff math still works.
+idr_honored_total() {
 	wget -q -O- "$ENDPOINT_STATS" 2>/dev/null | \
-		grep -oE '"(idr_count|idr_inserted)"[[:space:]]*:[[:space:]]*[0-9]+' | \
-		head -1 | \
-		grep -oE '[0-9]+$' || echo 0
+		grep -oE '"honored":[0-9]+' | \
+		grep -oE '[0-9]+' | \
+		awk '{sum+=$1} END {print sum+0}'
+}
+
+idr_dropped_total() {
+	wget -q -O- "$ENDPOINT_STATS" 2>/dev/null | \
+		grep -oE '"dropped":[0-9]+' | \
+		grep -oE '[0-9]+' | \
+		awk '{sum+=$1} END {print sum+0}'
 }
 
 echo "[idr_storm] target=$HOST count=$COUNT"
-before=$(idr_count_in_stats)
-echo "[idr_storm] idr_count before=$before"
+before_h=$(idr_honored_total)
+before_d=$(idr_dropped_total)
+echo "[idr_storm] honored=$before_h dropped=$before_d (before)"
 
 start_ns=$(date +%s%N)
-# Fire COUNT requests in parallel-ish (serialized curl avoids mixed-up stats).
 for i in $(seq 1 "$COUNT"); do
-	wget -q -O- --post-data='' --method=POST "$ENDPOINT_IDR" >/dev/null 2>&1 || true
+	wget -q -O- "$ENDPOINT_IDR" >/dev/null 2>&1 || true
 done
 end_ns=$(date +%s%N)
 elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
@@ -41,13 +49,18 @@ elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
 # Let any in-flight IDR register in stats.
 sleep 1
 
-after=$(idr_count_in_stats)
-honored=$((after - before))
+after_h=$(idr_honored_total)
+after_d=$(idr_dropped_total)
+delta_h=$((after_h - before_h))
+delta_d=$((after_d - before_d))
 
 echo "[idr_storm] fired $COUNT in ${elapsed_ms} ms"
-echo "[idr_storm] idr_count after=$after  honored=$honored"
-echo "[idr_storm] ratio=$(awk "BEGIN{print $honored/$COUNT}")"
+echo "[idr_storm] honored=$after_h dropped=$after_d (after)"
+echo "[idr_storm] delta: +${delta_h} honored, +${delta_d} dropped"
+if [ "$COUNT" -gt 0 ]; then
+	awk "BEGIN{printf \"[idr_storm] ratio_honored=%.3f\\n\", $delta_h/$COUNT}"
+fi
 
 # Expected:
-#   Pre-PR-B:  honored ~= COUNT          (every request becomes an IDR)
-#   Post-PR-B: honored << COUNT          (rate-limited by idr_min_spacing_ms)
+#   Pre-PR-B:  ratio_honored ≈ 1.0   (no gate; every request becomes an IDR)
+#   Post-PR-B: ratio_honored ≪ 1.0   (rate-limited — ~10 in 1 s with 100 ms gate)

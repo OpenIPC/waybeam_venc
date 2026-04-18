@@ -1,6 +1,7 @@
 #include "maruko_pipeline.h"
 
 #include "hevc_rtp.h"
+#include "idr_rate_limit.h"
 #include "isp_runtime.h"
 #include "maruko_bindings.h"
 #include "maruko_config.h"
@@ -1231,7 +1232,8 @@ static uint8_t maruko_scene_is_idr(const i6c_venc_strm *s, int codec)
 static void maruko_scene_request_idr(void *ctx_ptr)
 {
 	MarukoBackendContext *ctx = ctx_ptr;
-	maruko_mi_venc_request_idr(ctx->venc_device, ctx->venc_channel, 1);
+	if (idr_rate_limit_allow(ctx->venc_channel))
+		maruko_mi_venc_request_idr(ctx->venc_device, ctx->venc_channel, 1);
 }
 
 int maruko_pipeline_run(MarukoBackendContext *ctx)

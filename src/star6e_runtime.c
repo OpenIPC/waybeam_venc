@@ -2,6 +2,7 @@
 
 #include "debug_osd.h"
 #include "eis.h"
+#include "idr_rate_limit.h"
 #include "imu_bmi270.h"
 #include "pipeline_common.h"
 #include "scene_detector.h"
@@ -100,7 +101,8 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s, int codec)
 static void star6e_scene_request_idr(void *ctx)
 {
 	int venc_chn = *(const int *)ctx;
-	MI_VENC_RequestIdr(venc_chn, 1);
+	if (idr_rate_limit_allow(venc_chn))
+		MI_VENC_RequestIdr(venc_chn, 1);
 }
 
 /* ── Runner context ────────────────────────────────────────────────────── */
@@ -233,10 +235,15 @@ static void record_status_callback(VencRecordStatus *out)
 
 static int runtime_request_idr(void)
 {
+	int chn;
+
 	if (!g_runner_ctx)
 		return -1;
 
-	return MI_VENC_RequestIdr(g_runner_ctx->ps.venc_channel, 1) == 0 ? 0 : -1;
+	chn = g_runner_ctx->ps.venc_channel;
+	if (!idr_rate_limit_allow(chn))
+		return 0;  /* coalesced — not an error */
+	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
 static void start_custom_ae(const Star6ePipelineState *ps,

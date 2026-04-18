@@ -1,5 +1,6 @@
 #include "maruko_controls.h"
 
+#include "idr_rate_limit.h"
 #include "maruko_bindings.h"
 #include "maruko_iq.h"
 #include "maruko_output.h"
@@ -251,7 +252,8 @@ static int maruko_apply_qp_delta(int delta)
 	    g_ctx.venc_chn, &param) != 0)
 		return -1;
 
-	maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
+	if (idr_rate_limit_allow(g_ctx.venc_chn))
+		maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
 	printf("> qpDelta changed to %d\n", delta);
 	return 0;
 }

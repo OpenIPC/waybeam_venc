@@ -1,5 +1,38 @@
 # History
 
+## [0.7.5] - 2026-04-18
+
+- **Perf-series PR-B — IDR request rate-limit gate.** Second of the
+  2026-04-18 perf series.  Addresses the latent stability hazard where
+  five independent IDR producers (scene detector, HTTP `/request/idr`
+  and `/api/v1/dual/idr`, controls-apply, recorder-start) could storm
+  `MI_VENC_RequestIdr` without coordination — a bug-driven burst
+  (mis-tuned scene threshold during a camera pan) can crater per-frame
+  bitrate by chaining forced keyframes.
+- **New module (`include/idr_rate_limit.h`, `src/idr_rate_limit.c`):**
+  per-channel (up to 8) last-honored timestamp + honored/dropped
+  counters.  `idr_rate_limit_allow(chn)` enforces a compile-time
+  `IDR_RATE_LIMIT_MIN_SPACING_US` of 100 ms — at 120 fps that is 12
+  frames between honored forced IDRs, well below the GOP period
+  (~83 ms at GOP=10, which auto-inserts an IDR without RequestIdr).
+  State is lock-free (`__atomic_` load/store on `uint64_t`/`uint32_t`).
+- **Wired through the 5 producer sites:**
+  - `src/star6e_runtime.c` — `star6e_scene_request_idr`,
+    `runtime_request_idr`
+  - `src/star6e_controls.c` — `request_idr` (backend callback for HTTP
+    `/request/idr`)
+  - `src/venc_api.c` — `handle_dual_idr` (HTTP `/api/v1/dual/idr`);
+    coalesced response returns `{"coalesced":true}`
+  - `src/maruko_pipeline.c` — `maruko_scene_request_idr`
+  - `src/maruko_controls.c` — `apply_qp_delta` IDR reissue
+- **New endpoint `GET /api/v1/idr/stats`** returns per-channel honored
+  and dropped counts plus the configured `min_spacing_us`.  Used by
+  `tools/idr_storm.sh` to validate the gate.
+- **Unit tests (`tests/test_idr_rate_limit.c`, 20 cases):** first-call
+  honored, burst coalescing, per-channel independence, out-of-range
+  bypass, post-spacing honored, reset semantics.  1139 tests pass
+  (up from 1119).
+
 ## [0.7.4] - 2026-04-18
 
 - **Perf-series PR-A — clock wrapper + dual_rec Query dedup + bench infra.**
