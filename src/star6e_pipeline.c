@@ -934,6 +934,16 @@ static void star6e_pipeline_imu_push(void *ctx, const ImuSample *sample)
  * causes a mutex deadlock.  ISP bin and exposure cap are safe to reapply. */
 static int g_isp_initialized = 0;
 
+/* Track the last-loaded ISP bin path so we can skip the reload on reinit
+ * when nothing has changed.  The vendor AE inside the bin writes a default
+ * shutter (~10000us on IMX335) to the sensor register on load, which
+ * extends VTS and pins the sensor at ~100 fps.  MI_SNR_SetFps(same value)
+ * is a no-op in the sensor driver's pCus_SetFPS path, so there is no
+ * reliable way to undo the damage without power-cycling the sensor (which
+ * breaks MIPI sync on I6E).  Safer to avoid reloading the bin at all when
+ * the operator hasn't changed it. */
+static char g_last_isp_bin_path[256] = {0};
+
 /* Phase 3: assign port structs, issue all MI_SYS bind calls, init output,
  * video, ISP bin, exposure cap, cus3a, clocks, and audio. */
 static int bind_and_finalize_pipeline(Star6ePipelineState *state,
@@ -1012,12 +1022,21 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	star6e_video_init(&state->video, vcfg, pconf->sensor_framerate,
 		&state->output);
 
-	/* Load ISP bin on every start/reinit.  The kernel ISP driver accepts
-	 * repeated loads without issues on current firmware. */
-	if (pconf->isp_bin_path && *pconf->isp_bin_path) {
+	/* Load ISP bin on first start, or when the bin path changes.  Skipping
+	 * redundant reloads avoids the vendor AE resetting the sensor shutter
+	 * register back to its default (~10000us on IMX335) on every SIGHUP /
+	 * Save&Restart, which would otherwise lock the sensor VTS at ~100 fps.
+	 * The kernel ISP driver accepts repeated loads but each one disturbs
+	 * the running sensor timing. */
+	if (pconf->isp_bin_path && *pconf->isp_bin_path &&
+	    strcmp(pconf->isp_bin_path, g_last_isp_bin_path) != 0) {
 		ret = star6e_pipeline_load_isp_bin(pconf->isp_bin_path, sdk_quiet);
-		if (ret != 0)
+		if (ret != 0) {
 			fprintf(stderr, "WARNING: ISP bin load failed; continuing with default ISP settings\n");
+		} else {
+			snprintf(g_last_isp_bin_path, sizeof(g_last_isp_bin_path),
+				"%s", pconf->isp_bin_path);
+		}
 	}
 	if (!g_isp_initialized) {
 		star6e_pipeline_enable_cus3a(sdk_quiet);
