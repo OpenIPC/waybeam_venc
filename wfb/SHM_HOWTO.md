@@ -310,49 +310,149 @@ wfb_tx_cmd 8000 get_mbit             # read back
 
 **Default: 0.5** (matches `-k 8 -n 12`, the recommended FEC config).
 
-When M-bit fires on a partial block (say `actual_k=3` out of `fec_k=8`),
-the emitter needs to decide how many parity packets to send:
+### Mental model — two independent knobs
+
+`-k` / `-n` and `-r` control FEC protection on different kinds of block,
+and they **compose**:
+
+| Block kind | Parity budget | Controlled by |
+|---|---|---|
+| **Full block** — `fec_k` data fragments filled before M-bit | **`n - k`** parity, always (unchanged from upstream wfb-ng) | `-k` / `-n` |
+| **Partial block** — M-bit fires with `actual_k < fec_k` | `round(actual_k × r)` parity, capped at `n - k` | `-r` |
+
+A single frame typically spans 0 or more full blocks + 1 partial block
+(the tail, closed by the RTP M-bit marker). For example at 25 Mbps /
+120 fps / MTU 1400 → ≈19 fragments per frame → 2 full blocks + 1 partial
+per frame. At lower bitrates most frames are single partial blocks.
+
+**To raise the steady-state FEC rate, lower `-k` or raise `-n`** — same
+as pre-PR#10. `-r` is a second lever that only matters on the partial
+tail block; it does not replace `-k/-n`.
+
+### Wire layout of a partial block
 
 ```
-parity_count = max(fec_k - actual_k, min(fec_n - fec_k, round(actual_k × ratio)))
+parity_count   = min(n − k,  round(actual_k × r))
+padding_wire   = max(0,      k − actual_k − parity_count)
+wire_packets   = actual_k + padding_wire + parity_count
+               = max(actual_k + parity_count,  fec_k)
 ```
 
-- **Lower bound** `fec_k - actual_k` guarantees RX reaches its
-  `has_fragments == fec_k` trigger and decodes the block.
-- **Upper bound** `fec_n - fec_k` never exceeds the session's parity
-  budget.
-- **Target** `actual_k × ratio` scales proportional to the partial size.
+Why the `fec_k` floor: RX's `apply_fec` trigger requires
+`has_fragments == fec_k`. A block that reaches RX with fewer fragments
+expires without decode and **all data is lost**. When `parity_count`
+alone isn't enough (light-FEC configs like `-k 8 -n 12` where
+`n − k = 4 < fec_k = 8`), 2-byte padding fragments fill the gap.
 
-### Picking `ratio`
+Wire **bytes**, however, are dominated by the parity packets (full MTU
+each) not the padding (2 B each), so `-r` has a large effect on
+byte-rate even when packet count stays constant. See "Worked examples"
+below.
 
-Match it to `(n - k) / k` of your FEC config for **proportional
-partial-block protection** — the same parity-to-data ratio as a full
-block:
+### Picking `-r`
 
-| `-k` / `-n` | `(n − k)/k` | Recommended `-r` | Behavior |
-|---|---|---|---|
-| `-k 8 -n 12` | 0.5 | **`-r 0.5`** (default) | Typical: ~33 % parity overhead |
-| `-k 6 -n 18` | 2.0 | `-r 2.0` | Heavy FEC (200 % overhead, long-range) |
-| `-k 10 -n 30` | 2.0 | `-r 2.0` | Heavy FEC |
-| `-k 4 -n 12` | 2.0 | `-r 2.0` | Heavy FEC, smaller blocks |
-| any | n/a | `-r 0` | Minimum-parity partial (zero margin, lowest CPU) |
+Match it to `(n − k) / k` of your FEC config for **proportional
+partial-block protection** — same parity-to-data ratio as a full block:
+
+| `-k` / `-n` | `(n − k)/k` | Recommended `-r` | Full-block overhead | Partial-block behaviour at default `-r` |
+|---|---|---|---|---|
+| `-k 8 -n 12` | 0.5 | **`-r 0.5`** (default) | 50 % parity | 1-2 parity + padding to `fec_k`; partial always emits 8 wire packets |
+| `-k 6 -n 12` | 1.0 | `-r 1.0` | 100 % parity (2× coverage) | 3-6 parity; partial often emits `actual_k + parity_count` without padding |
+| `-k 4 -n 12` | 2.0 | `-r 2.0` | 200 % parity | parity saturates at `n − k = 8`; long-range configs |
+| `-k 6 -n 18` | 2.0 | `-r 2.0` | 200 % parity | heavy FEC |
+| `-k 10 -n 30` | 2.0 | `-r 2.0` | same | heavy FEC |
+| any | n/a | `-r 0` | (unchanged) | minimum-parity partial — zero margin on tail block |
 
 The ratio is Q8.8 fixed-point internally; floats are accepted on the CLI
 with resolution ≈ 0.004. Examples: `-r 0.5`, `-r 1.25`, `-r 2.0`.
 
-The flag only affects **partial blocks** (when M-bit fires mid-block).
-Full blocks always emit `n - k` parity regardless of `-r`.
+### How to raise FEC coverage
+
+Two levers, they compose:
+
+| Goal | Knob | Effect |
+|---|---|---|
+| Raise **full-block** recovery capacity | lower `-k` or raise `-n` | applies to every full block; e.g. `-k 6 -n 12` doubles parity vs `-k 8 -n 12` |
+| Raise **partial-block** recovery capacity | raise `-r` | applies only to the M-bit-closed tail; capped at `n − k` |
+| Do both (max coverage, most airtime) | combine | e.g. `-k 6 -n 12 -r 1.0` — 1:1 parity:data on full AND partial |
+
+### Tuning `-k` and `-r` to frame size
+
+The optimal `-k` fits the **average frame** in one block (minus a small
+headroom for natural variance).  When a frame exceeds `k × MTU`, it
+spills into the next block — but M-bit close still aligns the tail, so
+the spill is bounded and there's no cross-frame contamination.  The
+partial tail's size is `actual_k = frame_frags mod fec_k` (plus 0 if
+evenly divisible).
+
+| Avg frame size (frags) | Example workload | Suggested `-k`/`-n` | Suggested `-r` | Rationale |
+|---|---|---:|---:|---|
+| **≤ 3** | low-rate stream: 4-6 Mbps @ 120 fps, or 2 Mbps @ 60 fps | `-k 4 -n 12` | `-r 2.0` | every frame is ~1 partial; `-r` carries all the FEC weight. Full-block overhead = 200 % but hits rarely |
+| **4-8** | moderate: 8-15 Mbps @ 90-120 fps | `-k 6 -n 12` | `-r 1.0` | ~1 full + 0-1 partial per frame; 1:1 parity on both |
+| **8-16** | typical FPV: 20-30 Mbps @ 60-120 fps | `-k 8 -n 12` (default) | `-r 0.5` (default) | 1-2 full blocks dominate wire; partial is the tail only |
+| **> 16** | IDR bursts or very large P-frames (25+ Mbps) | same as 8-16 row | same | M-bit close bounds the tail; IDRs span 2-3 blocks without corrupting neighbours |
+
+Two practical consequences:
+
+1. **Choose `-k` first from the P-frame avg**, not the I-frame peak.
+   I-frames are 3-10× larger but occur every GOP (0.3-2 s).  Sizing
+   `-k` for the peak wastes airtime on every P-frame; sizing for the
+   avg lets I-frames span a few blocks and amortises the cost.
+2. **Then match `-r` to `(n − k) / k`** of the chosen config so partial
+   parity tracks the full-block ratio — operator intuition is stable
+   across loss scenarios.
+
+### Future: dynamic `-k` via fec_controller
+
+The `fec_controller` Python module (in this repo) is designed to pick
+`-k` dynamically from an EWMA of observed frame sizes, bounded by a
+learned headroom tracker.  Today it runs as a read-only observer; when
+it's activated as an authoritative controller it will issue
+`wfb_tx_cmd set_fec <k> <n>` calls as workload shifts.
+
+`-r` is still static config today.  Future controller work (see
+`docs/variable-payload-next-steps.md` section C) will likely auto-scale
+`-r` to track the current `-k` so the two-knob model remains
+self-consistent when `-k` moves during a session.  Operators should
+set `-r` once to match the **baseline** `-k` and accept that
+intermediate values may be suboptimal during k-transitions.
+
+### Worked examples at `-k 8 -n 12`, typical partial `actual_k = 3`
+
+| `-r` | `parity_count` | `padding_wire` | wire packets | wire bytes (approx) |
+|---|---:|---:|---:|---:|
+| 2.0 | 4 (capped at `n − k`) | 1 | 8 | 3·1400 + 2 + 4·1400 = ~9.8 KB |
+| 1.0 | 3 | 2 | 8 | 3·1400 + 4 + 3·1400 = ~8.4 KB |
+| 0.5 | 2 | 3 | 8 | 3·1400 + 6 + 2·1400 = ~7.0 KB |
+| 0.25 | 1 | 4 | 8 | 3·1400 + 8 + 1·1400 = ~5.6 KB |
+
+Packet count is **identical** across all four (the `fec_k = 8` floor);
+byte count differs by ~1.75× between `-r 0.25` and `-r 2.0`. At light
+FEC configs (`n − k < fec_k`), watch the **bytes-injected** counter in
+the `PKT` line, not the packets-injected counter.
+
+### Worked example at `-k 6 -n 12`, `actual_k = 3`
+
+| `-r` | `parity_count` | `padding_wire` | wire packets |
+|---|---:|---:|---:|
+| 2.0 | 6 (capped at `n − k`) | 0 | 9 |
+| 1.0 | 3 | 0 | 6 |
+| 0.5 | 2 | 1 | 6 |
+
+At `-k 6 -n 12`, `parity_max = 6 ≥ fec_k = 6`, so
+`actual_k + parity_count ≥ fec_k` already and padding usually goes to
+zero — wire packets track the ratio directly.
 
 ### Performance impact (measured)
 
 On SigmaStar Infinity6E, 25 Mbps / 120 fps H.265, `-k 8 -n 12`:
 
-| Config | wfb_cpu | Tasklet rate /s | Wire overhead on partials |
+| Config | wfb_cpu | Tasklet rate /s | Wire bytes on partials |
 |---|---|---|---|
-| `-b 0` (no M-bit) | baseline | baseline | 0 (natural behaviour) |
-| `-b 1 -r 0.5` (default) | ~+4 pp | ~+60 | +50 % wire per partial block |
-| `-b 1 -r 0` | ~+3 pp | ~+40 | +30 % wire per partial block |
-| `-b 1 -r 2.0` (over-protected) | ~+5 pp | ~+100 | +100 % wire per partial block |
+| `-b 0` (no M-bit close) | baseline | baseline | (no partials, tail spans next block) |
+| `-b 1 -r 0.5` (default) | ~+4 pp | ~+60 | ~5× data per partial |
+| `-b 1 -r 0` | ~+3 pp | ~+40 | ~3× data per partial |
+| `-b 1 -r 2.0` (over-protected) | ~+5 pp | ~+100 | ~7× data per partial |
 
 `-r 0.5` is the sweet spot for `-k 8 -n 12` — proportional protection
 with minimal overhead.
@@ -367,10 +467,11 @@ wfb_tx_cmd 8000 set_mbit -e 1 -r 0.25        # cut partial-block parity in half
 ### Sanity checks
 
 - `-r 0` with `-b 1` → partial blocks get zero extra parity beyond the
-  RX-trigger minimum. Any single packet loss on a partial block's wire
-  is unrecoverable. Accepted but warn-worthy for bursty links.
-- `-r > (n - k)` — saturates at `fec_n - fec_k`; no harm, no additional
-  protection. Wasted CLI-side effort.
+  RX-trigger minimum (achieved via padding at `-k 8 -n 12`, achievable
+  via bare min at `-k 6 -n 12` or tighter). Any single packet loss on
+  a partial block's wire is unrecoverable.
+- `-r > (n − k) / actual_k` — saturates at `fec_n − fec_k`; no harm,
+  no additional protection. Wasted CLI-side effort.
 - Changing `-b` mid-session via `wfb_tx_cmd` is safe; RX doesn't need
   any knowledge of this setting (it's a TX-side emission policy only).
 
