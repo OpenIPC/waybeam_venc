@@ -1,5 +1,6 @@
 #include "venc_webui.h"
 #include "venc_httpd.h"
+#include "venc_recordings.h"
 
 #include <stddef.h>
 
