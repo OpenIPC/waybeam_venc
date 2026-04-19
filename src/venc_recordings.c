@@ -11,8 +11,8 @@
  * Wire:  call venc_recordings_register() from venc_webui_register() (see patch)
  */
 
-#include "venc_webui.h"
 #include "venc_httpd.h"
+#include "venc_recordings.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -466,6 +466,33 @@ static int safe_filename(const char *name)
     return 1;
 }
 
+/*
+ * Parse a single key from req->query ("key=value&key2=value2").
+ * Writes the value into `out` (up to `outsz-1` bytes), returns out,
+ * or NULL if the key is not present.
+ */
+static char *query_param(const HttpRequest *req, const char *key,
+                         char *out, size_t outsz)
+{
+    const char *q = req->query;
+    size_t klen = strlen(key);
+    while (q && *q) {
+        /* skip leading '?' or '&' */
+        if (*q == '?' || *q == '&') { q++; continue; }
+        if (strncmp(q, key, klen) == 0 && q[klen] == '=') {
+            const char *v = q + klen + 1;
+            size_t i = 0;
+            while (*v && *v != '&' && i < outsz - 1)
+                out[i++] = *v++;
+            out[i] = '\0';
+            return out;
+        }
+        /* advance to next key */
+        while (*q && *q != '&') q++;
+    }
+    return NULL;
+}
+
 /* ── handlers ─────────────────────────────────────────────────── */
 
 /* GET /recordings — serve the gzipped HTML page */
@@ -582,7 +609,8 @@ static int handle_list(int fd, const HttpRequest *req, void *ctx)
 static int handle_download(int fd, const HttpRequest *req, void *ctx)
 {
     (void)ctx;
-    const char *name = httpd_query_param(req, "file");
+    char namebuf[256];
+    const char *name = query_param(req, "file", namebuf, sizeof(namebuf));
     if (!name || !safe_filename(name)) {
         return httpd_send_json(fd, 400,
             "{\"ok\":false,\"error\":\"missing or invalid file parameter\"}");
@@ -660,7 +688,8 @@ done:
 static int handle_delete(int fd, const HttpRequest *req, void *ctx)
 {
     (void)ctx;
-    const char *name = httpd_query_param(req, "file");
+    char namebuf[256];
+    const char *name = query_param(req, "file", namebuf, sizeof(namebuf));
     if (!name || !safe_filename(name)) {
         return httpd_send_json(fd, 400,
             "{\"ok\":false,\"error\":\"missing or invalid file parameter\"}");
