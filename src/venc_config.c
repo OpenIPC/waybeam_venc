@@ -784,22 +784,55 @@ int venc_config_save(const char *path, const VencConfig *cfg)
 		ssize_t n = readlink(path, target, sizeof(target) - 1);
 		if (n > 0) {
 			target[n] = '\0';
-			/* Relative symlink — resolve against `path`'s dir. */
+			/* Relative symlink — resolve against `path`'s dir.
+			 * `joined` sized for worst case `dirname(path) + '/' +
+			 * readlink_target + '\0'`; we then bail if the result
+			 * doesn't fit `target`. */
 			if (target[0] != '/') {
 				char base[512];
-				snprintf(base, sizeof(base), "%s", path);
-				char *slash = strrchr(base, '/');
+				char *slash;
+				int n_base = snprintf(base, sizeof(base),
+					"%s", path);
+				if (n_base < 0 ||
+				    (size_t)n_base >= sizeof(base)) {
+					fprintf(stderr,
+						"[venc_config] ERROR: path "
+						"too long: %s\n", path);
+					free(json);
+					return -1;
+				}
+				slash = strrchr(base, '/');
 				if (slash) {
-					char joined[512];
+					char joined[1024];
+					int n_join;
 					*slash = '\0';
-					snprintf(joined, sizeof(joined),
+					n_join = snprintf(joined, sizeof(joined),
 						"%s/%s", base, target);
-					snprintf(target, sizeof(target),
-						"%s", joined);
+					if (n_join < 0 ||
+					    (size_t)n_join >= sizeof(joined) ||
+					    (size_t)n_join >= sizeof(target)) {
+						fprintf(stderr,
+							"[venc_config] ERROR: "
+							"resolved symlink "
+							"path too long\n");
+						free(json);
+						return -1;
+					}
+					memcpy(target, joined,
+						(size_t)n_join + 1);
 				}
 			}
 		} else {
-			snprintf(target, sizeof(target), "%s", path);
+			int n_path = snprintf(target, sizeof(target),
+				"%s", path);
+			if (n_path < 0 ||
+			    (size_t)n_path >= sizeof(target)) {
+				fprintf(stderr,
+					"[venc_config] ERROR: path too long: "
+					"%s\n", path);
+				free(json);
+				return -1;
+			}
 		}
 		if (stat(target, &st) == 0) {
 			target_mode = st.st_mode & 07777;
@@ -809,8 +842,11 @@ int venc_config_save(const char *path, const VencConfig *cfg)
 	(void)have_existing;
 
 	size_t target_len = strlen(target);
-	char tmp_path[512];
-	if (target_len + 8 >= sizeof(tmp_path)) {
+	/* tmp_path sized for `target` + `.tmp` + '\0'.  The runtime check
+	 * below guarantees no truncation, but also size the buffer past
+	 * `target` so -Wformat-truncation can't false-positive. */
+	char tmp_path[sizeof(target) + 8];
+	if (target_len + 5 > sizeof(tmp_path)) {
 		fprintf(stderr, "[venc_config] ERROR: path too long: %s\n", target);
 		free(json);
 		return -1;
