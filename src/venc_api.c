@@ -1941,7 +1941,12 @@ static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
 	snapshot = fresh;
 	pthread_mutex_unlock(&g_cfg_mutex);
 	save_rc = venc_api_save_config_to_disk(&snapshot);
-	venc_api_request_reinit(1);
+	/* Mode 1 (reload-from-disk) is correct only when the disk save
+	 * succeeded — otherwise the reload would silently overlay the stale
+	 * on-disk config onto the in-memory defaults and revert most of
+	 * them.  On save failure use mode 2 (apply in-memory) so the
+	 * operator at least gets the defaults they asked for at runtime. */
+	venc_api_request_reinit(save_rc == 0 ? 1 : 2);
 	snprintf(resp, sizeof(resp),
 		"{\"defaults\":true,\"reinit\":true,\"saved\":%s}",
 		save_rc == 0 ? "true" : "false");
