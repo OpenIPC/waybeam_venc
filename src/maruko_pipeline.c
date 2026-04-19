@@ -1081,8 +1081,14 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	 * lifetime.  On reinit, kernel ISP driver retains CUS3A state;
 	 * re-running the 100->110->111 sequence causes a mutex deadlock. */
 	if (!g_mi_isp_initialized) {
-		if (ctx->cfg.isp_bin_path && *ctx->cfg.isp_bin_path) {
-			ret = maruko_load_isp_bin(ctx->cfg.isp_bin_path);
+		char isp_bin_resolved[256];
+		const char *configured = ctx->cfg.isp_bin_path[0] ?
+			ctx->cfg.isp_bin_path : NULL;
+
+		if (pipeline_common_resolve_isp_bin(configured,
+			ctx->sensor.plane.sensName,
+			isp_bin_resolved, sizeof(isp_bin_resolved))) {
+			ret = maruko_load_isp_bin(isp_bin_resolved);
 			if (ret != 0)
 				return -1;
 		}

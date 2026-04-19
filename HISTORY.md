@@ -1,5 +1,33 @@
 # History
 
+## [0.7.10] - 2026-04-19
+
+Discoverable defaults + automatic ISP-bin selection:
+
+- **`config/venc.default.json` lists `video0.size`.**  The field defaulted
+  to `"auto"` in the parser but wasn't in the reference JSON, so users
+  copying the file as a template never saw it.  Added with the same
+  `"auto"` value.
+- **Automatic ISP-bin fallback (both backends).**  New
+  `pipeline_common_resolve_isp_bin()` runs after `sensor_select` and:
+  1. Uses `isp.sensorBin` if non-empty and readable.
+  2. Otherwise tries `/etc/sensors/<lowercase prefix>.bin` keyed off the
+     live sensor name (`IMX335_MIPI` → `imx335`).
+  3. Falls back to "no bin" (driver defaults).
+
+  Stock devices that already ship `/etc/sensors/imx335.bin`,
+  `/etc/sensors/imx415.bin`, etc. now run without per-host config.  A
+  configured-but-missing path logs a warning and uses the fallback so
+  typos and renamed bin files no longer cripple AE/AWB.  Logs the
+  resolution decision once per pipeline start: `> ISP bin: %s
+  (configured | auto-detected for sensor 'imx335') | none (no fallback…)`.
+- **Star6E `Star6ePipelineConfig.isp_bin_path`** changed from
+  `const char *` to `char[256]` to hold the resolved path.  Maruko
+  `MarukoBackendConfig.isp_bin_path` got the same treatment.
+- **Tests.**  10 new cases in `test_pipeline_common`: configured +
+  readable, configured + missing, NULL/empty sensor name, no-alnum-prefix
+  sensor name, NULL/zero output buffer (1190 tests, was 1180).
+
 ## [0.7.9] - 2026-04-19
 
 Aspect-ratio crop is now opt-out (Star6E):

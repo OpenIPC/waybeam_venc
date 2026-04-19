@@ -20,6 +20,7 @@
     "codec": "h265",
     "rcMode": "cbr",
     "fps": 60,
+    "size": "auto",
     "bitrate": 8192,
     "gopSize": 1.0,
     "qpDelta": -4,

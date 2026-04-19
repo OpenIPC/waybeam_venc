@@ -733,7 +733,9 @@ typedef struct {
 	SensorSelectConfig sensor_cfg;
 	SensorUnlockConfig sensor_unlock;
 	SensorStrategy     sensor_strategy;
-	const char        *isp_bin_path;
+	char               isp_bin_path[256];   /* "" if no bin should be loaded;
+	                                         * resolved by select_and_configure_sensor()
+	                                         * after we know the live sensor name */
 	uint32_t           sensor_width;
 	uint32_t           sensor_height;
 	uint32_t           image_width;
@@ -798,7 +800,9 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	pconf->image_flip      = vcfg->image.flip   ? 1 : 0;
 	pconf->vpe_level_3dnr  = vcfg->fpv.noise_level;
 	pconf->oc_level        = vcfg->system.overclock_level;
-	pconf->isp_bin_path    = vcfg->isp.sensor_bin[0] ? vcfg->isp.sensor_bin : NULL;
+	/* isp_bin_path is resolved later in select_and_configure_sensor() once
+	 * the live sensor name is known.  Leave empty here. */
+	pconf->isp_bin_path[0] = '\0';
 
 	pconf->sensor_cfg = pipeline_common_build_sensor_select_config(
 		vcfg->sensor.index, vcfg->sensor.mode,
@@ -940,9 +944,12 @@ static int g_isp_initialized = 0;
 static char g_last_isp_bin_path[256] = {0};
 
 /* Phase 3: assign port structs, issue all MI_SYS bind calls, init output,
- * video, ISP bin, exposure cap, cus3a, clocks, and audio. */
+ * video, ISP bin, exposure cap, cus3a, clocks, and audio.
+ * pconf is non-const because we resolve isp_bin_path in here (we need
+ * the live sensor name from state->sensor, which is only populated
+ * after Phase 2). */
 static int bind_and_finalize_pipeline(Star6ePipelineState *state,
-	const VencConfig *vcfg, const Star6ePipelineConfig *pconf,
+	const VencConfig *vcfg, Star6ePipelineConfig *pconf,
 	SdkQuietState *sdk_quiet)
 {
 	MI_U32 venc_device = 0;
@@ -1017,13 +1024,24 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	star6e_video_init(&state->video, vcfg, pconf->sensor_framerate,
 		&state->output);
 
+	/* Resolve isp.sensorBin: configured path takes precedence; if empty
+	 * or unreadable, fall back to /etc/sensors/<sensor>.bin keyed off
+	 * the live sensor name.  Resolved here (rather than in
+	 * select_and_configure_sensor) so reinit also picks up SIGHUP-driven
+	 * isp.sensorBin changes — reinit reuses the existing sensor and
+	 * skips select_and_configure_sensor. */
+	pipeline_common_resolve_isp_bin(
+		vcfg->isp.sensor_bin[0] ? vcfg->isp.sensor_bin : NULL,
+		state->sensor.plane.sensName,
+		pconf->isp_bin_path, sizeof(pconf->isp_bin_path));
+
 	/* Load ISP bin on first start, or when the bin path changes.  Skipping
 	 * redundant reloads avoids the vendor AE resetting the sensor shutter
 	 * register back to its default (~10000us on IMX335) on every SIGHUP /
 	 * Save&Restart, which would otherwise lock the sensor VTS at ~100 fps.
 	 * The kernel ISP driver accepts repeated loads but each one disturbs
 	 * the running sensor timing. */
-	if (pconf->isp_bin_path && *pconf->isp_bin_path &&
+	if (pconf->isp_bin_path[0] &&
 	    strcmp(pconf->isp_bin_path, g_last_isp_bin_path) != 0) {
 		ret = star6e_pipeline_load_isp_bin(pconf->isp_bin_path, sdk_quiet);
 		if (ret != 0) {

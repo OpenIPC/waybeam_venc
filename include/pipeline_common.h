@@ -45,6 +45,23 @@ PipelinePrecropRect pipeline_common_compute_precrop(uint32_t sensor_w,
 	uint32_t sensor_h, uint32_t image_w, uint32_t image_h,
 	bool keep_aspect);
 
+/** Resolve which ISP bin path to load.  Resolution order:
+ *   1. configured_path is non-empty AND access(R_OK) succeeds → use it
+ *   2. else /etc/sensors/<lowercase prefix of sensor_name>.bin if readable
+ *      (prefix = sensor_name truncated at first non-alnum, e.g.
+ *      "IMX335_MIPI" → "imx335")
+ *   3. else write "" (caller skips the load)
+ *
+ * Logs the chosen path and the reason on stdout (one line, "> ISP bin: ...").
+ *
+ * out_path must hold at least 256 bytes.  sensor_name may be NULL or
+ * empty — the fallback is then skipped.
+ *
+ * Returns 1 if a path was chosen (out_path filled), 0 if no path
+ * could be resolved (out_path = ""). */
+int pipeline_common_resolve_isp_bin(const char *configured_path,
+	const char *sensor_name, char *out_path, size_t out_sz);
+
 /** Scale QP proportionally for a given band level.
  * level 1 = outermost (weakest), level steps = innermost (full qp).
  * Higher-index ROI regions override lower ones in overlap zones. */

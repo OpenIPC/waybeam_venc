@@ -1,5 +1,6 @@
 #include "pipeline_common.h"
 
+#include <ctype.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
@@ -222,4 +223,70 @@ PipelinePrecropRect pipeline_common_compute_precrop(uint32_t sensor_w,
 	}
 
 	return rect;
+}
+
+/* Lowercase sensor_name into out_buf, stopping at the first non-alnum
+ * character or out_sz-1 bytes.  Returns the number of characters written
+ * (0 if sensor_name is NULL/empty or starts with a non-alnum). */
+static size_t sensor_name_normalize(const char *sensor_name,
+	char *out_buf, size_t out_sz)
+{
+	size_t w = 0;
+
+	if (!sensor_name || !out_buf || out_sz == 0)
+		return 0;
+	while (sensor_name[w] && w + 1 < out_sz) {
+		unsigned char c = (unsigned char)sensor_name[w];
+		if (!isalnum(c))
+			break;
+		out_buf[w] = (char)tolower(c);
+		w++;
+	}
+	out_buf[w] = '\0';
+	return w;
+}
+
+int pipeline_common_resolve_isp_bin(const char *configured_path,
+	const char *sensor_name, char *out_path, size_t out_sz)
+{
+	char fallback[256];
+	char normalized[64];
+	size_t name_len;
+
+	if (!out_path || out_sz == 0)
+		return 0;
+	out_path[0] = '\0';
+
+	if (configured_path && *configured_path) {
+		if (access(configured_path, R_OK) == 0) {
+			snprintf(out_path, out_sz, "%s", configured_path);
+			printf("> ISP bin: %s (configured)\n", configured_path);
+			return 1;
+		}
+		fprintf(stderr,
+			"WARNING: ISP bin '%s' not readable, attempting fallback\n",
+			configured_path);
+	}
+
+	name_len = sensor_name_normalize(sensor_name, normalized,
+		sizeof(normalized));
+	if (name_len == 0) {
+		printf("> ISP bin: none (no path configured%s)\n",
+			(sensor_name && *sensor_name) ?
+				", sensor name unrecognized" :
+				", sensor name unavailable");
+		return 0;
+	}
+
+	snprintf(fallback, sizeof(fallback), "/etc/sensors/%s.bin", normalized);
+	if (access(fallback, R_OK) == 0) {
+		snprintf(out_path, out_sz, "%s", fallback);
+		printf("> ISP bin: %s (auto-detected for sensor '%s')\n",
+			fallback, normalized);
+		return 1;
+	}
+
+	printf("> ISP bin: none (no fallback at %s for sensor '%s')\n",
+		fallback, normalized);
+	return 0;
 }

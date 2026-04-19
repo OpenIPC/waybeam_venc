@@ -1,6 +1,23 @@
 #include "pipeline_common.h"
 #include "test_helpers.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* Create an empty file at path; returns 1 on success.  Used for fixture
+ * setup in the resolve_isp_bin tests. */
+static int touch_file(const char *path)
+{
+	FILE *f = fopen(path, "w");
+	if (!f)
+		return 0;
+	fclose(f);
+	return 1;
+}
+
 int test_pipeline_common(void)
 {
 	int failures = 0;
@@ -9,6 +26,11 @@ int test_pipeline_common(void)
 	uint32_t width;
 	uint32_t height;
 	PipelinePrecropRect rect;
+	char resolved[256];
+	char tmp_dir[64];
+	char fixture_a[160];
+	char fixture_b[160];
+	int rc;
 
 	CHECK("pipeline common gop zero", pipeline_common_gop_frames(0.0, 120) == 1);
 	CHECK("pipeline common gop fps zero", pipeline_common_gop_frames(1.0, 0) == 30);
@@ -91,6 +113,52 @@ int test_pipeline_common(void)
 	pipeline_common_clamp_image_size(NULL, 2688, 1520, NULL, &height);
 	pipeline_common_clamp_image_size(NULL, 2688, 1520, &width, NULL);
 	CHECK("pipeline common clamp null safe", 1);
+
+	/* ── resolve_isp_bin ─────────────────────────────────────────── */
+	snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/venc_test_isp_%d", (int)getpid());
+	mkdir(tmp_dir, 0700);
+	snprintf(fixture_a, sizeof(fixture_a), "%s/configured.bin", tmp_dir);
+	snprintf(fixture_b, sizeof(fixture_b), "%s/missing.bin", tmp_dir);
+	(void)touch_file(fixture_a);
+
+	/* configured path exists and is readable → use it verbatim */
+	resolved[0] = '\0';
+	rc = pipeline_common_resolve_isp_bin(fixture_a, "IMX335_MIPI",
+		resolved, sizeof(resolved));
+	CHECK("isp_bin configured rc", rc == 1);
+	CHECK("isp_bin configured path", strcmp(resolved, fixture_a) == 0);
+
+	/* configured but unreadable + sensor name has no fallback installed
+	 * (we assume the test host doesn't carry /etc/sensors/imx_test.bin) */
+	resolved[0] = 'X';
+	rc = pipeline_common_resolve_isp_bin(fixture_b, "imx_test",
+		resolved, sizeof(resolved));
+	CHECK("isp_bin missing rc", rc == 0);
+	CHECK("isp_bin missing empty", resolved[0] == '\0');
+
+	/* empty configured + NULL sensor name → no path */
+	resolved[0] = 'X';
+	rc = pipeline_common_resolve_isp_bin(NULL, NULL,
+		resolved, sizeof(resolved));
+	CHECK("isp_bin null sensor rc", rc == 0);
+	CHECK("isp_bin null sensor empty", resolved[0] == '\0');
+
+	/* empty configured + sensor name with no alnum prefix → no fallback */
+	resolved[0] = 'X';
+	rc = pipeline_common_resolve_isp_bin("", "_no_prefix",
+		resolved, sizeof(resolved));
+	CHECK("isp_bin no-prefix rc", rc == 0);
+	CHECK("isp_bin no-prefix empty", resolved[0] == '\0');
+
+	/* NULL out buffer / zero size → safe rc=0 */
+	rc = pipeline_common_resolve_isp_bin(fixture_a, "imx335", NULL, 100);
+	CHECK("isp_bin null buf rc", rc == 0);
+	rc = pipeline_common_resolve_isp_bin(fixture_a, "imx335", resolved, 0);
+	CHECK("isp_bin zero size rc", rc == 0);
+
+	/* cleanup */
+	unlink(fixture_a);
+	rmdir(tmp_dir);
 
 	return failures;
 }

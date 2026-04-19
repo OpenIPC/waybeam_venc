@@ -32,7 +32,7 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->stream_mode = MARUKO_STREAM_RTP;
 	cfg->forced_sensor_pad = (MI_SNR_PAD_ID_e)-1;
 	cfg->forced_sensor_mode = -1;
-	cfg->isp_bin_path = NULL;
+	cfg->isp_bin_path[0] = '\0';
 	cfg->vpe_level_3dnr = 1;
 	cfg->verbose = 0;
 	cfg->connected_udp = 1;  /* match VencConfig default */
@@ -77,8 +77,10 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->forced_sensor_pad = (vcfg->sensor.index >= 0) ?
 		(MI_SNR_PAD_ID_e)vcfg->sensor.index : (MI_SNR_PAD_ID_e)-1;
 	cfg->forced_sensor_mode = vcfg->sensor.mode;
-	cfg->isp_bin_path = vcfg->isp.sensor_bin[0] ?
-		vcfg->isp.sensor_bin : NULL;
+	/* Configured path is copied verbatim; pipeline resolves it after
+	 * sensor_select runs (may pick the per-sensor fallback). */
+	snprintf(cfg->isp_bin_path, sizeof(cfg->isp_bin_path), "%s",
+		vcfg->isp.sensor_bin);
 	cfg->vpe_level_3dnr = vcfg->fpv.noise_level;
 	cfg->sensor_unlock = (SensorUnlockConfig){
 		.enabled = vcfg->sensor.unlock_enabled ? 1 : 0,
