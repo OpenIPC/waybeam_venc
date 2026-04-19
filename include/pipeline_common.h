@@ -3,6 +3,7 @@
 
 #include "sensor_select.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -35,11 +36,14 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps);
  * Clamps kbps to 200000 to keep kbps*1024 inside uint32_t. */
 uint32_t pipeline_common_frame_lost_threshold(uint32_t kbps);
 
-/** Compute center-crop rectangle to match target aspect ratio.
- * Returns a rectangle that crops the sensor output to the aspect ratio of
- * image_w x image_h, with 2-pixel alignment. */
+/** Compute crop rectangle for the VIF/SCL stage.
+ * keep_aspect = true  → center-crop the sensor to the aspect ratio of
+ *                       image_w x image_h with 2-pixel alignment.
+ * keep_aspect = false → return the full sensor area; image_w/image_h are
+ *                       ignored and the downstream scaler will stretch. */
 PipelinePrecropRect pipeline_common_compute_precrop(uint32_t sensor_w,
-	uint32_t sensor_h, uint32_t image_w, uint32_t image_h);
+	uint32_t sensor_h, uint32_t image_w, uint32_t image_h,
+	bool keep_aspect);
 
 /** Scale QP proportionally for a given band level.
  * level 1 = outermost (weakest), level steps = innermost (full qp).

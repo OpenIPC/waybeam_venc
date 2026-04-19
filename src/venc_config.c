@@ -94,6 +94,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->isp.ae_fps = 15;
 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
 	cfg->isp.awb_ct = 5500;
+	cfg->isp.keep_aspect = true;
 
 	/* image */
 	cfg->image.mirror = false;
@@ -246,6 +247,7 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 	safe_strcpy(s->awb_mode, sizeof(s->awb_mode),
 		json_get_string(obj, "awbMode", s->awb_mode));
 	s->awb_ct = (uint32_t)json_get_int(obj, "awbCt", (int)s->awb_ct);
+	s->keep_aspect = json_get_bool(obj, "keepAspect", s->keep_aspect);
 }
 
 static void load_image(const cJSON *root, VencConfigImage *s)
@@ -626,6 +628,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);
 		cJSON_AddStringToObject(isp, "awbMode", cfg->isp.awb_mode);
 		cJSON_AddNumberToObject(isp, "awbCt", cfg->isp.awb_ct);
+		cJSON_AddBoolToObject(isp, "keepAspect", cfg->isp.keep_aspect);
 	}
 
 	/* image */

@@ -196,11 +196,18 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps)
 }
 
 PipelinePrecropRect pipeline_common_compute_precrop(uint32_t sensor_w,
-	uint32_t sensor_h, uint32_t image_w, uint32_t image_h)
+	uint32_t sensor_h, uint32_t image_w, uint32_t image_h,
+	bool keep_aspect)
 {
 	PipelinePrecropRect rect = {0, 0, (uint16_t)sensor_w, (uint16_t)sensor_h};
-	uint64_t sensor_ar = (uint64_t)sensor_w * image_h;
-	uint64_t image_ar = (uint64_t)image_w * sensor_h;
+	uint64_t sensor_ar;
+	uint64_t image_ar;
+
+	if (!keep_aspect)
+		return rect;
+
+	sensor_ar = (uint64_t)sensor_w * image_h;
+	image_ar = (uint64_t)image_w * sensor_h;
 
 	if (sensor_ar > image_ar) {
 		rect.h = (uint16_t)sensor_h;

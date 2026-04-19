@@ -34,13 +34,6 @@ typedef int (*isp_get_exposure_limit_fn_t)(int channel,
 typedef int (*isp_set_exposure_limit_fn_t)(int channel,
 	IspExposureLimit *config);
 
-typedef struct {
-	uint16_t x;
-	uint16_t y;
-	uint16_t w;
-	uint16_t h;
-} Star6ePrecropRect;
-
 typedef int (*isp_load_bin_fn_t)(int channel, char *path, unsigned int key);
 typedef int (*isp_disable_userspace3a_fn_t)(int channel);
 typedef int (*cus3a_fn_t)(int channel, void *params);
@@ -344,10 +337,11 @@ static void star6e_pipeline_stop_sensor(MI_SNR_PAD_ID_e pad_id)
 }
 
 static Star6ePrecropRect star6e_pipeline_compute_precrop(uint32_t sensor_w,
-	uint32_t sensor_h, uint32_t image_w, uint32_t image_h)
+	uint32_t sensor_h, uint32_t image_w, uint32_t image_h,
+	bool keep_aspect)
 {
 	PipelinePrecropRect common = pipeline_common_compute_precrop(
-		sensor_w, sensor_h, image_w, image_h);
+		sensor_w, sensor_h, image_w, image_h, keep_aspect);
 	Star6ePrecropRect rect = {common.x, common.y, common.w, common.h};
 	return rect;
 }
@@ -881,7 +875,8 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	state->image_height = pconf->image_height;
 
 	pconf->precrop = star6e_pipeline_compute_precrop(sensor_width,
-		sensor_height, pconf->image_width, pconf->image_height);
+		sensor_height, pconf->image_width, pconf->image_height,
+		vcfg->isp.keep_aspect);
 	overscan_x = (uint16_t)(((state->sensor.plane.capt.width  - sensor_width)
 		/ 2) & ~1u);
 	overscan_y = (uint16_t)(((state->sensor.plane.capt.height - sensor_height)
@@ -1383,8 +1378,7 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 	state->image_width  = pconf.image_width;
 	state->image_height = pconf.image_height;
 
-	if (pconf.image_width != prev_image_width ||
-	    pconf.image_height != prev_image_height) {
+	{
 		uint32_t sensor_w = state->sensor.plane.capt.width;
 		uint32_t sensor_h = state->sensor.plane.capt.height;
 
@@ -1405,27 +1399,34 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 		uint16_t overscan_y = (uint16_t)(
 			((sensor_h - usable_h) / 2) & ~1u);
 
-		Star6ePrecropRect old_precrop = star6e_pipeline_compute_precrop(
-			usable_w, usable_h, prev_image_width, prev_image_height);
-		old_precrop.x += overscan_x;
-		old_precrop.y += overscan_y;
 		Star6ePrecropRect new_precrop = star6e_pipeline_compute_precrop(
-			usable_w, usable_h, pconf.image_width, pconf.image_height);
+			usable_w, usable_h,
+			pconf.image_width, pconf.image_height,
+			vcfg->isp.keep_aspect);
 		new_precrop.x += overscan_x;
 		new_precrop.y += overscan_y;
 
-		if (old_precrop.x != new_precrop.x ||
-		    old_precrop.y != new_precrop.y ||
-		    old_precrop.w != new_precrop.w ||
-		    old_precrop.h != new_precrop.h) {
-			/* Aspect ratio changed: unbind VIF→VPE, destroy VPE, reconfigure
-			 * VIF capture region, recreate VPE with new dimensions.
-			 * The VIF device stays running — MIPI PHY is never touched.
-			 * bound_vif_vpe is cleared so bind_and_finalize_pipeline will
-			 * re-establish the VIF→VPE REALTIME bind. */
-			printf("> Reinit: AR change %ux%u -> %ux%u, reconfiguring VIF+VPE\n",
+		int dims_changed = (pconf.image_width != prev_image_width ||
+			pconf.image_height != prev_image_height);
+		int precrop_changed = (
+			new_precrop.x != state->active_precrop.x ||
+			new_precrop.y != state->active_precrop.y ||
+			new_precrop.w != state->active_precrop.w ||
+			new_precrop.h != state->active_precrop.h);
+
+		if (precrop_changed) {
+			/* VIF crop region must change (AR/resolution change or
+			 * keep_aspect toggle): unbind VIF→VPE, destroy VPE,
+			 * reconfigure VIF capture region, recreate VPE.  The VIF
+			 * device stays running — MIPI PHY is never touched.
+			 * bound_vif_vpe is cleared so bind_and_finalize_pipeline
+			 * will re-establish the VIF→VPE REALTIME bind. */
+			printf("> Reinit: VIF+VPE reconfigure %ux%u -> %ux%u "
+				"(precrop %ux%u+%u+%u)\n",
 				prev_image_width, prev_image_height,
-				pconf.image_width, pconf.image_height);
+				pconf.image_width, pconf.image_height,
+				new_precrop.w, new_precrop.h,
+				new_precrop.x, new_precrop.y);
 
 			if (state->bound_vif_vpe) {
 				MI_SYS_UnBindChnPort(&state->vif_port,
@@ -1494,10 +1495,11 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 				MI_VIF_DisableDev(0);
 				return ret;
 			}
+			state->active_precrop = new_precrop;
 
-		} else {
-			/* Same aspect ratio: only resize VPE output port.
-			 * VIF and the VIF→VPE REALTIME bind are unchanged. */
+		} else if (dims_changed) {
+			/* Same VIF crop: only resize VPE output port.  VIF and
+			 * the VIF→VPE REALTIME bind are unchanged. */
 			printf("> Reinit: resolution change %ux%u -> %ux%u,"
 				" resizing VPE port\n",
 				prev_image_width, prev_image_height,
@@ -1636,6 +1638,8 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	ret = select_and_configure_sensor(state, &pconf, vcfg, sdk_quiet);
 	if (ret != 0)
 		return ret;
+
+	state->active_precrop = pconf.precrop;
 
 	ret = star6e_pipeline_start_vif(&state->sensor, &pconf.precrop);
 	if (ret != 0)
