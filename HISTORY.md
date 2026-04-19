@@ -1,5 +1,58 @@
 # History
 
+## [0.7.11] - 2026-04-19
+
+Pre-merge review fixes prior to upstream sync.  Two functional bugs
+plus four polish items, all verified end-to-end on Star6E (IMX335 at
+192.168.1.13) and Maruko (IMX415 at 192.168.2.12).
+
+- **B1 — Maruko: split ISP-bin gate from CUS3A gate.**  v0.7.10's
+  auto-detect fallback was silently a no-op on Maruko reinit because
+  both `pipeline_common_resolve_isp_bin` and `maruko_load_isp_bin`
+  were gated under `g_mi_isp_initialized`, which is set once and never
+  cleared.  Resolve+load now runs every configure with a Star6E-style
+  `g_last_isp_bin_path` cache; CUS3A enable + cold-boot exposure cap
+  stay one-shot under the deadlock-protection gate.  Verified: 3
+  successive `/api/v1/restart` cycles transitioned configured ->
+  auto-detect fallback -> new configured -> restored.
+- **B2 — IDR rate limiter: CAS loop for thread-safe spacing.**  The
+  load-then-store pattern on `last_us` left a race where two
+  concurrent producers could both pass the spacing check on the same
+  `last` value and both honor an IDR inside the window — the exact
+  storm-coalescing guarantee the gate was added for.  Replaced with
+  `__atomic_compare_exchange_n` so exactly one caller wins each
+  window.  ACQ_REL on the winning store synchronizes with the next
+  caller's ACQUIRE load.  Verified: 100 concurrent `/request/idr` ->
+  9 honored / 91 dropped (~10 honored/s, matches 100 ms spacing over
+  the ~1 s curl burst).  All 18 idr_rate_limit unit tests still pass.
+- **M1 — `venc_config_save`: preserve symlinks + mode bits.**  Resolve
+  `path` via `readlink()` before writing the temp file so a symlinked
+  `/etc/venc.json` is replaced in-place rather than being replaced by
+  a regular file.  Preserve the existing target's mode bits via
+  `stat()`+`fchmod()` so saves no longer silently widen 0600/0640 to
+  0644.  Open the directory with `O_DIRECTORY`, propagate dir-fsync
+  errors, retry trailing-newline write on EINTR.  Verified live:
+  symlink intact, target mode 0640 preserved.
+- **M2 — `/api/v1/defaults`: pick reinit mode based on save success.**
+  The handler unconditionally requested reinit mode 1
+  (reload-from-disk).  On disk-save failure (`EROFS` / `ENOSPC` /
+  perm), the reload silently overlaid the stale on-disk config onto
+  the in-memory defaults and reverted most of them.  Use mode 2
+  (apply in-memory) when `save_rc != 0` so the operator at least gets
+  the defaults they asked for at runtime.
+- **M3 / L1 / L3 — Star6E hygiene.**
+  - `prepare_pipeline_config`: stale comment about isp_bin_path
+    resolution location refreshed (v0.7.10 moved it from
+    `select_and_configure_sensor` to `bind_and_finalize_pipeline`).
+  - `stop_venc_level`: stop and join `dual_rec_thread` BEFORE
+    `star6e_output_teardown(&dual->output)`.  The thread calls
+    `star6e_video_send_frame(&dual->output, ...)` inside its loop;
+    tearing down output first left a use-after-close window.
+  - `dual_rec_thread_fn`: always `usleep` after Query-empty (100 us on
+    the fd path, 1 ms on the fallback) to prevent a runaway spin if
+    the kernel ever signals POLLIN spuriously without a matching
+    packet.
+
 ## [0.7.10] - 2026-04-19
 
 Discoverable defaults + automatic ISP-bin selection:
