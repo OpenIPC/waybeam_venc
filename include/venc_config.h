@@ -37,6 +37,10 @@ typedef struct {
 	uint32_t gain_max;     /* max sensor gain (0 = use ISP bin default) */
 	char awb_mode[16];     /* "auto" or "ct_manual" */
 	uint32_t awb_ct;       /* color temperature in Kelvin (for ct_manual) */
+	bool keep_aspect;      /* true = center-crop sensor to encode aspect ratio
+	                        * (preserves geometry); false = pass full sensor
+	                        * to VIF and stretch in VPE. Star6E only — Maruko
+	                        * ignores until SCL crop port lands. */
 } VencConfigIsp;
 
 typedef struct {

@@ -532,7 +532,6 @@ const TOOLTIPS = {
 
 'isp.sensorBin':'Path to ISP calibration binary (.bin). Empty = use built-in defaults',
 
-'isp.exposure':'Manual exposure time in milliseconds. 0 = auto exposure. Applied live',
 
 'isp.gainMax':'Maximum sensor gain limit. 0 = use ISP default. Reduces noise in dark scenes',
 
@@ -589,6 +588,7 @@ const TOOLTIPS = {
 'fpv.noiseLevel':'3D noise reduction level (0-7). Higher = more NR. 0 = off. Requires restart',
 'isp.legacyAe':'Use legacy ISP auto-exposure instead of custom AE engine. Requires restart',
 'isp.aeFps':'Custom AE calculation rate in Hz. Only used when legacyAe is off. Default: 15. Requires restart',
+'isp.keepAspect':'true = center-crop sensor to encode aspect ratio (preserves geometry). false = stretch full sensor area. Star6E only. Requires restart',
 'audio.enabled':'Enable audio capture and streaming. Requires restart',
 'audio.sampleRate':'Audio sample rate in Hz (8000, 16000, 48000). Default: 48000. Requires restart',
 'audio.channels':'Audio channels (1=mono, 2=stereo). Default: 1. Requires restart',
@@ -643,7 +643,7 @@ const SECTIONS = [
 
 {id:'sensor',title:'Sensor',keys:['sensor.index','sensor.mode','sensor.unlockEnabled','sensor.unlockCmd','sensor.unlockReg','sensor.unlockValue','sensor.unlockDir']},
 
-{id:'isp',title:'ISP',keys:['isp.sensorBin','isp.exposure','isp.gainMax','isp.awbMode','isp.awbCt','isp.legacyAe','isp.aeFps']},
+{id:'isp',title:'ISP',keys:['isp.sensorBin','isp.gainMax','isp.awbMode','isp.awbCt','isp.legacyAe','isp.aeFps','isp.keepAspect']},
 {id:'image',title:'Image',keys:['image.mirror','image.flip','image.rotate']},
 {id:'video0',title:'Video',keys:['video0.codec','video0.rcMode','video0.fps','video0.size','video0.bitrate','video0.gopSize','video0.qpDelta','video0.frameLost']},
 {id:'outgoing',title:'Outgoing',keys:['outgoing.enabled','outgoing.server','outgoing.streamMode','outgoing.maxPayloadSize','outgoing.connectedUdp','outgoing.audioPort','outgoing.sidecarPort']},

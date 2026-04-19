@@ -1,5 +1,50 @@
 # History
 
+## [0.7.9] - 2026-04-19
+
+Aspect-ratio crop is now opt-out (Star6E):
+
+- **`isp.keepAspect` config (default `true`).** When `false`, VIF
+  captures the full sensor area and VPE stretches it to the encode
+  dimensions instead of center-cropping to preserve geometry. New
+  parameter on `pipeline_common_compute_precrop()` keeps both call sites
+  branch-free. Maruko parses but ignores the field until SCL crop port
+  lands.
+- **Reinit path now tracks the precrop currently programmed in VIF**
+  (`state->active_precrop`) and compares against the freshly computed
+  rect. A `keepAspect` toggle that doesn't change image dimensions now
+  correctly triggers a VIF+VPE reconfigure. The previous code only
+  re-armed precrop when `image_width`/`height` differed from the prior
+  config.
+- **Reinit branch reorganized.** `if (precrop_changed)` runs the full
+  VIF+VPE rebuild; `else if (dims_changed)` falls through to the
+  VPE-port-only resize. Equal-on-both-counts skips the block. The prior
+  shape (outer `if (dims_changed)` then inner precrop check) couldn't
+  express the keepAspect-toggle case, and the obvious patch-style fix
+  would have re-fired the VPE-port resize on no-change reinits.
+- **Reinit log shows precrop.** `> Reinit: VIF+VPE reconfigure %ux%u
+  -> %ux%u (precrop %ux%u+%u+%u)` so an operator can tell whether the
+  trigger was a resolution change, an AR change, or a keepAspect toggle.
+- **HTTP API contract bumped to 0.6.2.** `isp.keepAspect` field added to
+  `/api/v1/config`, `/api/v1/set` accepts both snake_case and the
+  Majestic-style camelCase alias.
+- **WebUI dashboard exposes the toggle** under the ISP section; embedded
+  gzip regenerated via `make webui`.  Also drops the stale `isp.exposure`
+  entry that lingered after the field was removed in 0.7.0.
+- **Active precrop visible via API.** New
+  `venc_api_set_active_precrop()` / `venc_api_get_active_precrop()` are
+  called from the Star6E pipeline whenever VIF is (re)programmed.
+  `/api/v1/config` gains a `runtime.active_precrop` block alongside the
+  config; Star6E `/api/v1/ae` includes the same rect under
+  `data.runtime.active_precrop`.  Maruko reports nothing until it gains
+  precrop support.  Useful for confirming a `keepAspect` toggle landed
+  without grepping the log.
+- **Unit tests.** New `compute_precrop` cases cover both `keep_aspect`
+  values plus the 2-pixel alignment guarantee, and a new
+  `test_active_precrop_setter` exercises the venc_api setter/getter
+  including the cleared-store, overwrite, and NULL-out-pointer paths
+  (1180 tests, was 1139).
+
 ## [0.7.8] - 2026-04-18
 
 Pre-merge review fixes folded in (see PR-47 review notes):
