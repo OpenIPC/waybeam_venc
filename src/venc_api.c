@@ -40,6 +40,50 @@ static pthread_mutex_t g_cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
 static VencConfig g_last_saved;
 static int g_last_saved_valid = 0;
 
+/* Pipeline runtime state exposed via /api/v1/config and /api/v1/ae.
+ * Backends call venc_api_set_active_precrop() after programming VIF; the
+ * store stays "valid=0" until the first successful pipeline start.  Reads
+ * are atomic under g_precrop_mutex (HTTP thread vs pipeline thread). */
+static pthread_mutex_t g_precrop_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+	uint16_t x, y, w, h;
+	int valid;
+} g_precrop = {0, 0, 0, 0, 0};
+
+void venc_api_set_active_precrop(uint16_t x, uint16_t y, uint16_t w, uint16_t h)
+{
+	pthread_mutex_lock(&g_precrop_mutex);
+	g_precrop.x = x;
+	g_precrop.y = y;
+	g_precrop.w = w;
+	g_precrop.h = h;
+	g_precrop.valid = 1;
+	pthread_mutex_unlock(&g_precrop_mutex);
+}
+
+void venc_api_clear_active_precrop(void)
+{
+	pthread_mutex_lock(&g_precrop_mutex);
+	g_precrop.valid = 0;
+	pthread_mutex_unlock(&g_precrop_mutex);
+}
+
+int venc_api_get_active_precrop(uint16_t *x, uint16_t *y,
+	uint16_t *w, uint16_t *h)
+{
+	int valid;
+	pthread_mutex_lock(&g_precrop_mutex);
+	valid = g_precrop.valid;
+	if (valid && x && y && w && h) {
+		*x = g_precrop.x;
+		*y = g_precrop.y;
+		*w = g_precrop.w;
+		*h = g_precrop.h;
+	}
+	pthread_mutex_unlock(&g_precrop_mutex);
+	return valid;
+}
+
 void venc_api_set_config_path(const char *path)
 {
 	pthread_mutex_lock(&g_cfg_mutex);
@@ -1595,6 +1639,10 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 
 static int handle_config(int fd, const HttpRequest *req, void *ctx)
 {
+	uint16_t px = 0, py = 0, pw = 0, ph = 0;
+	int precrop_valid;
+	char runtime[160];
+
 	(void)req; (void)ctx;
 	pthread_mutex_lock(&g_cfg_mutex);
 	char *cfg_json = venc_config_to_json_string(g_cfg);
@@ -1603,14 +1651,25 @@ static int handle_config(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 500, "internal_error",
 			"failed to serialize config");
 
+	precrop_valid = venc_api_get_active_precrop(&px, &py, &pw, &ph);
+	if (precrop_valid) {
+		snprintf(runtime, sizeof(runtime),
+			",\"runtime\":{\"active_precrop\":"
+			"{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u}}",
+			px, py, pw, ph);
+	} else {
+		runtime[0] = '\0';
+	}
+
 	/* Wrap in envelope */
-	size_t len = strlen(cfg_json) + 64;
+	size_t len = strlen(cfg_json) + strlen(runtime) + 64;
 	char *buf = malloc(len);
 	if (!buf) {
 		free(cfg_json);
 		return httpd_send_error(fd, 500, "internal_error", "out of memory");
 	}
-	snprintf(buf, len, "{\"ok\":true,\"data\":{\"config\":%s}}", cfg_json);
+	snprintf(buf, len, "{\"ok\":true,\"data\":{\"config\":%s%s}}",
+		cfg_json, runtime);
 	int ret = httpd_send_json(fd, 200, buf);
 	free(buf);
 	free(cfg_json);

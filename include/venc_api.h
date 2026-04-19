@@ -83,6 +83,16 @@ void venc_api_dual_unregister(void);
 /* Sensor info — set by backend after sensor_select() to expose via /api/v1/modes. */
 void venc_api_set_sensor_info(int pad, int mode_index, int forced_pad);
 
+/* Active VIF precrop rectangle — set by backend whenever it programs the
+ * VIF capture region (initial start and reinit).  Includes any sensor
+ * overscan offsets so the rectangle reflects exactly what is in hardware.
+ * Exposed in /api/v1/config (runtime block) and /api/v1/ae (Star6E only). */
+void venc_api_set_active_precrop(uint16_t x, uint16_t y,
+	uint16_t w, uint16_t h);
+void venc_api_clear_active_precrop(void);
+int  venc_api_get_active_precrop(uint16_t *x, uint16_t *y,
+	uint16_t *w, uint16_t *h);
+
 /* Record status callback — set by backend to expose status to HTTP API. */
 typedef struct {
 	int active;

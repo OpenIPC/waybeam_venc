@@ -1175,6 +1175,8 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	if (!state)
 		return;
 
+	venc_api_clear_active_precrop();
+
 	/* The recording thread must keep consuming ch1 frames through
 	 * the ENTIRE teardown sequence.  At 120fps, the 12-frame ch1
 	 * buffer fills in ~100ms — any gap in consumption causes VPE
@@ -1496,6 +1498,8 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 				return ret;
 			}
 			state->active_precrop = new_precrop;
+			venc_api_set_active_precrop(new_precrop.x, new_precrop.y,
+				new_precrop.w, new_precrop.h);
 
 		} else if (dims_changed) {
 			/* Same VIF crop: only resize VPE output port.  VIF and
@@ -1640,6 +1644,8 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 		return ret;
 
 	state->active_precrop = pconf.precrop;
+	venc_api_set_active_precrop(pconf.precrop.x, pconf.precrop.y,
+		pconf.precrop.w, pconf.precrop.h);
 
 	ret = star6e_pipeline_start_vif(&state->sensor, &pconf.precrop);
 	if (ret != 0)

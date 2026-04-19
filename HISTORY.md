@@ -29,7 +29,21 @@ Aspect-ratio crop is now opt-out (Star6E):
   `/api/v1/config`, `/api/v1/set` accepts both snake_case and the
   Majestic-style camelCase alias.
 - **WebUI dashboard exposes the toggle** under the ISP section; embedded
-  gzip regenerated via `make webui`.
+  gzip regenerated via `make webui`.  Also drops the stale `isp.exposure`
+  entry that lingered after the field was removed in 0.7.0.
+- **Active precrop visible via API.** New
+  `venc_api_set_active_precrop()` / `venc_api_get_active_precrop()` are
+  called from the Star6E pipeline whenever VIF is (re)programmed.
+  `/api/v1/config` gains a `runtime.active_precrop` block alongside the
+  config; Star6E `/api/v1/ae` includes the same rect under
+  `data.runtime.active_precrop`.  Maruko reports nothing until it gains
+  precrop support.  Useful for confirming a `keepAspect` toggle landed
+  without grepping the log.
+- **Unit tests.** New `compute_precrop` cases cover both `keep_aspect`
+  values plus the 2-pixel alignment guarantee, and a new
+  `test_active_precrop_setter` exercises the venc_api setter/getter
+  including the cleared-store, overwrite, and NULL-out-pointer paths
+  (1180 tests, was 1139).
 
 ## [0.7.8] - 2026-04-18
 

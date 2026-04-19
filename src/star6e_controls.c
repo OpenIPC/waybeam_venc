@@ -6,6 +6,7 @@
 #include "star6e_cus3a.h"
 #include "star6e_iq.h"
 #include "star6e_output.h"
+#include "venc_api.h"
 
 #include <dlfcn.h>
 #include <stdio.h>
@@ -620,14 +621,24 @@ static char *query_ae_info(void)
 {
 	AeDiagSnapshot snapshot;
 	char buf[2048];
+	char precrop_field[96];
 	uint32_t exposure_us;
 	uint32_t sensor_gain;
 	uint32_t isp_gain;
+	uint16_t px = 0, py = 0, pw = 0, ph = 0;
 
 	ae_diag_snapshot_collect(&snapshot);
 	exposure_us = ae_diag_exposure_us(&snapshot);
 	sensor_gain = ae_diag_sensor_gain(&snapshot);
 	isp_gain = ae_diag_isp_gain(&snapshot);
+
+	if (venc_api_get_active_precrop(&px, &py, &pw, &ph)) {
+		snprintf(precrop_field, sizeof(precrop_field),
+			",\"active_precrop\":{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u}",
+			px, py, pw, ph);
+	} else {
+		precrop_field[0] = '\0';
+	}
 
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
@@ -644,7 +655,7 @@ static char *query_ae_info(void)
 		"\"expo_mode\":{\"ret\":%d,\"raw\":%d,\"name\":\"%s\"},"
 		"\"metrics\":{\"exposure_us\":%u,\"sensor_gain_x1024\":%u,"
 		"\"isp_gain_x1024\":%u,\"fps\":%u},"
-		"\"runtime\":{\"sensor_fps\":%u}}}",
+		"\"runtime\":{\"sensor_fps\":%u%s}}}",
 		snapshot.plane_ret, snapshot.pad_id, snapshot.plane.shutter,
 		snapshot.plane.sensGain, snapshot.plane.compGain,
 		snapshot.limit_ret, snapshot.limit.minShutterUs,
@@ -664,7 +675,7 @@ static char *query_ae_info(void)
 		snapshot.mode_ret, snapshot.ae_mode_raw,
 		ae_expo_mode_name(snapshot.ae_mode_raw),
 		exposure_us, sensor_gain, isp_gain, ae_diag_sensor_fps(),
-		ae_diag_sensor_fps());
+		ae_diag_sensor_fps(), precrop_field);
 	return strdup(buf);
 }
 

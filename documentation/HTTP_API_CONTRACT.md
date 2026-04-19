@@ -106,10 +106,21 @@ Response `200`:
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
       "debug": { "showOsd": false }
+    },
+    "runtime": {
+      "active_precrop": { "x": 0, "y": 240, "w": 2560, "h": 1440 }
     }
   }
 }
 ```
+
+The `runtime` block is read-only and reports pipeline state that is not
+part of the editable config:
+
+- `active_precrop` — VIF crop rectangle currently programmed (includes
+  any sensor overscan offsets).  Present whenever a Star6E pipeline has
+  been started; absent before pipeline start, after pipeline stop, or on
+  Maruko (no precrop support yet).
 
 ### `GET /api/v1/capabilities`
 
@@ -505,10 +516,15 @@ Response `200`:
     "exposure_info": { "ret": 0, "stable": true, "reach_boundary": false, "long_us": 9999, "long_sensor_gain_x1024": 1673, "long_isp_gain_x1024": 1024, "luma_y": 236, "avg_y": 247 },
     "state": { "ret": 0, "raw": 0, "name": "normal" },
     "expo_mode": { "ret": 0, "raw": 0, "name": "auto" },
-    "metrics": { "exposure_us": 9999, "sensor_gain_x1024": 1673, "isp_gain_x1024": 1024, "fps": 90 }
+    "metrics": { "exposure_us": 9999, "sensor_gain_x1024": 1673, "isp_gain_x1024": 1024, "fps": 90 },
+    "runtime": { "sensor_fps": 90, "active_precrop": { "x": 0, "y": 240, "w": 2560, "h": 1440 } }
   }
 }
 ```
+
+`runtime.active_precrop` is included on Star6E whenever the pipeline has
+been started; it is omitted before the first start, after a stop, and on
+Maruko (no precrop support yet).
 
 Error `501`:
 ```json
@@ -906,6 +922,12 @@ Behavior:
     Star6E only; Maruko reads but ignores the field until SCL crop port
     lands as a follow-up.
   - Added `isp.keepAspect` camelCase alias (`isp.keep_aspect`).
+  - `GET /api/v1/config` response gains a `runtime` block with
+    `active_precrop` ({x,y,w,h}) — the VIF crop currently programmed
+    (includes any sensor overscan offsets).  Omitted when the pipeline
+    has not started, after stop, or on Maruko.
+  - `GET /api/v1/ae` Star6E response includes `runtime.active_precrop`
+    with the same rectangle.
 - `0.5.0`:
   - Added `GET /api/v1/iq` — query all ISP IQ parameter values (46 params).
   - Added `GET /api/v1/iq/set?param=value` — set individual IQ parameters live.
