@@ -1,5 +1,25 @@
 # History
 
+## [0.7.1] - 2026-04-19
+
+- **`isp.keepAspect` config field (Star6E):** New boolean (default `true`).
+  When `false`, VIF captures the full sensor area without center-cropping to
+  match the output aspect ratio; VPE scales the entire frame to the encode
+  dimensions. Settable at runtime via `GET /api/v1/set?isp.keep_aspect=false`
+  (triggers pipeline reinit). Value must be a JSON boolean (`false`), not a
+  number (`0`). Alias `isp.keepAspect` registered in the API alias table.
+- **Reinit precrop detection:** `star6e_pipeline_reinit()` now detects VIF
+  precrop changes independently of output dimension changes. Previously,
+  toggling `keepAspect` via the API triggered a reinit but VIF was never
+  reconfigured. `Star6ePrecropRect active_precrop` added to
+  `Star6ePipelineState` to track the live VIF capture rectangle.
+- **`Star6ePrecropRect` moved to header:** Typedef moved from
+  `star6e_pipeline.c` to `star6e_pipeline.h` to expose it to the state struct.
+- **HTTP API contract:** Updated to `0.6.2`. Added `isp.keepAspect` to config
+  example and camelCase alias list.
+- **Docs:** `documentation/PRECROP_ASPECT_RATIO.md` updated with Configuration
+  section, corrected source file references, and `keepAspect` JSON boolean note.
+
 ## [0.7.0] - 2026-04-11
 
 - **dlopen migration (both backends):** Both Star6E and Maruko now load all

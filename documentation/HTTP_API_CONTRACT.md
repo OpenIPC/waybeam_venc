@@ -15,7 +15,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.6.1`
+- `contract_version`: `0.6.2`
 - `status`: `active`
 
 ## Governance Rules
@@ -99,7 +99,7 @@ Response `200`:
     "config": {
       "system": { "webPort": 80, "overclockLevel": 2, "verbose": false },
       "sensor": { "index": -1, "mode": -1, "unlockEnabled": true, "..." : "..." },
-      "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "exposure": 9, "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500 },
+      "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "exposure": 9, "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
       "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2 },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
@@ -203,7 +203,7 @@ Error `404` — unknown field:
 Majestic-style camelCase aliases are also accepted for selected fields,
 including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `fpv.noiseLevel`, `isp.sensorBin`, `isp.awbMode`, `isp.awbCt`,
-`video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
+`isp.keepAspect`, `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
 `video0.sceneThreshold`, `video0.sceneHoldoff`,
 `outgoing.maxPayloadSize`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
@@ -874,6 +874,12 @@ Behavior:
 - `GET` endpoints must remain consistent across backends.
 
 ## Change Log (Contract)
+- `0.6.2`:
+  - Added `isp.keepAspect` (boolean, default `true`) to config schema.
+    When `false`, VIF captures the full sensor area and VPE scales
+    without aspect-ratio cropping. Requires restart. Value must be a
+    JSON boolean (`false`), not a number (`0`).
+  - Added `isp.keepAspect` camelCase alias (`isp.keep_aspect`).
 - `0.5.0`:
   - Added `GET /api/v1/iq` — query all ISP IQ parameter values (46 params).
   - Added `GET /api/v1/iq/set?param=value` — set individual IQ parameters live.

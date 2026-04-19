@@ -1,0 +1,321 @@
+diff --git a/config/venc.default.json b/config/venc.default.json
+index be46286..e2b7221 100644
+--- a/config/venc.default.json
++++ b/config/venc.default.json
+@@ -12,7 +12,8 @@
+   "isp": {
+     "sensorBin": "", "exposure": 0,
+     "legacyAe": true, "aeFps": 15, "gainMax": 0,
+-    "awbMode": "auto", "awbCt": 5500
++    "awbMode": "auto", "awbCt": 5500,
++    "keepAspect": true
+   },
+   "image": { "mirror": false, "flip": false, "rotate": 0 },
+   "video0": {
+diff --git a/documentation/HTTP_API_CONTRACT.md b/documentation/HTTP_API_CONTRACT.md
+index c4a070b..c81441c 100644
+--- a/documentation/HTTP_API_CONTRACT.md
++++ b/documentation/HTTP_API_CONTRACT.md
+@@ -15,7 +15,7 @@
+   - `read_only` — cannot be changed via API.
+ 
+ ## Contract Version
+-- `contract_version`: `0.6.1`
++- `contract_version`: `0.6.2`
+ - `status`: `active`
+ 
+ ## Governance Rules
+@@ -99,7 +99,7 @@ Response `200`:
+     "config": {
+       "system": { "webPort": 80, "overclockLevel": 2, "verbose": false },
+       "sensor": { "index": -1, "mode": -1, "unlockEnabled": true, "..." : "..." },
+-      "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "exposure": 9, "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500 },
++      "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "exposure": 9, "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
+       "image": { "mirror": false, "flip": false, "rotate": 0 },
+       "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2 },
+       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
+@@ -203,7 +203,7 @@ Error `404` — unknown field:
+ Majestic-style camelCase aliases are also accepted for selected fields,
+ including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
+ `fpv.noiseLevel`, `isp.sensorBin`, `isp.awbMode`, `isp.awbCt`,
+-`video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
++`isp.keepAspect`, `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
+ `video0.sceneThreshold`, `video0.sceneHoldoff`,
+ `outgoing.maxPayloadSize`,
+ `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
+@@ -874,6 +874,12 @@ Behavior:
+ - `GET` endpoints must remain consistent across backends.
+ 
+ ## Change Log (Contract)
++- `0.6.2`:
++  - Added `isp.keepAspect` (boolean, default `true`) to config schema.
++    When `false`, VIF captures the full sensor area and VPE scales
++    without aspect-ratio cropping. Requires restart. Value must be a
++    JSON boolean (`false`), not a number (`0`).
++  - Added `isp.keepAspect` camelCase alias (`isp.keep_aspect`).
+ - `0.5.0`:
+   - Added `GET /api/v1/iq` — query all ISP IQ parameter values (46 params).
+   - Added `GET /api/v1/iq/set?param=value` — set individual IQ parameters live.
+diff --git a/documentation/PRECROP_ASPECT_RATIO.md b/documentation/PRECROP_ASPECT_RATIO.md
+index 9eba4e4..4ef6998 100644
+--- a/documentation/PRECROP_ASPECT_RATIO.md
++++ b/documentation/PRECROP_ASPECT_RATIO.md
+@@ -131,13 +131,34 @@ interface may bypass this restriction on some SoCs. The application uses
+ VIF-level crop (Star6E) or SCL-level crop (Maruko) instead, which work
+ in all modes.
+ 
++## Configuration
++
++Precrop behaviour is controlled by the `isp.keepAspect` JSON config field:
++
++| Key | Type | Default | Meaning |
++|-----|------|---------|---------|
++| `keepAspect` | boolean | `true` | `true` — center-crop to match output AR before scaling. `false` — pass full sensor area to VIF; VPE scales the entire frame to the output dimensions. |
++
++**Important:** the value must be a JSON boolean, not a number.
++`"keepAspect": false` is correct. `"keepAspect": 0` is silently ignored
++and the default (`true`) is used instead.
++
++Example `isp` section with aspect-ratio cropping disabled:
++```json
++"isp": {
++  "sensorBin": "/etc/sensors/imx335_fpv.bin",
++  "keepAspect": false
++}
++```
++
+ ## Behavior
+ 
+-- **Automatic**: precrop is computed and applied whenever the encode
+-  resolution has a different aspect ratio than the sensor. No CLI flag
+-  required.
++- **Conditional on `keepAspect`**: precrop is computed and applied only
++  when `isp.keepAspect` is `true` (the default). When `false`, the full
++  sensor area is captured and VPE scales the entire frame to the encode
++  dimensions — which may stretch the image if the aspect ratios differ.
+ - **Informational output**: when precrop is active, the startup banner
+-  prints the crop rectangle:
++  prints the crop rectangle (requires `system.verbose: true`):
+   ```
+   - Precrop: 1920x1080 -> 1440x1080 (offset 240,0)
+   ```
+@@ -158,15 +179,17 @@ in all modes.
+ 
+ ## Implementation Status
+ 
+-- **Star6E**: Implemented (v0.1.4). VIF-level precrop via `compute_precrop()`,
+-  `start_vif()`, and `start_vpe()` in `backend_star6e.c`.
++- **Star6E**: Implemented. VIF-level precrop via `pipeline_common_compute_precrop()`,
++  `star6e_pipeline_start_vif()`, and `star6e_pipeline_start_vpe()` in
++  `star6e_pipeline.c`. Conditional on `isp.keepAspect` (added v0.7.0).
+ - **Maruko**: Planned. Will use SCL-level crop (`scl_port.crop`) as described
+   above. Separate follow-up.
+ 
+ ## Source Files
+ 
+-- `src/backend_star6e.c` — `compute_precrop()`, modified
+-  `start_vif()` and `start_vpe()`
++- `src/pipeline_common.c` — `pipeline_common_compute_precrop()`
++- `src/star6e_pipeline.c` — `select_and_configure_sensor()`, `star6e_pipeline_reinit()`,
++  `star6e_pipeline_start_vif()`, `star6e_pipeline_start_vpe()`
+ 
+ ## SDK References
+ 
+diff --git a/include/star6e_pipeline.h b/include/star6e_pipeline.h
+index 58ed054..54a840e 100644
+--- a/include/star6e_pipeline.h
++++ b/include/star6e_pipeline.h
+@@ -19,6 +19,13 @@
+ struct EisState;      /* forward declaration — see eis.h */
+ struct DebugOsdState; /* forward declaration — see debug_osd.h */
+ 
++typedef struct {
++	uint16_t x;
++	uint16_t y;
++	uint16_t w;
++	uint16_t h;
++} Star6ePrecropRect;
++
+ typedef struct {
+ 	SensorSelectResult sensor;
+ 	MI_VENC_CHN venc_channel;
+@@ -44,6 +51,7 @@ typedef struct {
+ 	/* Dual VENC (gemini mode) — heap-allocated, NULL when inactive */
+ 	struct Star6eDualVenc *dual;
+ 	struct DebugOsdState *debug_osd;  /* NULL if debug OSD disabled */
++	Star6ePrecropRect active_precrop; /* precrop currently programmed into VIF */
+ } Star6ePipelineState;
+ 
+ /** Dual VENC channel state. Heap-allocated to avoid changing
+diff --git a/include/venc_config.h b/include/venc_config.h
+index 9cefef1..ce36a12 100644
+--- a/include/venc_config.h
++++ b/include/venc_config.h
+@@ -38,6 +38,7 @@ typedef struct {
+ 	uint32_t gain_max;     /* max sensor gain (0 = use ISP bin default) */
+ 	char awb_mode[16];     /* "auto" or "ct_manual" */
+ 	uint32_t awb_ct;       /* color temperature in Kelvin (for ct_manual) */
++	bool keep_aspect;      /* true = center-crop to preserve sensor aspect ratio */
+ } VencConfigIsp;
+ 
+ typedef struct {
+diff --git a/src/star6e_pipeline.c b/src/star6e_pipeline.c
+index ddf174d..a95f9c2 100644
+--- a/src/star6e_pipeline.c
++++ b/src/star6e_pipeline.c
+@@ -34,12 +34,7 @@ typedef int (*isp_get_exposure_limit_fn_t)(int channel,
+ typedef int (*isp_set_exposure_limit_fn_t)(int channel,
+ 	IspExposureLimit *config);
+ 
+-typedef struct {
+-	uint16_t x;
+-	uint16_t y;
+-	uint16_t w;
+-	uint16_t h;
+-} Star6ePrecropRect;
++
+ 
+ typedef int (*isp_load_bin_fn_t)(int channel, char *path, unsigned int key);
+ typedef int (*isp_disable_userspace3a_fn_t)(int channel);
+@@ -863,8 +858,14 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
+ 	state->image_width  = pconf->image_width;
+ 	state->image_height = pconf->image_height;
+ 
+-	pconf->precrop = star6e_pipeline_compute_precrop(sensor_width,
+-		sensor_height, pconf->image_width, pconf->image_height);
++	if (vcfg->isp.keep_aspect) {
++		pconf->precrop = star6e_pipeline_compute_precrop(sensor_width,
++			sensor_height, pconf->image_width, pconf->image_height);
++	} else {
++		Star6ePrecropRect full = {0, 0,
++			(uint16_t)sensor_width, (uint16_t)sensor_height};
++		pconf->precrop = full;
++	}
+ 	overscan_x = (uint16_t)(((state->sensor.plane.capt.width  - sensor_width)
+ 		/ 2) & ~1u);
+ 	overscan_y = (uint16_t)(((state->sensor.plane.capt.height - sensor_height)
+@@ -1343,8 +1344,7 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
+ 	state->image_width  = pconf.image_width;
+ 	state->image_height = pconf.image_height;
+ 
+-	if (pconf.image_width != prev_image_width ||
+-	    pconf.image_height != prev_image_height) {
++	{
+ 		uint32_t sensor_w = state->sensor.plane.capt.width;
+ 		uint32_t sensor_h = state->sensor.plane.capt.height;
+ 
+@@ -1365,27 +1365,37 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
+ 		uint16_t overscan_y = (uint16_t)(
+ 			((sensor_h - usable_h) / 2) & ~1u);
+ 
+-		Star6ePrecropRect old_precrop = star6e_pipeline_compute_precrop(
+-			usable_w, usable_h, prev_image_width, prev_image_height);
+-		old_precrop.x += overscan_x;
+-		old_precrop.y += overscan_y;
+-		Star6ePrecropRect new_precrop = star6e_pipeline_compute_precrop(
+-			usable_w, usable_h, pconf.image_width, pconf.image_height);
++		Star6ePrecropRect new_precrop;
++		if (vcfg->isp.keep_aspect) {
++			new_precrop = star6e_pipeline_compute_precrop(
++				usable_w, usable_h, pconf.image_width, pconf.image_height);
++		} else {
++			Star6ePrecropRect full = {0, 0,
++				(uint16_t)usable_w, (uint16_t)usable_h};
++			new_precrop = full;
++		}
+ 		new_precrop.x += overscan_x;
+ 		new_precrop.y += overscan_y;
+ 
+-		if (old_precrop.x != new_precrop.x ||
+-		    old_precrop.y != new_precrop.y ||
+-		    old_precrop.w != new_precrop.w ||
+-		    old_precrop.h != new_precrop.h) {
++		int dims_changed = (pconf.image_width != prev_image_width ||
++			pconf.image_height != prev_image_height);
++		int precrop_changed = (new_precrop.x != state->active_precrop.x ||
++			new_precrop.y != state->active_precrop.y ||
++			new_precrop.w != state->active_precrop.w ||
++			new_precrop.h != state->active_precrop.h);
++
++		if (dims_changed || precrop_changed) {
+ 			/* Aspect ratio changed: unbind VIF→VPE, destroy VPE, reconfigure
+ 			 * VIF capture region, recreate VPE with new dimensions.
+ 			 * The VIF device stays running — MIPI PHY is never touched.
+ 			 * bound_vif_vpe is cleared so bind_and_finalize_pipeline will
+ 			 * re-establish the VIF→VPE REALTIME bind. */
+-			printf("> Reinit: AR change %ux%u -> %ux%u, reconfiguring VIF+VPE\n",
++			printf("> Reinit: VIF+VPE reconfiguring %ux%u -> %ux%u "
++				"(precrop %ux%u+%u+%u)\n",
+ 				prev_image_width, prev_image_height,
+-				pconf.image_width, pconf.image_height);
++				pconf.image_width, pconf.image_height,
++				new_precrop.w, new_precrop.h,
++				new_precrop.x, new_precrop.y);
+ 
+ 			if (state->bound_vif_vpe) {
+ 				MI_SYS_UnBindChnPort(&state->vif_port,
+@@ -1441,6 +1451,7 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
+ 
+ 			/* Recreate VPE with new input crop and output dimensions. */
+ 			pconf.precrop = new_precrop;
++			state->active_precrop = new_precrop;
+ 			ret = star6e_pipeline_start_vpe(&state->sensor,
+ 				&new_precrop,
+ 				pconf.image_width, pconf.image_height,
+@@ -1538,6 +1549,8 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
+ 	if (ret != 0)
+ 		return ret;
+ 
++	state->active_precrop = pconf.precrop;
++
+ 	ret = star6e_pipeline_start_vif(&state->sensor, &pconf.precrop);
+ 	if (ret != 0)
+ 		goto fail_sensor;
+diff --git a/src/venc_api.c b/src/venc_api.c
+index e9033eb..1c7f39d 100644
+--- a/src/venc_api.c
++++ b/src/venc_api.c
+@@ -177,6 +177,7 @@ static const FieldDesc g_fields[] = {
+ 
+ 	FIELD(isp, legacy_ae,      FT_BOOL,   MUT_RESTART),
+ 	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
++	FIELD(isp, keep_aspect,    FT_BOOL,   MUT_RESTART),
+ 
+ 	FIELD(audio, enabled,      FT_BOOL,   MUT_RESTART),
+ 	FIELD(audio, sample_rate,  FT_UINT,   MUT_RESTART),
+@@ -268,6 +269,7 @@ static const FieldAlias g_field_aliases[] = {
+ 	{ "fpv.noiseLevel", "fpv.noise_level" },
+ 	{ "isp.legacyAe", "isp.legacy_ae" },
+ 	{ "isp.aeFps", "isp.ae_fps" },
++	{ "isp.keepAspect", "isp.keep_aspect" },
+ 	{ "audio.sampleRate", "audio.sample_rate" },
+ 	{ "imu.i2cDevice", "imu.i2c_device" },
+ 	{ "imu.i2cAddr", "imu.i2c_addr" },
+diff --git a/src/venc_config.c b/src/venc_config.c
+index cdabcc3..099feb5 100644
+--- a/src/venc_config.c
++++ b/src/venc_config.c
+@@ -92,6 +92,7 @@ void venc_config_defaults(VencConfig *cfg)
+ 	cfg->isp.ae_fps = 15;
+ 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
+ 	cfg->isp.awb_ct = 5500;
++	cfg->isp.keep_aspect = true;
+ 
+ 	/* image */
+ 	cfg->image.mirror = false;
+@@ -245,6 +246,7 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
+ 	safe_strcpy(s->awb_mode, sizeof(s->awb_mode),
+ 		json_get_string(obj, "awbMode", s->awb_mode));
+ 	s->awb_ct = (uint32_t)json_get_int(obj, "awbCt", (int)s->awb_ct);
++	s->keep_aspect = json_get_bool(obj, "keepAspect", s->keep_aspect);
+ }
+ 
+ static void load_image(const cJSON *root, VencConfigImage *s)
+@@ -623,6 +625,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
+ 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);
+ 		cJSON_AddStringToObject(isp, "awbMode", cfg->isp.awb_mode);
+ 		cJSON_AddNumberToObject(isp, "awbCt", cfg->isp.awb_ct);
++		cJSON_AddBoolToObject(isp, "keepAspect", cfg->isp.keep_aspect);
+ 	}
+ 
+ 	/* image */

@@ -20,6 +20,13 @@ struct EisState;      /* forward declaration — see eis.h */
 struct DebugOsdState; /* forward declaration — see debug_osd.h */
 
 typedef struct {
+	uint16_t x;
+	uint16_t y;
+	uint16_t w;
+	uint16_t h;
+} Star6ePrecropRect;
+
+typedef struct {
 	SensorSelectResult sensor;
 	MI_VENC_CHN venc_channel;
 	MI_SYS_ChnPort_t vif_port;
@@ -44,6 +51,7 @@ typedef struct {
 	/* Dual VENC (gemini mode) — heap-allocated, NULL when inactive */
 	struct Star6eDualVenc *dual;
 	struct DebugOsdState *debug_osd;  /* NULL if debug OSD disabled */
+	Star6ePrecropRect active_precrop; /* precrop currently programmed into VIF */
 } Star6ePipelineState;
 
 /** Dual VENC channel state. Heap-allocated to avoid changing

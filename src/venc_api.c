@@ -177,6 +177,7 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(isp, legacy_ae,      FT_BOOL,   MUT_RESTART),
 	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
+	FIELD(isp, keep_aspect,    FT_BOOL,   MUT_RESTART),
 
 	FIELD(audio, enabled,      FT_BOOL,   MUT_RESTART),
 	FIELD(audio, sample_rate,  FT_UINT,   MUT_RESTART),
@@ -268,6 +269,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "fpv.noiseLevel", "fpv.noise_level" },
 	{ "isp.legacyAe", "isp.legacy_ae" },
 	{ "isp.aeFps", "isp.ae_fps" },
+	{ "isp.keepAspect", "isp.keep_aspect" },
 	{ "audio.sampleRate", "audio.sample_rate" },
 	{ "imu.i2cDevice", "imu.i2c_device" },
 	{ "imu.i2cAddr", "imu.i2c_addr" },

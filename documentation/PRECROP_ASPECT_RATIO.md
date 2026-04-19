@@ -131,13 +131,34 @@ interface may bypass this restriction on some SoCs. The application uses
 VIF-level crop (Star6E) or SCL-level crop (Maruko) instead, which work
 in all modes.
 
+## Configuration
+
+Precrop behaviour is controlled by the `isp.keepAspect` JSON config field:
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `keepAspect` | boolean | `true` | `true` — center-crop to match output AR before scaling. `false` — pass full sensor area to VIF; VPE scales the entire frame to the output dimensions. |
+
+**Important:** the value must be a JSON boolean, not a number.
+`"keepAspect": false` is correct. `"keepAspect": 0` is silently ignored
+and the default (`true`) is used instead.
+
+Example `isp` section with aspect-ratio cropping disabled:
+```json
+"isp": {
+  "sensorBin": "/etc/sensors/imx335_fpv.bin",
+  "keepAspect": false
+}
+```
+
 ## Behavior
 
-- **Automatic**: precrop is computed and applied whenever the encode
-  resolution has a different aspect ratio than the sensor. No CLI flag
-  required.
+- **Conditional on `keepAspect`**: precrop is computed and applied only
+  when `isp.keepAspect` is `true` (the default). When `false`, the full
+  sensor area is captured and VPE scales the entire frame to the encode
+  dimensions — which may stretch the image if the aspect ratios differ.
 - **Informational output**: when precrop is active, the startup banner
-  prints the crop rectangle:
+  prints the crop rectangle (requires `system.verbose: true`):
   ```
   - Precrop: 1920x1080 -> 1440x1080 (offset 240,0)
   ```
@@ -158,15 +179,17 @@ in all modes.
 
 ## Implementation Status
 
-- **Star6E**: Implemented (v0.1.4). VIF-level precrop via `compute_precrop()`,
-  `start_vif()`, and `start_vpe()` in `backend_star6e.c`.
+- **Star6E**: Implemented. VIF-level precrop via `pipeline_common_compute_precrop()`,
+  `star6e_pipeline_start_vif()`, and `star6e_pipeline_start_vpe()` in
+  `star6e_pipeline.c`. Conditional on `isp.keepAspect` (added v0.7.0).
 - **Maruko**: Planned. Will use SCL-level crop (`scl_port.crop`) as described
   above. Separate follow-up.
 
 ## Source Files
 
-- `src/backend_star6e.c` — `compute_precrop()`, modified
-  `start_vif()` and `start_vpe()`
+- `src/pipeline_common.c` — `pipeline_common_compute_precrop()`
+- `src/star6e_pipeline.c` — `select_and_configure_sensor()`, `star6e_pipeline_reinit()`,
+  `star6e_pipeline_start_vif()`, `star6e_pipeline_start_vpe()`
 
 ## SDK References
 

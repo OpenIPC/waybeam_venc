@@ -38,6 +38,7 @@ typedef struct {
 	uint32_t gain_max;     /* max sensor gain (0 = use ISP bin default) */
 	char awb_mode[16];     /* "auto" or "ct_manual" */
 	uint32_t awb_ct;       /* color temperature in Kelvin (for ct_manual) */
+	bool keep_aspect;      /* true = center-crop to preserve sensor aspect ratio */
 } VencConfigIsp;
 
 typedef struct {
