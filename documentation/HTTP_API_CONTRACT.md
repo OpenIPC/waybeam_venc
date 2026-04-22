@@ -15,7 +15,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.6.1`
+- `contract_version`: `0.6.2`
 - `status`: `active`
 
 ## Governance Rules
@@ -99,17 +99,28 @@ Response `200`:
     "config": {
       "system": { "webPort": 80, "overclockLevel": 2, "verbose": false },
       "sensor": { "index": -1, "mode": -1, "unlockEnabled": true, "..." : "..." },
-      "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "exposure": 9, "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500 },
+      "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2 },
+      "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2 },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
       "debug": { "showOsd": false }
+    },
+    "runtime": {
+      "active_precrop": { "x": 0, "y": 240, "w": 2560, "h": 1440 }
     }
   }
 }
 ```
+
+The `runtime` block is read-only and reports pipeline state that is not
+part of the editable config:
+
+- `active_precrop` — VIF crop rectangle currently programmed (includes
+  any sensor overscan offsets).  Present whenever a Star6E pipeline has
+  been started; absent before pipeline start, after pipeline stop, or on
+  Maruko (no precrop support yet).
 
 ### `GET /api/v1/capabilities`
 
@@ -134,7 +145,6 @@ Response `200`:
       "video0.scene_threshold": { "mutability": "restart_required", "supported": true },
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
       "system.verbose": { "mutability": "live", "supported": true },
-      "isp.exposure": { "mutability": "live", "supported": true },
       "outgoing.enabled": { "mutability": "live", "supported": true },
       "outgoing.server": { "mutability": "live", "supported": true },
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
@@ -203,7 +213,7 @@ Error `404` — unknown field:
 Majestic-style camelCase aliases are also accepted for selected fields,
 including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `fpv.noiseLevel`, `isp.sensorBin`, `isp.awbMode`, `isp.awbCt`,
-`video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
+`isp.keepAspect`, `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
 `video0.sceneThreshold`, `video0.sceneHoldoff`,
 `outgoing.maxPayloadSize`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
@@ -259,10 +269,12 @@ pipeline reinit (sensor→VIF→VPE→VENC teardown and rebuild):
 # Change resolution (single call, triggers one pipeline reinit)
 curl "http://<device-ip>/api/v1/set?video0.size=1280x720"
 
+# Use sensor native resolution (default — no downscaling)
+curl "http://<device-ip>/api/v1/set?video0.size=auto"
+
 # Preset shortcuts also work
 curl "http://<device-ip>/api/v1/set?video0.size=720p"
 curl "http://<device-ip>/api/v1/set?video0.size=1080p"
-curl "http://<device-ip>/api/v1/set?video0.size=4MP"
 
 # Enable Star6E scene-change IDR control
 curl "http://<device-ip>/api/v1/set?video0.scene_threshold=150"
@@ -448,8 +460,15 @@ restart the venc process to change sensor modes.
 
 ### `GET /api/v1/restart`
 
-Trigger a full pipeline reinit: reload config from disk (`/etc/venc.json`) and rebuild
-the pipeline. Equivalent to sending `SIGHUP` to the process.
+Reload `/etc/venc.json` from disk and rebuild the pipeline. Equivalent to sending
+`SIGHUP`. This endpoint does NOT write the in-memory config back to disk, so a manual
+file swap (editor, scp, json_cli) followed by `/api/v1/restart` reloads exactly what
+was placed on disk.
+
+In v0.7.8 persistence moved into the `/api/v1/set` layer — every set (LIVE or RESTART)
+now saves to disk before returning, so the WebUI "Save & Restart" flow (applyChanges
+→ /api/v1/restart) ends with the on-disk copy already matching memory before the
+reload runs.
 
 ```bash
 curl http://<device-ip>/api/v1/restart
@@ -458,6 +477,25 @@ curl http://<device-ip>/api/v1/restart
 Response `200`:
 ```json
 {"ok":true,"data":{"reinit":true}}
+```
+
+### `GET /api/v1/defaults`
+
+Overwrite the in-memory config with compiled-in defaults, persist to `/etc/venc.json`,
+then trigger a full pipeline reinit. Drives the "Restore Defaults" button in the WebUI.
+
+Added in v0.7.8. The `saved` field in the response reflects whether persistence
+actually succeeded — `false` means the runtime is at defaults but the on-disk copy is
+stale (e.g. disk full, readonly FS, permission error); check the venc log for the
+`[venc_config] ERROR:` line.
+
+```bash
+curl http://<device-ip>/api/v1/defaults
+```
+
+Response `200`:
+```json
+{"ok":true,"data":{"defaults":true,"reinit":true,"saved":true}}
 ```
 
 ### `GET /api/v1/ae`
@@ -478,10 +516,15 @@ Response `200`:
     "exposure_info": { "ret": 0, "stable": true, "reach_boundary": false, "long_us": 9999, "long_sensor_gain_x1024": 1673, "long_isp_gain_x1024": 1024, "luma_y": 236, "avg_y": 247 },
     "state": { "ret": 0, "raw": 0, "name": "normal" },
     "expo_mode": { "ret": 0, "raw": 0, "name": "auto" },
-    "metrics": { "exposure_us": 9999, "sensor_gain_x1024": 1673, "isp_gain_x1024": 1024, "fps": 90 }
+    "metrics": { "exposure_us": 9999, "sensor_gain_x1024": 1673, "isp_gain_x1024": 1024, "fps": 90 },
+    "runtime": { "sensor_fps": 90, "active_precrop": { "x": 0, "y": 240, "w": 2560, "h": 1440 } }
   }
 }
 ```
+
+`runtime.active_precrop` is included on Star6E whenever the pipeline has
+been started; it is omitted before the first start, after a stop, and on
+Maruko (no precrop support yet).
 
 Error `501`:
 ```json
@@ -679,9 +722,6 @@ isp_again 1673
 # HELP isp_dgain Digital Gain
 # TYPE isp_dgain gauge
 isp_dgain 1024
-# HELP isp_exposure Exposure
-# TYPE isp_exposure gauge
-isp_exposure 9
 # HELP isp_fps Sensor fps
 # TYPE isp_fps gauge
 isp_fps 90
@@ -874,6 +914,20 @@ Behavior:
 - `GET` endpoints must remain consistent across backends.
 
 ## Change Log (Contract)
+- `0.6.2`:
+  - Added `isp.keepAspect` (boolean, default `true`) to config schema.
+    When `false`, VIF captures the full sensor area and VPE scales without
+    aspect-ratio cropping (image is stretched if sensor and encode AR
+    differ). `MUT_RESTART` — applied on SIGHUP / Save & Restart.
+    Star6E only; Maruko reads but ignores the field until SCL crop port
+    lands as a follow-up.
+  - Added `isp.keepAspect` camelCase alias (`isp.keep_aspect`).
+  - `GET /api/v1/config` response gains a `runtime` block with
+    `active_precrop` ({x,y,w,h}) — the VIF crop currently programmed
+    (includes any sensor overscan offsets).  Omitted when the pipeline
+    has not started, after stop, or on Maruko.
+  - `GET /api/v1/ae` Star6E response includes `runtime.active_precrop`
+    with the same rectangle.
 - `0.5.0`:
   - Added `GET /api/v1/iq` — query all ISP IQ parameter values (46 params).
   - Added `GET /api/v1/iq/set?param=value` — set individual IQ parameters live.
@@ -919,6 +973,11 @@ Behavior:
 - `0.1.3`:
   - Documented live FPS control behavior (hardware bind decimation, clamping, mode switching limitation).
   - `video0.fps` set via API now uses MI_SYS_BindChnPort2 rebind instead of /proc write.
+  - Removed `isp.exposure` config field, capability, and Prometheus metric.
+    Auto-cap to frame period (1/fps) is now the only exposure mode.
+  - Changed `video0.size` default from `"1920x1080"` to `"auto"` (use sensor
+    native resolution). Added `"auto"` preset to size parser.
+  - Removed `"4MP"` size preset (sensor-specific, not a standard resolution).
 - `0.1.2`:
   - Updated to reflect actual implemented API (was draft, now active).
   - All endpoints use GET method (BusyBox wget compatibility).

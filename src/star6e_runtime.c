@@ -2,8 +2,10 @@
 
 #include "debug_osd.h"
 #include "eis.h"
+#include "idr_rate_limit.h"
 #include "imu_bmi270.h"
 #include "pipeline_common.h"
+#include "scene_detector.h"
 #include "sdk_quiet.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
@@ -63,35 +65,9 @@ static volatile sig_atomic_t g_running = 1;
 static volatile sig_atomic_t g_signal_count = 0;
 static struct timespec g_imu_eis_verbose_last = {0};
 
-/* ── Lightweight scene detector ──────────────────────────────────────── */
+/* ── Scene-detector stream decoders ───────────────────────────────────── */
 
-#define ENC_FRAME_P   0
-#define ENC_FRAME_IDR 2
-
-#define SCENE_EMA_SHIFT      4
-#define SCENE_WARMUP_FRAMES  8
-#define SCENE_COOLDOWN_AFTER_IDR 30
-
-typedef struct {
-	uint32_t ema_size_fp8;
-	uint32_t frame_count;
-	uint32_t last_frame_size;  /* cached from scene_update */
-	uint8_t  last_frame_type;  /* cached from scene_update */
-	uint16_t cooldown;
-	uint16_t settle_count;
-	uint8_t  spike_pending;
-	uint8_t  idr_inserted;
-	uint8_t  complexity;
-	uint8_t  scene_change;
-	uint16_t frames_since_idr;
-	uint16_t threshold;
-	uint8_t  holdoff;
-	uint8_t  consecutive_spikes;
-	uint8_t  idr_enabled;   /* 1 = request IDR after settle, 0 = telemetry only */
-	uint8_t  warmup_done;   /* set once frame_count passes SCENE_WARMUP_FRAMES */
-} SceneDetector;
-
-static uint32_t scene_frame_size(const MI_VENC_Stream_t *s)
+static uint32_t star6e_scene_frame_size(const MI_VENC_Stream_t *s)
 {
 	uint32_t t = 0;
 	unsigned int i;
@@ -100,131 +76,33 @@ static uint32_t scene_frame_size(const MI_VENC_Stream_t *s)
 	return t;
 }
 
-static uint8_t scene_frame_type(const MI_VENC_Stream_t *s, int codec)
+static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s, int codec)
 {
 	unsigned int i;
-	if (!s || !s->packet) return ENC_FRAME_P;
+	if (!s || !s->packet) return 0;
 	for (i = 0; i < s->count; i++) {
 		const MI_VENC_Pack_t *p = &s->packet[i];
 		unsigned int k, n = p->packNum > 8 ? 8 : p->packNum;
 		if (n > 0) {
 			for (k = 0; k < n; k++) {
 				if (codec == 0 && p->packetInfo[k].packType.h264Nalu == 5)
-					return ENC_FRAME_IDR;
+					return 1;
 				if (codec != 0 && p->packetInfo[k].packType.h265Nalu == 19)
-					return ENC_FRAME_IDR;
+					return 1;
 			}
 		} else {
-			if (codec == 0 && p->naluType.h264Nalu == 5) return ENC_FRAME_IDR;
-			if (codec != 0 && p->naluType.h265Nalu == 19) return ENC_FRAME_IDR;
+			if (codec == 0 && p->naluType.h264Nalu == 5) return 1;
+			if (codec != 0 && p->naluType.h265Nalu == 19) return 1;
 		}
 	}
-	return ENC_FRAME_P;
+	return 0;
 }
 
-static void scene_init(SceneDetector *sd, uint16_t threshold, uint8_t holdoff)
+static void star6e_scene_request_idr(void *ctx)
 {
-	memset(sd, 0, sizeof(*sd));
-	sd->threshold = threshold > 0 ? threshold : 150;
-	sd->holdoff = holdoff > 0 ? holdoff : 2;
-	sd->idr_enabled = threshold > 0 ? 1 : 0;
-}
-
-static void scene_update(SceneDetector *sd, const MI_VENC_Stream_t *stream,
-	int codec, int venc_chn)
-{
-	uint32_t size, size_fp8, ema_size, ratio_x100;
-	uint8_t ftype;
-
-	if (!sd) return;
-	size = scene_frame_size(stream);
-	ftype = scene_frame_type(stream, codec);
-	if (size > (UINT32_MAX / 1000)) size = (UINT32_MAX / 1000);
-	size_fp8 = size << 8;
-
-	/* Cache for scene_fill_sidecar — avoids re-walking packet arrays */
-	sd->last_frame_size = size;
-	sd->last_frame_type = ftype;
-
-	if (sd->frame_count < UINT32_MAX) sd->frame_count++;
-	sd->idr_inserted = 0;
-	sd->scene_change = 0;
-
-	if (ftype == ENC_FRAME_IDR) {
-		sd->frames_since_idr = 0;
-		sd->spike_pending = 0;
-		sd->settle_count = 0;
-		sd->consecutive_spikes = 0;
-		sd->cooldown = SCENE_COOLDOWN_AFTER_IDR;
-	} else {
-		if (sd->frames_since_idr < UINT16_MAX) sd->frames_since_idr++;
-	}
-
-	if (sd->frame_count == 1) { sd->ema_size_fp8 = size_fp8; return; }
-
-	if (size_fp8 > sd->ema_size_fp8)
-		sd->ema_size_fp8 += (size_fp8 - sd->ema_size_fp8) >> SCENE_EMA_SHIFT;
-	else
-		sd->ema_size_fp8 -= (sd->ema_size_fp8 - size_fp8) >> SCENE_EMA_SHIFT;
-
-	ema_size = sd->ema_size_fp8 >> 8;
-	ratio_x100 = ema_size > 0 ? (size * 100) / ema_size : 100;
-
-	{ /* complexity 0-255 from frame size ratio */
-		uint32_t c;
-		if (ratio_x100 <= 50) c = (ratio_x100 * 128) / 100;
-		else if (ratio_x100 >= 300) c = 255;
-		else c = 64 + ((ratio_x100 - 50) * 191) / 250;
-		sd->complexity = (uint8_t)c;
-	}
-
-	if (!sd->warmup_done) {
-		if (sd->frame_count > SCENE_WARMUP_FRAMES)
-			sd->warmup_done = 1;
-		return;
-	}
-
-	/* Scene-change IDR logic — skip entirely when disabled (threshold=0) */
-	if (!sd->idr_enabled) return;
-
-	if (sd->cooldown > 0) { sd->cooldown--; return; }
-
-	if (sd->spike_pending) {
-		if (ratio_x100 <= 120) {
-			sd->spike_pending = 0;
-			sd->settle_count = 0;
-			sd->scene_change = 1;
-			sd->idr_inserted = 1;
-			MI_VENC_RequestIdr(venc_chn, 1);
-		} else {
-			sd->settle_count++;
-			if (sd->settle_count > 30) {
-				sd->spike_pending = 0;
-				sd->settle_count = 0;
-			}
-		}
-	} else {
-		if (ratio_x100 >= sd->threshold) {
-			sd->consecutive_spikes++;
-			if (sd->consecutive_spikes >= sd->holdoff)
-				sd->spike_pending = 1;
-		} else {
-			sd->consecutive_spikes = 0;
-		}
-	}
-}
-
-static void scene_fill_sidecar(const SceneDetector *sd,
-	RtpSidecarEncInfo *out)
-{
-	if (!sd || !out) return;
-	memset(out, 0, sizeof(*out));
-	out->frame_size_bytes = sd->last_frame_size;
-	out->frame_type = sd->last_frame_type;
-	out->complexity = sd->complexity;
-	out->scene_change = sd->scene_change;
-	out->idr_inserted = sd->idr_inserted;
-	out->frames_since_idr = sd->frames_since_idr;
+	int venc_chn = *(const int *)ctx;
+	if (idr_rate_limit_allow(venc_chn))
+		MI_VENC_RequestIdr(venc_chn, 1);
 }
 
 /* ── Runner context ────────────────────────────────────────────────────── */
@@ -357,10 +235,15 @@ static void record_status_callback(VencRecordStatus *out)
 
 static int runtime_request_idr(void)
 {
+	int chn;
+
 	if (!g_runner_ctx)
 		return -1;
 
-	return MI_VENC_RequestIdr(g_runner_ctx->ps.venc_channel, 1) == 0 ? 0 : -1;
+	chn = g_runner_ctx->ps.venc_channel;
+	if (!idr_rate_limit_allow(chn))
+		return 0;  /* coalesced — not an error */
+	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
 static void start_custom_ae(const Star6ePipelineState *ps,
@@ -372,8 +255,6 @@ static void start_custom_ae(const Star6ePipelineState *ps,
 	ae_cfg.sensor_fps = ps->sensor.fps;
 	if (vcfg->isp.ae_fps > 0)
 		ae_cfg.ae_fps = vcfg->isp.ae_fps;
-	if (vcfg->isp.exposure > 0)
-		ae_cfg.shutter_max_us = vcfg->isp.exposure * 1000;
 	if (vcfg->isp.gain_max > 0)
 		ae_cfg.gain_max = vcfg->isp.gain_max;
 	ae_cfg.verbose = vcfg->system.verbose;
@@ -451,14 +332,50 @@ static void *dual_rec_thread_fn(void *arg)
 
 	clock_gettime(CLOCK_MONOTONIC, &interval_start);
 
+	/* Block on MI_VENC_GetFd(chn) via poll() instead of spinning on
+	 * MI_VENC_Query + usleep(1000).  The fd signals POLLIN when a
+	 * frame is ready, so we wake exactly once per frame (~120/s at
+	 * 120 fps) instead of ~1000/s from the old 1 ms spin.  If the
+	 * SDK returns fd < 0 (unknown BSP variant), fall back to the
+	 * original polling loop. */
+	int venc_fd = MI_VENC_GetFd(d->channel);
+
 	while (d->rec_running) {
 		MI_VENC_Stat_t stat = {0};
 		MI_VENC_Stream_t stream = {0};
 		int ret;
 
+		if (venc_fd >= 0) {
+			/* POLL_TIMEOUT_MS = 1000 is large on purpose — it
+			 * caps the rec_running cancellation latency
+			 * without wasting cycles on short periodic wakes.
+			 * Encoder frames arrive every 8-9 ms at 120 fps,
+			 * long before this timeout expires. */
+			struct pollfd pfd = { .fd = venc_fd, .events = POLLIN };
+			(void)poll(&pfd, 1, 1000);
+			/* POLLERR/POLLHUP/POLLNVAL: the SDK closed the fd
+			 * under us (BSP quirk, pipeline reinit, VPE unbind).
+			 * Fall back to the Query+usleep path for the rest
+			 * of the thread's lifetime — don't busy-loop on a
+			 * dead fd. */
+			if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				MI_VENC_CloseFd(d->channel);
+				venc_fd = -1;
+				usleep(1000);
+				continue;
+			}
+			if (!(pfd.revents & POLLIN))
+				continue;  /* timeout / spurious wake */
+		}
+
 		ret = MI_VENC_Query(d->channel, &stat);
 		if (ret != 0 || stat.curPacks == 0) {
-			usleep(1000);
+			/* Always sleep before retry: even with venc_fd >= 0,
+			 * a spurious POLLIN that's not matched by an actual
+			 * Query packet (rare BSP edge case) would otherwise
+			 * busy-loop.  100us keeps wakeup latency low while
+			 * preventing a runaway spin. */
+			usleep(venc_fd >= 0 ? 100 : 1000);
 			continue;
 		}
 
@@ -473,6 +390,9 @@ static void *dual_rec_thread_fn(void *arg)
 		ret = MI_VENC_GetStream(d->channel, &stream,
 			g_running ? 40 : 0);
 		if (ret != 0) {
+			/* EAGAIN on either path: sleep briefly before
+			 * retrying so we don't spin if Query said
+			 * stat.curPacks>0 but GetStream keeps contending. */
 			if (ret == -EAGAIN || ret == EAGAIN)
 				usleep(1000);
 			continue;
@@ -493,14 +413,13 @@ static void *dual_rec_thread_fn(void *arg)
 		MI_VENC_ReleaseStream(d->channel, &stream);
 		total_count++;
 
-		/* Peek: is another frame already waiting?  If so, we're
-		 * not keeping up — the write took longer than 1/fps. */
-		{
-			MI_VENC_Stat_t peek = {0};
-			if (MI_VENC_Query(d->channel, &peek) == 0 &&
-			    peek.curPacks > 0)
-				behind_count++;
-		}
+		/* Backpressure signal: the pre-GetStream Query found >= 2
+		 * packets queued, meaning the encoder produced another frame
+		 * before we consumed the prior one.  Equivalent semantics to
+		 * a post-ReleaseStream peek but avoids one MI_VENC_Query
+		 * syscall per recorded frame (~120/s at 120 fps). */
+		if (stat.curPacks >= 2)
+			behind_count++;
 
 		/* Every second: evaluate backpressure */
 		{
@@ -537,6 +456,9 @@ static void *dual_rec_thread_fn(void *arg)
 		}
 	}
 
+	if (venc_fd >= 0)
+		MI_VENC_CloseFd(d->channel);
+
 	return NULL;
 }
 
@@ -561,6 +483,7 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	star6e_controls_bind(ps, vcfg);
 	star6e_iq_init();
 	venc_api_register(vcfg, "star6e", star6e_controls_callbacks());
+	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
 	venc_api_set_record_status_fn(record_status_callback);
 
 	scene_init(&ctx->scene, ctx->vcfg.video0.scene_threshold,
@@ -826,8 +749,11 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	{
 		RtpSidecarEncInfo enc_info;
 		int codec = (strcmp(vcfg->video0.codec, "h264") == 0) ? 0 : 1;
+		uint32_t frame_size = star6e_scene_frame_size(&stream);
+		uint8_t is_idr = star6e_scene_is_idr(&stream, codec);
 
-		scene_update(&ctx->scene, &stream, codec, ps->venc_channel);
+		scene_update(&ctx->scene, frame_size, is_idr,
+			star6e_scene_request_idr, &ps->venc_channel);
 		scene_fill_sidecar(&ctx->scene, &enc_info);
 
 		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
@@ -840,6 +766,15 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		star6e_recorder_write_frame(&ps->recorder, &stream);
 		star6e_ts_recorder_write_stream(&ps->ts_recorder, &stream);
 	}
+
+	/* Release the encoder stream as soon as the last consumer of the
+	 * stream payload (recorder writes above) is done. Everything
+	 * below — HTTP record control, verbose IMU/EIS output, debug OSD —
+	 * only reads independent state, so releasing here frees the VENC
+	 * output slot for the next frame instead of waiting on blocking
+	 * work (stdout printf, OSD draw) that can otherwise push send
+	 * spread past a full frame period at 120 fps. */
+	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
 
 	/* Check HTTP record control flags.
 	 * In dual mode, the recording thread owns the ts_recorder
@@ -960,8 +895,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 
 		debug_osd_end_frame(ps->debug_osd);
 	}
-
-	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
 
 	/* ch1 frames are now drained by the dedicated recording thread
 	 * (dual_rec_thread_fn) — no polling needed here. */

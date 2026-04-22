@@ -102,7 +102,7 @@ template is provided at `config/venc.default.json`.
   },
   "image": { "mirror": false, "flip": false, "rotate": 0 },
   "video0": {
-    "codec": "h265", "rcMode": "cbr", "fps": 30, "size": "1920x1080",
+    "codec": "h265", "rcMode": "cbr", "fps": 30,
     "bitrate": 8192, "gopSize": 1.0,
     "qpDelta": -4
   },
@@ -361,7 +361,7 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 | `video0.codec` | string | restart | `"h265"` (Maruko also supports `"h264"`; Star6E RTP remains h265-only) |
 | `video0.rc_mode` | string | restart | `"cbr"`, `"vbr"`, `"avbr"`, `"fixqp"` |
 | `video0.fps` | uint | live | Output frame rate |
-| `video0.size` | WxH | restart | Encode resolution (e.g., `"1920x1080"`) |
+| `video0.size` | string | restart | Encode resolution: `"auto"` (default, uses sensor native), `"1920x1080"`, `"720p"`, `"1080p"` |
 | `video0.bitrate` | uint | live | Target bitrate in kbps |
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |
@@ -448,7 +448,10 @@ dedicated local UDP audio destination.
 Audio configuration (enabled, sample rate, channels, codec, volume) is
 set in `/etc/venc.json` only and requires a process restart to change.
 
-Supported codecs: `"pcm"` (raw 16-bit), `"g711a"` (A-law), `"g711u"` (µ-law).
+Supported codecs: `"pcm"` (raw 16-bit, big-endian L16 per RFC 3551),
+`"g711a"` (A-law), `"g711u"` (µ-law), `"opus"` (requires `libopus.so` at
+runtime; falls back to PCM with a warning if the library or encoder is
+unavailable).
 
 **RTP payload types:** When streaming in RTP mode, venc uses standard static
 payload types when the sample rate matches the RFC 3551 standard:
@@ -461,12 +464,24 @@ payload types when the sample rate matches the RFC 3551 standard:
 | `g711a` | non-8kHz | 113 | Dynamic, Waybeam convention |
 | `pcm` | 44100 | 11 (L16 mono) | RFC 3551 standard |
 | `pcm` | other | 110 | Dynamic PCM |
+| `opus` | any | 98 | Dynamic, majestic-compatible (RFC 7587) |
 
-Sample rate range: 8000–48000 Hz (clamped by config parser). The
-recommended default is 16kHz G.711a for low-latency FPV audio.
+Sample rate range: 8000–48000 Hz (clamped by config parser). For Opus the
+recommended sample rate is 48000 Hz (native Opus clock, no resampling);
+the RTP clock is fixed at 48 kHz per RFC 7587 regardless of capture rate.
+For voice-only FPV audio, 16 kHz G.711a remains a low-latency choice.
 
-**Frame timing:** Each RTP packet contains `sample_rate / 50` samples
-(~20ms of audio). The RTP timestamp increments by this value per packet.
+**Frame timing:** Each RTP packet carries one 20 ms frame. The RTP
+timestamp advances by `sample_rate / 50` samples for PCM/G.711, and by
+960 (the 48 kHz nominal Opus tick) for Opus.
+
+**Receiving Opus:**
+
+```bash
+gst-launch-1.0 udpsrc port=5601 \
+    caps="application/x-rtp,media=audio,payload=98,clock-rate=48000,encoding-name=OPUS" \
+  ! rtpopusdepay ! opusdec ! audioconvert ! autoaudiosink
+```
 
 #### Recording (Star6E only)
 
@@ -774,6 +789,22 @@ ls sensors-src/sigmastar/infinity6e/sensor/
 ```
 
 Pre-built kernel modules (`.ko`) for IMX335 and IMX415 remain in `sensors/`.
+
+### Maruko IMX335 Sensor Modes
+
+Custom Maruko driver in `drivers/sensor_imx335_maruko.c` (built via
+`make -C drivers sensor`):
+
+| Mode | Resolution | Max FPS | Verified | Init table |
+|------|-----------|---------|----------|------------|
+| 0 | 1920x1080 | 60 | 59fps | Star6E 120fps windowed |
+| 1 | 1920x1080 | 90 | 89fps | Star6E 120fps windowed |
+
+Deploy: `scp sensor_imx335_maruko.ko root@device:/lib/modules/5.10.61/sigmastar/sensor_imx335_mipi.ko`
+
+The driver uses no-op `pCus_poweroff` (sensor stays powered from boot)
+and a VTS 120% cap to prevent AE from dropping FPS in low light.
+A delayed MI\_SNR\_SetFps kick after ~1s fixes cold-boot FPS lock.
 
 ## Deployment Testing
 

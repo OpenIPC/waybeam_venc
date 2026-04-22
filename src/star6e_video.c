@@ -2,22 +2,10 @@
 #include "star6e_audio.h"
 
 #include "rtp_session.h"
+#include "timing.h"
 
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
-
-static uint64_t monotonic_us(void)
-{
-	struct timespec ts;
-#ifdef CLOCK_MONOTONIC_RAW
-	clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-#else
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-#endif
-	return (uint64_t)ts.tv_sec * 1000000ULL +
-	       (uint64_t)(ts.tv_nsec / 1000);
-}
 
 typedef struct {
 	RtpPacketizerState *rtp;
@@ -103,22 +91,38 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 			.stats = verbose_enabled ? &frame_packetizer : NULL,
 		};
 
-		rtp_sidecar_poll(&state->sidecar);
+		/* Sidecar work — poll, timestamp snapshot, send — is only
+		 * meaningful when the sidecar socket is configured.  Gating
+		 * on sidecar.fd >= 0 avoids one recvfrom syscall, one
+		 * wb_monotonic_us() read, and the sidecar send argument setup
+		 * per frame when the sidecar feature is disabled.  Mirrors
+		 * the Maruko gate from PR #37. */
+		int sidecar_active = (state->sidecar.fd >= 0);
 
-		uint32_t frame_rtp_ts = state->rtp_state.timestamp;
-		uint16_t seq_before = state->rtp_state.seq;
-		uint64_t ready_us = monotonic_us();
-		uint64_t capture_us = (stream->count > 0 && stream->packet)
-			? stream->packet[0].timestamp : 0;
+		uint32_t frame_rtp_ts = 0;
+		uint16_t seq_before = 0;
+		uint64_t ready_us = 0;
+		uint64_t capture_us = 0;
+
+		if (sidecar_active) {
+			rtp_sidecar_poll(&state->sidecar);
+			frame_rtp_ts = state->rtp_state.timestamp;
+			seq_before = state->rtp_state.seq;
+			ready_us = wb_monotonic_us();
+			capture_us = (stream->count > 0 && stream->packet)
+				? stream->packet[0].timestamp : 0;
+		}
 
 		total_bytes = star6e_output_send_frame(output, stream,
 			state->max_frame_size, send_frame_output_rtp, &rtp_frame);
 
-		rtp_sidecar_send_frame(&state->sidecar,
-			state->rtp_state.ssrc, frame_rtp_ts,
-			seq_before,
-			(uint16_t)(state->rtp_state.seq - seq_before),
-			capture_us, ready_us, enc_info);
+		if (sidecar_active) {
+			rtp_sidecar_send_frame(&state->sidecar,
+				state->rtp_state.ssrc, frame_rtp_ts,
+				seq_before,
+				(uint16_t)(state->rtp_state.seq - seq_before),
+				capture_us, ready_us, enc_info);
+		}
 	}
 
 	if (!verbose_enabled)

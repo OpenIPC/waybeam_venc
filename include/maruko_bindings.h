@@ -59,6 +59,8 @@ typedef int (*maruko_isp_disable_userspace3a_fn_t)(MI_U32 dev_id, MI_U32 channel
   g_mi_venc.fnGetStream((dev), (chn), (strm), (ms))
 #define maruko_mi_venc_release_stream(dev, chn, strm) \
   g_mi_venc.fnReleaseStream((dev), (chn), (strm))
+#define maruko_mi_venc_get_fd(dev, chn)         g_mi_venc.fnGetFd((dev), (chn))
+#define maruko_mi_venc_close_fd(dev, chn)       g_mi_venc.fnCloseFd((dev), (chn))
 #define maruko_mi_venc_set_input_source(dev, chn, cfg) \
   g_mi_venc.fnSetInputSourceConfig((dev), (chn), (cfg))
 #define maruko_mi_venc_get_chn_attr(dev, chn, attr) \
@@ -71,12 +73,24 @@ typedef int (*maruko_isp_disable_userspace3a_fn_t)(MI_U32 dev_id, MI_U32 channel
   g_mi_venc.fnSetRcParam((dev), (chn), (param))
 #define maruko_mi_venc_request_idr(dev, chn, inst) \
   g_mi_venc.fnRequestIdr((dev), (chn), (inst))
+#define maruko_mi_venc_set_frame_lost(dev, chn, strat) \
+  g_mi_venc.fnSetFrameLostStrategy((dev), (chn), (strat))
+#define maruko_mi_venc_get_frame_lost(dev, chn, strat) \
+  g_mi_venc.fnGetFrameLostStrategy((dev), (chn), (strat))
 #define maruko_mi_sys_config_private_pool(soc, cfg) \
   g_mi_sys.fnConfigPrivateMMAPool((soc), (cfg))
 
+/* Maruko (i6c) uses the UBR rate-mode enum layout — the standard
+ * I6C_VENC_RATEMODE_* values (H265CBR=9) are rejected by MI_VENC_CreateChn.
+ * The UBR layout inserts extra UBR slots for H264/H265, shifting all H265
+ * modes up by 1.  These are the values the firmware actually accepts. */
 enum {
-	MARUKO_VENC_RC_H264_CBR = 1,
-	MARUKO_VENC_RC_H265_CBR = 10,
+	MARUKO_VENC_RC_H264_CBR  = 1,   /* UBR_H264CBR  */
+	MARUKO_VENC_RC_H264_VBR  = 2,   /* UBR_H264VBR  */
+	MARUKO_VENC_RC_H264_AVBR = 6,   /* UBR_H264AVBR */
+	MARUKO_VENC_RC_H265_CBR  = 10,  /* UBR_H265CBR  */
+	MARUKO_VENC_RC_H265_VBR  = 11,  /* UBR_H265VBR  */
+	MARUKO_VENC_RC_H265_AVBR = 14,  /* UBR_H265AVBR */
 };
 
 #endif

@@ -300,6 +300,51 @@ static int test_register(void)
 	return failures;
 }
 
+static int test_active_precrop_setter(void)
+{
+	int failures = 0;
+	uint16_t x = 0xAA, y = 0xBB, w = 0xCC, h = 0xDD;
+
+	/* Cleared store: getter returns 0 (invalid), out args untouched. */
+	venc_api_clear_active_precrop();
+	CHECK("active_precrop initial invalid",
+		venc_api_get_active_precrop(&x, &y, &w, &h) == 0);
+	CHECK("active_precrop unread x", x == 0xAA);
+	CHECK("active_precrop unread y", y == 0xBB);
+	CHECK("active_precrop unread w", w == 0xCC);
+	CHECK("active_precrop unread h", h == 0xDD);
+
+	venc_api_set_active_precrop(240, 0, 1440, 1080);
+	CHECK("active_precrop set valid",
+		venc_api_get_active_precrop(&x, &y, &w, &h) == 1);
+	CHECK("active_precrop set x", x == 240);
+	CHECK("active_precrop set y", y == 0);
+	CHECK("active_precrop set w", w == 1440);
+	CHECK("active_precrop set h", h == 1080);
+
+	/* Overwrite from a subsequent reinit. */
+	venc_api_set_active_precrop(0, 240, 2560, 1440);
+	CHECK("active_precrop overwrite",
+		venc_api_get_active_precrop(&x, &y, &w, &h) == 1);
+	CHECK("active_precrop overwrite x", x == 0);
+	CHECK("active_precrop overwrite y", y == 240);
+	CHECK("active_precrop overwrite w", w == 2560);
+	CHECK("active_precrop overwrite h", h == 1440);
+
+	/* Pipeline stop clears the store. */
+	venc_api_clear_active_precrop();
+	CHECK("active_precrop cleared",
+		venc_api_get_active_precrop(&x, &y, &w, &h) == 0);
+
+	/* NULL out-pointers must not crash even when valid. */
+	venc_api_set_active_precrop(1, 2, 3, 4);
+	CHECK("active_precrop null safe",
+		venc_api_get_active_precrop(NULL, NULL, NULL, NULL) == 1);
+	venc_api_clear_active_precrop();
+
+	return failures;
+}
+
 static int test_register_with_callbacks(void)
 {
 	int failures = 0;
@@ -690,6 +735,7 @@ int test_venc_api(void)
 {
 	int failures = 0;
 	failures += test_register();
+	failures += test_active_precrop_setter();
 	failures += test_register_with_callbacks();
 	failures += test_field_support_by_backend();
 	failures += test_multi_set_live_success();

@@ -1,5 +1,6 @@
 #include "maruko_controls.h"
 
+#include "idr_rate_limit.h"
 #include "maruko_bindings.h"
 #include "maruko_iq.h"
 #include "maruko_output.h"
@@ -163,22 +164,22 @@ static int maruko_apply_rc_qp_delta(const i6c_venc_chn *attr, MI_VENC_RcParam_t 
 		return -1;
 
 	switch (attr->rate.mode) {
-	case I6C_VENC_RATEMODE_H265CBR:
+	case MARUKO_VENC_RC_H265_CBR:
 		param->stParamH265Cbr.s32IPQPDelta = delta;
 		return 0;
-	case I6C_VENC_RATEMODE_H264CBR:
+	case MARUKO_VENC_RC_H264_CBR:
 		param->stParamH264Cbr.s32IPQPDelta = delta;
 		return 0;
-	case I6C_VENC_RATEMODE_H265VBR:
+	case MARUKO_VENC_RC_H265_VBR:
 		param->stParamH265Vbr.s32IPQPDelta = delta;
 		return 0;
-	case I6C_VENC_RATEMODE_H264VBR:
+	case MARUKO_VENC_RC_H264_VBR:
 		param->stParamH264VBR.s32IPQPDelta = delta;
 		return 0;
-	case I6C_VENC_RATEMODE_H265AVBR:
+	case MARUKO_VENC_RC_H265_AVBR:
 		param->stParamH265Avbr.s32IPQPDelta = delta;
 		return 0;
-	case I6C_VENC_RATEMODE_H264AVBR:
+	case MARUKO_VENC_RC_H264_AVBR:
 		param->stParamH264Avbr.s32IPQPDelta = delta;
 		return 0;
 	default:
@@ -196,23 +197,31 @@ static int maruko_apply_bitrate(uint32_t kbps)
 		return -1;
 	unsigned int bits = kbps * 1024;
 	switch (attr.rate.mode) {
-	case I6C_VENC_RATEMODE_H265CBR:
+	case MARUKO_VENC_RC_H265_CBR:
 		attr.rate.h265Cbr.bitrate = bits; break;
-	case I6C_VENC_RATEMODE_H264CBR:
+	case MARUKO_VENC_RC_H264_CBR:
 		attr.rate.h264Cbr.bitrate = bits; break;
-	case I6C_VENC_RATEMODE_H265VBR:
+	case MARUKO_VENC_RC_H265_VBR:
 		attr.rate.h265Vbr.maxBitrate = bits; break;
-	case I6C_VENC_RATEMODE_H264VBR:
+	case MARUKO_VENC_RC_H264_VBR:
 		attr.rate.h264Vbr.maxBitrate = bits; break;
-	case I6C_VENC_RATEMODE_H265AVBR:
+	case MARUKO_VENC_RC_H265_AVBR:
 		attr.rate.h265Avbr.maxBitrate = bits; break;
-	case I6C_VENC_RATEMODE_H264AVBR:
+	case MARUKO_VENC_RC_H264_AVBR:
 		attr.rate.h264Avbr.maxBitrate = bits; break;
 	default:
 		return -1;
 	}
-	return maruko_mi_venc_set_chn_attr(g_ctx.venc_dev,
-		g_ctx.venc_chn, &attr) == 0 ? 0 : -1;
+	if (maruko_mi_venc_set_chn_attr(g_ctx.venc_dev,
+	    g_ctx.venc_chn, &attr) != 0)
+		return -1;
+	/* Force an IDR after a bitrate change so the decoder resyncs against
+	 * the new rate-control state.  Rate-limit gated to coalesce storms;
+	 * see the matching note in src/star6e_controls.c apply_bitrate(). */
+	if (idr_rate_limit_allow(g_ctx.venc_chn))
+		maruko_mi_venc_request_idr(g_ctx.venc_dev,
+			g_ctx.venc_chn, 1);
+	return 0;
 }
 
 static int maruko_apply_gop(uint32_t gop_size)
@@ -222,12 +231,12 @@ static int maruko_apply_gop(uint32_t gop_size)
 	    g_ctx.venc_chn, &attr) != 0)
 		return -1;
 	switch (attr.rate.mode) {
-	case I6C_VENC_RATEMODE_H265CBR: attr.rate.h265Cbr.gop = gop_size; break;
-	case I6C_VENC_RATEMODE_H264CBR: attr.rate.h264Cbr.gop = gop_size; break;
-	case I6C_VENC_RATEMODE_H265VBR: attr.rate.h265Vbr.gop = gop_size; break;
-	case I6C_VENC_RATEMODE_H264VBR: attr.rate.h264Vbr.gop = gop_size; break;
-	case I6C_VENC_RATEMODE_H265AVBR: attr.rate.h265Avbr.gop = gop_size; break;
-	case I6C_VENC_RATEMODE_H264AVBR: attr.rate.h264Avbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H265_CBR: attr.rate.h265Cbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H264_CBR: attr.rate.h264Cbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H265_VBR: attr.rate.h265Vbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H264_VBR: attr.rate.h264Vbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H265_AVBR: attr.rate.h265Avbr.gop = gop_size; break;
+	case MARUKO_VENC_RC_H264_AVBR: attr.rate.h264Avbr.gop = gop_size; break;
 	default: return -1;
 	}
 	return maruko_mi_venc_set_chn_attr(g_ctx.venc_dev,
@@ -251,7 +260,8 @@ static int maruko_apply_qp_delta(int delta)
 	    g_ctx.venc_chn, &param) != 0)
 		return -1;
 
-	maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
+	if (idr_rate_limit_allow(g_ctx.venc_chn))
+		maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
 	printf("> qpDelta changed to %d\n", delta);
 	return 0;
 }
@@ -288,17 +298,17 @@ static int maruko_apply_fps(uint32_t fps)
 	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
 	    g_ctx.venc_chn, &attr) == 0) {
 		switch (attr.rate.mode) {
-		case I6C_VENC_RATEMODE_H265CBR:
+		case MARUKO_VENC_RC_H265_CBR:
 			attr.rate.h265Cbr.fpsNum = fps; break;
-		case I6C_VENC_RATEMODE_H264CBR:
+		case MARUKO_VENC_RC_H264_CBR:
 			attr.rate.h264Cbr.fpsNum = fps; break;
-		case I6C_VENC_RATEMODE_H265VBR:
+		case MARUKO_VENC_RC_H265_VBR:
 			attr.rate.h265Vbr.fpsNum = fps; break;
-		case I6C_VENC_RATEMODE_H264VBR:
+		case MARUKO_VENC_RC_H264_VBR:
 			attr.rate.h264Vbr.fpsNum = fps; break;
-		case I6C_VENC_RATEMODE_H265AVBR:
+		case MARUKO_VENC_RC_H265_AVBR:
 			attr.rate.h265Avbr.fpsNum = fps; break;
-		case I6C_VENC_RATEMODE_H264AVBR:
+		case MARUKO_VENC_RC_H264_AVBR:
 			attr.rate.h264Avbr.fpsNum = fps; break;
 		default:
 			break;
@@ -334,12 +344,12 @@ static uint32_t maruko_query_live_fps(void)
 		return 0;
 
 	switch (attr.rate.mode) {
-	case I6C_VENC_RATEMODE_H265CBR: return attr.rate.h265Cbr.fpsNum;
-	case I6C_VENC_RATEMODE_H264CBR: return attr.rate.h264Cbr.fpsNum;
-	case I6C_VENC_RATEMODE_H265VBR: return attr.rate.h265Vbr.fpsNum;
-	case I6C_VENC_RATEMODE_H264VBR: return attr.rate.h264Vbr.fpsNum;
-	case I6C_VENC_RATEMODE_H265AVBR: return attr.rate.h265Avbr.fpsNum;
-	case I6C_VENC_RATEMODE_H264AVBR: return attr.rate.h264Avbr.fpsNum;
+	case MARUKO_VENC_RC_H265_CBR: return attr.rate.h265Cbr.fpsNum;
+	case MARUKO_VENC_RC_H264_CBR: return attr.rate.h264Cbr.fpsNum;
+	case MARUKO_VENC_RC_H265_VBR: return attr.rate.h265Vbr.fpsNum;
+	case MARUKO_VENC_RC_H264_VBR: return attr.rate.h264Vbr.fpsNum;
+	case MARUKO_VENC_RC_H265_AVBR: return attr.rate.h265Avbr.fpsNum;
+	case MARUKO_VENC_RC_H264_AVBR: return attr.rate.h264Avbr.fpsNum;
 	default: return 0;
 	}
 }
@@ -468,7 +478,7 @@ static char *maruko_query_ae_info(void)
 		"\"expo_mode\":{\"ret\":%d,\"raw\":%d,\"name\":\"%s\"},"
 		"\"metrics\":{\"exposure_us\":%u,\"sensor_gain_x1024\":%u,"
 		"\"isp_gain_x1024\":%u,\"fps\":%u},"
-		"\"runtime\":{\"configured_exposure_ms\":%u,\"sensor_fps\":%u}}}",
+		"\"runtime\":{\"sensor_fps\":%u}}}",
 		s.plane_ret, s.pad_id, s.plane.shutter,
 		s.plane.sensGain, s.plane.compGain,
 		s.limit_ret, s.limit.minShutterUs, s.limit.maxShutterUs,
@@ -485,7 +495,6 @@ static char *maruko_query_ae_info(void)
 		s.state_ret, s.ae_state, ae_state_name(s.ae_state),
 		s.mode_ret, s.ae_mode_raw, ae_expo_mode_name(s.ae_mode_raw),
 		exposure_us, sensor_gain, isp_gain, ae_diag_sensor_fps(),
-		g_ctx.vcfg ? g_ctx.vcfg->isp.exposure : 0,
 		ae_diag_sensor_fps());
 	return strdup(buf);
 }
@@ -743,43 +752,6 @@ static int maruko_apply_awb_mode(int mode, uint32_t ct)
 	return ret;
 }
 
-/* ── Exposure control (Step 2B) ──────────────────────────────────────── */
-
-static int maruko_apply_exposure(uint32_t us)
-{
-	/* Direct SetExposureLimit — no star6e poll/wait logic which
-	 * causes encoder stalls on Maruko. The 3A_Proc_0 thread
-	 * handles convergence asynchronously. */
-	typedef int (*ae_get_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
-	typedef int (*ae_set_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
-	void *h = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
-	if (!h) return -1;
-
-	ae_get_fn fn_get = (ae_get_fn)dlsym(h, "MI_ISP_AE_GetExposureLimit");
-	ae_set_fn fn_set = (ae_set_fn)dlsym(h, "MI_ISP_AE_SetExposureLimit");
-	if (!fn_get || !fn_set) { dlclose(h); return -1; }
-
-	MarukoIspExposureLimit limit = {0};
-	int ret = fn_get(0, 0, &limit);
-	if (ret != 0) { dlclose(h); return ret; }
-
-	uint32_t target_us;
-	if (us == 0) {
-		uint32_t fps = g_ctx.sensor_fps;
-		if (fps == 0) fps = 30;
-		target_us = 1000000 / fps;
-	} else {
-		target_us = us;
-	}
-
-	printf("> [maruko] Exposure: maxShutter %uus -> %uus\n",
-		limit.maxShutterUs, target_us);
-	limit.maxShutterUs = target_us;
-	ret = fn_set(0, 0, &limit);
-	dlclose(h);
-	return ret;
-}
-
 static int maruko_apply_gain_max(uint32_t gain)
 {
 	/* Set max sensor gain via SetExposureLimit. */
@@ -957,7 +929,6 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_gop = maruko_apply_gop,
 	.apply_qp_delta = maruko_apply_qp_delta,
 	.apply_roi_qp = maruko_apply_roi_qp,
-	.apply_exposure = maruko_apply_exposure,
 	.apply_verbose = maruko_apply_verbose,
 	.apply_output_enabled = maruko_apply_output_enabled,
 	.apply_server = maruko_apply_server,

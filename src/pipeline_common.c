@@ -1,9 +1,23 @@
 #include "pipeline_common.h"
 
+#include <ctype.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+
+uint32_t pipeline_common_frame_lost_threshold(uint32_t kbps)
+{
+	uint32_t bits, margin;
+
+	if (kbps > 200000U)
+		kbps = 200000U;
+	bits = kbps * 1024U;
+	margin = bits / 5U;
+	if (margin < 524288U)
+		margin = 524288U;
+	return bits + margin;
+}
 
 uint32_t pipeline_common_gop_frames(double gop_seconds, uint32_t fps)
 {
@@ -100,7 +114,7 @@ typedef int (*isp_set_exposure_limit_fn_t)(int channel,
 #define ISP_AE_CALL(fn, cfg) fn(0, cfg)
 #endif
 
-int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
+int pipeline_common_cap_exposure_for_fps(uint32_t fps)
 {
 	isp_get_exposure_limit_fn_t fn_get;
 	isp_set_exposure_limit_fn_t fn_set;
@@ -109,7 +123,7 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
 	uint32_t target_us;
 	int ret;
 
-	if (fps == 0 && user_cap_us == 0)
+	if (fps == 0)
 		return 0;
 
 	handle = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
@@ -152,14 +166,10 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
 				break;
 		}
 		if (config.maxShutterUs == 0 && config.maxSensorGain == 0) {
-			/* ISP never populated — use synthetic limits so the
-			 * shutter cap is still applied.  Permissive gain
-			 * defaults let AE compensate; cus3a or ISP bin will
-			 * tighten them once initialised. */
 			fprintf(stderr,
 				"WARNING: ISP exposure limits not populated "
 				"after 500 ms, using synthetic defaults\n");
-			config.maxShutterUs = 1000000;  /* 1 s — will be capped below */
+			config.maxShutterUs = 1000000;
 			config.maxSensorGain = SYNTHETIC_MAX_GAIN;
 			config.maxIspGain = SYNTHETIC_MAX_GAIN;
 		} else {
@@ -168,21 +178,13 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
 		}
 	}
 
-	if (user_cap_us > 0) {
-		target_us = user_cap_us;
-		printf("> Exposure override: maxShutter %uus -> %uus (exposure %ums)\n",
-			config.maxShutterUs, target_us, user_cap_us / 1000);
+	target_us = 1000000 / fps;
+	if (config.maxShutterUs <= target_us) {
+		printf("> Exposure cap: maxShutter %uus (already <= %uus for %u fps), enforcing\n",
+			config.maxShutterUs, target_us, fps);
 	} else {
-		target_us = 1000000 / fps;
-		if (config.maxShutterUs <= target_us) {
-			/* Limit looks OK but the sensor register may disagree
-			 * on cold boot — fall through to set + poll. */
-			printf("> Exposure cap: maxShutter %uus (already <= %uus for %u fps), enforcing\n",
-				config.maxShutterUs, target_us, fps);
-		} else {
-			printf("> Exposure cap: maxShutter %uus -> %uus (for %u fps)\n",
-				config.maxShutterUs, target_us, fps);
-		}
+		printf("> Exposure cap: maxShutter %uus -> %uus (for %u fps)\n",
+			config.maxShutterUs, target_us, fps);
 	}
 
 	config.maxShutterUs = target_us;
@@ -195,11 +197,18 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
 }
 
 PipelinePrecropRect pipeline_common_compute_precrop(uint32_t sensor_w,
-	uint32_t sensor_h, uint32_t image_w, uint32_t image_h)
+	uint32_t sensor_h, uint32_t image_w, uint32_t image_h,
+	bool keep_aspect)
 {
 	PipelinePrecropRect rect = {0, 0, (uint16_t)sensor_w, (uint16_t)sensor_h};
-	uint64_t sensor_ar = (uint64_t)sensor_w * image_h;
-	uint64_t image_ar = (uint64_t)image_w * sensor_h;
+	uint64_t sensor_ar;
+	uint64_t image_ar;
+
+	if (!keep_aspect)
+		return rect;
+
+	sensor_ar = (uint64_t)sensor_w * image_h;
+	image_ar = (uint64_t)image_w * sensor_h;
 
 	if (sensor_ar > image_ar) {
 		rect.h = (uint16_t)sensor_h;
@@ -214,4 +223,70 @@ PipelinePrecropRect pipeline_common_compute_precrop(uint32_t sensor_w,
 	}
 
 	return rect;
+}
+
+/* Lowercase sensor_name into out_buf, stopping at the first non-alnum
+ * character or out_sz-1 bytes.  Returns the number of characters written
+ * (0 if sensor_name is NULL/empty or starts with a non-alnum). */
+static size_t sensor_name_normalize(const char *sensor_name,
+	char *out_buf, size_t out_sz)
+{
+	size_t w = 0;
+
+	if (!sensor_name || !out_buf || out_sz == 0)
+		return 0;
+	while (sensor_name[w] && w + 1 < out_sz) {
+		unsigned char c = (unsigned char)sensor_name[w];
+		if (!isalnum(c))
+			break;
+		out_buf[w] = (char)tolower(c);
+		w++;
+	}
+	out_buf[w] = '\0';
+	return w;
+}
+
+int pipeline_common_resolve_isp_bin(const char *configured_path,
+	const char *sensor_name, char *out_path, size_t out_sz)
+{
+	char fallback[256];
+	char normalized[64];
+	size_t name_len;
+
+	if (!out_path || out_sz == 0)
+		return 0;
+	out_path[0] = '\0';
+
+	if (configured_path && *configured_path) {
+		if (access(configured_path, R_OK) == 0) {
+			snprintf(out_path, out_sz, "%s", configured_path);
+			printf("> ISP bin: %s (configured)\n", configured_path);
+			return 1;
+		}
+		fprintf(stderr,
+			"WARNING: ISP bin '%s' not readable, attempting fallback\n",
+			configured_path);
+	}
+
+	name_len = sensor_name_normalize(sensor_name, normalized,
+		sizeof(normalized));
+	if (name_len == 0) {
+		printf("> ISP bin: none (no path configured%s)\n",
+			(sensor_name && *sensor_name) ?
+				", sensor name unrecognized" :
+				", sensor name unavailable");
+		return 0;
+	}
+
+	snprintf(fallback, sizeof(fallback), "/etc/sensors/%s.bin", normalized);
+	if (access(fallback, R_OK) == 0) {
+		snprintf(out_path, out_sz, "%s", fallback);
+		printf("> ISP bin: %s (auto-detected for sensor '%s')\n",
+			fallback, normalized);
+		return 1;
+	}
+
+	printf("> ISP bin: none (no fallback at %s for sensor '%s')\n",
+		fallback, normalized);
+	return 0;
 }

@@ -1,4 +1,5 @@
 #include "venc_api.h"
+#include "idr_rate_limit.h"
 #include "pipeline_common.h"
 #include "sensor_select.h"
 #include "star6e_recorder.h"
@@ -17,13 +18,124 @@
 static VencConfig *g_cfg;
 static const VencApplyCallbacks *g_cb;
 static char g_backend[32];
+static char g_config_path[256];
 static int g_api_routes_registered = 0;
 
 /* Mutex protecting g_cfg field access from the httpd thread.
  * All handle_set/handle_get calls run on the httpd pthread; the main
  * streaming thread reads config fields concurrently.  This mutex
- * serializes field reads/writes to prevent torn values on ARM. */
+ * serializes field reads/writes to prevent torn values on ARM.  It also
+ * guards g_config_path and the g_last_saved cache below (the httpd is
+ * single-threaded so no handler-vs-handler race, but the main thread
+ * calls venc_api_set_config_path at startup). */
 static pthread_mutex_t g_cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Last config snapshot that was successfully persisted, used to skip
+ * redundant flash writes when /api/v1/set changes nothing (e.g. a
+ * slider that lands back on its current value, or an adaptive-bitrate
+ * loop re-asserting the same kbps).  memcmp is safe because both the
+ * saved copy and the candidate are produced by byte-wise struct copies
+ * (`*g_cfg = new_cfg` and `actual_cfg = *g_cfg`), so any padding bytes
+ * are bit-identical. */
+static VencConfig g_last_saved;
+static int g_last_saved_valid = 0;
+
+/* Pipeline runtime state exposed via /api/v1/config and /api/v1/ae.
+ * Backends call venc_api_set_active_precrop() after programming VIF; the
+ * store stays "valid=0" until the first successful pipeline start.  Reads
+ * are atomic under g_precrop_mutex (HTTP thread vs pipeline thread). */
+static pthread_mutex_t g_precrop_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+	uint16_t x, y, w, h;
+	int valid;
+} g_precrop = {0, 0, 0, 0, 0};
+
+void venc_api_set_active_precrop(uint16_t x, uint16_t y, uint16_t w, uint16_t h)
+{
+	pthread_mutex_lock(&g_precrop_mutex);
+	g_precrop.x = x;
+	g_precrop.y = y;
+	g_precrop.w = w;
+	g_precrop.h = h;
+	g_precrop.valid = 1;
+	pthread_mutex_unlock(&g_precrop_mutex);
+}
+
+void venc_api_clear_active_precrop(void)
+{
+	pthread_mutex_lock(&g_precrop_mutex);
+	g_precrop.valid = 0;
+	pthread_mutex_unlock(&g_precrop_mutex);
+}
+
+int venc_api_get_active_precrop(uint16_t *x, uint16_t *y,
+	uint16_t *w, uint16_t *h)
+{
+	int valid;
+	pthread_mutex_lock(&g_precrop_mutex);
+	valid = g_precrop.valid;
+	if (valid && x && y && w && h) {
+		*x = g_precrop.x;
+		*y = g_precrop.y;
+		*w = g_precrop.w;
+		*h = g_precrop.h;
+	}
+	pthread_mutex_unlock(&g_precrop_mutex);
+	return valid;
+}
+
+void venc_api_set_config_path(const char *path)
+{
+	pthread_mutex_lock(&g_cfg_mutex);
+	if (path)
+		snprintf(g_config_path, sizeof(g_config_path), "%s", path);
+	else
+		g_config_path[0] = '\0';
+	/* Path change invalidates the last-saved cache so the first save to
+	 * the new path is unconditional. */
+	g_last_saved_valid = 0;
+	pthread_mutex_unlock(&g_cfg_mutex);
+}
+
+/* Persist current config to disk if a config path was registered and the
+ * snapshot differs from the last-saved copy.  Caller must NOT hold
+ * g_cfg_mutex (this function takes it).
+ * Returns:
+ *   0  — saved successfully, or skipped because content is unchanged
+ *  -1  — save failed (disk full, readonly FS, permission, fsync error).
+ *        In-memory state was already committed before this call; callers
+ *        should surface the failure so operators know the runtime and
+ *        on-disk config have diverged. */
+static int venc_api_save_config_to_disk(const VencConfig *cfg_snapshot)
+{
+	char path[sizeof(g_config_path)];
+	int is_same = 0;
+	int rc;
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	snprintf(path, sizeof(path), "%s", g_config_path);
+	if (g_last_saved_valid &&
+	    memcmp(&g_last_saved, cfg_snapshot, sizeof(*cfg_snapshot)) == 0)
+		is_same = 1;
+	pthread_mutex_unlock(&g_cfg_mutex);
+	if (!path[0])
+		return 0;  /* no path registered — silently no-op */
+	if (is_same)
+		return 0;  /* identical to last save — skip flash write */
+
+	rc = venc_config_save(path, cfg_snapshot);
+	if (rc == 0) {
+		pthread_mutex_lock(&g_cfg_mutex);
+		g_last_saved = *cfg_snapshot;
+		g_last_saved_valid = 1;
+		pthread_mutex_unlock(&g_cfg_mutex);
+	} else {
+		fprintf(stderr, "[venc_api] WARNING: config save to %s failed — "
+			"in-memory change committed but on-disk copy is stale\n",
+			path);
+	}
+	return rc;
+}
 
 /* ── Sensor info (set by backend after sensor_select) ─────────────────── */
 
@@ -148,7 +260,6 @@ static const FieldDesc g_fields[] = {
 	FIELD(sensor, unlock_dir,      FT_INT,    MUT_RESTART),
 
 	FIELD(isp, sensor_bin,         FT_STRING, MUT_RESTART),
-	FIELD(isp, exposure,           FT_UINT,   MUT_LIVE),
 	FIELD(isp, gain_max,           FT_UINT,   MUT_LIVE),
 	FIELD(isp, awb_mode,           FT_STRING, MUT_LIVE),
 	FIELD(isp, awb_ct,             FT_UINT,   MUT_LIVE),
@@ -177,6 +288,7 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(isp, legacy_ae,      FT_BOOL,   MUT_RESTART),
 	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
+	FIELD(isp, keep_aspect,    FT_BOOL,   MUT_RESTART),
 
 	FIELD(audio, enabled,      FT_BOOL,   MUT_RESTART),
 	FIELD(audio, sample_rate,  FT_UINT,   MUT_RESTART),
@@ -268,6 +380,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "fpv.noiseLevel", "fpv.noise_level" },
 	{ "isp.legacyAe", "isp.legacy_ae" },
 	{ "isp.aeFps", "isp.ae_fps" },
+	{ "isp.keepAspect", "isp.keep_aspect" },
 	{ "audio.sampleRate", "audio.sample_rate" },
 	{ "imu.i2cDevice", "imu.i2c_device" },
 	{ "imu.i2cAddr", "imu.i2c_addr" },
@@ -366,6 +479,8 @@ static char *field_to_json_value_from_cfg(const VencConfig *cfg,
 	}
 	case FT_SIZE: {
 		const uint32_t *wh = (const uint32_t *)ptr;
+		if (wh[0] == 0 && wh[1] == 0)
+			return strdup("\"auto\"");
 		snprintf(buf, sizeof(buf), "\"%ux%u\"", wh[0], wh[1]);
 		return strdup(buf);
 	}
@@ -445,9 +560,9 @@ static int field_from_string_cfg(VencConfig *cfg, const FieldDesc *f,
 		break;
 	case FT_SIZE: {
 		uint32_t w, h;
-		if (!strcmp(val, "720p")) { w = 1280; h = 720; }
+		if (!strcmp(val, "auto")) { w = 0; h = 0; }
+		else if (!strcmp(val, "720p")) { w = 1280; h = 720; }
 		else if (!strcmp(val, "1080p")) { w = 1920; h = 1080; }
-		else if (!strcmp(val, "4MP")) { w = 2688; h = 1520; }
 		else if (sscanf(val, "%ux%u", &w, &h) != 2) return -1;
 		uint32_t *wh = (uint32_t *)ptr;
 		wh[0] = w;
@@ -571,7 +686,6 @@ typedef enum {
 	LIVE_GROUP_VIDEO_TIMING,
 	LIVE_GROUP_QP_DELTA,
 	LIVE_GROUP_ROI,
-	LIVE_GROUP_EXPOSURE,
 	LIVE_GROUP_GAIN_MAX,
 	LIVE_GROUP_AWB,
 	LIVE_GROUP_VERBOSE,
@@ -722,8 +836,6 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	    strcmp(canonical_key, "fpv.roi_steps") == 0 ||
 	    strcmp(canonical_key, "fpv.roi_center") == 0)
 		return LIVE_GROUP_ROI;
-	if (strcmp(canonical_key, "isp.exposure") == 0)
-		return LIVE_GROUP_EXPOSURE;
 	if (strcmp(canonical_key, "isp.gain_max") == 0)
 		return LIVE_GROUP_GAIN_MAX;
 	if (strcmp(canonical_key, "isp.awb_mode") == 0 ||
@@ -751,8 +863,6 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "video0.qp_delta";
 	case LIVE_GROUP_ROI:
 		return "fpv.roi_*";
-	case LIVE_GROUP_EXPOSURE:
-		return "isp.exposure";
 	case LIVE_GROUP_GAIN_MAX:
 		return "isp.gain_max";
 	case LIVE_GROUP_AWB:
@@ -885,8 +995,6 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_qp_delta != NULL;
 	case LIVE_GROUP_ROI:
 		return g_cb->apply_roi_qp != NULL;
-	case LIVE_GROUP_EXPOSURE:
-		return g_cb->apply_exposure != NULL;
 	case LIVE_GROUP_GAIN_MAX:
 		return g_cb->apply_gain_max != NULL;
 	case LIVE_GROUP_AWB:
@@ -931,9 +1039,6 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		dst->fpv.roi_qp = src->fpv.roi_qp;
 		dst->fpv.roi_steps = src->fpv.roi_steps;
 		dst->fpv.roi_center = src->fpv.roi_center;
-		break;
-	case LIVE_GROUP_EXPOSURE:
-		dst->isp.exposure = src->isp.exposure;
 		break;
 	case LIVE_GROUP_GAIN_MAX:
 		dst->isp.gain_max = src->isp.gain_max;
@@ -1019,8 +1124,6 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_qp_delta(cfg->video0.qp_delta);
 	case LIVE_GROUP_ROI:
 		return g_cb->apply_roi_qp(cfg->fpv.roi_qp);
-	case LIVE_GROUP_EXPOSURE:
-		return g_cb->apply_exposure(cfg->isp.exposure * 1000);
 	case LIVE_GROUP_GAIN_MAX:
 		return g_cb->apply_gain_max(cfg->isp.gain_max);
 	case LIVE_GROUP_AWB:
@@ -1360,6 +1463,13 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	}
 
 	pthread_mutex_unlock(&g_cfg_mutex);
+	/* Persist LIVE changes too.  Matches user expectation that a
+	 * /api/v1/set round-trip (WebUI slider, curl, etc.) survives restart.
+	 * Done after the mutex is released to avoid holding it across fsync.
+	 * The helper already logs failures to stderr and caches the
+	 * last-saved snapshot, so repeated identical sets skip the flash
+	 * write entirely. */
+	(void)venc_api_save_config_to_disk(&actual_cfg);
 	return 0;
 }
 
@@ -1421,9 +1531,14 @@ static int process_restart_set_query(const SetQueryParam *param,
 	}
 
 	*g_cfg = new_cfg;
-	venc_api_request_reinit(2);
 	jval = field_to_json_value_from_cfg(&new_cfg, param->field);
 	pthread_mutex_unlock(&g_cfg_mutex);
+	/* Persist to disk so the change survives restart/crash.  The reinit
+	 * uses the in-memory snapshot we just committed; the on-disk copy now
+	 * matches.  Failure is logged by the helper — leave as void since the
+	 * reinit is still the right next step even if persistence stalled. */
+	(void)venc_api_save_config_to_disk(&new_cfg);
+	venc_api_request_reinit(2);
 	if (!jval) {
 		*status_code = 500;
 		return make_error_json("internal_error", "out of memory",
@@ -1524,6 +1639,10 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 
 static int handle_config(int fd, const HttpRequest *req, void *ctx)
 {
+	uint16_t px = 0, py = 0, pw = 0, ph = 0;
+	int precrop_valid;
+	char runtime[160];
+
 	(void)req; (void)ctx;
 	pthread_mutex_lock(&g_cfg_mutex);
 	char *cfg_json = venc_config_to_json_string(g_cfg);
@@ -1532,14 +1651,25 @@ static int handle_config(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 500, "internal_error",
 			"failed to serialize config");
 
+	precrop_valid = venc_api_get_active_precrop(&px, &py, &pw, &ph);
+	if (precrop_valid) {
+		snprintf(runtime, sizeof(runtime),
+			",\"runtime\":{\"active_precrop\":"
+			"{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u}}",
+			px, py, pw, ph);
+	} else {
+		runtime[0] = '\0';
+	}
+
 	/* Wrap in envelope */
-	size_t len = strlen(cfg_json) + 64;
+	size_t len = strlen(cfg_json) + strlen(runtime) + 64;
 	char *buf = malloc(len);
 	if (!buf) {
 		free(cfg_json);
 		return httpd_send_error(fd, 500, "internal_error", "out of memory");
 	}
-	snprintf(buf, len, "{\"ok\":true,\"data\":{\"config\":%s}}", cfg_json);
+	snprintf(buf, len, "{\"ok\":true,\"data\":{\"config\":%s%s}}",
+		cfg_json, runtime);
 	int ret = httpd_send_json(fd, 200, buf);
 	free(buf);
 	free(cfg_json);
@@ -1727,16 +1857,23 @@ static int handle_iq_set(int fd, const HttpRequest *req, void *ctx)
 #if HAVE_BACKEND_STAR6E
 extern int star6e_iq_import(const char *json_str);
 #endif
+#if HAVE_BACKEND_MARUKO
+extern int maruko_iq_import(const char *json_str);
+#endif
 
 static int handle_iq_import(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)ctx;
-#if HAVE_BACKEND_STAR6E
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
 	if (req->body_len <= 0 || !req->body[0]) {
 		return httpd_send_error(fd, 400, "invalid_request",
 			"POST JSON body required (output of /api/v1/iq)");
 	}
+#if HAVE_BACKEND_STAR6E
 	int ret = star6e_iq_import(req->body);
+#else
+	int ret = maruko_iq_import(req->body);
+#endif
 	if (ret != 0)
 		return httpd_send_error(fd, 500, "import_partial",
 			"some parameters failed to apply");
@@ -1782,9 +1919,48 @@ static int handle_isp_metrics(int fd, const HttpRequest *req, void *ctx)
 	return ret;
 }
 
+static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
+{
+	VencConfig snapshot;
+	VencConfig fresh;
+	int save_rc;
+	char resp[80];
+
+	(void)req; (void)ctx;
+	/* Build defaults in a local first, then swap under the lock.  Keeps
+	 * the critical section short so live readers of g_cfg fields see a
+	 * consistent commit point rather than a half-mutated mid-memset. */
+	venc_config_defaults(&fresh);
+	pthread_mutex_lock(&g_cfg_mutex);
+	if (!g_cfg) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return httpd_send_error(fd, 500, "internal_error",
+			"config not registered");
+	}
+	*g_cfg = fresh;
+	snapshot = fresh;
+	pthread_mutex_unlock(&g_cfg_mutex);
+	save_rc = venc_api_save_config_to_disk(&snapshot);
+	/* Mode 1 (reload-from-disk) is correct only when the disk save
+	 * succeeded — otherwise the reload would silently overlay the stale
+	 * on-disk config onto the in-memory defaults and revert most of
+	 * them.  On save failure use mode 2 (apply in-memory) so the
+	 * operator at least gets the defaults they asked for at runtime. */
+	venc_api_request_reinit(save_rc == 0 ? 1 : 2);
+	snprintf(resp, sizeof(resp),
+		"{\"defaults\":true,\"reinit\":true,\"saved\":%s}",
+		save_rc == 0 ? "true" : "false");
+	return httpd_send_ok(fd, resp);
+}
+
 static int handle_restart(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
+	/* /api/v1/restart is pure "reload from disk + reinit" (like SIGHUP).
+	 * We do NOT write the in-memory config back to disk here, so that a
+	 * manual file swap (scp, editor) followed by /api/v1/restart reloads
+	 * exactly what the operator put on disk.  Persistence happens at the
+	 * /api/v1/set level (LIVE and RESTART both now save per set). */
 	venc_api_request_reinit(1);
 	return httpd_send_ok(fd, "{\"reinit\":true}");
 }
@@ -2095,6 +2271,37 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 		"Supported: bitrate, gop");
 }
 
+static int handle_idr_stats(int fd, const HttpRequest *req, void *ctx)
+{
+	/* 8 channels × ~40 B/entry + envelope ≈ 360 B worst case; 768 B
+	 * leaves comfortable headroom and avoids the tight `sizeof(buf)-16`
+	 * break margin needing to match the 3-byte `"]}}"` tail exactly. */
+	char buf[768];
+	size_t n = 0;
+
+	(void)req; (void)ctx;
+
+	n += (size_t)snprintf(buf + n, sizeof(buf) - n,
+		"{\"ok\":true,\"data\":{\"min_spacing_us\":%u,"
+		"\"channels\":[",
+		IDR_RATE_LIMIT_MIN_SPACING_US);
+	for (int chn = 0; chn < IDR_RATE_LIMIT_MAX_CHANNELS; chn++) {
+		uint32_t h = idr_rate_limit_honored(chn);
+		uint32_t d = idr_rate_limit_dropped(chn);
+		if (h == 0 && d == 0)
+			continue;  /* skip inactive channels */
+		if (n > 0 && buf[n - 1] != '[')
+			n += (size_t)snprintf(buf + n, sizeof(buf) - n, ",");
+		n += (size_t)snprintf(buf + n, sizeof(buf) - n,
+			"{\"idx\":%d,\"honored\":%u,\"dropped\":%u}",
+			chn, h, d);
+		if (n >= sizeof(buf) - 16)
+			break;
+	}
+	(void)snprintf(buf + n, sizeof(buf) - n, "]}}");
+	return httpd_send_json(fd, 200, buf);
+}
+
 static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 {
 	MI_VENC_CHN ch;
@@ -2110,6 +2317,10 @@ static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 	}
 	ch = g_dual.channel;
 	pthread_mutex_unlock(&g_dual_mutex);
+
+	if (!idr_rate_limit_allow((int)ch))
+		return httpd_send_json(fd, 200,
+			"{\"ok\":true,\"data\":{\"idr\":true,\"coalesced\":true}}");
 
 	ret = MI_VENC_RequestIdr(ch, 1);
 	if (ret != 0)
@@ -2163,6 +2374,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/fps/config",   handle_fps_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/fps/live",     handle_fps_live, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/restart",      handle_restart, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/defaults",     handle_defaults, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/ae",           handle_ae, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/awb",          handle_awb, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/iq/set",       handle_iq_set, NULL);
@@ -2177,6 +2389,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/status", handle_dual_status, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/set",    handle_dual_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
 	r |= venc_webui_register();
 	if (r != 0) {
 		pthread_mutex_lock(&g_cfg_mutex);

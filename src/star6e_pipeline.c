@@ -34,13 +34,6 @@ typedef int (*isp_get_exposure_limit_fn_t)(int channel,
 typedef int (*isp_set_exposure_limit_fn_t)(int channel,
 	IspExposureLimit *config);
 
-typedef struct {
-	uint16_t x;
-	uint16_t y;
-	uint16_t w;
-	uint16_t h;
-} Star6ePrecropRect;
-
 typedef int (*isp_load_bin_fn_t)(int channel, char *path, unsigned int key);
 typedef int (*isp_disable_userspace3a_fn_t)(int channel);
 typedef int (*cus3a_fn_t)(int channel, void *params);
@@ -333,9 +326,9 @@ void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 	g_cus3a_handoff_done = 1;
 }
 
-int star6e_pipeline_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us)
+int star6e_pipeline_cap_exposure_for_fps(uint32_t fps)
 {
-	return pipeline_common_cap_exposure_for_fps(fps, user_cap_us);
+	return pipeline_common_cap_exposure_for_fps(fps);
 }
 
 static void star6e_pipeline_stop_sensor(MI_SNR_PAD_ID_e pad_id)
@@ -344,10 +337,11 @@ static void star6e_pipeline_stop_sensor(MI_SNR_PAD_ID_e pad_id)
 }
 
 static Star6ePrecropRect star6e_pipeline_compute_precrop(uint32_t sensor_w,
-	uint32_t sensor_h, uint32_t image_w, uint32_t image_h)
+	uint32_t sensor_h, uint32_t image_w, uint32_t image_h,
+	bool keep_aspect)
 {
 	PipelinePrecropRect common = pipeline_common_compute_precrop(
-		sensor_w, sensor_h, image_w, image_h);
+		sensor_w, sensor_h, image_w, image_h, keep_aspect);
 	Star6ePrecropRect rect = {common.x, common.y, common.w, common.h};
 	return rect;
 }
@@ -466,6 +460,24 @@ static int star6e_pipeline_start_vpe(const SensorSelectResult *sensor,
 		fprintf(stderr, "ERROR: MI_VPE_SetChannelParam failed %d\n", ret);
 		MI_VPE_DestroyChannel(0);
 		return ret;
+	}
+
+	/* Sensor-level orientation.  VPE digital flip is unreliable on some
+	 * sensor combos; MI_SNR_SetOrien programs the sensor's own flip
+	 * register which is what actually inverts scan-line order.  Applied
+	 * after MI_VPE_SetChannelParam so both paths agree.  Non-fatal: some
+	 * sensor drivers may reject mid-stream orientation changes; we log
+	 * so BSP regressions surface instead of silently leaving the image
+	 * upside down. */
+	{
+		MI_S32 orien_ret = MI_SNR_SetOrien(sensor->pad_id,
+			mirror ? 1 : 0, flip ? 1 : 0);
+		if (orien_ret != 0)
+			fprintf(stderr, "[pipeline] WARNING: "
+				"MI_SNR_SetOrien(pad=%d mirror=%d flip=%d) "
+				"returned %d\n",
+				(int)sensor->pad_id, mirror ? 1 : 0,
+				flip ? 1 : 0, (int)orien_ret);
 	}
 
 	ret = MI_VPE_StartChannel(0);
@@ -721,7 +733,9 @@ typedef struct {
 	SensorSelectConfig sensor_cfg;
 	SensorUnlockConfig sensor_unlock;
 	SensorStrategy     sensor_strategy;
-	const char        *isp_bin_path;
+	char               isp_bin_path[256];   /* "" if no bin should be loaded;
+	                                         * resolved by select_and_configure_sensor()
+	                                         * after we know the live sensor name */
 	uint32_t           sensor_width;
 	uint32_t           sensor_height;
 	uint32_t           image_width;
@@ -777,22 +791,21 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 		return -1;
 	}
 
-	/* When legacyAe is active and no explicit exposure cap is set, the
-	 * ISP bin's built-in AE ignores SetExposureLimit for the physical
-	 * sensor register.  Auto-derive a cap from the sensor fps so the
-	 * shutter never exceeds the frame period.  Without this, the AE
-	 * converges on a long exposure that locks fps below the target. */
-	if (vcfg->isp.exposure > 0)
-		pconf->exposure_cap_us = vcfg->isp.exposure * 1000;
-	else if (vcfg->isp.legacy_ae && pconf->sensor_framerate > 0)
-		pconf->exposure_cap_us = 1000000 / pconf->sensor_framerate;
-	else
-		pconf->exposure_cap_us = 0;
+	/* Auto-cap exposure to frame period so the AE shutter never exceeds
+	 * the frame period.  Without this, the AE converges on a long
+	 * exposure that locks fps below the target. */
+	pconf->exposure_cap_us = (pconf->sensor_framerate > 0) ?
+		1000000 / pconf->sensor_framerate : 0;
 	pconf->image_mirror    = vcfg->image.mirror ? 1 : 0;
 	pconf->image_flip      = vcfg->image.flip   ? 1 : 0;
 	pconf->vpe_level_3dnr  = vcfg->fpv.noise_level;
 	pconf->oc_level        = vcfg->system.overclock_level;
-	pconf->isp_bin_path    = vcfg->isp.sensor_bin[0] ? vcfg->isp.sensor_bin : NULL;
+	/* isp_bin_path is resolved later in bind_and_finalize_pipeline() once
+	 * the live sensor name is known.  Resolved there (rather than in
+	 * select_and_configure_sensor) so that reinit — which reuses the
+	 * existing sensor and skips select_and_configure_sensor — also picks
+	 * up SIGHUP-driven `isp.sensorBin` changes.  Leave empty here. */
+	pconf->isp_bin_path[0] = '\0';
 
 	pconf->sensor_cfg = pipeline_common_build_sensor_select_config(
 		vcfg->sensor.index, vcfg->sensor.mode,
@@ -858,13 +871,19 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	pconf->sensor_framerate = state->sensor.fps;
 	pconf->venc_gop_size = pipeline_common_gop_frames(vcfg->video0.gop_size,
 		pconf->sensor_framerate);
+	/* Auto resolution: 0x0 means use sensor native dimensions */
+	if (pconf->image_width == 0 || pconf->image_height == 0) {
+		pconf->image_width = sensor_width;
+		pconf->image_height = sensor_height;
+	}
 	pipeline_common_clamp_image_size("", sensor_width, sensor_height,
 		&pconf->image_width, &pconf->image_height);
 	state->image_width  = pconf->image_width;
 	state->image_height = pconf->image_height;
 
 	pconf->precrop = star6e_pipeline_compute_precrop(sensor_width,
-		sensor_height, pconf->image_width, pconf->image_height);
+		sensor_height, pconf->image_width, pconf->image_height,
+		vcfg->isp.keep_aspect);
 	overscan_x = (uint16_t)(((state->sensor.plane.capt.width  - sensor_width)
 		/ 2) & ~1u);
 	overscan_y = (uint16_t)(((state->sensor.plane.capt.height - sensor_height)
@@ -917,10 +936,23 @@ static void star6e_pipeline_imu_push(void *ctx, const ImuSample *sample)
  * causes a mutex deadlock.  ISP bin and exposure cap are safe to reapply. */
 static int g_isp_initialized = 0;
 
+/* Track the last-loaded ISP bin path so we can skip the reload on reinit
+ * when nothing has changed.  The vendor AE inside the bin writes a default
+ * shutter (~10000us on IMX335) to the sensor register on load, which
+ * extends VTS and pins the sensor at ~100 fps.  MI_SNR_SetFps(same value)
+ * is a no-op in the sensor driver's pCus_SetFPS path, so there is no
+ * reliable way to undo the damage without power-cycling the sensor (which
+ * breaks MIPI sync on I6E).  Safer to avoid reloading the bin at all when
+ * the operator hasn't changed it. */
+static char g_last_isp_bin_path[256] = {0};
+
 /* Phase 3: assign port structs, issue all MI_SYS bind calls, init output,
- * video, ISP bin, exposure cap, cus3a, clocks, and audio. */
+ * video, ISP bin, exposure cap, cus3a, clocks, and audio.
+ * pconf is non-const because we resolve isp_bin_path in here (we need
+ * the live sensor name from state->sensor, which is only populated
+ * after Phase 2). */
 static int bind_and_finalize_pipeline(Star6ePipelineState *state,
-	const VencConfig *vcfg, const Star6ePipelineConfig *pconf,
+	const VencConfig *vcfg, Star6ePipelineConfig *pconf,
 	SdkQuietState *sdk_quiet)
 {
 	MI_U32 venc_device = 0;
@@ -964,8 +996,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	 * can converge on a shutter time longer than the frame period during
 	 * the ISP bin load + CUS3A init window, locking the pipeline at a
 	 * lower framerate until reinit. */
-	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate,
-		pconf->exposure_cap_us);
+	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate);
 
 	bind_src_fps = state->sensor.mode.maxFps ?
 		state->sensor.mode.maxFps : pconf->sensor_framerate;
@@ -996,12 +1027,32 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	star6e_video_init(&state->video, vcfg, pconf->sensor_framerate,
 		&state->output);
 
-	/* Load ISP bin on every start/reinit.  The kernel ISP driver accepts
-	 * repeated loads without issues on current firmware. */
-	if (pconf->isp_bin_path && *pconf->isp_bin_path) {
+	/* Resolve isp.sensorBin: configured path takes precedence; if empty
+	 * or unreadable, fall back to /etc/sensors/<sensor>.bin keyed off
+	 * the live sensor name.  Resolved here (rather than in
+	 * select_and_configure_sensor) so reinit also picks up SIGHUP-driven
+	 * isp.sensorBin changes — reinit reuses the existing sensor and
+	 * skips select_and_configure_sensor. */
+	pipeline_common_resolve_isp_bin(
+		vcfg->isp.sensor_bin[0] ? vcfg->isp.sensor_bin : NULL,
+		state->sensor.plane.sensName,
+		pconf->isp_bin_path, sizeof(pconf->isp_bin_path));
+
+	/* Load ISP bin on first start, or when the bin path changes.  Skipping
+	 * redundant reloads avoids the vendor AE resetting the sensor shutter
+	 * register back to its default (~10000us on IMX335) on every SIGHUP /
+	 * Save&Restart, which would otherwise lock the sensor VTS at ~100 fps.
+	 * The kernel ISP driver accepts repeated loads but each one disturbs
+	 * the running sensor timing. */
+	if (pconf->isp_bin_path[0] &&
+	    strcmp(pconf->isp_bin_path, g_last_isp_bin_path) != 0) {
 		ret = star6e_pipeline_load_isp_bin(pconf->isp_bin_path, sdk_quiet);
-		if (ret != 0)
+		if (ret != 0) {
 			fprintf(stderr, "WARNING: ISP bin load failed; continuing with default ISP settings\n");
+		} else {
+			snprintf(g_last_isp_bin_path, sizeof(g_last_isp_bin_path),
+				"%s", pconf->isp_bin_path);
+		}
 	}
 	if (!g_isp_initialized) {
 		star6e_pipeline_enable_cus3a(sdk_quiet);
@@ -1009,8 +1060,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	}
 	/* Reapply exposure cap after ISP bin load — the bin may reset AE
 	 * limits to its own defaults which could exceed the frame period. */
-	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate,
-		pconf->exposure_cap_us);
+	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate);
 
 	/* Cold-boot fix: with legacyAe the ISP bin's AE may initialize the
 	 * sensor at a shutter exceeding the frame period.  SetExposureLimit
@@ -1146,6 +1196,8 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	if (!state)
 		return;
 
+	venc_api_clear_active_precrop();
+
 	/* The recording thread must keep consuming ch1 frames through
 	 * the ENTIRE teardown sequence.  At 120fps, the 12-frame ch1
 	 * buffer fills in ~100ms — any gap in consumption causes VPE
@@ -1262,14 +1314,18 @@ static void star6e_pipeline_stop_venc_level(Star6ePipelineState *state)
 
 	star6e_audio_teardown(&state->audio);
 	star6e_output_teardown(&state->output);
-	if (state->dual)
-		star6e_output_teardown(&state->dual->output);
 
+	/* Stop and join the dual recorder thread BEFORE tearing down its
+	 * output.  The thread calls star6e_video_send_frame(&dual->output, …)
+	 * inside its loop; tearing down output first leaves a window where
+	 * the still-running thread writes to a closed/freed output. */
 	if (state->dual && state->dual->rec_started) {
 		state->dual->rec_running = 0;
 		pthread_join(state->dual->rec_thread, NULL);
 		state->dual->rec_started = 0;
 	}
+	if (state->dual)
+		star6e_output_teardown(&state->dual->output);
 
 	if (state->dual && state->dual->bound) {
 		MI_SYS_UnBindChnPort(&state->vpe_port, &state->dual->port);
@@ -1336,6 +1392,12 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 	prev_image_width  = state->image_width;
 	prev_image_height = state->image_height;
 
+	/* Auto resolution: 0x0 means keep dimensions from initial sensor
+	 * selection rather than re-deriving from raw capture size. */
+	if (pconf.image_width == 0 || pconf.image_height == 0) {
+		pconf.image_width = state->image_width;
+		pconf.image_height = state->image_height;
+	}
 	pipeline_common_clamp_image_size("",
 		state->sensor.plane.capt.width,
 		state->sensor.plane.capt.height,
@@ -1343,8 +1405,7 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 	state->image_width  = pconf.image_width;
 	state->image_height = pconf.image_height;
 
-	if (pconf.image_width != prev_image_width ||
-	    pconf.image_height != prev_image_height) {
+	{
 		uint32_t sensor_w = state->sensor.plane.capt.width;
 		uint32_t sensor_h = state->sensor.plane.capt.height;
 
@@ -1365,27 +1426,34 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 		uint16_t overscan_y = (uint16_t)(
 			((sensor_h - usable_h) / 2) & ~1u);
 
-		Star6ePrecropRect old_precrop = star6e_pipeline_compute_precrop(
-			usable_w, usable_h, prev_image_width, prev_image_height);
-		old_precrop.x += overscan_x;
-		old_precrop.y += overscan_y;
 		Star6ePrecropRect new_precrop = star6e_pipeline_compute_precrop(
-			usable_w, usable_h, pconf.image_width, pconf.image_height);
+			usable_w, usable_h,
+			pconf.image_width, pconf.image_height,
+			vcfg->isp.keep_aspect);
 		new_precrop.x += overscan_x;
 		new_precrop.y += overscan_y;
 
-		if (old_precrop.x != new_precrop.x ||
-		    old_precrop.y != new_precrop.y ||
-		    old_precrop.w != new_precrop.w ||
-		    old_precrop.h != new_precrop.h) {
-			/* Aspect ratio changed: unbind VIF→VPE, destroy VPE, reconfigure
-			 * VIF capture region, recreate VPE with new dimensions.
-			 * The VIF device stays running — MIPI PHY is never touched.
-			 * bound_vif_vpe is cleared so bind_and_finalize_pipeline will
-			 * re-establish the VIF→VPE REALTIME bind. */
-			printf("> Reinit: AR change %ux%u -> %ux%u, reconfiguring VIF+VPE\n",
+		int dims_changed = (pconf.image_width != prev_image_width ||
+			pconf.image_height != prev_image_height);
+		int precrop_changed = (
+			new_precrop.x != state->active_precrop.x ||
+			new_precrop.y != state->active_precrop.y ||
+			new_precrop.w != state->active_precrop.w ||
+			new_precrop.h != state->active_precrop.h);
+
+		if (precrop_changed) {
+			/* VIF crop region must change (AR/resolution change or
+			 * keep_aspect toggle): unbind VIF→VPE, destroy VPE,
+			 * reconfigure VIF capture region, recreate VPE.  The VIF
+			 * device stays running — MIPI PHY is never touched.
+			 * bound_vif_vpe is cleared so bind_and_finalize_pipeline
+			 * will re-establish the VIF→VPE REALTIME bind. */
+			printf("> Reinit: VIF+VPE reconfigure %ux%u -> %ux%u "
+				"(precrop %ux%u+%u+%u)\n",
 				prev_image_width, prev_image_height,
-				pconf.image_width, pconf.image_height);
+				pconf.image_width, pconf.image_height,
+				new_precrop.w, new_precrop.h,
+				new_precrop.x, new_precrop.y);
 
 			if (state->bound_vif_vpe) {
 				MI_SYS_UnBindChnPort(&state->vif_port,
@@ -1454,10 +1522,13 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 				MI_VIF_DisableDev(0);
 				return ret;
 			}
+			state->active_precrop = new_precrop;
+			venc_api_set_active_precrop(new_precrop.x, new_precrop.y,
+				new_precrop.w, new_precrop.h);
 
-		} else {
-			/* Same aspect ratio: only resize VPE output port.
-			 * VIF and the VIF→VPE REALTIME bind are unchanged. */
+		} else if (dims_changed) {
+			/* Same VIF crop: only resize VPE output port.  VIF and
+			 * the VIF→VPE REALTIME bind are unchanged. */
 			printf("> Reinit: resolution change %ux%u -> %ux%u,"
 				" resizing VPE port\n",
 				prev_image_width, prev_image_height,
@@ -1509,6 +1580,65 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 		return ret;
 	}
 
+	/* Re-apply orientation on reinit.  Two layers are involved:
+	 *   (1) VPE channel-level (MI_VPE_SetChannelParam) — digital mirror
+	 *       works reliably; digital flip is unreliable on some
+	 *       sensor/pipeline combos (reported: mirror toggles in live
+	 *       preview, flip does not).
+	 *   (2) Sensor-level (MI_SNR_SetOrien) — programs the sensor's own
+	 *       orientation registers.  For IMX335-class sensors the flip
+	 *       register is what actually inverts the scan-line order;
+	 *       without this call the image stays upright even though the
+	 *       config reports flip=true.
+	 * We apply both.  Each is independent and non-fatal.  Neither is
+	 * plumbed by the non-AR-change reinit path otherwise, so without
+	 * this block an image.mirror / image.flip toggle would persist to
+	 * disk and log "reinit complete" but never affect the output. */
+	{
+		MI_VPE_ChannelParam_t vpe_param = {0};
+		MI_S32 vpe_ret;
+		vpe_param.hdr = I6_HDR_OFF;
+		vpe_param.level3DNR = pconf.vpe_level_3dnr;
+		vpe_param.mirror = pconf.image_mirror ? 1 : 0;
+		vpe_param.flip = pconf.image_flip ? 1 : 0;
+		vpe_param.lensAdjOn = 0;
+		vpe_ret = MI_VPE_SetChannelParam(0, &vpe_param);
+		if (vpe_ret != 0)
+			fprintf(stderr, "[pipeline] WARNING: reinit "
+				"MI_VPE_SetChannelParam(mirror=%d flip=%d) "
+				"returned %d\n",
+				vpe_param.mirror, vpe_param.flip,
+				(int)vpe_ret);
+	}
+	{
+		MI_S32 orien_ret = MI_SNR_SetOrien(state->sensor.pad_id,
+			pconf.image_mirror ? 1 : 0,
+			pconf.image_flip   ? 1 : 0);
+		if (orien_ret != 0)
+			fprintf(stderr, "[pipeline] WARNING: reinit "
+				"MI_SNR_SetOrien(pad=%d mirror=%d flip=%d) "
+				"returned %d\n",
+				(int)state->sensor.pad_id,
+				pconf.image_mirror ? 1 : 0,
+				pconf.image_flip ? 1 : 0,
+				(int)orien_ret);
+	}
+
+	/* Re-kick sensor timing on reinit.  The ISP AE can leave the sensor
+	 * register at stale exposure/timing when we rebuild only VENC (common
+	 * path).  MI_SNR_SetFps forces the sensor driver to reconfigure its
+	 * timing registers so a FPS target change (e.g. 100 -> 120) actually
+	 * takes effect.  Fires for both legacyAe and CUS3A. */
+	if (pconf.sensor_framerate > 0) {
+		MI_S32 fps_ret = MI_SNR_SetFps(state->sensor.pad_id,
+			pconf.sensor_framerate);
+		if (fps_ret != 0)
+			fprintf(stderr, "[pipeline] WARNING: reinit "
+				"MI_SNR_SetFps(pad=%d fps=%u) returned %d\n",
+				(int)state->sensor.pad_id,
+				pconf.sensor_framerate, (int)fps_ret);
+	}
+
 	return 0;
 }
 
@@ -1537,6 +1667,10 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	ret = select_and_configure_sensor(state, &pconf, vcfg, sdk_quiet);
 	if (ret != 0)
 		return ret;
+
+	state->active_precrop = pconf.precrop;
+	venc_api_set_active_precrop(pconf.precrop.x, pconf.precrop.y,
+		pconf.precrop.w, pconf.precrop.h);
 
 	ret = star6e_pipeline_start_vif(&state->sensor, &pconf.precrop);
 	if (ret != 0)

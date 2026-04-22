@@ -43,10 +43,6 @@ void star6e_cus3a_join(void);
 /** Return 1 if the supervisory AE thread is running. */
 int star6e_cus3a_running(void);
 
-/** Update the max shutter time (us) at runtime.
- *  Called by the exposure control when the user changes isp.exposure. */
-void star6e_cus3a_set_shutter_max(uint32_t max_us);
-
 /** Update the max sensor gain at runtime.
  *  Called when the user changes isp.gainMax via API. */
 void star6e_cus3a_set_gain_max(uint32_t gain);

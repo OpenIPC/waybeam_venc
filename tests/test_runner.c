@@ -19,6 +19,7 @@ extern int test_pipeline_common(void);
 extern int test_codec_config(void);
 extern int test_sdk_quiet(void);
 extern int test_rtp_packetizer(void);
+extern int test_hevc_rtp(void);
 extern int test_isp_runtime(void);
 extern int test_rtp_session(void);
 extern int test_stream_metrics(void);
@@ -30,6 +31,7 @@ extern int test_star6e_recorder(void);
 extern int test_ts_mux(void);
 extern int test_audio_ring(void);
 extern int test_star6e_ts_recorder(void);
+extern int test_idr_rate_limit(void);
 extern int test_backend(void);
 
 int main(void)
@@ -77,6 +79,9 @@ int main(void)
 	printf("\n--- test_rtp_packetizer ---\n");
 	failures += test_rtp_packetizer();
 
+	printf("\n--- test_hevc_rtp ---\n");
+	failures += test_hevc_rtp();
+
 	printf("\n--- test_isp_runtime ---\n");
 	failures += test_isp_runtime();
 
@@ -109,6 +114,9 @@ int main(void)
 
 	printf("\n--- test_star6e_ts_recorder ---\n");
 	failures += test_star6e_ts_recorder();
+
+	printf("\n--- test_idr_rate_limit ---\n");
+	failures += test_idr_rate_limit();
 
 	printf("\n--- test_backend ---\n");
 	failures += test_backend();

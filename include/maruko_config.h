@@ -31,12 +31,18 @@ typedef struct {
 	MarukoStreamMode stream_mode;
 	MI_SNR_PAD_ID_e forced_sensor_pad;
 	int forced_sensor_mode;
-	const char *isp_bin_path;
+	/* Configured isp.sensorBin path; resolved (with sensor-name fallback)
+	 * by the pipeline once sensor_select has run.  Empty string means
+	 * "use default fallback". */
+	char isp_bin_path[256];
 	int vpe_level_3dnr;
-	uint32_t exposure_cap_us;
 	SensorUnlockConfig sensor_unlock;
 	int oc_level;
+	uint16_t scene_threshold;
+	uint8_t scene_holdoff;
+	uint8_t frame_lost;
 	int verbose;
+	int connected_udp;
 } MarukoBackendConfig;
 
 /** Fill config with compiled-in defaults for Maruko backend. */

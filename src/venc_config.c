@@ -4,9 +4,12 @@
 #include "../lib/cJSON.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* Round a float to 6 significant digits before cJSON serialization.
  * Prevents artifacts like 0.001f -> 0.0010000000474974513 in JSON. */
@@ -87,11 +90,11 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* isp */
 	cfg->isp.sensor_bin[0] = '\0';
-	cfg->isp.exposure = 0;
 	cfg->isp.legacy_ae = true;
 	cfg->isp.ae_fps = 15;
 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
 	cfg->isp.awb_ct = 5500;
+	cfg->isp.keep_aspect = true;
 
 	/* image */
 	cfg->image.mirror = false;
@@ -102,8 +105,8 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->video0.codec, sizeof(cfg->video0.codec), "h265");
 	safe_strcpy(cfg->video0.rc_mode, sizeof(cfg->video0.rc_mode), "cbr");
 	cfg->video0.fps = 60;
-	cfg->video0.width = 1920;
-	cfg->video0.height = 1080;
+	cfg->video0.width = 0;
+	cfg->video0.height = 0;
 	cfg->video0.bitrate = 8192;
 	cfg->video0.gop_size = 1.0;
 	cfg->video0.qp_delta = -4;
@@ -238,13 +241,13 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 	if (!obj) return;
 	safe_strcpy(s->sensor_bin, sizeof(s->sensor_bin),
 		json_get_string(obj, "sensorBin", s->sensor_bin));
-	s->exposure = (uint32_t)json_get_int(obj, "exposure", (int)s->exposure);
 	s->legacy_ae = json_get_bool(obj, "legacyAe", s->legacy_ae);
 	s->ae_fps = (uint32_t)json_get_int(obj, "aeFps", (int)s->ae_fps);
 	s->gain_max = (uint32_t)json_get_int(obj, "gainMax", (int)s->gain_max);
 	safe_strcpy(s->awb_mode, sizeof(s->awb_mode),
 		json_get_string(obj, "awbMode", s->awb_mode));
 	s->awb_ct = (uint32_t)json_get_int(obj, "awbCt", (int)s->awb_ct);
+	s->keep_aspect = json_get_bool(obj, "keepAspect", s->keep_aspect);
 }
 
 static void load_image(const cJSON *root, VencConfigImage *s)
@@ -264,17 +267,17 @@ static void load_image(const cJSON *root, VencConfigImage *s)
 
 static int parse_resolution(const char *str, uint32_t *w, uint32_t *h)
 {
-	/* Accept "WxH", "720p", "1080p", "4MP" */
+	/* Accept "auto", "WxH", "720p", "1080p" */
+	if (!strcmp(str, "auto")) {
+		*w = 0; *h = 0;
+		return 0;
+	}
 	if (!strcmp(str, "720p")) {
 		*w = 1280; *h = 720;
 		return 0;
 	}
 	if (!strcmp(str, "1080p")) {
 		*w = 1920; *h = 1080;
-		return 0;
-	}
-	if (!strcmp(str, "4MP")) {
-		*w = 2688; *h = 1520;
 		return 0;
 	}
 	if (sscanf(str, "%ux%u", w, h) == 2)
@@ -304,6 +307,9 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 				"keeping %ux%u\n", size, v->width, v->height);
 		}
 	}
+	/* Also accept separate width/height fields (override size if both present) */
+	v->width = (uint32_t)json_get_int(obj, "width", (int)v->width);
+	v->height = (uint32_t)json_get_int(obj, "height", (int)v->height);
 
 	v->bitrate = (uint32_t)json_get_int(obj, "bitrate", (int)v->bitrate);
 	v->gop_size = json_get_double(obj, "gopSize", v->gop_size);
@@ -617,12 +623,12 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	cJSON *isp = cJSON_AddObjectToObject(root, "isp");
 	if (isp) {
 		cJSON_AddStringToObject(isp, "sensorBin", cfg->isp.sensor_bin);
-		cJSON_AddNumberToObject(isp, "exposure", cfg->isp.exposure);
 		cJSON_AddBoolToObject(isp, "legacyAe", cfg->isp.legacy_ae);
 		cJSON_AddNumberToObject(isp, "aeFps", cfg->isp.ae_fps);
 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);
 		cJSON_AddStringToObject(isp, "awbMode", cfg->isp.awb_mode);
 		cJSON_AddNumberToObject(isp, "awbCt", cfg->isp.awb_ct);
+		cJSON_AddBoolToObject(isp, "keepAspect", cfg->isp.keep_aspect);
 	}
 
 	/* image */
@@ -639,10 +645,14 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(vid, "codec", cfg->video0.codec);
 		cJSON_AddStringToObject(vid, "rcMode", cfg->video0.rc_mode);
 		cJSON_AddNumberToObject(vid, "fps", cfg->video0.fps);
-		char size_buf[32];
-		snprintf(size_buf, sizeof(size_buf), "%ux%u",
-			cfg->video0.width, cfg->video0.height);
-		cJSON_AddStringToObject(vid, "size", size_buf);
+		if (cfg->video0.width > 0 && cfg->video0.height > 0) {
+			char size_buf[32];
+			snprintf(size_buf, sizeof(size_buf), "%ux%u",
+				cfg->video0.width, cfg->video0.height);
+			cJSON_AddStringToObject(vid, "size", size_buf);
+		} else {
+			cJSON_AddStringToObject(vid, "size", "auto");
+		}
 		cJSON_AddNumberToObject(vid, "bitrate", cfg->video0.bitrate);
 		cJSON_AddNumberToObject(vid, "gopSize", cfg->video0.gop_size);
 		cJSON_AddNumberToObject(vid, "qpDelta", cfg->video0.qp_delta);
@@ -758,16 +768,180 @@ int venc_config_save(const char *path, const VencConfig *cfg)
 	cJSON_Delete(root);
 	if (!json) return -1;
 
-	FILE *f = fopen(path, "w");
-	if (!f) {
-		fprintf(stderr, "[venc_config] ERROR: cannot write %s: %s\n",
-			path, strerror(errno));
+	/* Atomic write: write to temp file in the same directory as the *real*
+	 * target, fsync, then rename over the target.  Survives power cut
+	 * mid-write — we always end up with either the old or the new config
+	 * on disk, never a truncated/empty file.  Symlink-aware: if `path` is
+	 * a symlink we operate on the resolved target so we replace its
+	 * contents (atomic in-place semantics) rather than replacing the
+	 * symlink itself with a regular file.  Mode bits are preserved from
+	 * the existing file when present (default 0644 on first save). */
+	char target[512];
+	mode_t target_mode = 0644;
+	struct stat st;
+	int have_existing = 0;
+	{
+		ssize_t n = readlink(path, target, sizeof(target) - 1);
+		if (n > 0) {
+			target[n] = '\0';
+			/* Relative symlink — resolve against `path`'s dir.
+			 * `joined` sized for worst case `dirname(path) + '/' +
+			 * readlink_target + '\0'`; we then bail if the result
+			 * doesn't fit `target`. */
+			if (target[0] != '/') {
+				char base[512];
+				char *slash;
+				int n_base = snprintf(base, sizeof(base),
+					"%s", path);
+				if (n_base < 0 ||
+				    (size_t)n_base >= sizeof(base)) {
+					fprintf(stderr,
+						"[venc_config] ERROR: path "
+						"too long: %s\n", path);
+					free(json);
+					return -1;
+				}
+				slash = strrchr(base, '/');
+				if (slash) {
+					char joined[1024];
+					int n_join;
+					*slash = '\0';
+					n_join = snprintf(joined, sizeof(joined),
+						"%s/%s", base, target);
+					if (n_join < 0 ||
+					    (size_t)n_join >= sizeof(joined) ||
+					    (size_t)n_join >= sizeof(target)) {
+						fprintf(stderr,
+							"[venc_config] ERROR: "
+							"resolved symlink "
+							"path too long\n");
+						free(json);
+						return -1;
+					}
+					memcpy(target, joined,
+						(size_t)n_join + 1);
+				}
+			}
+		} else {
+			int n_path = snprintf(target, sizeof(target),
+				"%s", path);
+			if (n_path < 0 ||
+			    (size_t)n_path >= sizeof(target)) {
+				fprintf(stderr,
+					"[venc_config] ERROR: path too long: "
+					"%s\n", path);
+				free(json);
+				return -1;
+			}
+		}
+		if (stat(target, &st) == 0) {
+			target_mode = st.st_mode & 07777;
+			have_existing = 1;
+		}
+	}
+	(void)have_existing;
+
+	size_t target_len = strlen(target);
+	/* tmp_path sized for `target` + `.tmp` + '\0'.  The runtime check
+	 * below guarantees no truncation, but also size the buffer past
+	 * `target` so -Wformat-truncation can't false-positive. */
+	char tmp_path[sizeof(target) + 8];
+	if (target_len + 5 > sizeof(tmp_path)) {
+		fprintf(stderr, "[venc_config] ERROR: path too long: %s\n", target);
 		free(json);
 		return -1;
 	}
-	fprintf(f, "%s\n", json);
-	fclose(f);
+	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target);
+
+	int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, target_mode);
+	if (fd < 0) {
+		fprintf(stderr, "[venc_config] ERROR: cannot open %s: %s\n",
+			tmp_path, strerror(errno));
+		free(json);
+		return -1;
+	}
+	/* O_CREAT mode is masked by umask; restore explicitly so the saved
+	 * file matches the original mode bits even when umask is non-zero. */
+	(void)fchmod(fd, target_mode);
+
+	size_t json_len = strlen(json);
+	ssize_t wrote = 0;
+	while ((size_t)wrote < json_len) {
+		ssize_t n = write(fd, json + wrote, json_len - (size_t)wrote);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			fprintf(stderr, "[venc_config] ERROR: write %s: %s\n",
+				tmp_path, strerror(errno));
+			close(fd);
+			unlink(tmp_path);
+			free(json);
+			return -1;
+		}
+		wrote += n;
+	}
+	/* trailing newline — short-write retry for completeness */
+	{
+		const char nl = '\n';
+		ssize_t n;
+		do {
+			n = write(fd, &nl, 1);
+		} while (n < 0 && errno == EINTR);
+		if (n != 1) {
+			fprintf(stderr,
+				"[venc_config] ERROR: trailing-nl write %s: %s\n",
+				tmp_path, strerror(errno));
+			close(fd);
+			unlink(tmp_path);
+			free(json);
+			return -1;
+		}
+	}
+
+	if (fsync(fd) != 0) {
+		fprintf(stderr, "[venc_config] ERROR: fsync %s: %s\n",
+			tmp_path, strerror(errno));
+		close(fd);
+		unlink(tmp_path);
+		free(json);
+		return -1;
+	}
+	close(fd);
 	free(json);
-	fprintf(stderr, "[venc_config] Config saved to %s\n", path);
+
+	if (rename(tmp_path, target) != 0) {
+		fprintf(stderr, "[venc_config] ERROR: rename %s -> %s: %s\n",
+			tmp_path, target, strerror(errno));
+		unlink(tmp_path);
+		return -1;
+	}
+
+	/* fsync the containing directory so the rename itself is durable.
+	 * O_DIRECTORY is informational on Linux but flags the intent and
+	 * fails fast on platforms that enforce it. */
+	{
+		char dir_buf[512];
+		snprintf(dir_buf, sizeof(dir_buf), "%s", target);
+		char *slash = strrchr(dir_buf, '/');
+		const char *dir_path = slash ?
+			(*slash = '\0', dir_buf) : ".";
+		int dfd = open(dir_path, O_RDONLY | O_DIRECTORY);
+		if (dfd < 0) {
+			fprintf(stderr,
+				"[venc_config] ERROR: open dir %s: %s\n",
+				dir_path, strerror(errno));
+			return -1;
+		}
+		if (fsync(dfd) != 0) {
+			fprintf(stderr,
+				"[venc_config] ERROR: fsync dir %s: %s\n",
+				dir_path, strerror(errno));
+			close(dfd);
+			return -1;
+		}
+		close(dfd);
+	}
+
+	fprintf(stderr, "[venc_config] Config saved to %s\n", target);
 	return 0;
 }

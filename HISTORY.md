@@ -1,5 +1,352 @@
 # History
 
+## [0.7.11] - 2026-04-19
+
+Pre-merge review fixes prior to upstream sync.  Two functional bugs
+plus four polish items, all verified end-to-end on Star6E (IMX335 at
+192.168.1.13) and Maruko (IMX415 at 192.168.2.12).
+
+- **B1 — Maruko: split ISP-bin gate from CUS3A gate.**  v0.7.10's
+  auto-detect fallback was silently a no-op on Maruko reinit because
+  both `pipeline_common_resolve_isp_bin` and `maruko_load_isp_bin`
+  were gated under `g_mi_isp_initialized`, which is set once and never
+  cleared.  Resolve+load now runs every configure with a Star6E-style
+  `g_last_isp_bin_path` cache; CUS3A enable + cold-boot exposure cap
+  stay one-shot under the deadlock-protection gate.  Verified: 3
+  successive `/api/v1/restart` cycles transitioned configured ->
+  auto-detect fallback -> new configured -> restored.
+- **B2 — IDR rate limiter: CAS loop for thread-safe spacing.**  The
+  load-then-store pattern on `last_us` left a race where two
+  concurrent producers could both pass the spacing check on the same
+  `last` value and both honor an IDR inside the window — the exact
+  storm-coalescing guarantee the gate was added for.  Replaced with
+  `__atomic_compare_exchange_n` so exactly one caller wins each
+  window.  ACQ_REL on the winning store synchronizes with the next
+  caller's ACQUIRE load.  Verified: 100 concurrent `/request/idr` ->
+  9 honored / 91 dropped (~10 honored/s, matches 100 ms spacing over
+  the ~1 s curl burst).  All 18 idr_rate_limit unit tests still pass.
+- **M1 — `venc_config_save`: preserve symlinks + mode bits.**  Resolve
+  `path` via `readlink()` before writing the temp file so a symlinked
+  `/etc/venc.json` is replaced in-place rather than being replaced by
+  a regular file.  Preserve the existing target's mode bits via
+  `stat()`+`fchmod()` so saves no longer silently widen 0600/0640 to
+  0644.  Open the directory with `O_DIRECTORY`, propagate dir-fsync
+  errors, retry trailing-newline write on EINTR.  Verified live:
+  symlink intact, target mode 0640 preserved.
+- **M2 — `/api/v1/defaults`: pick reinit mode based on save success.**
+  The handler unconditionally requested reinit mode 1
+  (reload-from-disk).  On disk-save failure (`EROFS` / `ENOSPC` /
+  perm), the reload silently overlaid the stale on-disk config onto
+  the in-memory defaults and reverted most of them.  Use mode 2
+  (apply in-memory) when `save_rc != 0` so the operator at least gets
+  the defaults they asked for at runtime.
+- **M3 / L1 / L3 — Star6E hygiene.**
+  - `prepare_pipeline_config`: stale comment about isp_bin_path
+    resolution location refreshed (v0.7.10 moved it from
+    `select_and_configure_sensor` to `bind_and_finalize_pipeline`).
+  - `stop_venc_level`: stop and join `dual_rec_thread` BEFORE
+    `star6e_output_teardown(&dual->output)`.  The thread calls
+    `star6e_video_send_frame(&dual->output, ...)` inside its loop;
+    tearing down output first left a use-after-close window.
+  - `dual_rec_thread_fn`: always `usleep` after Query-empty (100 us on
+    the fd path, 1 ms on the fallback) to prevent a runaway spin if
+    the kernel ever signals POLLIN spuriously without a matching
+    packet.
+
+## [0.7.10] - 2026-04-19
+
+Discoverable defaults + automatic ISP-bin selection:
+
+- **`config/venc.default.json` lists `video0.size`.**  The field defaulted
+  to `"auto"` in the parser but wasn't in the reference JSON, so users
+  copying the file as a template never saw it.  Added with the same
+  `"auto"` value.
+- **Automatic ISP-bin fallback (both backends).**  New
+  `pipeline_common_resolve_isp_bin()` runs after `sensor_select` and:
+  1. Uses `isp.sensorBin` if non-empty and readable.
+  2. Otherwise tries `/etc/sensors/<lowercase prefix>.bin` keyed off the
+     live sensor name (`IMX335_MIPI` → `imx335`).
+  3. Falls back to "no bin" (driver defaults).
+
+  Stock devices that already ship `/etc/sensors/imx335.bin`,
+  `/etc/sensors/imx415.bin`, etc. now run without per-host config.  A
+  configured-but-missing path logs a warning and uses the fallback so
+  typos and renamed bin files no longer cripple AE/AWB.  Logs the
+  resolution decision once per pipeline start: `> ISP bin: %s
+  (configured | auto-detected for sensor 'imx335') | none (no fallback…)`.
+- **Star6E `Star6ePipelineConfig.isp_bin_path`** changed from
+  `const char *` to `char[256]` to hold the resolved path.  Maruko
+  `MarukoBackendConfig.isp_bin_path` got the same treatment.
+- **Tests.**  10 new cases in `test_pipeline_common`: configured +
+  readable, configured + missing, NULL/empty sensor name, no-alnum-prefix
+  sensor name, NULL/zero output buffer (1190 tests, was 1180).
+
+## [0.7.9] - 2026-04-19
+
+Aspect-ratio crop is now opt-out (Star6E):
+
+- **`isp.keepAspect` config (default `true`).** When `false`, VIF
+  captures the full sensor area and VPE stretches it to the encode
+  dimensions instead of center-cropping to preserve geometry. New
+  parameter on `pipeline_common_compute_precrop()` keeps both call sites
+  branch-free. Maruko parses but ignores the field until SCL crop port
+  lands.
+- **Reinit path now tracks the precrop currently programmed in VIF**
+  (`state->active_precrop`) and compares against the freshly computed
+  rect. A `keepAspect` toggle that doesn't change image dimensions now
+  correctly triggers a VIF+VPE reconfigure. The previous code only
+  re-armed precrop when `image_width`/`height` differed from the prior
+  config.
+- **Reinit branch reorganized.** `if (precrop_changed)` runs the full
+  VIF+VPE rebuild; `else if (dims_changed)` falls through to the
+  VPE-port-only resize. Equal-on-both-counts skips the block. The prior
+  shape (outer `if (dims_changed)` then inner precrop check) couldn't
+  express the keepAspect-toggle case, and the obvious patch-style fix
+  would have re-fired the VPE-port resize on no-change reinits.
+- **Reinit log shows precrop.** `> Reinit: VIF+VPE reconfigure %ux%u
+  -> %ux%u (precrop %ux%u+%u+%u)` so an operator can tell whether the
+  trigger was a resolution change, an AR change, or a keepAspect toggle.
+- **HTTP API contract bumped to 0.6.2.** `isp.keepAspect` field added to
+  `/api/v1/config`, `/api/v1/set` accepts both snake_case and the
+  Majestic-style camelCase alias.
+- **WebUI dashboard exposes the toggle** under the ISP section; embedded
+  gzip regenerated via `make webui`.  Also drops the stale `isp.exposure`
+  entry that lingered after the field was removed in 0.7.0.
+- **Active precrop visible via API.** New
+  `venc_api_set_active_precrop()` / `venc_api_get_active_precrop()` are
+  called from the Star6E pipeline whenever VIF is (re)programmed.
+  `/api/v1/config` gains a `runtime.active_precrop` block alongside the
+  config; Star6E `/api/v1/ae` includes the same rect under
+  `data.runtime.active_precrop`.  Maruko reports nothing until it gains
+  precrop support.  Useful for confirming a `keepAspect` toggle landed
+  without grepping the log.
+- **Unit tests.** New `compute_precrop` cases cover both `keep_aspect`
+  values plus the 2-pixel alignment guarantee, and a new
+  `test_active_precrop_setter` exercises the venc_api setter/getter
+  including the cleared-store, overwrite, and NULL-out-pointer paths
+  (1180 tests, was 1139).
+
+## [0.7.8] - 2026-04-18
+
+Pre-merge review fixes folded in (see PR-47 review notes):
+
+- **Atomic config write.** `venc_config_save()` now writes to `<path>.tmp`,
+  fsyncs the file, renames over the target, and fsyncs the containing
+  directory.  Power cut mid-write (a real failure mode on FPV hardware)
+  no longer truncates `/etc/venc.json` — you always get either the old
+  or the new copy, never a partial.
+- **Flash-write guard.** `venc_api_save_config_to_disk()` caches the
+  last successfully-saved VencConfig and skips the write when the
+  candidate is byte-identical.  Hot loops (adaptive-link re-asserting
+  the same kbps, WebUI sliders landing on their current value) no
+  longer wear flash.
+- **Save errors surface.** `venc_config_save()` return value is now
+  honored.  `/api/v1/defaults` response gains `"saved":bool`.  LIVE /
+  RESTART `/api/v1/set` paths log a `WARNING: config save to X failed
+  — in-memory change committed but on-disk copy is stale` to stderr so
+  operators catch disk-full / readonly-FS conditions from the venc log.
+- **SDK call return values logged.** `MI_SNR_SetOrien`,
+  `MI_VPE_SetChannelParam` (reinit), and `MI_SNR_SetFps` (reinit) now
+  log non-zero returns so BSP regressions surface instead of silently
+  leaving the image upside-down or the sensor stuck at the wrong FPS.
+- **Dashboard source tracked.** HTML authored in `web/dashboard.html`;
+  `tools/build_webui.py` regenerates the embedded gzip deterministically
+  (mtime=0, compresslevel=9).  New `make webui` and `make webui-check`
+  targets; `make verify` runs `webui-check` to catch drift.
+
+- **WebUI reinit + IDR fixes.** Four related bugs in the reinit/save
+  path and one missing IDR-on-bitrate behaviour.
+- **Fix #1 — FPS kick on live reinit.** `star6e_pipeline_reinit`
+  (`src/star6e_pipeline.c`) now re-kicks `MI_SNR_SetFps` at the end so
+  a live FPS change actually reconfigures sensor timing.  Previously
+  the kick only fired during the initial `star6e_pipeline_start_vpe`
+  legacyAe branch and the once-per-process CUS3A `fps_kick_done`
+  gate — neither re-armed on reinit, so the sensor stayed stuck at
+  its cold-boot timing (e.g. 100 fps when 120 was requested).
+- **Fix #2 — Save & Restart actually saves.** Added
+  `venc_api_set_config_path()` (called by star6e_runtime and
+  maruko_runtime with `VENC_CONFIG_DEFAULT_PATH`).  Both LIVE
+  (`apply_live_set_query`) and RESTART (`process_restart_set_query`)
+  set paths now call `venc_config_save()` before returning, so every
+  `/api/v1/set` round-trip persists to `/etc/venc.json`.  `handle_restart`
+  is intentionally left pure (reload-from-disk only, matching SIGHUP);
+  the per-set save takes care of persistence so the WebUI "Save &
+  Restart" flow ends with the on-disk copy already matching memory.
+  Bonus: manual file swaps (e.g. scp of a config backup) followed by
+  `/api/v1/restart` reload exactly what was written.
+- **Fix #3 — Restore Defaults actually restores.** New
+  `GET /api/v1/defaults` endpoint (`handle_defaults`) writes
+  compiled-in defaults to disk and triggers reinit.  WebUI JS
+  `restoreDefaults()` rewired from `/api/v1/restart` to the new
+  endpoint (embedded gzip regenerated).  Previously the button just
+  reloaded the on-disk config — misleading, and did nothing if the
+  file already matched in-memory state.
+- **Fix #5 — IDR on bitrate change.** `apply_bitrate` in both
+  `src/star6e_controls.c` and `src/maruko_controls.c` now issues
+  `MI_VENC_RequestIdr` after `MI_VENC_SetChnAttr`, gated through the
+  existing `idr_rate_limit_allow` so storm callers stay coalesced.
+  The decoder now gets a fresh keyframe to resync against the new
+  rate-control state instead of drifting on stale P-frames.
+- **Fix #4 — image.mirror / image.flip** now re-apply on reinit.
+  `MI_VPE_SetChannelParam` is only invoked during VPE creation inside
+  `star6e_pipeline_start_vpe`; the non-aspect-ratio reinit path skipped
+  VPE rebuild, so a mirror/flip toggle would persist to disk and log
+  "Pipeline reinit complete" but never actually change the output.
+  Added an unconditional `MI_VPE_SetChannelParam(0, ...)` at the end
+  of `star6e_pipeline_reinit` carrying the current mirror/flip/3DNR
+  params.  Config round-trip verified on 192.168.1.13; visual flip
+  verification requires a live decoder (operator check).
+
+## [0.7.7] - 2026-04-18
+
+- **Perf-series PR-C.1 — port MI_VENC_GetFd + poll() blocking wait to
+  the Maruko main encoder loop.** Follow-up to PR-C (Star6E dual_rec
+  only).  Maruko's main encoder loop in `maruko_pipeline_run`
+  (`src/maruko_pipeline.c:1291`) was spinning on `maruko_mi_venc_query
+  + usleep(500)` — ~2000 syscalls/s during idle gaps.  Replaced with
+  `poll(MI_VENC_GetFd, 1000 ms)` and a wall-clock idle-abort timer
+  (20 s of no frames → abort, preserved from the original
+  `idle_counter * 500us` logic).
+- **Fallback preserved:** if `MI_VENC_GetFd` returns < 0 on an unknown
+  BSP variant, the loop falls back to the original Query+usleep(500)
+  spin.  POLLERR/POLLHUP/POLLNVAL on the fd path drops into the
+  fallback for the rest of the run.
+- **Lifecycle:** `MI_VENC_CloseFd` called at cleanup when the fd was
+  acquired.  The fd function pointers were already loaded by
+  `maruko_mi.c` (dlsym'd but unused before this PR).
+- **New bindings** (`include/maruko_bindings.h`): `maruko_mi_venc_get_fd`
+  and `maruko_mi_venc_close_fd` macros alongside the existing
+  MI_VENC_* wrappers.
+- **Wall-clock idle timeout** consolidates the old dual idle paths
+  (500us-keyed counter) into a single `wb_monotonic_us()`-based
+  deadline that works identically on both the fd path (rare wakeups)
+  and the fallback spin path (frequent wakeups).
+
+## [0.7.6] - 2026-04-18
+
+- **Perf-series PR-C — dual_rec_thread blocking wait via MI_VENC_GetFd.**
+  Third of the 2026-04-18 perf series.  Replaces the 1-ms `usleep` spin
+  in the dual-recorder thread with a `poll()` on the VENC channel's
+  kernel fd (`MI_VENC_GetFd`).  The fd signals `POLLIN` when a frame is
+  ready, so the thread wakes once per frame (~120/s at 120 fps) instead
+  of ~1000/s from the old 1 ms spin — ~88 % fewer syscalls during
+  recording.
+- **Fallback preserved:** if `MI_VENC_GetFd` returns < 0 on an unknown
+  BSP variant, the thread falls back to the original
+  `MI_VENC_Query + usleep(1000)` loop — zero behaviour change on SDKs
+  that don't expose the fd.
+- **Lifecycle:** `MI_VENC_CloseFd` is called on thread exit when the fd
+  was acquired.  The fd function pointers were already loaded by
+  `star6e_mi.c` / `maruko_mi.c` (dlsym'd but unused before this PR).
+
+## [0.7.5] - 2026-04-18
+
+- **Perf-series PR-B — IDR request rate-limit gate.** Second of the
+  2026-04-18 perf series.  Addresses the latent stability hazard where
+  five independent IDR producers (scene detector, HTTP `/request/idr`
+  and `/api/v1/dual/idr`, controls-apply, recorder-start) could storm
+  `MI_VENC_RequestIdr` without coordination — a bug-driven burst
+  (mis-tuned scene threshold during a camera pan) can crater per-frame
+  bitrate by chaining forced keyframes.
+- **New module (`include/idr_rate_limit.h`, `src/idr_rate_limit.c`):**
+  per-channel (up to 8) last-honored timestamp + honored/dropped
+  counters.  `idr_rate_limit_allow(chn)` enforces a compile-time
+  `IDR_RATE_LIMIT_MIN_SPACING_US` of 100 ms — at 120 fps that is 12
+  frames between honored forced IDRs, well below the GOP period
+  (~83 ms at GOP=10, which auto-inserts an IDR without RequestIdr).
+  State is lock-free (`__atomic_` load/store on `uint64_t`/`uint32_t`).
+- **Wired through the 5 producer sites:**
+  - `src/star6e_runtime.c` — `star6e_scene_request_idr`,
+    `runtime_request_idr`
+  - `src/star6e_controls.c` — `request_idr` (backend callback for HTTP
+    `/request/idr`)
+  - `src/venc_api.c` — `handle_dual_idr` (HTTP `/api/v1/dual/idr`);
+    coalesced response returns `{"coalesced":true}`
+  - `src/maruko_pipeline.c` — `maruko_scene_request_idr`
+  - `src/maruko_controls.c` — `apply_qp_delta` IDR reissue
+- **New endpoint `GET /api/v1/idr/stats`** returns per-channel honored
+  and dropped counts plus the configured `min_spacing_us`.  Used by
+  `tools/idr_storm.sh` to validate the gate.
+- **Unit tests (`tests/test_idr_rate_limit.c`, 20 cases):** first-call
+  honored, burst coalescing, per-channel independence, out-of-range
+  bypass, post-spacing honored, reset semantics.  1139 tests pass
+  (up from 1119).
+
+## [0.7.4] - 2026-04-18
+
+- **Perf-series PR-A — clock wrapper + dual_rec Query dedup + bench infra.**
+  First of a five-PR series landing the post-review performance findings
+  from 2026-04-18 (see `bench/perf-series/README.md`).
+- **Clock reads via vDSO (`include/timing.h`, `src/timing.c`):** New
+  `wb_monotonic_us()` helper using `CLOCK_MONOTONIC` (vDSO fast path on
+  ARMv7, ~100 ns/call) instead of `CLOCK_MONOTONIC_RAW` (real syscall,
+  ~1500 ns/call on A7).  Replaces three duplicated local wrappers —
+  `monotonic_us` in `star6e_video.c` and `maruko_pipeline.c`, and
+  `now_us` in `rtp_sidecar.c`.  NTP slew is <500 ppm → <4 us drift over
+  a 60 s bench window, well inside frame-timing measurement error.
+- **dual_rec backpressure signal (`src/star6e_runtime.c`):** Replaced the
+  post-`MI_VENC_ReleaseStream` peek `MI_VENC_Query` with an inspection of
+  the pre-`GetStream` `stat.curPacks >= 2` condition.  Equivalent
+  semantics (queue had a backlog before we consumed) at one fewer syscall
+  per recorded frame (~120/s at 120 fps).
+- **Perf-series bench harness (`bench/perf-series/`):** New
+  `run_bench.sh` drives the Tier A/B/C bench recipe end-to-end (deploy,
+  probe, collect); `compare.py` emits a markdown Delta table between two
+  labels with a 1.5×sigma regression flag.  Baseline tag
+  `perf-series-baseline` pinned at master `40b8435`.
+- **Host microbench (`tools/clock_bench.c`):** 1 M-iteration loop over
+  `CLOCK_MONOTONIC_RAW`, `CLOCK_MONOTONIC`, `CLOCK_MONOTONIC_COARSE` to
+  validate the vDSO assumption on A7 before deploying the PR.
+- **IDR-storm stress (`tools/idr_storm.sh`):** Infrastructure for PR-B
+  validation; fires N `POST /api/v1/dual/idr` back-to-back and reports
+  the honored:fired ratio.
+
+## [0.7.3] - 2026-04-14
+
+- **Star6E sidecar gate (parity with Maruko PR #37):** Gated the per-frame
+  `rtp_sidecar_poll` / `monotonic_us` / `rtp_sidecar_send_frame` work in
+  `star6e_video_send_frame` on `state->sidecar.fd >= 0`.  When the
+  sidecar feature is disabled (port 0), these calls are now skipped
+  entirely rather than relying on each callee's early return.
+- **SHM write: iovec-style 3-segment ring put (`venc_ring.h`, both backends):**
+  Added `venc_ring_write3(hdr, p1, p2)` so the producer no longer has to
+  pre-flatten `payload1 + payload2` into an 8 KB `flat[]` stack buffer
+  before calling `venc_ring_write`.  Drops one memcpy per fragmented RTP
+  packet (H.265 FU), removes the 8 KB stack allocation, and eliminates
+  the `RTP_BUFFER_MAX` size clamp on the SHM write path.
+  Applied to `src/star6e_output.c::star6e_output_send_rtp_parts` and
+  `src/maruko_video.c::maruko_video_send_rtp_parts`.
+  `venc_ring_write` is preserved as a thin wrapper for existing callers
+  (C and C++, including the wfb_tx patched consumer).
+
+## [0.7.1] - 2026-04-12
+
+- **Phase 5 — Maruko HEVC RTP parity (PR #32):** Extracted the HEVC RTP
+  output stage into a shared `hevc_rtp` module (`include/hevc_rtp.h` +
+  `src/hevc_rtp.c`). Both Star6E and Maruko now go through the same
+  Aggregation Packet (type 48) builder, FU-A fragmentation, VPS/SPS/PPS
+  prepend-on-IDR, and per-frame `HevcRtpStats`. `star6e_hevc_rtp.c` is
+  now a thin stream-iteration wrapper (227 lines → 111 lines);
+  `Star6eHevcRtpStats` becomes a typedef alias of `HevcRtpStats` so
+  existing call sites are unchanged. Maruko's RTP output gets standards-
+  compliant AP aggregation for the first time: hardware-validated on
+  SSC378QE at H.265 CBR 118 fps / 8 Mbps — IDR frames pack
+  VPS+SPS+PPS+IDR as a single AP packet (`ap 1/6` in `[pktzr]` verbose
+  line) instead of 4 separate RTP datagrams.
+- **`[pktzr]` verbose line on Maruko:** Matches Star6E's exact format
+  (`nals N | rtp N | fill N B | single N | ap N/N | fu N`) so log
+  tooling works across both backends.
+- **H.264 RTP output removed from Maruko:** Maruko ships H.265-only on
+  the RTP wire path. The H.264 path was never hardware-verified and
+  Maruko's FPV use case is H.265 exclusive. Channel creation still
+  accepts `codec=h264` for forward compatibility, but the frame sender
+  emits a warning and drops output. Net -~130 lines in `maruko_video.c`.
+- **New `test_hevc_rtp` suite** (3 tests, 16 assertions): AP packing of
+  small NALs, AP→FU-A fallback on oversized NALs, VPS/SPS/PPS prepend
+  behavior — uses a capture-callback harness (no sockets) so tests run
+  in <1 ms. Existing Star6E AP/FU-A test still passes unchanged as
+  regression guard.
+
 ## [0.7.0] - 2026-04-11
 
 - **dlopen migration (both backends):** Both Star6E and Maruko now load all

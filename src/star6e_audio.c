@@ -353,6 +353,20 @@ static void *star6e_audio_encode_fn(void *arg)
 			len = star6e_audio_encode_g711((const int16_t *)data, n,
 				enc_buf, state->codec_type);
 			data = enc_buf;
+		} else if (len > 0 && state->codec_type < 0 &&
+		           star6e_output_is_rtp(state->output.video_output)) {
+			/* RFC 3551: L16 samples are carried in network byte order.
+			 * The MI_AI pipeline yields native (little-endian) S16, so
+			 * swap into enc_buf before RTP packetization. */
+			size_t pairs = (len & ~(size_t)1) / 2;
+			if (pairs > sizeof(enc_buf) / 2)
+				pairs = sizeof(enc_buf) / 2;
+			for (size_t i = 0; i < pairs; i++) {
+				enc_buf[2 * i]     = data[2 * i + 1];
+				enc_buf[2 * i + 1] = data[2 * i];
+			}
+			data = enc_buf;
+			len  = pairs * 2;
 		}
 
 		if (len > 0)
@@ -457,7 +471,7 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 		else if (state->codec_type == AUDIO_TYPE_G711A)
 			state->rtp.payload_type = 113; /* PCMA non-8kHz */
 		else if (state->codec_type == AUDIO_TYPE_OPUS)
-			state->rtp.payload_type = 120; /* dynamic PT for Opus (RFC 7587) */
+			state->rtp.payload_type = 98; /* dynamic PT for Opus (majestic convention) */
 		else if (state->codec_type < 0 &&
 		         state->sample_rate == 44100)
 			state->rtp.payload_type = 11;  /* L16 44.1kHz mono */

@@ -1,10 +1,12 @@
 #include "star6e_controls.h"
 
+#include "idr_rate_limit.h"
 #include "pipeline_common.h"
 #include "star6e_audio.h"
 #include "star6e_cus3a.h"
 #include "star6e_iq.h"
 #include "star6e_output.h"
+#include "venc_api.h"
 
 #include <dlfcn.h>
 #include <stdio.h>
@@ -175,27 +177,13 @@ int star6e_controls_apply_frame_lost_threshold(MI_VENC_CHN chn, bool enabled,
 	uint32_t kbps)
 {
 	MI_VENC_ParamFrameLost_t lost = {0};
-	MI_U32 bits, margin;
 
 	if (!enabled)
 		return 0;
 
-	/* Clamp to prevent overflow in kbps * 1024 (wraps above 4194303). */
-	if (kbps > 200000)
-		kbps = 200000;
-
-	/* At low bitrates (< ~2500 kbps), a 20% margin is too tight —
-	 * I-frames in VBR/AVBR easily exceed 120% of target, causing
-	 * unnecessary frame drops right after keyframes.  Use a minimum
-	 * absolute margin of 512 kbit/s so low-bitrate streams get enough
-	 * headroom for I-frame bursts. */
-	bits = kbps * 1024;
-	margin = bits / 5;
-	if (margin < 512 * 1024)
-		margin = 512 * 1024;
 	lost.bFrmLostOpen = 1;
 	lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
-	lost.u32FrmLostBpsThr = bits + margin;
+	lost.u32FrmLostBpsThr = pipeline_common_frame_lost_threshold(kbps);
 	lost.u32EncFrmGaps = 0;
 
 	return MI_VENC_SetFrameLostStrategy(chn, &lost) == 0 ? 0 : -1;
@@ -245,6 +233,16 @@ static int apply_bitrate(uint32_t kbps)
 	if (star6e_controls_apply_frame_lost_threshold(g_star6e_control_ctx.venc_chn,
 	    frame_lost_enabled, kbps) != 0)
 		return -1;
+	/* Force an IDR after a bitrate change so the decoder resyncs against
+	 * the new rate-control state.  Goes through the rate-limit gate so
+	 * bitrate-storm calls can't DoS the stream.  Tight bitrate ramps
+	 * (e.g. 100-step adaptive-link ladders inside the gate's min-spacing
+	 * window, default 100 ms) will only IDR on the first step and again
+	 * after the window expires — acceptable because the encoder rate
+	 * controller absorbs small between-IDR changes without decoder
+	 * resync. */
+	if (idr_rate_limit_allow(g_star6e_control_ctx.venc_chn))
+		(void)MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1);
 	return 0;
 }
 
@@ -383,27 +381,6 @@ static int apply_fps(uint32_t fps)
 	return 0;
 }
 
-static int apply_exposure(uint32_t us)
-{
-	uint32_t sensor_fps;
-	uint32_t cap_us;
-
-	if (us == 0) {
-		sensor_fps = g_star6e_control_ctx.sensor_fps;
-		if (sensor_fps == 0)
-			sensor_fps = 30;
-		cap_us = 1000000 / sensor_fps;
-	} else {
-		cap_us = us;
-	}
-
-	/* Keep supervisory AE thread's shutter limit in sync */
-	if (star6e_cus3a_running())
-		star6e_cus3a_set_shutter_max(cap_us);
-
-	return star6e_pipeline_cap_exposure_for_fps(0, cap_us);
-}
-
 static int apply_gain_max(uint32_t gain)
 {
 	if (star6e_cus3a_running())
@@ -419,7 +396,10 @@ static int apply_verbose(bool on)
 
 static int request_idr(void)
 {
-	return MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1) == 0 ? 0 : -1;
+	int chn = g_star6e_control_ctx.venc_chn;
+	if (!idr_rate_limit_allow(chn))
+		return 0;  /* coalesced — not an error */
+	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
 /* Compute one horizontal ROI band for step index of steps.
@@ -641,14 +621,24 @@ static char *query_ae_info(void)
 {
 	AeDiagSnapshot snapshot;
 	char buf[2048];
+	char precrop_field[96];
 	uint32_t exposure_us;
 	uint32_t sensor_gain;
 	uint32_t isp_gain;
+	uint16_t px = 0, py = 0, pw = 0, ph = 0;
 
 	ae_diag_snapshot_collect(&snapshot);
 	exposure_us = ae_diag_exposure_us(&snapshot);
 	sensor_gain = ae_diag_sensor_gain(&snapshot);
 	isp_gain = ae_diag_isp_gain(&snapshot);
+
+	if (venc_api_get_active_precrop(&px, &py, &pw, &ph)) {
+		snprintf(precrop_field, sizeof(precrop_field),
+			",\"active_precrop\":{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u}",
+			px, py, pw, ph);
+	} else {
+		precrop_field[0] = '\0';
+	}
 
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
@@ -665,7 +655,7 @@ static char *query_ae_info(void)
 		"\"expo_mode\":{\"ret\":%d,\"raw\":%d,\"name\":\"%s\"},"
 		"\"metrics\":{\"exposure_us\":%u,\"sensor_gain_x1024\":%u,"
 		"\"isp_gain_x1024\":%u,\"fps\":%u},"
-		"\"runtime\":{\"configured_exposure_ms\":%u,\"sensor_fps\":%u}}}",
+		"\"runtime\":{\"sensor_fps\":%u%s}}}",
 		snapshot.plane_ret, snapshot.pad_id, snapshot.plane.shutter,
 		snapshot.plane.sensGain, snapshot.plane.compGain,
 		snapshot.limit_ret, snapshot.limit.minShutterUs,
@@ -685,8 +675,7 @@ static char *query_ae_info(void)
 		snapshot.mode_ret, snapshot.ae_mode_raw,
 		ae_expo_mode_name(snapshot.ae_mode_raw),
 		exposure_us, sensor_gain, isp_gain, ae_diag_sensor_fps(),
-		g_star6e_control_ctx.vcfg ? g_star6e_control_ctx.vcfg->isp.exposure : 0,
-		ae_diag_sensor_fps());
+		ae_diag_sensor_fps(), precrop_field);
 	return strdup(buf);
 }
 
@@ -1011,7 +1000,6 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_gop = apply_gop,
 	.apply_qp_delta = apply_qp_delta,
 	.apply_roi_qp = apply_roi_qp,
-	.apply_exposure = apply_exposure,
 	.apply_gain_max = apply_gain_max,
 	.apply_verbose = apply_verbose,
 	.apply_output_enabled = apply_output_enabled,

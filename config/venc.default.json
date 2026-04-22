@@ -10,16 +10,17 @@
     "unlockDir": 0
   },
   "isp": {
-    "sensorBin": "", "exposure": 0,
+    "sensorBin": "",
     "legacyAe": true, "aeFps": 15, "gainMax": 0,
-    "awbMode": "auto", "awbCt": 5500
+    "awbMode": "auto", "awbCt": 5500,
+    "keepAspect": true
   },
   "image": { "mirror": false, "flip": false, "rotate": 0 },
   "video0": {
     "codec": "h265",
     "rcMode": "cbr",
     "fps": 60,
-    "size": "1920x1080",
+    "size": "auto",
     "bitrate": 8192,
     "gopSize": 1.0,
     "qpDelta": -4,

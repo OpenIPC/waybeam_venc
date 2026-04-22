@@ -20,6 +20,13 @@ struct EisState;      /* forward declaration — see eis.h */
 struct DebugOsdState; /* forward declaration — see debug_osd.h */
 
 typedef struct {
+	uint16_t x;
+	uint16_t y;
+	uint16_t w;
+	uint16_t h;
+} Star6ePrecropRect;
+
+typedef struct {
 	SensorSelectResult sensor;
 	MI_VENC_CHN venc_channel;
 	MI_SYS_ChnPort_t vif_port;
@@ -44,6 +51,8 @@ typedef struct {
 	/* Dual VENC (gemini mode) — heap-allocated, NULL when inactive */
 	struct Star6eDualVenc *dual;
 	struct DebugOsdState *debug_osd;  /* NULL if debug OSD disabled */
+	Star6ePrecropRect active_precrop; /* precrop currently programmed into VIF
+	                                   * (includes overscan offsets) */
 } Star6ePipelineState;
 
 /** Dual VENC channel state. Heap-allocated to avoid changing
@@ -102,6 +111,6 @@ void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 void star6e_pipeline_cus3a_reset(void);
 
 /** Calculate max exposure time to avoid frame drops at target FPS. */
-int star6e_pipeline_cap_exposure_for_fps(uint32_t fps, uint32_t user_cap_us);
+int star6e_pipeline_cap_exposure_for_fps(uint32_t fps);
 
 #endif /* STAR6E_PIPELINE_H */

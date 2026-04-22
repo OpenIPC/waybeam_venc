@@ -1,5 +1,7 @@
 #include "maruko_pipeline.h"
 
+#include "hevc_rtp.h"
+#include "idr_rate_limit.h"
 #include "isp_runtime.h"
 #include "maruko_bindings.h"
 #include "maruko_config.h"
@@ -27,17 +29,7 @@
 #include <time.h>
 #include <unistd.h>
 
-static uint64_t monotonic_us(void)
-{
-	struct timespec ts;
-#ifdef CLOCK_MONOTONIC_RAW
-	clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-#else
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-#endif
-	return (uint64_t)ts.tv_sec * 1000000ULL +
-	       (uint64_t)(ts.tv_nsec / 1000);
-}
+#include "timing.h"
 
 static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
 {
@@ -53,6 +45,11 @@ static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
 volatile sig_atomic_t g_maruko_running = 1;
 static volatile sig_atomic_t g_maruko_reinit = 0;
 static int g_mi_isp_initialized = 0;
+/* Last ISP bin path successfully loaded (Star6E parity).  Lets reinit
+ * pick up SIGHUP-driven `isp.sensorBin` changes without re-running the
+ * one-shot CUS3A enable below (which deadlocks the vendor mutex on a
+ * second invocation).  Empty until the first successful load. */
+static char g_last_isp_bin_path[256] = {0};
 static int g_mi_isp_dev_created = 0;
 static int g_mi_scl_dev_created = 0;
 static int g_mi_isp_chn_created = 0;
@@ -190,7 +187,9 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 	/* Also load via MI_ISP_IQ_ApiCmdLoadBinFile to initialize the
 	 * IQ parameter subsystem. Without this, MI_ISP_IQ_Set* calls
 	 * are accepted but have no effect on the image. The IQ variant
-	 * takes raw bin data (not a file path). */
+	 * takes raw bin data (not a file path).
+	 * NOTE: this second load may reset AE parameters from the API
+	 * bin — testing if skipping it fixes dark image issue. */
 	if (ret == 0) {
 		FILE *f = fopen(isp_bin_path, "rb");
 		if (f) {
@@ -205,10 +204,15 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 					RTLD_DEFAULT,
 					"MI_ISP_IQ_ApiCmdLoadBinFile");
 				if (fn) {
-					int iq_ret = fn(0, 0, buf, 1234);
-					printf("> [maruko] IQ bin load: %s "
-						"(%ld bytes) ret=%d\n",
-						isp_bin_path, sz, iq_ret);
+					/* DISABLED: IQ bin reload may reset
+					 * AE params from API bin load above.
+					 * Testing if this fixes dark image. */
+					printf("> [maruko] IQ bin load: "
+						"SKIPPED (testing AE fix)\n");
+					(void)fn;
+				} else {
+					printf("> [maruko] IQ bin load: "
+						"symbol not found (skipped)\n");
 				}
 			}
 			free(buf);
@@ -647,18 +651,86 @@ static void fill_maruko_rc_attr(i6c_venc_chn *attr,
 	const MarukoBackendConfig *cfg, uint32_t gop, MI_U32 bit_rate_bits,
 	uint32_t framerate)
 {
+	/* rc_mode values come from codec_config_resolve_codec_rc():
+	 *   cbr=3, h265 vbr=4 avbr=5 qvbr=6, h264 vbr=2 avbr=0 qvbr=1. */
 	if (cfg->rc_codec == PT_H265) {
-		attr->rate.mode = MARUKO_VENC_RC_H265_CBR;
-		attr->rate.h265Cbr = (i6c_venc_rate_h26xcbr){
-			.gop = gop, .statTime = 1, .fpsNum = framerate,
-			.fpsDen = 1, .bitrate = bit_rate_bits, .avgLvl = 1,
-		};
+		switch (cfg->rc_mode) {
+		case 4: /* VBR */
+			attr->rate.mode = MARUKO_VENC_RC_H265_VBR;
+			attr->rate.h265Vbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 45, .minQual = 20,
+			};
+			break;
+		case 5: /* AVBR */
+			attr->rate.mode = MARUKO_VENC_RC_H265_AVBR;
+			attr->rate.h265Avbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 45, .minQual = 20,
+			};
+			break;
+		case 6: /* QVBR: VBR with tighter QP range */
+			attr->rate.mode = MARUKO_VENC_RC_H265_VBR;
+			attr->rate.h265Vbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 40, .minQual = 28,
+			};
+			break;
+		case 3: /* CBR */
+		default:
+			attr->rate.mode = MARUKO_VENC_RC_H265_CBR;
+			attr->rate.h265Cbr = (i6c_venc_rate_h26xcbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.bitrate = bit_rate_bits, .avgLvl = 1,
+			};
+			break;
+		}
 	} else {
-		attr->rate.mode = MARUKO_VENC_RC_H264_CBR;
-		attr->rate.h264Cbr = (i6c_venc_rate_h26xcbr){
-			.gop = gop, .statTime = 1, .fpsNum = framerate,
-			.fpsDen = 1, .bitrate = bit_rate_bits, .avgLvl = 1,
-		};
+		switch (cfg->rc_mode) {
+		case 2: /* VBR */
+			attr->rate.mode = MARUKO_VENC_RC_H264_VBR;
+			attr->rate.h264Vbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 45, .minQual = 20,
+			};
+			break;
+		case 0: /* AVBR */
+			attr->rate.mode = MARUKO_VENC_RC_H264_AVBR;
+			attr->rate.h264Avbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 45, .minQual = 20,
+			};
+			break;
+		case 1: /* QVBR */
+			attr->rate.mode = MARUKO_VENC_RC_H264_VBR;
+			attr->rate.h264Vbr = (i6c_venc_rate_h26xvbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.maxBitrate = bit_rate_bits,
+				.maxQual = 40, .minQual = 28,
+			};
+			break;
+		case 3: /* CBR */
+		default:
+			attr->rate.mode = MARUKO_VENC_RC_H264_CBR;
+			attr->rate.h264Cbr = (i6c_venc_rate_h26xcbr){
+				.gop = gop, .statTime = 1,
+				.fpsNum = framerate, .fpsDen = 1,
+				.bitrate = bit_rate_bits, .avgLvl = 1,
+			};
+			break;
+		}
 	}
 }
 
@@ -740,6 +812,27 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 			*dev_created = 0;
 		}
 		return ret;
+	}
+
+	/* Frame-lost safety net — must be after StartRecvPic. */
+	if (cfg->frame_lost) {
+		MI_VENC_ParamFrameLost_t lost = {0};
+		lost.bFrmLostOpen = 1;
+		lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
+		lost.u32FrmLostBpsThr =
+			pipeline_common_frame_lost_threshold(cfg->venc_max_rate);
+		lost.u32EncFrmGaps = 0;
+		MI_S32 fl_ret = maruko_mi_venc_set_frame_lost(venc_dev, *chn,
+			&lost);
+		if (fl_ret != 0) {
+			fprintf(stderr,
+				"WARNING: [maruko] SetFrameLostStrategy"
+				" thr=%u ret=%d (overshoot protection disabled)\n",
+				lost.u32FrmLostBpsThr, fl_ret);
+		} else {
+			printf("> [maruko] SetFrameLostStrategy: thr=%u ret=0\n",
+				lost.u32FrmLostBpsThr);
+		}
 	}
 
 	return 0;
@@ -847,13 +940,18 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 		&ctx->sensor);
 
 	/* Overscan detection: capture rect > crop rect can cause pipeline
-	 * hangs (e.g. imx415 mode 1). Clamp to crop. */
+	 * hangs (e.g. binning modes report pre-binning capture).
+	 * Clamp to crop and zero offsets — the VIF inputRect must
+	 * match the actual MIPI output, not the pre-binning window. */
 	if (ctx->sensor.mode.crop.width > 0 &&
 	    ctx->sensor.plane.capt.width > ctx->sensor.mode.crop.width) {
 		fprintf(stderr, "WARNING: [maruko] sensor overscan detected: "
-			"capture %ux%u > crop %ux%u — clamping to crop\n",
+			"capture (%u,%u %ux%u) > crop %ux%u — clamping\n",
+			ctx->sensor.plane.capt.x, ctx->sensor.plane.capt.y,
 			ctx->sensor.plane.capt.width, ctx->sensor.plane.capt.height,
 			ctx->sensor.mode.crop.width, ctx->sensor.mode.crop.height);
+		ctx->sensor.plane.capt.x = 0;
+		ctx->sensor.plane.capt.y = 0;
 		ctx->sensor.plane.capt.width = ctx->sensor.mode.crop.width;
 		ctx->sensor.plane.capt.height = ctx->sensor.mode.crop.height;
 	}
@@ -884,6 +982,14 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 	ctx->cfg.image_height = out_h;
 	ctx->cfg.venc_gop_size = pipeline_common_gop_frames(
 		ctx->cfg.venc_gop_seconds, ctx->sensor.fps);
+
+	/* ISP throughput note: the Maruko ISP stalls when the sensor
+	 * pixel throughput exceeds ~144M pix/s.  Mode 3 (1472x816@120fps
+	 * = 144M) works; modes 0-2 (>=1920x1080) stall regardless of
+	 * FPS because the MIPI data rate is set by the sensor mode, not
+	 * the target FPS.  VIF sub-window crop is NOT supported on I6C.
+	 * To enable lower-FPS modes at 1080p, the sensor driver needs
+	 * custom mode entries with appropriate binning/MIPI settings. */
 
 	/* Configure SCL ring pool using sensor capture dimensions.
 	 * Note: majestic skips this, but the SDK sample_venc.c uses it.
@@ -967,15 +1073,43 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	}
 	ctx->bound_vpe_venc = 1;
 
-	/* ISP bin load and CUS3A enable must only run once per process
-	 * lifetime.  On reinit, kernel ISP driver retains CUS3A state;
-	 * re-running the 100->110->111 sequence causes a mutex deadlock. */
-	if (!g_mi_isp_initialized) {
-		if (ctx->cfg.isp_bin_path && *ctx->cfg.isp_bin_path) {
-			ret = maruko_load_isp_bin(ctx->cfg.isp_bin_path);
+	/* Set output port buffer depths to allow pipelining between
+	 * stages.  Without this, the pipeline has zero frame buffering
+	 * and any processing jitter causes frame drops, capping FPS
+	 * well below the sensor's output rate.
+	 * Star6E uses (1, 3) on the VENC port; SDK samples use (2, 4). */
+	(void)MI_SYS_SetChnOutputPortDepth(&ctx->isp_port, 1, 3);
+	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
+	(void)MI_SYS_SetChnOutputPortDepth(&ctx->venc_port, 1, 3);
+
+	/* ISP bin: resolve every configure (so SIGHUP / `/api/v1/restart`
+	 * changes to `isp.sensorBin` and the auto-detect fallback are picked
+	 * up on reinit), but skip the actual reload when the resolved path
+	 * matches the last-loaded path.  Avoids redundant vendor reloads
+	 * which can disturb running AE.  Star6E parity. */
+	{
+		char isp_bin_resolved[256];
+		const char *configured = ctx->cfg.isp_bin_path[0] ?
+			ctx->cfg.isp_bin_path : NULL;
+
+		if (pipeline_common_resolve_isp_bin(configured,
+			ctx->sensor.plane.sensName,
+			isp_bin_resolved, sizeof(isp_bin_resolved)) &&
+		    strcmp(isp_bin_resolved, g_last_isp_bin_path) != 0) {
+			ret = maruko_load_isp_bin(isp_bin_resolved);
 			if (ret != 0)
 				return -1;
+			snprintf(g_last_isp_bin_path,
+				sizeof(g_last_isp_bin_path), "%s",
+				isp_bin_resolved);
 		}
+	}
+
+	/* CUS3A enable + cold-boot exposure cap: must only run once per
+	 * process lifetime.  Re-running CUS3A enable causes a vendor mutex
+	 * deadlock; the exposure cap and `MI_SNR_SetFps` kick are documented
+	 * cold-boot fixups, not reinit operations. */
+	if (!g_mi_isp_initialized) {
 		/* CUS3A enable + EnableUserspace3A: the 100->110->111 sequence
 		 * initializes the CUS3A framework, then EnableUserspace3A
 		 * creates the 3A_Proc_0 thread that drives AE/AWB and
@@ -988,14 +1122,10 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			unsigned int minSensorGain, minIspGain;
 			unsigned int maxSensorGain, maxIspGain;
 		} MarukoIspExposureLimit;
-		/* Cap exposure to sensor frame period so AE doesn't limit
-		 * output FPS. Default bin has 14ms → 71fps. For 120fps
-		 * sensor: 1000000/120 = 8333us max shutter → ~110fps. */
+		/* Auto-cap exposure to frame period for max FPS.
+		 * 120fps sensor → 8333us cap → 118fps. */
 		if (ctx->sensor.fps > 0) {
-			uint32_t fps_cap_us = 1000000 / ctx->sensor.fps;
-			/* User config overrides if set (in ms → us) */
-			if (ctx->cfg.exposure_cap_us > 0)
-				fps_cap_us = ctx->cfg.exposure_cap_us;
+			uint32_t frame_period_us = 1000000 / ctx->sensor.fps;
 			typedef int (*ae_get_fn)(uint32_t, uint32_t,
 				MarukoIspExposureLimit *);
 			typedef int (*ae_set_fn)(uint32_t, uint32_t,
@@ -1008,13 +1138,27 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 				MarukoIspExposureLimit lim = {0};
 				if (fn_get(0, 0, &lim) == 0) {
 					printf("> [maruko] Exposure cap: "
-						"%uus -> %uus (for %u fps)\n",
-						lim.maxShutterUs, fps_cap_us,
-						ctx->sensor.fps);
-					lim.maxShutterUs = fps_cap_us;
+						"%uus -> %uus (for %u fps, "
+						"frame period %uus)\n",
+						lim.maxShutterUs,
+						frame_period_us,
+						ctx->sensor.fps,
+						frame_period_us);
+					lim.maxShutterUs = frame_period_us;
 					fn_set(0, 0, &lim);
 				}
 			}
+
+			/* Force sensor timing reconfiguration after AE
+			 * init.  The vendor AE may have extended VTS
+			 * based on ISP bin defaults; MI_SNR_SetFps
+			 * forces the sensor driver to reset VTS to the
+			 * mode's native value. */
+			MI_SNR_SetFps(ctx->sensor.pad_id, ctx->sensor.fps);
+			printf("> [maruko] MI_SNR_SetFps kick: "
+				"pad %d fps %u\n",
+				(int)ctx->sensor.pad_id,
+				ctx->sensor.fps);
 		}
 
 		g_mi_isp_initialized = 1;
@@ -1029,7 +1173,8 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		    ctx->cfg.rtp_payload_size) != 0)
 			return -1;
 	} else {
-		if (maruko_output_init(&ctx->output, &ctx->cfg.output_uri) != 0)
+		if (maruko_output_init(&ctx->output, &ctx->cfg.output_uri,
+		    ctx->cfg.connected_udp) != 0)
 			return -1;
 	}
 
@@ -1075,10 +1220,61 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	return 0;
 }
 
+/* ── Scene-detector stream decoders (i6c_venc_strm) ──────────────────── */
+
+static uint32_t maruko_scene_frame_size(const i6c_venc_strm *s)
+{
+	uint32_t t = 0;
+	unsigned int i;
+	if (!s || !s->packet) return 0;
+	for (i = 0; i < s->count; i++) t += s->packet[i].length;
+	return t;
+}
+
+static uint8_t maruko_scene_is_idr(const i6c_venc_strm *s, int codec)
+{
+	unsigned int i;
+	if (!s || !s->packet) return 0;
+	for (i = 0; i < s->count; i++) {
+		const i6c_venc_pack *p = &s->packet[i];
+		unsigned int k, n = p->packNum > 8 ? 8 : p->packNum;
+		if (n > 0) {
+			for (k = 0; k < n; k++) {
+				if (codec == 0 && p->packetInfo[k].packType.h264Nalu == 5)
+					return 1;
+				if (codec != 0 && p->packetInfo[k].packType.h265Nalu == 19)
+					return 1;
+			}
+		} else {
+			if (codec == 0 && p->naluType.h264Nalu == 5) return 1;
+			if (codec != 0 && p->naluType.h265Nalu == 19) return 1;
+		}
+	}
+	return 0;
+}
+
+static void maruko_scene_request_idr(void *ctx_ptr)
+{
+	MarukoBackendContext *ctx = ctx_ptr;
+	if (idr_rate_limit_allow(ctx->venc_channel))
+		maruko_mi_venc_request_idr(ctx->venc_device, ctx->venc_channel, 1);
+}
+
 int maruko_pipeline_run(MarukoBackendContext *ctx)
 {
+	int result = -1;
+
 	if (!ctx || (ctx->output.socket_handle < 0 && !ctx->output.ring))
 		return -1;
+
+	if (ctx->cfg.stream_mode == MARUKO_STREAM_RTP &&
+	    ctx->cfg.rc_codec != PT_H265) {
+		fprintf(stderr,
+			"ERROR: [maruko] RTP output mode requires codec=h265;"
+			" rc_codec=%d not supported — aborting pipeline\n",
+			(int)ctx->cfg.rc_codec);
+		return -1;
+	}
 
 	if (ctx->cfg.stream_mode == MARUKO_STREAM_RTP)
 		printf("> [maruko] RTP packetizer enabled\n");
@@ -1094,19 +1290,75 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 	}
 
 	unsigned int frame_counter = 0;
-	unsigned int idle_counter = 0;
+	/* Cached packet buffer — avoids malloc/free per frame at 90fps. */
+	i6c_venc_pack *cached_packs = NULL;
+	uint32_t cached_packs_cap = 0;
 	StreamMetricsState metrics;
+	HevcRtpStats pktzr_interval = {0};
+#define PKTZR_VERBOSE_ACTIVE() (ctx->cfg.verbose && \
+		ctx->cfg.rc_codec == PT_H265 && \
+		ctx->cfg.stream_mode == MARUKO_STREAM_RTP)
 	if (ctx->cfg.verbose) {
 		struct timespec now;
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		stream_metrics_start(&metrics, &now);
 	}
+
+	/* Block on MI_VENC_GetFd(chn) via poll() instead of spinning on
+	 * Query + usleep(500).  The fd signals POLLIN when a frame is
+	 * ready, so the thread wakes ~fps-times/s instead of ~2000/s.
+	 * If the SDK returns fd < 0 on an unknown BSP variant, fall back
+	 * to the original spin loop. */
+	int venc_fd = maruko_mi_venc_get_fd(ctx->venc_device,
+		ctx->venc_channel);
+	/* Idle-detection timeout: 20 s of no encoder data → abort.
+	 * Wall-clock based so semantics are preserved across both the
+	 * fd path (sparse wakeups) and the fallback spin path. */
+	const uint64_t IDLE_ABORT_US = 20ULL * 1000000ULL;
+	const uint64_t IDLE_WARN_US = 1000000ULL;
+	uint64_t last_activity_us = wb_monotonic_us();
+	uint64_t last_warn_us = last_activity_us;
+
 	while (g_maruko_running) {
 		if (g_maruko_reinit || venc_api_get_reinit()) {
 			g_maruko_reinit = 0;
 			printf("> [maruko] reinit requested, breaking stream loop\n");
-			rtp_sidecar_sender_close(&sidecar);
-			return 1;
+			result = 1;
+			goto cleanup;
+		}
+
+		if (venc_fd >= 0) {
+			/* 1 s timeout caps the g_maruko_running cancellation
+			 * latency without wasting cycles on short periodic
+			 * wakes.  Frames at ≥60 fps arrive well within this. */
+			struct pollfd pfd = { .fd = venc_fd, .events = POLLIN };
+			(void)poll(&pfd, 1, 1000);
+			/* POLLERR/POLLHUP/POLLNVAL: the SDK closed the fd
+			 * under us (BSP quirk, pipeline reinit, VPE unbind).
+			 * Fall back to the Query+usleep path for the rest
+			 * of the loop's lifetime. */
+			if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				maruko_mi_venc_close_fd(ctx->venc_device,
+					ctx->venc_channel);
+				venc_fd = -1;
+				usleep(1000);
+				continue;
+			}
+			if (!(pfd.revents & POLLIN)) {
+				/* poll timeout — check wall-clock idle abort */
+				uint64_t now_us = wb_monotonic_us();
+				if (now_us - last_warn_us >= IDLE_WARN_US) {
+					printf("> [maruko] waiting for encoder data...\n");
+					last_warn_us = now_us;
+				}
+				if (now_us - last_activity_us >= IDLE_ABORT_US) {
+					fprintf(stderr,
+						"ERROR: [maruko] no encoder data"
+						" received; aborting stream loop\n");
+					goto cleanup;
+				}
+				continue;
+			}
 		}
 
 		i6c_venc_stat stat = {0};
@@ -1114,81 +1366,134 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			ctx->venc_channel, &stat);
 		if (ret != 0) {
 			if (ret == -EAGAIN || ret == EAGAIN) {
-				idle_wait(&sidecar, 2);
+				usleep(100);
 				continue;
 			}
 			fprintf(stderr,
 				"ERROR: [maruko] MI_VENC_Query failed %d\n",
 				ret);
-			return -1;
+			goto cleanup;
 		}
 
 		if (stat.curPacks == 0) {
-			idle_counter++;
-			if ((idle_counter % 500) == 0)
+			uint64_t now_us = wb_monotonic_us();
+			if (now_us - last_warn_us >= IDLE_WARN_US) {
 				printf("> [maruko] waiting for encoder data...\n");
-			if (idle_counter > 10000) {
+				last_warn_us = now_us;
+			}
+			if (now_us - last_activity_us >= IDLE_ABORT_US) {
 				fprintf(stderr,
 					"ERROR: [maruko] no encoder data"
 					" received; aborting stream loop\n");
-				return -1;
+				goto cleanup;
 			}
-			idle_wait(&sidecar, 1);
+			/* On the fd path this means spurious POLLIN (rare).
+			 * On the fallback spin path, sleep 500us: <5 % of the
+			 * 11 ms frame period at 90 fps, keeps frame latency
+			 * low while reducing idle syscalls. */
+			if (venc_fd < 0)
+				usleep(500);
 			continue;
 		}
-		idle_counter = 0;
+		last_activity_us = wb_monotonic_us();
+		last_warn_us = last_activity_us;
 
 		i6c_venc_strm stream = {0};
 		stream.count = stat.curPacks;
-		stream.packet = calloc(stat.curPacks, sizeof(i6c_venc_pack));
-		if (!stream.packet) {
-			fprintf(stderr,
-				"ERROR: [maruko] packet alloc failed\n");
-			return -1;
+		if (stat.curPacks > cached_packs_cap) {
+			free(cached_packs);
+			cached_packs = malloc(stat.curPacks * sizeof(i6c_venc_pack));
+			if (!cached_packs) {
+				cached_packs_cap = 0;
+				fprintf(stderr,
+					"ERROR: [maruko] packet alloc failed\n");
+				goto cleanup;
+			}
+			cached_packs_cap = stat.curPacks;
 		}
+		stream.packet = cached_packs;
 
 		ret = maruko_mi_venc_get_stream(ctx->venc_device,
-			ctx->venc_channel, &stream, 40);
+			ctx->venc_channel, &stream, 10);
 		if (ret != 0) {
-			free(stream.packet);
-			stream.packet = NULL;
 			if (ret == -EAGAIN || ret == EAGAIN) {
-				idle_wait(&sidecar, 2);
+				usleep(100);
 				continue;
 			}
 			fprintf(stderr,
 				"ERROR: [maruko] MI_VENC_GetStream failed %d\n",
 				ret);
-			return -1;
+			goto cleanup;
 		}
 
 		++frame_counter;
+
+		/* Cold-boot FPS kick: the ISP bin's AE overrides sensor
+		 * timing on first init, locking FPS below target (e.g.
+		 * 74fps instead of 89fps).  Re-kick MI_SNR_SetFps after
+		 * ~1 second of frames to force correct sensor timing.
+		 * Same fix as Star6E CUS3A cold-boot FPS lock. */
+		if (frame_counter == (unsigned int)ctx->sensor.fps) {
+			MI_SNR_SetFps(ctx->sensor.pad_id, ctx->sensor.fps);
+			printf("> [maruko] delayed FPS kick: pad %d fps %u "
+				"(cold-boot fix at frame %u)\n",
+				ctx->sensor.pad_id, ctx->sensor.fps,
+				frame_counter);
+		}
 
 		rtp_sidecar_poll(&sidecar);
 
 		uint32_t frame_rtp_ts = rtp_state.timestamp;
 		uint16_t seq_before = rtp_state.seq;
-		uint64_t ready_us = monotonic_us();
+		uint64_t ready_us = wb_monotonic_us();
 		uint64_t capture_us = (stream.count > 0 && stream.packet)
 			? stream.packet[0].timestamp : 0;
 
+		int codec = (ctx->cfg.rc_codec == PT_H265) ? 1 : 0;
+		uint32_t frame_size = maruko_scene_frame_size(&stream);
+		uint8_t is_idr = maruko_scene_is_idr(&stream, codec);
+		scene_update(&ctx->scene, frame_size, is_idr,
+			maruko_scene_request_idr, ctx);
+		RtpSidecarEncInfo enc_info = {0};
+		scene_fill_sidecar(&ctx->scene, &enc_info);
+
 		size_t total_bytes = 0;
+		HevcRtpStats frame_pktzr = {0};
 		if (ctx->output_enabled) {
 			total_bytes = maruko_video_send_frame(&stream,
 				&ctx->output, &rtp_state, &param_sets,
-				&ctx->cfg);
+				&ctx->cfg,
+				PKTZR_VERBOSE_ACTIVE() ? &frame_pktzr : NULL);
 		}
 
-			rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
-				seq_before,
-				(uint16_t)(rtp_state.seq - seq_before),
-				capture_us, ready_us, NULL);
+		/* Release the encoder stream immediately after the last
+		 * consumer of stream payload (maruko_video_send_frame) so
+		 * the sidecar emit and verbose printf below don't hold the
+		 * VENC output slot. stream.count is captured locally for
+		 * the verbose line; sidecar uses rtp_state only. */
+		unsigned int pack_count = stream.count;
+		(void)maruko_mi_venc_release_stream(ctx->venc_device,
+			ctx->venc_channel, &stream);
+
+		rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
+			seq_before,
+			(uint16_t)(rtp_state.seq - seq_before),
+			capture_us, ready_us, &enc_info);
 
 		if (ctx->cfg.verbose) {
 			StreamMetricsSample sample;
 			struct timespec verbose_ts_now;
 
 			stream_metrics_record_frame(&metrics, total_bytes);
+			if (PKTZR_VERBOSE_ACTIVE()) {
+				pktzr_interval.total_nals += frame_pktzr.total_nals;
+				pktzr_interval.single_packets += frame_pktzr.single_packets;
+				pktzr_interval.ap_packets += frame_pktzr.ap_packets;
+				pktzr_interval.ap_nals += frame_pktzr.ap_nals;
+				pktzr_interval.fu_packets += frame_pktzr.fu_packets;
+				pktzr_interval.rtp_packets += frame_pktzr.rtp_packets;
+				pktzr_interval.rtp_payload_bytes += frame_pktzr.rtp_payload_bytes;
+			}
 			clock_gettime(CLOCK_MONOTONIC, &verbose_ts_now);
 			if (stream_metrics_sample(&metrics, &verbose_ts_now,
 			    &sample)) {
@@ -1197,19 +1502,36 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 					" | %u packs\n",
 					sample.uptime_s, sample.fps,
 					sample.kbps, frame_counter,
-					sample.avg_bytes, stream.count);
+					sample.avg_bytes, pack_count);
+				if (PKTZR_VERBOSE_ACTIVE()) {
+					unsigned int avg_rtp_payload =
+						pktzr_interval.rtp_packets > 0
+						? (unsigned int)(pktzr_interval.rtp_payload_bytes /
+							pktzr_interval.rtp_packets) : 0;
+					printf("[pktzr] nals %u | rtp %u | fill %u B"
+						" | single %u | ap %u/%u | fu %u\n",
+						pktzr_interval.total_nals,
+						pktzr_interval.rtp_packets,
+						avg_rtp_payload,
+						pktzr_interval.single_packets,
+						pktzr_interval.ap_packets,
+						pktzr_interval.ap_nals,
+						pktzr_interval.fu_packets);
+					memset(&pktzr_interval, 0, sizeof(pktzr_interval));
+				}
 				fflush(stdout);
 			}
 		}
-
-		(void)maruko_mi_venc_release_stream(ctx->venc_device,
-			ctx->venc_channel, &stream);
-		free(stream.packet);
-		stream.packet = NULL;
 	}
+	result = 0;
 
+cleanup:
+	if (venc_fd >= 0)
+		maruko_mi_venc_close_fd(ctx->venc_device, ctx->venc_channel);
+	free(cached_packs);
 	rtp_sidecar_sender_close(&sidecar);
-	return 0;
+#undef PKTZR_VERBOSE_ACTIVE
+	return result;
 }
 
 void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)

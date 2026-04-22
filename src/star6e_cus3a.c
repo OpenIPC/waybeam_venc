@@ -341,7 +341,19 @@ static void *cus3a_thread(void *arg)
 			 * After 15 ticks (~1s), if still stuck, call
 			 * MI_SNR_SetFps to force the sensor driver to
 			 * reconfigure its timing registers, then re-set
-			 * the exposure limit.  Only fires once. */
+			 * the exposure limit.  Only fires once.
+			 *
+			 * Note: star6e_pipeline_reinit also unconditionally
+			 * calls MI_SNR_SetFps on every reinit, and
+			 * star6e_pipeline_start_vpe calls it during the
+			 * legacyAe startup branch.  This block remains the
+			 * safety net for CUS3A cold boot (non-legacyAe) —
+			 * where the pipeline-level kicks don't fire and the
+			 * sensor register can still be stuck above our cap
+			 * after ISP bin load.  Cus3a_thread is stopped and
+			 * restarted on reinit, so `fps_kick_done` resets
+			 * automatically and this branch re-arms each
+			 * pipeline cycle. */
 			if (frames > 0 && frames <= 15 &&
 			    !fps_kick_done &&
 			    s->fn_get_plane_info &&
@@ -544,12 +556,6 @@ void star6e_cus3a_join(void)
 int star6e_cus3a_running(void)
 {
 	return g_cus3a.running;
-}
-
-void star6e_cus3a_set_shutter_max(uint32_t max_us)
-{
-	if (max_us > 0)
-		g_cus3a.shutter_max_us = max_us;
 }
 
 void star6e_cus3a_set_gain_max(uint32_t gain)
