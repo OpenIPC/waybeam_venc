@@ -618,8 +618,13 @@ int star6e_output_apply_server(Star6eOutput *output, const char *uri)
 {
 	VencOutputUri parsed;
 
-	if (!output || output->ring || !uri)
+	if (!output || !uri)
 		return -1;
+	if (output->ring) {
+		fprintf(stderr, "ERROR: live switch away from shm:// is not supported "
+			"(requires restart)\n");
+		return -1;
+	}
 	if (venc_config_parse_output_uri(uri, &parsed) != 0)
 		return -1;
 	if (parsed.type == VENC_OUTPUT_URI_SHM) {
