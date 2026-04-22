@@ -642,10 +642,50 @@ static const char *validate_backend_config(const char *backend_name,
 
 /* ── Query string helpers ────────────────────────────────────────────── */
 
+static int hex_nibble(unsigned char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+/* RFC 3986 percent-decode in place. '+' is preserved as-is (matches
+ * JavaScript encodeURIComponent, which never emits '+' for spaces).
+ * Returns 0 on success, -1 on malformed escape (truncated or non-hex). */
+static int url_decode_inplace(char *s)
+{
+	char *src;
+	char *dst;
+
+	if (!s)
+		return -1;
+
+	src = s;
+	dst = s;
+	while (*src) {
+		if (*src == '%') {
+			int hi = hex_nibble((unsigned char)src[1]);
+			int lo = (hi >= 0) ? hex_nibble((unsigned char)src[2]) : -1;
+			if (hi < 0 || lo < 0)
+				return -1;
+			*dst++ = (char)((hi << 4) | lo);
+			src += 3;
+		} else {
+			*dst++ = *src++;
+		}
+	}
+	*dst = '\0';
+	return 0;
+}
+
 /* Find the first key=value in a query string.  Writes key and value into
- * provided buffers.  Returns 0 on success, -1 if no key found. */
+ * provided buffers.  Both are percent-decoded in place.  Returns 0 on
+ * success, -1 if no key found or decode fails.  On percent-decode
+ * failure, *error_message (if provided) is set to a static string;
+ * otherwise it is left untouched. */
 static int parse_first_query_param(const char *query, char *key, size_t key_sz,
-	char *val, size_t val_sz)
+	char *val, size_t val_sz, const char **error_message)
 {
 	if (!query || !*query) return -1;
 	const char *eq = strchr(query, '=');
@@ -667,6 +707,11 @@ static int parse_first_query_param(const char *query, char *key, size_t key_sz,
 		memcpy(key, query, klen);
 		key[klen] = '\0';
 		val[0] = '\0';
+	}
+	if (url_decode_inplace(key) != 0 || url_decode_inplace(val) != 0) {
+		if (error_message)
+			*error_message = "malformed percent-escape in query";
+		return -1;
 	}
 	return 0;
 }
@@ -954,6 +999,13 @@ static int parse_query_params(const char *query, SetQueryParam *params,
 			value_len = sizeof(params[count].value) - 1;
 		memcpy(params[count].value, eq + 1, value_len);
 		params[count].value[value_len] = '\0';
+
+		if (url_decode_inplace(params[count].key) != 0 ||
+		    url_decode_inplace(params[count].value) != 0) {
+			if (error_message)
+				*error_message = "malformed percent-escape in query";
+			return -1;
+		}
 
 		canonical_key = canonicalize_field_key(params[count].key);
 		if (!canonical_key)
@@ -1558,12 +1610,14 @@ static int process_single_set_query(const char *query, int *status_code,
 	const char *canonical_key;
 	const FieldDesc *f;
 	SetQueryParam param;
+	const char *parse_error = NULL;
 	int rc;
 
-	if (parse_first_query_param(query, key, sizeof(key), val, sizeof(val)) != 0 ||
-	    !*key) {
+	if (parse_first_query_param(query, key, sizeof(key), val, sizeof(val),
+	    &parse_error) != 0 || !*key) {
 		*status_code = 400;
 		return make_error_json("invalid_request",
+			parse_error ? parse_error :
 			"missing query parameter key=value", response_json);
 	}
 
@@ -1757,9 +1811,11 @@ static int handle_get(int fd, const HttpRequest *req, void *ctx)
 	(void)ctx;
 	char key[128], dummy[4];
 	const char *canonical_key;
+	const char *parse_error = NULL;
 	if (parse_first_query_param(req->query, key, sizeof(key),
-			dummy, sizeof(dummy)) != 0 || !*key) {
+			dummy, sizeof(dummy), &parse_error) != 0 || !*key) {
 		return httpd_send_error(fd, 400, "invalid_request",
+			parse_error ? parse_error :
 			"missing query parameter (field name)");
 	}
 
@@ -1824,9 +1880,11 @@ static int handle_iq_set(int fd, const HttpRequest *req, void *ctx)
 			"IQ set not available");
 	}
 	char key[64], val[256];
+	const char *parse_error = NULL;
 	if (parse_first_query_param(req->query, key, sizeof(key),
-			val, sizeof(val)) != 0 || !*key || !*val) {
+			val, sizeof(val), &parse_error) != 0 || !*key || !*val) {
 		return httpd_send_error(fd, 400, "invalid_request",
+			parse_error ? parse_error :
 			"usage: /api/v1/iq/set?param=value");
 	}
 	/* Validate value is numeric (with commas for arrays) */
@@ -1991,7 +2049,7 @@ static int handle_record_start(int fd, const HttpRequest *req, void *ctx)
 	if (req->query[0]) {
 		char key[64];
 		if (parse_first_query_param(req->query, key, sizeof(key),
-				dir, sizeof(dir)) == 0 &&
+				dir, sizeof(dir), NULL) == 0 &&
 		    strcmp(key, "dir") == 0 && dir[0]) {
 			/* Use provided dir */
 		} else {
