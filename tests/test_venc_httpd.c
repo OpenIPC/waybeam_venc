@@ -83,6 +83,84 @@ static int test_request_struct_sizes(void)
 	return failures;
 }
 
+static int test_query_param(void)
+{
+	int failures = 0;
+	HttpRequest req;
+	char out[64];
+
+	memset(&req, 0, sizeof(req));
+	snprintf(req.query, sizeof(req.query), "file=foo.ts");
+	CHECK("qp_found_simple",
+		httpd_query_param(&req, "file", out, sizeof(out)) == 0 &&
+		strcmp(out, "foo.ts") == 0);
+
+	memset(&req, 0, sizeof(req));
+	snprintf(req.query, sizeof(req.query), "a=1&file=bar.ts&b=2");
+	CHECK("qp_middle_key",
+		httpd_query_param(&req, "file", out, sizeof(out)) == 0 &&
+		strcmp(out, "bar.ts") == 0);
+
+	memset(&req, 0, sizeof(req));
+	snprintf(req.query, sizeof(req.query), "file=hello%%20world");
+	CHECK("qp_percent_space",
+		httpd_query_param(&req, "file", out, sizeof(out)) == 0 &&
+		strcmp(out, "hello world") == 0);
+
+	memset(&req, 0, sizeof(req));
+	snprintf(req.query, sizeof(req.query), "file=a+b+c");
+	CHECK("qp_plus_space",
+		httpd_query_param(&req, "file", out, sizeof(out)) == 0 &&
+		strcmp(out, "a b c") == 0);
+
+	memset(&req, 0, sizeof(req));
+	snprintf(req.query, sizeof(req.query), "file=%%C3%%A9.ts");
+	CHECK("qp_utf8_decode",
+		httpd_query_param(&req, "file", out, sizeof(out)) == 0 &&
+		(unsigned char)out[0] == 0xC3 &&
+		(unsigned char)out[1] == 0xA9 &&
+		strcmp(out + 2, ".ts") == 0);
+
+	memset(&req, 0, sizeof(req));
+	snprintf(req.query, sizeof(req.query), "other=x");
+	CHECK("qp_missing",
+		httpd_query_param(&req, "file", out, sizeof(out)) == -1);
+
+	memset(&req, 0, sizeof(req));
+	snprintf(req.query, sizeof(req.query), "filepart=bad&file=ok");
+	CHECK("qp_prefix_collision",
+		httpd_query_param(&req, "file", out, sizeof(out)) == 0 &&
+		strcmp(out, "ok") == 0);
+
+	memset(&req, 0, sizeof(req));
+	snprintf(req.query, sizeof(req.query), "file=");
+	CHECK("qp_empty_value",
+		httpd_query_param(&req, "file", out, sizeof(out)) == 0 &&
+		out[0] == '\0');
+
+	memset(&req, 0, sizeof(req));
+	snprintf(req.query, sizeof(req.query), "file=bad%%Ghex");
+	CHECK("qp_invalid_percent_passthrough",
+		httpd_query_param(&req, "file", out, sizeof(out)) == 0 &&
+		strcmp(out, "bad%Ghex") == 0);
+
+	memset(&req, 0, sizeof(req));
+	snprintf(req.query, sizeof(req.query), "file=%%");
+	CHECK("qp_trailing_percent",
+		httpd_query_param(&req, "file", out, sizeof(out)) == 0 &&
+		strcmp(out, "%") == 0);
+
+	memset(&req, 0, sizeof(req));
+	snprintf(req.query, sizeof(req.query), "file=verylongvalue");
+	char small[8];
+	CHECK("qp_truncate_safe",
+		httpd_query_param(&req, "file", small, sizeof(small)) == 0 &&
+		strlen(small) == sizeof(small) - 1 &&
+		strncmp(small, "verylon", 7) == 0);
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_httpd(void)
@@ -91,5 +169,6 @@ int test_venc_httpd(void)
 	failures += test_route_registration();
 	failures += test_route_overflow();
 	failures += test_request_struct_sizes();
+	failures += test_query_param();
 	return failures;
 }

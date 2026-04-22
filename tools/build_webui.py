@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """
-Regenerate the embedded dashboard gzip inside src/venc_webui.c from
-web/dashboard.html.
+Regenerate embedded gzip blobs inside src/*.c from their web/*.html sources.
 
-Writes a deterministic gzip (mtime=0, fixed OS byte from Python's stdlib
-default) so diffs on src/venc_webui.c reflect only actual HTML changes.
+Each entry in BLOBS maps an HTML file to a target C file and the array
+name that holds the gzip bytes inside it.  The C file must contain a
+block of the form:
+
+    static const unsigned char <array_name>[] = {
+        0x..., 0x..., ...
+    };
+
+The splicer rewrites everything between `<array_name>[] = {\\n` and
+`\\n};` with deterministic output (mtime=0) so repeated runs produce
+byte-identical files.
 
 Usage:
     python3 tools/build_webui.py          # regenerate in place
-    python3 tools/build_webui.py --check  # fail if src is out of date
+    python3 tools/build_webui.py --check  # fail if any src is out of date
 """
 import argparse
 import gzip
@@ -17,8 +25,12 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SRC_HTML = ROOT / "web" / "dashboard.html"
-SRC_C    = ROOT / "src" / "venc_webui.c"
+
+BLOBS = [
+    # (html source, C target, array name)
+    (ROOT / "web" / "dashboard.html",
+     ROOT / "src" / "venc_webui.c", "dashboard_gz"),
+]
 
 
 def build_gzip(html_bytes: bytes) -> bytes:
@@ -34,42 +46,53 @@ def format_c_array(data: bytes, indent: str = "\t") -> str:
     return "\n".join(lines)
 
 
-def splice_into_c(src_text: str, array_body: str) -> str:
-    pat = re.compile(r"(dashboard_gz\[\] = \{\n)(.*?)(\n\};)", re.S)
+def splice_into_c(src_text: str, array_name: str, array_body: str) -> str:
+    pat = re.compile(
+        r"(" + re.escape(array_name) + r"\[\] = \{\n)(.*?)(\n\};)", re.S)
     m = pat.search(src_text)
     if not m:
-        raise SystemExit("could not find dashboard_gz[] block in venc_webui.c")
+        raise SystemExit(
+            f"could not find {array_name}[] block in source")
     return src_text[:m.start(2)] + array_body + src_text[m.end(2):]
+
+
+def regenerate_one(html_path, c_path, array_name, check):
+    html_bytes = html_path.read_bytes()
+    gz = build_gzip(html_bytes)
+    array_body = format_c_array(gz)
+    current = c_path.read_text()
+    expected = splice_into_c(current, array_name, array_body)
+    rel_c = c_path.relative_to(ROOT)
+    if check:
+        if current != expected:
+            print(
+                f"{rel_c} is out of date with "
+                f"{html_path.relative_to(ROOT)}.",
+                file=sys.stderr)
+            print("Run: python3 tools/build_webui.py", file=sys.stderr)
+            return False
+        return True
+    if current == expected:
+        print(f"{rel_c} already up to date.")
+        return True
+    c_path.write_text(expected)
+    print(
+        f"Regenerated {rel_c} "
+        f"({len(gz)} gz bytes from {len(html_bytes)} html bytes).")
+    return True
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true",
-                    help="exit non-zero if src is stale")
+                    help="exit non-zero if any src is stale")
     args = ap.parse_args()
 
-    html_bytes = SRC_HTML.read_bytes()
-    gz = build_gzip(html_bytes)
-    array_body = format_c_array(gz)
-
-    current = SRC_C.read_text()
-    expected = splice_into_c(current, array_body)
-
-    if args.check:
-        if current != expected:
-            print("venc_webui.c is out of date with web/dashboard.html.",
-                  file=sys.stderr)
-            print("Run: python3 tools/build_webui.py", file=sys.stderr)
-            return 1
-        return 0
-
-    if current == expected:
-        print("venc_webui.c already up to date.")
-        return 0
-    SRC_C.write_text(expected)
-    print(f"Regenerated {SRC_C.relative_to(ROOT)} "
-          f"({len(gz)} gz bytes from {len(html_bytes)} html bytes).")
-    return 0
+    ok = True
+    for html_path, c_path, name in BLOBS:
+        if not regenerate_one(html_path, c_path, name, args.check):
+            ok = False
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

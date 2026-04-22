@@ -497,6 +497,31 @@ gst-launch-1.0 udpsrc port=5601 \
 Recording can also be controlled at runtime via the HTTP API. In dual/dual-stream
 modes, the secondary channel parameters can be adjusted live via `/api/v1/dual/set`.
 
+**HTTP `/api/v1/record/start|stop` behavior vs configured `record.mode`:**
+
+`/api/v1/record/start` always writes ch0 (the live encoded stream) to disk in
+the configured `record.format` — it cannot change the pipeline topology, only
+open or close a recording file. Whether that even runs depends on whether a
+dedicated recording thread already owns the recorder:
+
+| `record.enabled` | `record.mode`   | Auto-start at boot             | Dashboard Start / `/record/start` |
+|------------------|-----------------|--------------------------------|-----------------------------------|
+| false            | any             | no                             | starts ch0 mirror, `record.format` respected |
+| true             | `off`           | no                             | starts ch0 mirror, `record.format` respected |
+| true             | `mirror`        | yes (ch0 → disk)               | restarts ch0 mirror               |
+| true             | `dual`          | yes (ch1 → disk, dedicated)    | **silently ignored** — ch1 thread owns the recorder |
+| true             | `dual-stream`   | no (ch1 → RTP via `record.server`) | **silently ignored** — ch1 is streamed, not recorded |
+
+The "silently ignored" rows exist because `ps->dual` is non-NULL only when
+`record.enabled=true && mode ∈ {dual, dual-stream}`; the runtime loop
+explicitly skips the HTTP start/stop poll in that case to avoid racing the
+dedicated recording thread.  The dashboard Recordings tab detects this
+configuration and disables the Start/Stop buttons with a reason note.
+
+File rotation (`record.max_seconds`, `record.max_mb`) applies equally to
+config-started and HTTP-started recordings — both use the same `ts_recorder`
+/ `recorder` object.
+
 #### IMU (Star6E only, POC)
 
 | Field | Type | Mutability | Description |
