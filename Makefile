@@ -31,7 +31,9 @@ COMMON_LDFLAGS := -Wl,-rpath,$(LIB_RUNPATH) -Wl,--no-as-needed
 ifeq ($(SOC_BUILD),maruko)
 CC := $(MARUKO_CC)
 SRC := src/main.c src/backend_maruko.c $(MARUKO_ONLY_SRC) $(HELPER_SRC) $(CONFIG_SRC)
-DRV :=
+# Stock OpenIPC Infinity6C firmware does NOT ship MI vendor libs; bundle them.
+# Star6E doesn't need this — Infinity6E firmware has them in /rom/usr/lib/.
+DRV := vendor-libs/maruko
 DRV_EXTRA :=
 SOC_CFLAGS :=
 SOC_DEFS := -DPLATFORM_STAR6E -DPLATFORM_MARUKO -DHAVE_BACKEND_MARUKO=1
@@ -113,7 +115,7 @@ $(TIMING_PROBE_TARGET): $(TIMING_PROBE_SRC) include/rtp_sidecar.h
 	$(HOST_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE -Iinclude $(TIMING_PROBE_SRC) -lm -o $@
 
 stage: build
-	mkdir -p $(OUT_DIR)/lib
+	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
 	@if [ -n "$(DRV)" ]; then cp -f $(DRV)/*.so $(OUT_DIR)/lib/; fi
 	@if [ -n "$(DRV_EXTRA)" ]; then cp -f "$(DRV_EXTRA)"/*.so $(OUT_DIR)/lib/; fi
 
