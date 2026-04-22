@@ -214,7 +214,7 @@ Missing libraries cause graceful fallback (warning + continue without audio).
 ffplay -nodisp -f rtp -i rtp://0.0.0.0:5601
 
 # GStreamer
-gst-launch-1.0 udpsrc port=5601 caps="application/x-rtp,payload=120,clock-rate=48000,encoding-name=OPUS" ! \
+gst-launch-1.0 udpsrc port=5601 caps="application/x-rtp,payload=98,clock-rate=48000,encoding-name=OPUS" ! \
   rtpopusdepay ! opusdec ! autoaudiosink
 ```
 

@@ -471,7 +471,7 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 		else if (state->codec_type == AUDIO_TYPE_G711A)
 			state->rtp.payload_type = 113; /* PCMA non-8kHz */
 		else if (state->codec_type == AUDIO_TYPE_OPUS)
-			state->rtp.payload_type = 120; /* dynamic PT for Opus (RFC 7587) */
+			state->rtp.payload_type = 98; /* dynamic PT for Opus (majestic convention) */
 		else if (state->codec_type < 0 &&
 		         state->sample_rate == 44100)
 			state->rtp.payload_type = 11;  /* L16 44.1kHz mono */
