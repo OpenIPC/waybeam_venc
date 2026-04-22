@@ -448,7 +448,10 @@ dedicated local UDP audio destination.
 Audio configuration (enabled, sample rate, channels, codec, volume) is
 set in `/etc/venc.json` only and requires a process restart to change.
 
-Supported codecs: `"pcm"` (raw 16-bit), `"g711a"` (A-law), `"g711u"` (µ-law).
+Supported codecs: `"pcm"` (raw 16-bit, big-endian L16 per RFC 3551),
+`"g711a"` (A-law), `"g711u"` (µ-law), `"opus"` (requires `libopus.so` at
+runtime; falls back to PCM with a warning if the library or encoder is
+unavailable).
 
 **RTP payload types:** When streaming in RTP mode, venc uses standard static
 payload types when the sample rate matches the RFC 3551 standard:
@@ -461,12 +464,24 @@ payload types when the sample rate matches the RFC 3551 standard:
 | `g711a` | non-8kHz | 113 | Dynamic, Waybeam convention |
 | `pcm` | 44100 | 11 (L16 mono) | RFC 3551 standard |
 | `pcm` | other | 110 | Dynamic PCM |
+| `opus` | any | 98 | Dynamic, majestic-compatible (RFC 7587) |
 
-Sample rate range: 8000–48000 Hz (clamped by config parser). The
-recommended default is 16kHz G.711a for low-latency FPV audio.
+Sample rate range: 8000–48000 Hz (clamped by config parser). For Opus the
+recommended sample rate is 48000 Hz (native Opus clock, no resampling);
+the RTP clock is fixed at 48 kHz per RFC 7587 regardless of capture rate.
+For voice-only FPV audio, 16 kHz G.711a remains a low-latency choice.
 
-**Frame timing:** Each RTP packet contains `sample_rate / 50` samples
-(~20ms of audio). The RTP timestamp increments by this value per packet.
+**Frame timing:** Each RTP packet carries one 20 ms frame. The RTP
+timestamp advances by `sample_rate / 50` samples for PCM/G.711, and by
+960 (the 48 kHz nominal Opus tick) for Opus.
+
+**Receiving Opus:**
+
+```bash
+gst-launch-1.0 udpsrc port=5601 \
+    caps="application/x-rtp,media=audio,payload=98,clock-rate=48000,encoding-name=OPUS" \
+  ! rtpopusdepay ! opusdec ! audioconvert ! autoaudiosink
+```
 
 #### Recording (Star6E only)
 
