@@ -42,6 +42,7 @@ typedef struct {
 	int apply_qp_delta_calls;
 	int apply_verbose_calls;
 	int apply_awb_mode_calls;
+	int apply_server_calls;
 
 	uint32_t last_bitrate;
 	uint32_t last_fps;
@@ -50,11 +51,13 @@ typedef struct {
 	bool last_verbose;
 	int last_awb_mode;
 	uint32_t last_awb_ct;
+	char last_server[128];
 
 	int fail_bitrate;
 	int fail_verbose;
 	int fail_fps;
 	int fail_gop;
+	int fail_server;
 } ApiCallbackState;
 
 static ApiCallbackState g_api_cb_state;
@@ -272,6 +275,14 @@ static int test_apply_awb_mode(int mode, uint32_t ct)
 	g_api_cb_state.last_awb_mode = mode;
 	g_api_cb_state.last_awb_ct = ct;
 	return 0;
+}
+
+static int test_apply_server(const char *uri)
+{
+	g_api_cb_state.apply_server_calls++;
+	snprintf(g_api_cb_state.last_server, sizeof(g_api_cb_state.last_server),
+		"%s", uri ? uri : "");
+	return g_api_cb_state.fail_server ? -1 : 0;
 }
 
 /* Whitebox access to internal functions via extern declarations.
@@ -729,6 +740,93 @@ static int test_restart_set_accepts_star6e_h264_compact(void)
 	return failures;
 }
 
+static int test_single_set_url_decodes_outgoing_server(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_server = test_apply_server;
+
+	/* encodeURIComponent("udp://192.168.1.5:5601") */
+	CHECK("url-decode single rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.server=udp%3A%2F%2F192.168.1.5%3A5601",
+			&status, response, sizeof(response)) == 0);
+	CHECK("url-decode single status", status == 200);
+	CHECK("url-decode single cfg",
+		strcmp(cfg.outgoing.server, "udp://192.168.1.5:5601") == 0);
+	CHECK("url-decode single callback invoked",
+		g_api_cb_state.apply_server_calls == 1);
+	CHECK("url-decode single callback value",
+		strcmp(g_api_cb_state.last_server,
+			"udp://192.168.1.5:5601") == 0);
+
+	return failures;
+}
+
+static int test_multi_set_url_decodes_values(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_server = test_apply_server;
+	cb.apply_verbose = test_apply_verbose;
+
+	CHECK("url-decode multi rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.server=udp%3A%2F%2F10.0.0.1%3A5600"
+			"&system.verbose=true",
+			&status, response, sizeof(response)) == 0);
+	CHECK("url-decode multi status", status == 200);
+	CHECK("url-decode multi cfg",
+		strcmp(cfg.outgoing.server, "udp://10.0.0.1:5600") == 0);
+	CHECK("url-decode multi callback value",
+		strcmp(g_api_cb_state.last_server,
+			"udp://10.0.0.1:5600") == 0);
+
+	return failures;
+}
+
+static int test_set_rejects_malformed_percent_escape(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_server = test_apply_server;
+
+	/* "%ZZ" is not a valid percent-escape */
+	CHECK("malformed %% multi rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.server=udp%ZZ://1.2.3.4:5600"
+			"&system.verbose=true",
+			&status, response, sizeof(response)) == 0);
+	CHECK("malformed %% multi status", status == 400);
+	CHECK("malformed %% multi error",
+		strstr(response, "malformed percent-escape") != NULL);
+	CHECK("malformed %% no callback",
+		g_api_cb_state.apply_server_calls == 0);
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_api(void)
@@ -750,6 +848,9 @@ int test_venc_api(void)
 	failures += test_restart_set_accepts_maruko_h264_config();
 	failures += test_restart_set_rejects_star6e_h264_rtp();
 	failures += test_restart_set_accepts_star6e_h264_compact();
+	failures += test_single_set_url_decodes_outgoing_server();
+	failures += test_multi_set_url_decodes_values();
+	failures += test_set_rejects_malformed_percent_escape();
 	stop_api_test_server();
 	return failures;
 }
