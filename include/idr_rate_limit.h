@@ -18,9 +18,10 @@
  * (≈83 ms at GOP=10) — so auto-GOP IDRs are unaffected (they're not
  * RequestIdr-driven), forced IDRs coalesce when fired in a storm.
  *
- * Thread-safety: each channel's state is a pair of __atomic_ fields;
- * multiple callers may race without locking — last writer wins on
- * `last_us`, counter is atomic-increment.  No mutex required.
+ * Thread-safety: per-channel `last_us` is updated via a CAS loop so
+ * exactly one concurrent caller wins each spacing window; the rest see
+ * the updated `last_us` on retry and drop into the rate-limited branch.
+ * Counters are atomic-increment.  No mutex required.
  */
 
 #ifndef IDR_RATE_LIMIT_H

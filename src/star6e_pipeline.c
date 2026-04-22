@@ -800,8 +800,11 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	pconf->image_flip      = vcfg->image.flip   ? 1 : 0;
 	pconf->vpe_level_3dnr  = vcfg->fpv.noise_level;
 	pconf->oc_level        = vcfg->system.overclock_level;
-	/* isp_bin_path is resolved later in select_and_configure_sensor() once
-	 * the live sensor name is known.  Leave empty here. */
+	/* isp_bin_path is resolved later in bind_and_finalize_pipeline() once
+	 * the live sensor name is known.  Resolved there (rather than in
+	 * select_and_configure_sensor) so that reinit — which reuses the
+	 * existing sensor and skips select_and_configure_sensor — also picks
+	 * up SIGHUP-driven `isp.sensorBin` changes.  Leave empty here. */
 	pconf->isp_bin_path[0] = '\0';
 
 	pconf->sensor_cfg = pipeline_common_build_sensor_select_config(
@@ -1311,14 +1314,18 @@ static void star6e_pipeline_stop_venc_level(Star6ePipelineState *state)
 
 	star6e_audio_teardown(&state->audio);
 	star6e_output_teardown(&state->output);
-	if (state->dual)
-		star6e_output_teardown(&state->dual->output);
 
+	/* Stop and join the dual recorder thread BEFORE tearing down its
+	 * output.  The thread calls star6e_video_send_frame(&dual->output, …)
+	 * inside its loop; tearing down output first leaves a window where
+	 * the still-running thread writes to a closed/freed output. */
 	if (state->dual && state->dual->rec_started) {
 		state->dual->rec_running = 0;
 		pthread_join(state->dual->rec_thread, NULL);
 		state->dual->rec_started = 0;
 	}
+	if (state->dual)
+		star6e_output_teardown(&state->dual->output);
 
 	if (state->dual && state->dual->bound) {
 		MI_SYS_UnBindChnPort(&state->vpe_port, &state->dual->port);

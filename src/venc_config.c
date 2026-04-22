@@ -768,26 +768,101 @@ int venc_config_save(const char *path, const VencConfig *cfg)
 	cJSON_Delete(root);
 	if (!json) return -1;
 
-	/* Atomic write: write to temp file in the same directory, fsync, then
-	 * rename over the target.  Survives power cut mid-write (a real failure
-	 * mode on FPV hardware) — we always end up with either the old or the
-	 * new config on disk, never a truncated/empty file. */
-	size_t path_len = strlen(path);
-	char tmp_path[512];
-	if (path_len + 8 >= sizeof(tmp_path)) {
-		fprintf(stderr, "[venc_config] ERROR: path too long: %s\n", path);
+	/* Atomic write: write to temp file in the same directory as the *real*
+	 * target, fsync, then rename over the target.  Survives power cut
+	 * mid-write — we always end up with either the old or the new config
+	 * on disk, never a truncated/empty file.  Symlink-aware: if `path` is
+	 * a symlink we operate on the resolved target so we replace its
+	 * contents (atomic in-place semantics) rather than replacing the
+	 * symlink itself with a regular file.  Mode bits are preserved from
+	 * the existing file when present (default 0644 on first save). */
+	char target[512];
+	mode_t target_mode = 0644;
+	struct stat st;
+	int have_existing = 0;
+	{
+		ssize_t n = readlink(path, target, sizeof(target) - 1);
+		if (n > 0) {
+			target[n] = '\0';
+			/* Relative symlink — resolve against `path`'s dir.
+			 * `joined` sized for worst case `dirname(path) + '/' +
+			 * readlink_target + '\0'`; we then bail if the result
+			 * doesn't fit `target`. */
+			if (target[0] != '/') {
+				char base[512];
+				char *slash;
+				int n_base = snprintf(base, sizeof(base),
+					"%s", path);
+				if (n_base < 0 ||
+				    (size_t)n_base >= sizeof(base)) {
+					fprintf(stderr,
+						"[venc_config] ERROR: path "
+						"too long: %s\n", path);
+					free(json);
+					return -1;
+				}
+				slash = strrchr(base, '/');
+				if (slash) {
+					char joined[1024];
+					int n_join;
+					*slash = '\0';
+					n_join = snprintf(joined, sizeof(joined),
+						"%s/%s", base, target);
+					if (n_join < 0 ||
+					    (size_t)n_join >= sizeof(joined) ||
+					    (size_t)n_join >= sizeof(target)) {
+						fprintf(stderr,
+							"[venc_config] ERROR: "
+							"resolved symlink "
+							"path too long\n");
+						free(json);
+						return -1;
+					}
+					memcpy(target, joined,
+						(size_t)n_join + 1);
+				}
+			}
+		} else {
+			int n_path = snprintf(target, sizeof(target),
+				"%s", path);
+			if (n_path < 0 ||
+			    (size_t)n_path >= sizeof(target)) {
+				fprintf(stderr,
+					"[venc_config] ERROR: path too long: "
+					"%s\n", path);
+				free(json);
+				return -1;
+			}
+		}
+		if (stat(target, &st) == 0) {
+			target_mode = st.st_mode & 07777;
+			have_existing = 1;
+		}
+	}
+	(void)have_existing;
+
+	size_t target_len = strlen(target);
+	/* tmp_path sized for `target` + `.tmp` + '\0'.  The runtime check
+	 * below guarantees no truncation, but also size the buffer past
+	 * `target` so -Wformat-truncation can't false-positive. */
+	char tmp_path[sizeof(target) + 8];
+	if (target_len + 5 > sizeof(tmp_path)) {
+		fprintf(stderr, "[venc_config] ERROR: path too long: %s\n", target);
 		free(json);
 		return -1;
 	}
-	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target);
 
-	int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, target_mode);
 	if (fd < 0) {
 		fprintf(stderr, "[venc_config] ERROR: cannot open %s: %s\n",
 			tmp_path, strerror(errno));
 		free(json);
 		return -1;
 	}
+	/* O_CREAT mode is masked by umask; restore explicitly so the saved
+	 * file matches the original mode bits even when umask is non-zero. */
+	(void)fchmod(fd, target_mode);
 
 	size_t json_len = strlen(json);
 	ssize_t wrote = 0;
@@ -805,9 +880,23 @@ int venc_config_save(const char *path, const VencConfig *cfg)
 		}
 		wrote += n;
 	}
-	/* trailing newline */
-	const char nl = '\n';
-	(void)write(fd, &nl, 1);
+	/* trailing newline — short-write retry for completeness */
+	{
+		const char nl = '\n';
+		ssize_t n;
+		do {
+			n = write(fd, &nl, 1);
+		} while (n < 0 && errno == EINTR);
+		if (n != 1) {
+			fprintf(stderr,
+				"[venc_config] ERROR: trailing-nl write %s: %s\n",
+				tmp_path, strerror(errno));
+			close(fd);
+			unlink(tmp_path);
+			free(json);
+			return -1;
+		}
+	}
 
 	if (fsync(fd) != 0) {
 		fprintf(stderr, "[venc_config] ERROR: fsync %s: %s\n",
@@ -820,24 +909,39 @@ int venc_config_save(const char *path, const VencConfig *cfg)
 	close(fd);
 	free(json);
 
-	if (rename(tmp_path, path) != 0) {
+	if (rename(tmp_path, target) != 0) {
 		fprintf(stderr, "[venc_config] ERROR: rename %s -> %s: %s\n",
-			tmp_path, path, strerror(errno));
+			tmp_path, target, strerror(errno));
 		unlink(tmp_path);
 		return -1;
 	}
 
-	/* fsync the containing directory so the rename itself is durable. */
-	char dir_buf[512];
-	snprintf(dir_buf, sizeof(dir_buf), "%s", path);
-	char *slash = strrchr(dir_buf, '/');
-	const char *dir_path = slash ? (*slash = '\0', dir_buf) : ".";
-	int dfd = open(dir_path, O_RDONLY);
-	if (dfd >= 0) {
-		(void)fsync(dfd);
+	/* fsync the containing directory so the rename itself is durable.
+	 * O_DIRECTORY is informational on Linux but flags the intent and
+	 * fails fast on platforms that enforce it. */
+	{
+		char dir_buf[512];
+		snprintf(dir_buf, sizeof(dir_buf), "%s", target);
+		char *slash = strrchr(dir_buf, '/');
+		const char *dir_path = slash ?
+			(*slash = '\0', dir_buf) : ".";
+		int dfd = open(dir_path, O_RDONLY | O_DIRECTORY);
+		if (dfd < 0) {
+			fprintf(stderr,
+				"[venc_config] ERROR: open dir %s: %s\n",
+				dir_path, strerror(errno));
+			return -1;
+		}
+		if (fsync(dfd) != 0) {
+			fprintf(stderr,
+				"[venc_config] ERROR: fsync dir %s: %s\n",
+				dir_path, strerror(errno));
+			close(dfd);
+			return -1;
+		}
 		close(dfd);
 	}
 
-	fprintf(stderr, "[venc_config] Config saved to %s\n", path);
+	fprintf(stderr, "[venc_config] Config saved to %s\n", target);
 	return 0;
 }
