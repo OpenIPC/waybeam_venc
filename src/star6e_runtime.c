@@ -370,8 +370,12 @@ static void *dual_rec_thread_fn(void *arg)
 
 		ret = MI_VENC_Query(d->channel, &stat);
 		if (ret != 0 || stat.curPacks == 0) {
-			if (venc_fd < 0)
-				usleep(1000);
+			/* Always sleep before retry: even with venc_fd >= 0,
+			 * a spurious POLLIN that's not matched by an actual
+			 * Query packet (rare BSP edge case) would otherwise
+			 * busy-loop.  100us keeps wakeup latency low while
+			 * preventing a runaway spin. */
+			usleep(venc_fd >= 0 ? 100 : 1000);
 			continue;
 		}
 

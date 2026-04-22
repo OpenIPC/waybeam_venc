@@ -45,6 +45,11 @@ static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
 volatile sig_atomic_t g_maruko_running = 1;
 static volatile sig_atomic_t g_maruko_reinit = 0;
 static int g_mi_isp_initialized = 0;
+/* Last ISP bin path successfully loaded (Star6E parity).  Lets reinit
+ * pick up SIGHUP-driven `isp.sensorBin` changes without re-running the
+ * one-shot CUS3A enable below (which deadlocks the vendor mutex on a
+ * second invocation).  Empty until the first successful load. */
+static char g_last_isp_bin_path[256] = {0};
 static int g_mi_isp_dev_created = 0;
 static int g_mi_scl_dev_created = 0;
 static int g_mi_isp_chn_created = 0;
@@ -1077,21 +1082,34 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->venc_port, 1, 3);
 
-	/* ISP bin load and CUS3A enable must only run once per process
-	 * lifetime.  On reinit, kernel ISP driver retains CUS3A state;
-	 * re-running the 100->110->111 sequence causes a mutex deadlock. */
-	if (!g_mi_isp_initialized) {
+	/* ISP bin: resolve every configure (so SIGHUP / `/api/v1/restart`
+	 * changes to `isp.sensorBin` and the auto-detect fallback are picked
+	 * up on reinit), but skip the actual reload when the resolved path
+	 * matches the last-loaded path.  Avoids redundant vendor reloads
+	 * which can disturb running AE.  Star6E parity. */
+	{
 		char isp_bin_resolved[256];
 		const char *configured = ctx->cfg.isp_bin_path[0] ?
 			ctx->cfg.isp_bin_path : NULL;
 
 		if (pipeline_common_resolve_isp_bin(configured,
 			ctx->sensor.plane.sensName,
-			isp_bin_resolved, sizeof(isp_bin_resolved))) {
+			isp_bin_resolved, sizeof(isp_bin_resolved)) &&
+		    strcmp(isp_bin_resolved, g_last_isp_bin_path) != 0) {
 			ret = maruko_load_isp_bin(isp_bin_resolved);
 			if (ret != 0)
 				return -1;
+			snprintf(g_last_isp_bin_path,
+				sizeof(g_last_isp_bin_path), "%s",
+				isp_bin_resolved);
 		}
+	}
+
+	/* CUS3A enable + cold-boot exposure cap: must only run once per
+	 * process lifetime.  Re-running CUS3A enable causes a vendor mutex
+	 * deadlock; the exposure cap and `MI_SNR_SetFps` kick are documented
+	 * cold-boot fixups, not reinit operations. */
+	if (!g_mi_isp_initialized) {
 		/* CUS3A enable + EnableUserspace3A: the 100->110->111 sequence
 		 * initializes the CUS3A framework, then EnableUserspace3A
 		 * creates the 3A_Proc_0 thread that drives AE/AWB and
