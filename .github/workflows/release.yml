@@ -110,11 +110,35 @@ jobs:
             | File | Backend | SoC | Contents |
             |------|---------|-----|----------|
             | `venc-star6e.tar.gz` | Star6E | SSC30KQ / SSC338Q (Infinity6E) | `venc` + `venc.json` |
-            | `venc-maruko.tar.gz` | Maruko | SSC378QE (Infinity6C) | `venc` + `venc.json` |
+            | `venc-maruko.tar.gz` | Maruko | SSC378QE (Infinity6C) | `venc` + `venc.json` + `lib/` (10 MI libs) |
 
-            Each archive contains the binary and default config. MI vendor libraries
-            are loaded via dlopen at runtime from `/usr/lib/` on the device.
-            Copy `venc.json` to `/etc/venc.json` on the device.
+            ## Install
+
+            ```bash
+            # Both backends: binary + default config
+            tar -xzf venc-<backend>.tar.gz -C /tmp
+            cp /tmp/venc-<backend>/venc     /usr/bin/venc
+            cp /tmp/venc-<backend>/venc.json /etc/venc.json
+
+            # Maruko only — stock OpenIPC Infinity6C firmware does not ship MI libs:
+            cp /tmp/venc-maruko/lib/*.so    /usr/lib/
+            ```
+
+            ## Runtime library requirements
+
+            **Star6E / Infinity6E:** all MI libs ship in stock OpenIPC firmware
+            (`/rom/usr/lib/`). No bundled libraries — the tarball is binary-only.
+            The binary `dlopen`s at runtime: `libmi_sys`, `libmi_isp`, `libmi_venc`,
+            `libmi_rgn`, `libmi_sensor`, `libmi_vpe`, `libmi_vif`, `libmi_ai`,
+            `libispalgo`, `libcam_os_wrapper`, `libcus3a`, `libopus` *(optional — Opus
+            audio falls back to PCM if missing)*.
+
+            **Maruko / Infinity6C:** stock OpenIPC firmware does **not** ship MI
+            vendor libs, so the tarball bundles 10 `.so` files (~2 MB) in `lib/`.
+            Copy them to `/usr/lib/` on first install. Required: `libmi_sys`,
+            `libmi_isp`, `libmi_venc`, `libmi_scl`, `libmi_sensor`, `libmi_vif`,
+            `libmi_common`, `libispalgo`, `libcam_os_wrapper`, `libcus3a`. Source
+            and MD5s in `vendor-libs/maruko/` in the repo.
 
             See [README](https://github.com/${{ github.repository }}/blob/master/README.md) for usage.
           files: |
