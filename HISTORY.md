@@ -1,5 +1,28 @@
 # History
 
+## [0.7.12] - 2026-04-23
+
+Debug OSD: migrate Star6E overlay from `MI_RGN_PIXFMT_ARGB4444` (16 bpp)
+to `MI_RGN_PIXFMT_I8` (8 bpp, palette-indexed).  Halves the canvas
+footprint for the full-frame overlay (e.g. 4.0 MB → 2.0 MB at 1920x1080)
+and removes the hand-rolled NEON row fill in favor of `memset`, which
+the toolchain auto-vectorizes.
+
+- **Pure rasterizer extracted.**  New `src/debug_osd_draw.{c,h}` holds
+  the font, palette, dirty-rect logic, and drawing primitives.  The
+  MI_RGN glue in `src/debug_osd.c` is now a thin wrapper.  The pure
+  module compiles on the host and is exercised by a new
+  `tests/test_debug_osd.c` (53 assertions covering every primitive,
+  clipping, dirty-rect expansion, glyph rendering, and two hashed
+  composite-scene goldens).
+- **Palette matches legacy alpha codes.**  Entries 1..8 map to
+  `DEBUG_OSD_*` color constants; semi-transparent entries reuse the
+  4-bit ARGB4444 codes (0x4 → 68, 0xA → 170) so visual output is
+  unchanged vs. the ARGB4444 implementation.
+- **Public API source-compatible.**  `debug_osd_rect/point/line/text`
+  signatures unchanged; `DEBUG_OSD_*` constants are now palette indices
+  (0..8) but callers only reference them symbolically.
+
 ## [0.7.11] - 2026-04-19
 
 Pre-merge review fixes prior to upstream sync.  Two functional bugs
