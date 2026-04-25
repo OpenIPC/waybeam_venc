@@ -54,7 +54,11 @@ static VencRecordStatusFn g_record_status_fn;
 
 void venc_api_request_reinit(int mode)
 {
-	/* Don't downgrade: mode 1 (reload) takes priority over mode 2 (in-memory) */
+	/* Modes ordered by scope (low → high). Higher modes win.
+	 *   1 — reload config from disk + partial pipeline reinit (VENC only).
+	 *   2 — apply in-memory config + partial pipeline reinit (VENC only).
+	 *   3 — full pipeline restart including sensor_select (sensor mode change).
+	 */
 	if (mode > g_reinit)
 		g_reinit = mode;
 }
@@ -1789,6 +1793,19 @@ static int handle_restart(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_ok(fd, "{\"reinit\":true}");
 }
 
+/* Full pipeline restart including sensor_select. Use when the caller wants a
+ * different sensor mode (resolution and/or FPS that doesn't fit the currently
+ * selected mode). The runtime tears down the full pipeline and re-runs
+ * sensor_select against the on-disk /etc/venc.json. Heavier than /api/v1/restart
+ * — multi-second blackout — but the only in-process path that picks a new
+ * sensor mode. See HTTP_API_CONTRACT.md for the MIPI PHY caveat. */
+static int handle_restart_full(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+	venc_api_request_reinit(3);
+	return httpd_send_ok(fd, "{\"reinit\":true,\"mode\":\"full\"}");
+}
+
 static int handle_idr(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
@@ -2163,6 +2180,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/fps/config",   handle_fps_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/fps/live",     handle_fps_live, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/restart",      handle_restart, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/restart_full", handle_restart_full, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/ae",           handle_ae, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/awb",          handle_awb, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/iq/set",       handle_iq_set, NULL);

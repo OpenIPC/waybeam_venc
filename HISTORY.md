@@ -1,5 +1,31 @@
 # History
 
+## [0.7.1] - 2026-04-26
+
+- **New endpoint `/api/v1/restart_full`** (Star6E): triggers a full pipeline
+  restart including `sensor_select`, so a client can switch sensor modes
+  (e.g. resolution/FPS combinations that don't fit the current mode) without
+  killing the venc process. Reloads `/etc/venc.json` first, like
+  `/api/v1/restart`. Response: `{"reinit":true,"mode":"full"}`.
+  - Reinit mode 3 added to `venc_api_request_reinit()`. Modes 1/2 keep their
+    existing partial-reinit semantics (VENC only); mode 3 calls
+    `star6e_pipeline_stop()` followed by `star6e_pipeline_start()` so
+    `sensor_select` re-runs against the freshly-loaded config.
+  - The `vcfg.video0.fps` clamp to current sensor mode is now skipped in
+    mode 3 (it would defeat the purpose of a sensor-mode change).
+  - **Known caveat (carried forward from 0.7.0):** the SigmaStar MIPI PHY
+    sometimes does not recover from `MI_SNR_Disable`/`Enable` cycles. The
+    endpoint exposes the right semantics but may stall the encoder until the
+    process is killed and respawned. The note in `HTTP_API_CONTRACT.md`'s
+    "Mode switching limitation" section now points callers to the active
+    investigation in `src/snr_toggle_test.c` / `src/snr_sequence_probe.c`.
+  - **Maruko backend** treats mode 3 as mode 2 (no sensor reselect) for now
+    — sensor mode changes on Maruko still require a process restart. Maruko
+    support to follow once Star6E is validated.
+
+- Documentation: `documentation/HTTP_API_CONTRACT.md` updated with the new
+  endpoint and the Ruby/RubyFPV-style usage pattern (json_cli edit + restart).
+
 ## [0.7.0] - 2026-04-11
 
 - **dlopen migration (both backends):** Both Star6E and Maruko now load all

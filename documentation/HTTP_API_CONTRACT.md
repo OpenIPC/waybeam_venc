@@ -448,8 +448,10 @@ restart the venc process to change sensor modes.
 
 ### `GET /api/v1/restart`
 
-Trigger a full pipeline reinit: reload config from disk (`/etc/venc.json`) and rebuild
-the pipeline. Equivalent to sending `SIGHUP` to the process.
+Trigger a partial pipeline reinit: reload config from disk (`/etc/venc.json`) and rebuild
+VENC. Sensor, VIF, and VPE keep running. Equivalent to sending `SIGHUP` to the process.
+
+Sub-second blackout. Cannot change sensor mode (use `/api/v1/restart_full` for that).
 
 ```bash
 curl http://<device-ip>/api/v1/restart
@@ -459,6 +461,46 @@ Response `200`:
 ```json
 {"ok":true,"data":{"reinit":true}}
 ```
+
+### `GET /api/v1/restart_full`
+
+Trigger a **full pipeline restart** including sensor re-selection. Reload config from disk
+(`/etc/venc.json`), tear down sensor/VIF/VPE/VENC, then run `sensor_select` against the new
+config and start the pipeline from scratch.
+
+Use this when the requested `video0.size` and/or `video0.fps` does not fit the currently
+selected sensor mode. Multi-second blackout (~3-5s). Heavier than `/api/v1/restart`, but
+the only in-process path that picks a different sensor mode.
+
+```bash
+curl http://<device-ip>/api/v1/restart_full
+```
+
+Response `200`:
+```json
+{"ok":true,"data":{"reinit":true,"mode":"full"}}
+```
+
+**Typical use** (a client like Ruby/RubyFPV switching sensor modes):
+
+```bash
+# 1. Update config on disk
+json_cli -s .video0.size 1920x1080 -i /etc/venc.json
+json_cli -s .video0.fps 60 -i /etc/venc.json
+# 2. Trigger full restart so the new sensor mode is selected
+curl http://<device-ip>/api/v1/restart_full
+```
+
+**MIPI PHY caveat (Star6E):** the SigmaStar kernel driver does not always recover from
+`MI_SNR_Disable`/`MI_SNR_Enable` cycles. If you observe the encoder stalling after this
+endpoint, that is the cause — see the existing "Mode switching limitation" note above.
+The endpoint is safe to call (it always returns 200), but the encoder may need to be
+restarted via `killall venc` if recovery fails. Investigation of a clean MIPI PHY
+recovery sequence is ongoing (`src/snr_toggle_test.c`, `src/snr_sequence_probe.c`).
+
+**Maruko backend:** mode 3 currently falls through to mode 2 behavior (partial reinit
+with sensor lock — no sensor reselect). Sensor mode changes on Maruko continue to require
+a full process restart. A Maruko implementation will follow once Star6E is validated.
 
 ### `GET /api/v1/ae`
 

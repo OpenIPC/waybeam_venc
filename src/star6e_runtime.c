@@ -673,7 +673,10 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 	star6e_ts_recorder_stop(&ps->ts_recorder);
 	ps->audio.rec_ring = NULL;
 
-	if (reinit_mode == 1) {
+	if (reinit_mode == 1 || reinit_mode == 3) {
+		/* Both /api/v1/restart and /api/v1/restart_full reload from disk
+		 * so callers can write /etc/venc.json (e.g. via json_cli) and
+		 * have the new values applied without going through /api/v1/set. */
 		venc_config_defaults(vcfg);
 		if (venc_config_load(VENC_CONFIG_DEFAULT_PATH, vcfg) != 0) {
 			fprintf(stderr,
@@ -682,23 +685,43 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 		}
 	}
 
-	/* Clamp FPS to current sensor mode (mode changes require restart) */
-	if (prev_max_fps > 0 && vcfg->video0.fps > prev_max_fps) {
+	/* Clamp FPS to current sensor mode (modes 1/2 only — they keep the
+	 * existing sensor running). Mode 3 re-runs sensor_select against the
+	 * requested fps, so don't clamp away the user's request. */
+	if (reinit_mode != 3 && prev_max_fps > 0 && vcfg->video0.fps > prev_max_fps) {
 		printf("> Reinit: clamping FPS %u -> %u "
 			"(limited by current sensor mode)\n",
 			vcfg->video0.fps, prev_max_fps);
 		vcfg->video0.fps = prev_max_fps;
 	}
 
-	/* Partial reinit: keep sensor/VIF/VPE running, only rebuild VENC.
-	 * The SigmaStar MIPI PHY does not recover from MI_SNR_Disable/Enable
-	 * cycles — full pipeline_stop + pipeline_start stalls the encoder. */
-	ret = star6e_pipeline_reinit(ps, vcfg, &g_sdk_quiet);
-	if (ret != 0) {
-		fprintf(stderr, "ERROR: pipeline reinit failed (%d), shutting down\n",
-			ret);
+	/* Mode 3 (full restart): tear down the entire pipeline and re-run
+	 * sensor_select. Heavier than the partial reinit below — multi-second
+	 * blackout — but the only in-process path that picks a different sensor
+	 * mode. Note: the SigmaStar MIPI PHY does not always recover from
+	 * MI_SNR_Disable/Enable cycles. If callers report "encoder stalled after
+	 * /api/v1/restart_full", that's the cause — see HTTP_API_CONTRACT.md.
+	 *
+	 * Modes 1 and 2 (partial reinit): keep sensor/VIF/VPE running, only
+	 * rebuild VENC. Avoids the MIPI PHY issue but cannot change sensor mode. */
+	if (reinit_mode == 3) {
+		star6e_pipeline_stop(ps);
 		ctx->pipeline_started = 0;
-		return ret;
+		ret = star6e_pipeline_start(ps, vcfg, &g_sdk_quiet);
+		if (ret != 0) {
+			fprintf(stderr, "ERROR: pipeline full restart failed (%d), shutting down\n",
+				ret);
+			return ret;
+		}
+		ctx->pipeline_started = 1;
+	} else {
+		ret = star6e_pipeline_reinit(ps, vcfg, &g_sdk_quiet);
+		if (ret != 0) {
+			fprintf(stderr, "ERROR: pipeline reinit failed (%d), shutting down\n",
+				ret);
+			ctx->pipeline_started = 0;
+			return ret;
+		}
 	}
 
 	star6e_controls_bind(ps, vcfg);
@@ -748,9 +771,14 @@ static int star6e_runtime_handle_reinit(Star6eRunnerContext *ctx,
 	}
 	venc_api_clear_reinit();
 
-	printf("> Reinit requested (mode %d: %s)\n", reinit_mode,
-		reinit_mode == 1 ? "reload config from disk" :
-		"apply in-memory config");
+	const char *mode_desc;
+	switch (reinit_mode) {
+	case 1:  mode_desc = "reload config from disk (partial reinit)"; break;
+	case 2:  mode_desc = "apply in-memory config (partial reinit)"; break;
+	case 3:  mode_desc = "full pipeline restart with sensor_select"; break;
+	default: mode_desc = "unknown"; break;
+	}
+	printf("> Reinit requested (mode %d: %s)\n", reinit_mode, mode_desc);
 
 	ret = star6e_runtime_restart_pipeline(ctx, reinit_mode);
 	if (ret != 0) {
