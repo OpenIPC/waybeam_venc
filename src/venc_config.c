@@ -12,15 +12,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* Round a float to 6 significant digits before cJSON serialization.
- * Prevents artifacts like 0.001f -> 0.0010000000474974513 in JSON. */
-static double float_clean(float v)
-{
-	char buf[32];
-	snprintf(buf, sizeof(buf), "%.6g", (double)v);
-	return strtod(buf, NULL);
-}
-
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
 static void safe_strcpy(char *dst, size_t dst_size, const char *src)
