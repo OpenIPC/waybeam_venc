@@ -228,6 +228,25 @@ void venc_api_set_record_status_fn(VencRecordStatusFn fn)
 	g_record_status_fn = fn;
 }
 
+void venc_api_get_record_dir(char *buf, size_t buf_size)
+{
+	if (!buf || buf_size == 0)
+		return;
+	pthread_mutex_lock(&g_cfg_mutex);
+	const char *src = (g_cfg && g_cfg->record.dir[0]) ?
+		g_cfg->record.dir : RECORDER_DEFAULT_DIR;
+	snprintf(buf, buf_size, "%s", src);
+	pthread_mutex_unlock(&g_cfg_mutex);
+}
+
+void venc_api_fill_record_status(VencRecordStatus *out)
+{
+	if (!out) return;
+	memset(out, 0, sizeof(*out));
+	if (g_record_status_fn)
+		g_record_status_fn(out);
+}
+
 /* ── Field descriptor table ──────────────────────────────────────────── */
 
 typedef enum { MUT_LIVE, MUT_RESTART } Mutability;

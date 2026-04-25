@@ -86,6 +86,22 @@ code,pre,.mono{font-family:'JetBrains Mono',monospace;font-size:.85em}
 
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 
+/* ── Recordings Tab ── */
+
+.rec-header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.8rem 1rem;margin-bottom:.8rem}
+.rec-meta{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.8rem;color:var(--text-dim);align-items:baseline}
+.rec-meta b{color:var(--text-bright);font-weight:600}
+.rec-meta .rec-on{color:var(--live)}
+.rec-meta .rec-off{color:var(--text-dim)}
+.rec-actions{display:flex;gap:.5rem;flex-wrap:wrap}
+.rec-warn{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:var(--restart);border-radius:4px;padding:.5rem .8rem;margin-bottom:.8rem;font-size:.8rem}
+#rec-table td.num{text-align:right;font-variant-numeric:tabular-nums}
+#rec-table td.rowbtns{text-align:right;white-space:nowrap}
+#rec-table td.rowbtns .btn{padding:.3rem .7rem;font-size:.72rem;margin-left:.3rem}
+.rec-empty{color:var(--text-dim);padding:1rem;text-align:center;font-size:.85rem;border:1px dashed var(--border);border-radius:6px}
+.tbar-item.clickable{cursor:pointer;transition:color .15s}
+.tbar-item.clickable:hover{color:var(--text-bright)}
+
 /* ── Settings Sections ── */
 
 .section{background:var(--card);border:1px solid var(--border);border-radius:6px;margin-bottom:.8rem;overflow:hidden}
@@ -302,7 +318,7 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
 
   <div class="tbar-item"><div class="tbar-dot live-fps"></div>FPS <b id="tbar-fps">-</b></div>
 
-  <div class="tbar-item">REC <div class="tbar-dot off" id="tbar-rec"></div></div>
+  <div class="tbar-item clickable" onclick="switchTab('recordings')" title="Open Recordings tab">REC <div class="tbar-dot off" id="tbar-rec"></div></div>
 
   <div class="tbar-right">
 
@@ -321,6 +337,8 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
   <div class="tab" onclick="switchTab('api')">API Reference</div>
 
   <div class="tab" onclick="switchTab('iq')">Image Quality</div>
+
+  <div class="tab" onclick="switchTab('recordings')">Recordings</div>
 
 </div>
 
@@ -432,6 +450,12 @@ venc_gain 1024</td></tr>
 
 <tr><td class="api-method">GET</td><td class="api-path">/api/v1/record/status</td><td class="api-desc">Recording state, bytes written, frame count, segments</td><td class="api-example">{"ok":true,"data":{"active":false,"frames":0,"bytes":0}}</td></tr>
 
+<tr><td class="api-method">GET</td><td class="api-path">/api/v1/recordings</td><td class="api-desc">List <code>.ts</code>/<code>.hevc</code> files in <code>record.dir</code> with size, mtime, free/total bytes. UI lives in the Recordings tab above.</td><td class="api-example">{"ok":true,"data":{"dir":"/mnt/mmcblk0p1","files":[...]}}</td></tr>
+
+<tr><td class="api-method">GET</td><td class="api-path">/api/v1/recordings/download?file=<i>name</i></td><td class="api-desc">Stream a recording as an attachment download</td><td class="api-example">(file body)</td></tr>
+
+<tr><td class="api-method">GET</td><td class="api-path">/api/v1/recordings/delete?file=<i>name</i></td><td class="api-desc">Delete a recording from <code>record.dir</code>. Refuses when file is actively being recorded</td><td class="api-example">{"ok":true}</td></tr>
+
 </tbody></table>
 
 </div>
@@ -493,6 +517,36 @@ venc_gain 1024</td></tr>
     <pre id="iq-params-pre"></pre>
 
   </div>
+
+</div>
+
+<!-- Tab: Recordings -->
+
+<div class="tab-content" id="tab-recordings">
+
+  <div class="rec-header">
+    <div class="rec-meta">
+      <div>dir: <b id="rec-dir">&mdash;</b></div>
+      <div>free <b id="rec-free">&mdash;</b> / <b id="rec-total">&mdash;</b></div>
+      <div>mode: <b id="rec-mode">&mdash;</b></div>
+      <div>recording: <b id="rec-active" class="rec-off">&mdash;</b></div>
+    </div>
+    <div class="rec-actions">
+      <button class="btn btn-apply" id="rec-btn-start" onclick="recStart()">Start recording</button>
+      <button class="btn btn-discard" id="rec-btn-stop" onclick="recStop()">Stop</button>
+      <button class="btn btn-discard" onclick="refreshRecordings()">Refresh</button>
+    </div>
+  </div>
+
+  <div id="rec-mode-note" class="rec-warn" hidden></div>
+  <div id="rec-warn" class="rec-warn" hidden></div>
+
+  <table class="api-table" id="rec-table">
+    <thead><tr><th>Name</th><th class="num">Size</th><th>Modified</th><th></th></tr></thead>
+    <tbody id="rec-files"></tbody>
+  </table>
+
+  <div class="rec-empty" id="rec-empty" hidden>No recordings found in <b id="rec-empty-dir">&mdash;</b>.</div>
 
 </div>
 
@@ -670,7 +724,7 @@ function switchTab(id){
 
   document.querySelectorAll('.tab').forEach((t,i) => {
 
-    const ids = ['settings','api','iq'];
+    const ids = ['settings','api','iq','recordings'];
 
     t.classList.toggle('active', ids[i] === id);
 
@@ -680,6 +734,178 @@ function switchTab(id){
 
   document.getElementById('tab-'+id).classList.add('active');
 
+  if(window._recPoll){ clearInterval(window._recPoll); window._recPoll = null; }
+  if(id === 'recordings'){
+    refreshRecordings();
+    /* Light poll: only status+list, config fetched once per switch. */
+    window._recPoll = setInterval(() => pollRecordingStatus(), 2000);
+  }
+
+}
+
+/* ── Recordings Tab ── */
+
+function recFmtBytes(n){
+  if(n == null || n < 0) return '\u2014';
+  const u = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while(n >= 1024 && i < u.length - 1){ n /= 1024; i++; }
+  return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + u[i];
+}
+
+function recBasename(p){
+  const i = (p || '').lastIndexOf('/');
+  return i >= 0 ? p.slice(i + 1) : (p || '');
+}
+
+async function refreshRecordings(){
+  try{
+    const [list, status, cfg] = await Promise.all([
+      api('/api/v1/recordings').catch(() => null),
+      api('/api/v1/record/status').catch(() => null),
+      api('/api/v1/config').catch(() => null)
+    ]);
+    const recCfg = (cfg && cfg.ok && cfg.data && cfg.data.config && cfg.data.config.record) || {};
+    const mode = recCfg.mode || '\u2014';
+    const cfgEnabled = !!recCfg.enabled;
+    document.getElementById('rec-mode').textContent = mode;
+    const dualOwned = cfgEnabled && (mode === 'dual' || mode === 'dual-stream');
+    const btnStart = document.getElementById('rec-btn-start');
+    const btnStop = document.getElementById('rec-btn-stop');
+    const note = document.getElementById('rec-mode-note');
+    if(dualOwned){
+      btnStart.disabled = true;
+      btnStop.disabled = true;
+      const reason = mode === 'dual'
+        ? 'record.mode=dual with record.enabled=true: the dedicated recording thread owns ch1 \u2014 HTTP start/stop is ignored. Recordings here are driven by the configured rotation limits.'
+        : 'record.mode=dual-stream with record.enabled=true: ch1 is sent to record.server over RTP, not written to disk. HTTP start/stop is ignored and no files land here.';
+      note.textContent = reason;
+      note.hidden = false;
+    } else {
+      btnStart.disabled = false;
+      btnStop.disabled = false;
+      note.hidden = true;
+    }
+    if(list && list.ok){
+      const d = list.data;
+      document.getElementById('rec-dir').textContent = d.dir || '\u2014';
+      document.getElementById('rec-free').textContent = recFmtBytes(d.free_bytes);
+      document.getElementById('rec-total').textContent = recFmtBytes(d.total_bytes);
+      const warn = document.getElementById('rec-warn');
+      if(d.truncated){
+        warn.textContent = 'Showing newest ' + d.files.length + ' files \u2014 older recordings hidden (cap 512).';
+        warn.hidden = false;
+      } else {
+        warn.hidden = true;
+      }
+      const tb = document.getElementById('rec-files');
+      const empty = document.getElementById('rec-empty');
+      tb.innerHTML = '';
+      if(!d.files.length){
+        document.getElementById('rec-empty-dir').textContent = d.dir || '\u2014';
+        empty.hidden = false;
+      } else {
+        empty.hidden = true;
+        d.files.sort((a,b) => b.mtime - a.mtime);
+        for(const f of d.files){
+          const tr = document.createElement('tr');
+          tr.innerHTML =
+            '<td class="api-path"></td>' +
+            '<td class="num"></td>' +
+            '<td></td>' +
+            '<td class="rowbtns"><button class="btn btn-discard dl">Download</button>' +
+            '<button class="btn btn-discard rm" style="color:var(--accent)">Delete</button></td>';
+          tr.children[0].textContent = f.name;
+          tr.children[1].textContent = recFmtBytes(f.size);
+          tr.children[2].textContent = f.mtime ? new Date(f.mtime * 1000).toLocaleString() : '\u2014';
+          tr.querySelector('.dl').onclick = () => {
+            window.location.href = '/api/v1/recordings/download?file=' + encodeURIComponent(f.name);
+          };
+          tr.querySelector('.rm').onclick = () => recDelete(f.name);
+          tb.appendChild(tr);
+        }
+      }
+    } else {
+      document.getElementById('rec-files').innerHTML = '';
+      const msg = (list && list.error && list.error.message) || 'failed to list recordings';
+      toast(msg, false);
+    }
+    const el = document.getElementById('rec-active');
+    if(status && status.ok && status.data){
+      if(status.data.active){
+        const name = recBasename(status.data.path);
+        const stats = [];
+        if(typeof status.data.frames === 'number') stats.push(status.data.frames + ' frames');
+        if(typeof status.data.bytes === 'number') stats.push(recFmtBytes(status.data.bytes));
+        if(typeof status.data.segments === 'number' && status.data.segments > 1) stats.push('seg ' + status.data.segments);
+        const tail = stats.length ? '  (' + stats.join(', ') + ')' : '';
+        el.textContent = (name ? 'yes \u2014 ' + name : 'yes') + tail;
+        el.className = 'rec-on';
+      } else {
+        const reason = status.data.stop_reason;
+        el.textContent = reason && reason !== 'none' && reason !== 'manual' ? 'no (' + reason + ')' : 'no';
+        el.className = 'rec-off';
+      }
+    } else {
+      el.textContent = '\u2014';
+      el.className = 'rec-off';
+    }
+  } catch(e){
+    toast('recordings: ' + e.message, false);
+  }
+}
+
+/* Lightweight poll: list + status only (no /api/v1/config which doesn't
+ * change at runtime without a restart).  Called every 2 s while the
+ * Recordings tab is visible so frames/bytes tick live. */
+async function pollRecordingStatus(){
+  try{
+    const [list, status] = await Promise.all([
+      api('/api/v1/recordings').catch(() => null),
+      api('/api/v1/record/status').catch(() => null)
+    ]);
+    if(list && list.ok){
+      const d = list.data;
+      document.getElementById('rec-free').textContent = recFmtBytes(d.free_bytes);
+      document.getElementById('rec-total').textContent = recFmtBytes(d.total_bytes);
+    }
+    const el = document.getElementById('rec-active');
+    if(status && status.ok && status.data){
+      if(status.data.active){
+        const name = recBasename(status.data.path);
+        const stats = [];
+        if(typeof status.data.frames === 'number') stats.push(status.data.frames + ' frames');
+        if(typeof status.data.bytes === 'number') stats.push(recFmtBytes(status.data.bytes));
+        if(typeof status.data.segments === 'number' && status.data.segments > 1) stats.push('seg ' + status.data.segments);
+        const tail = stats.length ? '  (' + stats.join(', ') + ')' : '';
+        el.textContent = (name ? 'yes \u2014 ' + name : 'yes') + tail;
+        el.className = 'rec-on';
+      } else {
+        const reason = status.data.stop_reason;
+        el.textContent = reason && reason !== 'none' && reason !== 'manual' ? 'no (' + reason + ')' : 'no';
+        el.className = 'rec-off';
+      }
+    }
+  } catch(e){}
+}
+
+async function recStart(){
+  const j = await api('/api/v1/record/start').catch(e => ({ ok:false, error:{ message:e.message }}));
+  if(j.ok){ toast('recording started'); setTimeout(refreshRecordings, 500); }
+  else toast((j.error && j.error.message) || 'start failed', false);
+}
+
+async function recStop(){
+  const j = await api('/api/v1/record/stop').catch(e => ({ ok:false, error:{ message:e.message }}));
+  if(j.ok){ toast('recording stopped'); setTimeout(refreshRecordings, 500); }
+  else toast((j.error && j.error.message) || 'stop failed', false);
+}
+
+async function recDelete(name){
+  if(!confirm('Delete ' + name + '?')) return;
+  const j = await api('/api/v1/recordings/delete?file=' + encodeURIComponent(name)).catch(e => ({ ok:false, error:{ message:e.message }}));
+  if(j.ok){ toast('deleted ' + name); refreshRecordings(); }
+  else toast((j.error && j.error.message) || 'delete failed', false);
 }
 
 /* ── Flatten nested config into dot notation ── */

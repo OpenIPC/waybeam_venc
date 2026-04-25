@@ -1,6 +1,7 @@
 #ifndef VENC_HTTPD_H
 #define VENC_HTTPD_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -61,6 +62,21 @@ int httpd_send_ok(int client_fd, const char *data_json);
 /* Send a JSON error envelope: {"ok":false,"error":{"code":"...","message":"..."}} */
 int httpd_send_error(int client_fd, int status_code,
 	const char *code, const char *message);
+
+/* Extract a named parameter from req->query, URL-decoding the value
+ * (percent-encoded octets and '+' → ' ').  Writes NUL-terminated value
+ * into out (truncated if needed).  Returns 0 if the key was present,
+ * -1 otherwise. */
+int httpd_query_param(const HttpRequest *req, const char *key,
+	char *out, size_t out_sz);
+
+/* Stream a file as an HTTP response with the given content type.  When
+ * download_name is non-NULL, adds a Content-Disposition attachment
+ * header with the given filename.  Responds with 404 if the file does
+ * not exist, 500 on open/read failure.  Returns 0 on success, -1 on
+ * error (headers or body failed to send). */
+int httpd_send_file(int client_fd, const char *path,
+	const char *content_type, const char *download_name);
 
 #ifdef __cplusplus
 }

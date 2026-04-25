@@ -79,6 +79,11 @@ int  venc_api_get_record_start(char *buf, size_t buf_size);
 /* Returns 1 if stop requested, clears the flag. */
 int  venc_api_get_record_stop(void);
 
+/* Copy the configured recording directory (record.dir) into buf, falling
+ * back to RECORDER_DEFAULT_DIR when unset.  Buf is always NUL-terminated
+ * (truncated if needed). */
+void venc_api_get_record_dir(char *buf, size_t buf_size);
+
 /* Dual VENC channel API -- live controls for ch1 (dual-stream mode).
  * Call venc_api_dual_register() after pipeline_start_dual() to enable
  * the dual endpoints.  Call venc_api_dual_unregister() on
@@ -113,6 +118,10 @@ typedef struct {
 
 typedef void (*VencRecordStatusFn)(VencRecordStatus *out);
 void venc_api_set_record_status_fn(VencRecordStatusFn fn);
+
+/* Fill the supplied struct with live record status via the registered
+ * callback.  When no callback is set, zeroes the struct. */
+void venc_api_fill_record_status(VencRecordStatus *out);
 
 #ifdef __cplusplus
 }
