@@ -922,7 +922,7 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 }
 
 /* IMU push callback: stub.  EIS was the only consumer and was removed
- * (see HISTORY 0.7.14).  Samples are discarded; the callback stays so
+ * (see HISTORY 0.8.0).  Samples are discarded; the callback stays so
  * imu_init() has a valid push_fn slot if a future consumer (telemetry
  * export, sidecar logging) is wired in. */
 static void star6e_pipeline_imu_push(void *ctx, const ImuSample *sample)
@@ -1179,7 +1179,7 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	 * to stop → join thread. */
 
 	/* Stop + destroy IMU.  The push callback is now a stub (EIS was
-	 * removed; see HISTORY 0.7.14) so order vs other teardown steps
+	 * removed; see HISTORY 0.8.0) so order vs other teardown steps
 	 * doesn't matter, but keeping the stop-then-destroy split lets a
 	 * future telemetry consumer slot in without rework. */
 	if (state->imu) {

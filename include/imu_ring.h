@@ -5,7 +5,7 @@
  * Generic timestamped 6-axis IMU sample ring buffer.
  * Thread-safe (mutex-protected push/read).
  *
- * Originally extracted from the (now-removed, 0.7.14) EIS module
+ * Originally extracted from the (now-removed, 0.8.0) EIS module
  * for reuse by any frame-synced consumer — telemetry export,
  * sidecar gcsv logging, future stabilization framework, etc.
  */

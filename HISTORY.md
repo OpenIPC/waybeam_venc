@@ -1,16 +1,23 @@
 # History
 
-## [0.7.14] - 2026-04-25
+## [0.8.0] - 2026-04-25
 
-Drop EIS module entirely.  An empirical sensor-mode sweep on Star6E
-IMX335 (see PR #60 discussion) established that EIS only worked in
-one validated config (sensor mode 3 native 1920x1080 + real IMU +
-≤90 fps); every other combination silently stalled the encoder via
-`MI_VPE_SetPortCrop` interactions with VPE scaling, VIF-side crop,
-or pixel-rate ceilings.  PR #58 + PR #60 added increasingly elaborate
-guards to refuse EIS in the broken cases, but the surface area
-shipping isn't worth maintaining for a single-config feature, and a
-future LDC-warp rewrite (Phase C in `documentation/EIS_INTEGRATION_PLAN.md`)
+Drop the EIS module and migrate the Star6E debug OSD from
+`MI_RGN_PIXFMT_ARGB4444` (16 bpp) to `MI_RGN_PIXFMT_I4` (4 bpp,
+two pixels per byte).  Major bump because `eis.*` config fields and
+the EIS internal headers are removed; nothing else in the public HTTP
+API or config schema breaks.
+
+### EIS removal
+
+An empirical sensor-mode sweep on Star6E IMX335 established that EIS
+only worked in one validated config (sensor mode 3 native 1920x1080
++ real IMU + ≤90 fps); every other combination silently stalled the
+encoder via `MI_VPE_SetPortCrop` interactions with VPE scaling,
+VIF-side crop, or pixel-rate ceilings.  Increasingly elaborate guards
+were added to refuse EIS in the broken cases, but the surface area
+isn't worth maintaining for a single-config feature, and a future
+LDC-warp rewrite (Phase C in `documentation/EIS_INTEGRATION_PLAN.md`)
 would replace this code anyway.
 
 - **Removed:** `src/eis.c`, `src/eis_gyroglide.c`, `include/eis.h`,
@@ -18,9 +25,9 @@ would replace this code anyway.
   `tests/test_eis_gyroglide.c` (~1100 LoC).
 - **Pipeline init:** EIS init/teardown blocks deleted from
   `bind_and_finalize_pipeline()` and `pipeline_stop()` /
-  `pipeline_stop_venc_level()`.  PR #58 + PR #60 EIS guards
-  (VPE-scaling, VIF-crop, testMode, pixel-rate refusals) are gone
-  with them — they only existed to make EIS misconfiguration loud.
+  `pipeline_stop_venc_level()`.  All VPE-scaling / VIF-crop / testMode /
+  pixel-rate refusal guards are gone with them — they only existed to
+  make EIS misconfiguration loud.
 - **Per-frame:** `eis_update()` removed from
   `star6e_runtime_process_stream()`.  `imu_drain()` still runs
   per-frame so a future telemetry consumer slots in cheaply.
@@ -36,81 +43,67 @@ would replace this code anyway.
   `star6e_pipeline_imu_push()` is now a stub — samples are discarded
   unless a future consumer (telemetry export, gcsv-style file logging
   for Gyroflow post-process) is wired in.
-- **Pre-existing:** debug OSD, encoder hot path, and all non-EIS
-  pipeline behavior unchanged.
 
-## [0.7.13] - 2026-04-25
+### Debug OSD: ARGB4444 → I4 format migration
 
-Debug OSD: migrate Star6E overlay from `MI_RGN_PIXFMT_I8` (8 bpp) to
-`MI_RGN_PIXFMT_I4` (4 bpp, two pixels per byte).  Follow-up to 0.7.12;
-halves the canvas footprint again (2.0 MB → 1.0 MB at 1920x1080) and
-cuts OSD-on CPU cost a further ~33% on Star6E by writing half the
-bytes per row fill.
+Two-step migration delivered in one release.  First the rasterizer is
+extracted into a pure host-testable module, then the MI_RGN backing
+format is dropped from 16 bpp ARGB4444 → 8 bpp I8 → 4 bpp I4
+palette-indexed.  Canvas footprint at 1920x1080 goes from 4.0 MB to
+1.0 MB; OSD-on CPU drops by 74 % on Star6E IMX335.  Encoder hot path
+is unchanged — the win is entirely in the OSD-on cost.
 
-- **OsdCanvas API:** `stride_px` renamed to `stride_bytes` (now bytes
+- **Pure rasterizer extracted.**  New `src/debug_osd_draw.{c,h}` holds
+  the font, palette, dirty-rect logic, and drawing primitives.  The
+  MI_RGN glue in `src/debug_osd.c` is now a thin wrapper.  The pure
+  module compiles on the host and is exercised by
+  `tests/test_debug_osd.c` (76 assertions covering every primitive,
+  clipping, dirty-rect expansion, glyph rendering, and hashed
+  composite-scene goldens).
+- **OsdCanvas API.**  `stride_px` renamed to `stride_bytes` (now bytes
   per row regardless of pixel format).  `width` is still logical
-  pixels.
-- **`osd_fill_row(uint8_t *row, int count, color)`** removed in favor
-  of `osd_fill_pixels(canvas, x, y, count, color)` which handles I4
+  pixels.  `osd_fill_pixels(canvas, x, y, count, color)` handles I4
   nibble alignment internally:
     - Unaligned start (odd x): RMW the high nibble of byte (x/2).
     - Byte-aligned middle: `memset` the doubled-nibble byte
       `(color << 4) | color` over `(end - x) / 2` bytes.
     - Unaligned tail (end odd): RMW the low nibble of the last byte.
   Drawing primitives (`osd_draw_rect`, `osd_draw_char`) call this in
-  place of their old byte-pointer inline math.
-- **`osd_get_pixel`** added so tests can read back the unpacked nibble
-  through the same code path the rasterizer uses; production drawing
-  never reads back.
-- **Palette shrunk to 16 entries** (was 256).  Index assignments
-  unchanged; entries 9..15 are zeroed reserved.
-- **MI_RGN region pixfmt:** `I6_RGN_PIXFMT_I4`.  Wire stride at
-  1920x1080 is 960 bytes (was 1920 for I8; would be 3840 for ARGB4444).
+  place of their old byte-pointer inline math.  `osd_get_pixel` reads
+  back the unpacked nibble through the same code path the rasterizer
+  uses; production drawing never reads back.
+- **Palette: 16 entries** (was 256 in I8, ARGB4444 in 16 bpp).
+  Entries 1..8 map to `DEBUG_OSD_*` color constants; semi-transparent
+  entries reuse the 4-bit ARGB4444 codes (0x4 → 68, 0xA → 170) so
+  visual output is unchanged vs. the ARGB4444 implementation.  Entries
+  9..15 are zeroed reserved.
+- **MI_RGN region pixfmt:** `MI_RGN_PIXFMT_I4`.  Wire stride at
+  1920x1080 is 960 bytes (was 1920 for I8; 3840 for ARGB4444).
 - **Track-points use case** (filled small rects from upstream PR #23,
   motion-vector markers): supported unchanged via existing
   `debug_osd_rect` API; dirty-rect tracking gives sub-canvas clear,
   more efficient than the upstream's full-canvas `memset(0xFF)`.
-- **Tests:** 76 assertions (was 53).  New cases cover even-x and odd-x
-  nibble writes preserving the sibling, fill_pixels paths for aligned
-  middle / unaligned ends / negative-x clip / past-right clip, and
-  regenerated golden hashes for the now-half-size packed buffer.
 - **Public API source-compatible.**  `debug_osd_rect/point/line/text`
   signatures unchanged; `DEBUG_OSD_*` constants are still palette
-  indices (now 0..15 max instead of 0..255 max).
+  indices (now 0..15 max).
 
 Hardware comparison (Star6E IMX335 @ 90 fps, 30 s samples):
 
-| Format     | Actual fps | CPU/core | OSD-on cost vs baseline |
-|------------|-----------:|---------:|------------------------:|
-| Pre-I8 ARGB4444 | 87.00 |    26.80 % | +20.53 pp |
-| I8 (0.7.12) | 90.00 |    17.43 % | +11.30 pp |
-| **I4 (this)** | **90.00** | **11.70 %** | **+5.43 pp** |
+| Format          | Actual fps | CPU/core   | OSD-on cost vs baseline |
+|-----------------|-----------:|-----------:|------------------------:|
+| ARGB4444 (pre)  |      87.00 |    26.80 % |              +20.53 pp |
+| I8 (intermediate) |    90.00 |    17.43 % |              +11.30 pp |
+| **I4 (this)**   |  **90.00** | **11.70 %** |          **+5.43 pp** |
 
 I4 cuts OSD CPU −74 % vs the original ARGB4444 path, and hits 2.36×
 the fps-per-CPU% of ARGB4444 (7.69 vs 3.25).
 
-## [0.7.12] - 2026-04-23
+### Bundles fork-only history
 
-Debug OSD: migrate Star6E overlay from `MI_RGN_PIXFMT_ARGB4444` (16 bpp)
-to `MI_RGN_PIXFMT_I8` (8 bpp, palette-indexed).  Halves the canvas
-footprint for the full-frame overlay (e.g. 4.0 MB → 2.0 MB at 1920x1080)
-and removes the hand-rolled NEON row fill in favor of `memset`, which
-the toolchain auto-vectorizes.
-
-- **Pure rasterizer extracted.**  New `src/debug_osd_draw.{c,h}` holds
-  the font, palette, dirty-rect logic, and drawing primitives.  The
-  MI_RGN glue in `src/debug_osd.c` is now a thin wrapper.  The pure
-  module compiles on the host and is exercised by a new
-  `tests/test_debug_osd.c` (53 assertions covering every primitive,
-  clipping, dirty-rect expansion, glyph rendering, and two hashed
-  composite-scene goldens).
-- **Palette matches legacy alpha codes.**  Entries 1..8 map to
-  `DEBUG_OSD_*` color constants; semi-transparent entries reuse the
-  4-bit ARGB4444 codes (0x4 → 68, 0xA → 170) so visual output is
-  unchanged vs. the ARGB4444 implementation.
-- **Public API source-compatible.**  `debug_osd_rect/point/line/text`
-  signatures unchanged; `DEBUG_OSD_*` constants are now palette indices
-  (0..8) but callers only reference them symbolically.
+This release subsumes fork-only intermediate tags 0.7.12 (OSD I8
+extraction), 0.7.13 (OSD I8 → I4), and 0.7.14 (EIS removal).  Bundled
+because they share a hardware test footprint and were never released
+upstream as separate tags.
 
 ## [0.7.11] - 2026-04-19
 

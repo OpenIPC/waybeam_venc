@@ -1,7 +1,7 @@
 # GyroGlide-Lite Design
 
-> **Status (0.7.14): historical / deprecated.** The implementation
-> described here (`src/eis_gyroglide.c`) was removed in 0.7.14.
+> **Status (0.8.0): historical / deprecated.** The implementation
+> described here (`src/eis_gyroglide.c`) was removed in 0.8.0.
 > See `EIS_INTEGRATION_PLAN.md` and HISTORY for context. Document
 > retained for posterity in case the algorithm is resurrected on
 > a future BSP that handles `MI_VPE_SetPortCrop` more gracefully.

@@ -1,8 +1,8 @@
 # Optical Flow + IMU Fusion Roadmap
 
-> **Status (0.7.14): on hold.** This roadmap assumed the EIS framework
+> **Status (0.8.0): on hold.** This roadmap assumed the EIS framework
 > (`src/eis.c`, `src/eis_gyroglide.c`, `EisMotionRing`) as an
-> integration target.  The EIS module was removed in 0.7.14 (see
+> integration target.  The EIS module was removed in 0.8.0 (see
 > HISTORY).  The core ideas — visual-inertial motion estimation,
 > ROI-driven encoder feedback, IMU dead-reckoning — remain valid
 > targets, but the integration sections below referencing

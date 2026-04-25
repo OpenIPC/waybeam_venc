@@ -135,7 +135,7 @@ void my_module_update(Star6ePipelineState *ps, ...)
 
     /* Text stats — pick row numbers that don't conflict with existing rows.
      * Rows 0-1 are fps/cpu (rows 3-5 were EIS in 0.7.13 and earlier;
-     * EIS removed in 0.7.14, so 3+ are now free). */
+     * EIS removed in 0.8.0, so 3+ are now free). */
     debug_osd_text(ps->debug_osd, 3, "my_val", "%d", some_value);
     debug_osd_text(ps->debug_osd, 8, "my_str", "%s", some_string);
 
@@ -172,7 +172,7 @@ if (ps->debug_osd) {
 - All draw calls must be between `begin_frame` / `end_frame`
 - The frame loop is single-threaded — no locking needed
 - Use rows 2+ for text (rows 0-1 are fps/cpu; the old EIS rows 3-5
-  freed up in 0.7.14 when EIS was removed)
+  freed up in 0.8.0 when EIS was removed)
 - Coordinates are frame pixels — scale if your data uses different units
 - Keep draw operations minimal — each filled rect and text line has a cost
 

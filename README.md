@@ -902,7 +902,7 @@ hardware FIFO at 200 Hz, drains per video frame, and hands samples to a
 caller-supplied push callback.
 
 The previous EIS consumer (`gyroglide` crop-based stabilization) was
-removed in 0.7.14 — see `HISTORY.md` for the rationale and
+removed in 0.8.0 — see `HISTORY.md` for the rationale and
 `documentation/EIS_INTEGRATION_PLAN.md` for what a future replacement
 (LDC-warp Phase C) would look like. The push callback in
 `star6e_pipeline.c` is currently a stub that discards samples; a future

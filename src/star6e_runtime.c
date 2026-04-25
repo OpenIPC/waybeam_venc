@@ -729,7 +729,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 
 	/* Drain IMU FIFO BEFORE GetStream so any future telemetry/sidecar
 	 * consumer sees fresh samples for the frame currently being
-	 * captured.  Without EIS (removed in 0.7.14) the drained samples
+	 * captured.  Without EIS (removed in 0.8.0) the drained samples
 	 * go to the stub push callback and are discarded — cheap when
 	 * imu.enabled=false, as it is by default. */
 	if (ps->imu)
