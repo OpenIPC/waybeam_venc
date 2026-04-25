@@ -1,5 +1,44 @@
 # History
 
+## [0.7.14] - 2026-04-25
+
+Drop EIS module entirely.  An empirical sensor-mode sweep on Star6E
+IMX335 (see PR #60 discussion) established that EIS only worked in
+one validated config (sensor mode 3 native 1920x1080 + real IMU +
+≤90 fps); every other combination silently stalled the encoder via
+`MI_VPE_SetPortCrop` interactions with VPE scaling, VIF-side crop,
+or pixel-rate ceilings.  PR #58 + PR #60 added increasingly elaborate
+guards to refuse EIS in the broken cases, but the surface area
+shipping isn't worth maintaining for a single-config feature, and a
+future LDC-warp rewrite (Phase C in `documentation/EIS_INTEGRATION_PLAN.md`)
+would replace this code anyway.
+
+- **Removed:** `src/eis.c`, `src/eis_gyroglide.c`, `include/eis.h`,
+  `include/eis_gyroglide.h`, `include/eis_ring.h`,
+  `tests/test_eis_gyroglide.c` (~1100 LoC).
+- **Pipeline init:** EIS init/teardown blocks deleted from
+  `bind_and_finalize_pipeline()` and `pipeline_stop()` /
+  `pipeline_stop_venc_level()`.  PR #58 + PR #60 EIS guards
+  (VPE-scaling, VIF-crop, testMode, pixel-rate refusals) are gone
+  with them — they only existed to make EIS misconfiguration loud.
+- **Per-frame:** `eis_update()` removed from
+  `star6e_runtime_process_stream()`.  `imu_drain()` still runs
+  per-frame so a future telemetry consumer slots in cheaply.
+- **OSD:** EIS visualization (1/3-scale crop miniature in
+  bottom-right + crop/off/margin text rows) removed from
+  `star6e_runtime.c`.  Debug OSD now shows only fps and CPU.
+- **Config:** `eis.*` fields dropped from `VencConfig`,
+  `venc.default.json`, the `/api/v1/set` snake-case alias map,
+  and the WebUI dashboard (tab + tooltips + enum).
+- **IMU module retained.**  `src/imu_bmi270.c` + `include/imu_bmi270.h`
+  stay in the build; `imu.enabled` defaults to `false` so the BMI270
+  is never opened unless explicitly enabled.  The push callback
+  `star6e_pipeline_imu_push()` is now a stub — samples are discarded
+  unless a future consumer (telemetry export, gcsv-style file logging
+  for Gyroflow post-process) is wired in.
+- **Pre-existing:** debug OSD, encoder hot path, and all non-EIS
+  pipeline behavior unchanged.
+
 ## [0.7.13] - 2026-04-25
 
 Debug OSD: migrate Star6E overlay from `MI_RGN_PIXFMT_I8` (8 bpp) to

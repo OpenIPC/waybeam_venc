@@ -23,7 +23,7 @@ COMMON_CFLAGS := -Os -s -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c src/sensor_select.c src/venc_ring.c lib/cJSON.c
 HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c
 MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c
-STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/imu_bmi270.c src/eis.c src/eis_gyroglide.c src/star6e_iq.c src/debug_osd.c src/debug_osd_draw.c
+STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/imu_bmi270.c src/star6e_iq.c src/debug_osd.c src/debug_osd_draw.c
 LIB_RUNPATH ?= /usr/lib
 COMMON_LDFLAGS := -Wl,-rpath,$(LIB_RUNPATH) -Wl,--no-as-needed
 
@@ -107,7 +107,7 @@ check:
 lint: $(TOOLCHAIN_TARGET) check
 	$(CC) $(CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -Wno-old-style-declaration -fsyntax-only $(SRC)
 
-$(TARGET): $(SRC) include/backend.h include/codec_config.h include/codec_types.h include/file_util.h include/h26x_param_sets.h include/h26x_util.h include/hevc_rtp.h include/isp_runtime.h include/maruko_bindings.h include/maruko_config.h include/maruko_controls.h include/maruko_output.h include/maruko_pipeline.h include/maruko_runtime.h include/maruko_video.h include/output_socket.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/sdk_quiet.h include/star6e_audio.h include/star6e_controls.h include/star6e_cus3a.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_pipeline.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_runtime.h include/star6e_video.h include/stream_metrics.h include/timing.h include/idr_rate_limit.h include/venc_config.h include/venc_httpd.h include/venc_api.h include/sensor_select.h include/venc_ring.h include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h include/maruko_mi.h include/star6e_mi.h include/imu_bmi270.h include/eis.h include/eis_ring.h include/eis_gyroglide.h include/debug_osd.h
+$(TARGET): $(SRC) include/backend.h include/codec_config.h include/codec_types.h include/file_util.h include/h26x_param_sets.h include/h26x_util.h include/hevc_rtp.h include/isp_runtime.h include/maruko_bindings.h include/maruko_config.h include/maruko_controls.h include/maruko_output.h include/maruko_pipeline.h include/maruko_runtime.h include/maruko_video.h include/output_socket.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/sdk_quiet.h include/star6e_audio.h include/star6e_controls.h include/star6e_cus3a.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_pipeline.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_runtime.h include/star6e_video.h include/stream_metrics.h include/timing.h include/idr_rate_limit.h include/venc_config.h include/venc_httpd.h include/venc_api.h include/sensor_select.h include/venc_ring.h include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h include/maruko_mi.h include/star6e_mi.h include/imu_bmi270.h include/debug_osd.h
 	$(CC) $(CFLAGS) $(LDFLAGS) $(SRC) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(if $(DRV),-Ltools,) $(BASE_LIBS) $(SOC_LIBS) -o $@
 
 # Host-native timing probe (no cross-compiler or SDK libs needed)
@@ -174,14 +174,7 @@ test-tsan:
 	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=thread $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -o $(TEST_RUNNER)
 	./$(TEST_RUNNER)
 
-TEST_EIS_GG := tests/test_eis_gyroglide
-$(TEST_EIS_GG): tests/test_eis_gyroglide.c src/eis_gyroglide.c src/eis.c include/eis.h include/eis_gyroglide.h include/eis_ring.h
-	$(HOST_CC) $(HOST_CFLAGS) -DEIS_GYROGLIDE_TEST tests/test_eis_gyroglide.c src/eis_gyroglide.c src/eis.c -lpthread -lm -o $@
-
-test-eis: $(TEST_EIS_GG)
-	./$(TEST_EIS_GG)
-
-test-ci: test test-eis test-asan test-tsan
+test-ci: test test-asan test-tsan
 
 toolchain:
 	@if [ ! -x "$(CC_BIN)" ]; then \

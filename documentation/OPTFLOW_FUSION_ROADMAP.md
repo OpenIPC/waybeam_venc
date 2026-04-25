@@ -1,5 +1,18 @@
 # Optical Flow + IMU Fusion Roadmap
 
+> **Status (0.7.14): on hold.** This roadmap assumed the EIS framework
+> (`src/eis.c`, `src/eis_gyroglide.c`, `EisMotionRing`) as an
+> integration target.  The EIS module was removed in 0.7.14 (see
+> HISTORY).  The core ideas — visual-inertial motion estimation,
+> ROI-driven encoder feedback, IMU dead-reckoning — remain valid
+> targets, but the integration sections below referencing
+> `eis.flow.*` config keys, `eis.mode = "fused"`, and the
+> `EisMotionRing` structure are now stale.  When this work is
+> resumed, the consumer side will need to be redesigned around
+> whatever stabilization framework replaces EIS (likely Phase C
+> LDC-warp; see EIS_INTEGRATION_PLAN.md).  The IMU module itself
+> is retained, compiled but disabled by default.
+
 ## Goal
 
 Add visual-inertial motion estimation to waybeam_venc that produces
