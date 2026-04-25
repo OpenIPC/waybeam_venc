@@ -1,4 +1,5 @@
 #include "venc_config.h"
+#include "venc_api.h"
 #include "pipeline_common.h"
 #include "star6e_recorder.h"
 #include "../lib/cJSON.h"
@@ -454,6 +455,17 @@ int venc_config_load(const char *path, VencConfig *cfg)
 	}
 
 	cJSON_Delete(root);
+
+	{
+		const char *err = venc_api_validate_loaded_config(cfg);
+		if (err) {
+			fprintf(stderr,
+				"[venc_config] ERROR: invalid value in %s: %s\n",
+				path, err);
+			return -1;
+		}
+	}
+
 	fprintf(stderr, "[venc_config] Loaded config from %s\n", path);
 	return 0;
 }
