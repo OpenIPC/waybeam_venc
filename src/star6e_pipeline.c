@@ -1108,6 +1108,25 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	if (vcfg->eis.enabled) {
 		if (!state->imu && !vcfg->eis.test_mode) {
 			fprintf(stderr, "WARNING: EIS requires IMU (unless testMode), skipping\n");
+		} else if (state->active_precrop.w != state->image_width ||
+		           state->active_precrop.h != state->image_height) {
+			/* MI_VPE_SetPortCrop (used by EIS) silently stalls the
+			 * encoder when the VPE port is also scaling — VENC
+			 * never receives a frame.  Refuse cleanly so the user
+			 * sees the actual reason instead of "waiting for
+			 * encoder data..." forever. */
+			fprintf(stderr,
+				"WARNING: EIS skipped — VPE scaling active "
+				"(channel %ux%u → port %ux%u).  EIS port-crop "
+				"cannot coexist with VPE scaling on this BSP; "
+				"the encoder would stall silently.\n"
+				"  Fix: pick a sensor mode whose native capture "
+				"matches image.size (%ux%u), or set image.size "
+				"to match the sensor capture.\n",
+				(unsigned)state->active_precrop.w,
+				(unsigned)state->active_precrop.h,
+				state->image_width, state->image_height,
+				state->image_width, state->image_height);
 		} else {
 			EisConfig eis_cfg = {
 				.mode = vcfg->eis.mode,
