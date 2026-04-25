@@ -601,18 +601,6 @@ const TOOLTIPS = {
 'imu.gyroRangeDps':'Gyroscope full-scale range in degrees/sec. Default: 1000. Requires restart',
 'imu.calFile':'Path to IMU calibration file. Default: /etc/imu.cal. Requires restart',
 'imu.calSamples':'Number of samples for gyro bias calibration at startup. Default: 400. Requires restart',
-'eis.enabled':'Enable electronic image stabilization (GyroGlide). Requires IMU. Requires restart',
-'eis.mode':'EIS algorithm: gyroglide (default). Requires restart',
-'eis.marginPercent':'Crop margin for stabilization (10-50%). Larger = more range but lower resolution. Default: 30',
-'eis.testMode':'EIS debug mode: apply crop without stabilization to verify margin. Requires restart',
-'eis.swapXY':'Swap X/Y gyro axes. Use if stabilization corrects the wrong axis. Requires restart',
-'eis.invertX':'Invert X-axis correction. Use if horizontal stabilization is reversed. Requires restart',
-'eis.invertY':'Invert Y-axis correction. Use if vertical stabilization is reversed. Requires restart',
-'eis.gain':'Correction gain (0.0-2.0). Higher = more aggressive stabilization. Default: 1.0',
-'eis.deadbandRad':'Per-frame angle threshold in radians. Motion below this is ignored. Default: 0.0',
-'eis.recenterRate':'Return-to-center speed (0.0-5.0). Higher = faster recentering. Default: 0.5',
-'eis.maxSlewPx':'Max crop shift per frame in pixels. Limits jerk. 0 = unlimited. Default: 0.0',
-'eis.biasAlpha':'Runtime gyro bias adaptation rate. Small values = slow drift correction. Default: 0.001',
 'record.enabled':'Enable recording on startup. Requires restart',
 'record.dir':'Recording output directory. Default: /tmp. Requires restart',
 'record.format':'Recording container format: ts (MPEG-TS) or hevc (raw). Default: ts. Requires restart',
@@ -631,7 +619,6 @@ const ENUMS = {
 'video0.rcMode':['cbr','vbr','avbr','qvbr'],
 'isp.awbMode':['auto','ct_manual'],
 'audio.codec':['opus','pcm','g711a','g711u'],
-'eis.mode':['gyroglide'],
 'record.format':['ts','hevc'],
 'record.mode':['off','mirror','dual','dual-stream'],
 'outgoing.streamMode':['rtp']
@@ -650,7 +637,6 @@ const SECTIONS = [
 {id:'audio',title:'Audio',keys:['audio.enabled','audio.codec','audio.sampleRate','audio.channels','audio.volume','audio.mute']},
 {id:'fpv',title:'FPV',keys:['fpv.roiEnabled','fpv.roiQp','fpv.roiSteps','fpv.roiCenter','fpv.noiseLevel']},
 {id:'imu',title:'IMU',keys:['imu.enabled','imu.i2cDevice','imu.i2cAddr','imu.sampleRateHz','imu.gyroRangeDps','imu.calFile','imu.calSamples']},
-{id:'eis',title:'EIS (Stabilization)',keys:['eis.enabled','eis.mode','eis.marginPercent','eis.gain','eis.deadbandRad','eis.recenterRate','eis.maxSlewPx','eis.biasAlpha','eis.testMode','eis.swapXY','eis.invertX','eis.invertY']},
 {id:'record',title:'Recording',keys:['record.enabled','record.mode','record.format','record.dir','record.maxSeconds','record.maxMB','record.bitrate','record.fps','record.gopSize','record.server']}
 ];
 

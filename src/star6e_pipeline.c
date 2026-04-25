@@ -3,7 +3,6 @@
 #include "codec_config.h"
 #include "codec_types.h"
 #include "debug_osd.h"
-#include "eis.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
 #include "file_util.h"
@@ -922,13 +921,14 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	return 0;
 }
 
-/* IMU push callback: forwards each sample to the EIS module */
+/* IMU push callback: stub.  EIS was the only consumer and was removed
+ * (see HISTORY 0.7.14).  Samples are discarded; the callback stays so
+ * imu_init() has a valid push_fn slot if a future consumer (telemetry
+ * export, sidecar logging) is wired in. */
 static void star6e_pipeline_imu_push(void *ctx, const ImuSample *sample)
 {
-	Star6ePipelineState *ps = (Star6ePipelineState *)ctx;
-	if (ps->eis)
-		eis_push_sample(ps->eis, sample->gyro_x, sample->gyro_y,
-			sample->gyro_z, &sample->ts);
+	(void)ctx;
+	(void)sample;
 }
 
 /* Track whether CUS3A has been enabled.  Without MI_SYS_Exit(), the kernel
@@ -1104,54 +1104,6 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 	}
 
-	/* EIS */
-	if (vcfg->eis.enabled) {
-		if (!state->imu && !vcfg->eis.test_mode) {
-			fprintf(stderr, "WARNING: EIS requires IMU (unless testMode), skipping\n");
-		} else if (state->active_precrop.w != state->image_width ||
-		           state->active_precrop.h != state->image_height) {
-			/* MI_VPE_SetPortCrop (used by EIS) silently stalls the
-			 * encoder when the VPE port is also scaling — VENC
-			 * never receives a frame.  Refuse cleanly so the user
-			 * sees the actual reason instead of "waiting for
-			 * encoder data..." forever. */
-			fprintf(stderr,
-				"WARNING: EIS skipped — VPE scaling active "
-				"(channel %ux%u → port %ux%u).  EIS port-crop "
-				"cannot coexist with VPE scaling on this BSP; "
-				"the encoder would stall silently.\n"
-				"  Fix: pick a sensor mode whose native capture "
-				"matches image.size (%ux%u), or set image.size "
-				"to match the sensor capture.\n",
-				(unsigned)state->active_precrop.w,
-				(unsigned)state->active_precrop.h,
-				state->image_width, state->image_height,
-				state->image_width, state->image_height);
-		} else {
-			EisConfig eis_cfg = {
-				.mode = vcfg->eis.mode,
-				.margin_percent = vcfg->eis.margin_percent,
-				.capture_w = (uint16_t)state->image_width,
-				.capture_h = (uint16_t)state->image_height,
-				.vpe_channel = 0,
-				.vpe_port = 0,
-				.pixels_per_radian = 0.0f,  /* auto: capture_w/2 */
-				.test_mode = vcfg->eis.test_mode ? 1 : 0,
-				.swap_xy = vcfg->eis.swap_xy ? 1 : 0,
-				.invert_x = vcfg->eis.invert_x ? 1 : 0,
-				.invert_y = vcfg->eis.invert_y ? 1 : 0,
-				.gain = vcfg->eis.gain,
-				.deadband_rad = vcfg->eis.deadband_rad,
-				.recenter_rate = vcfg->eis.recenter_rate,
-				.max_slew_px = vcfg->eis.max_slew_px,
-				.bias_alpha = vcfg->eis.bias_alpha,
-			};
-			state->eis = eis_create(&eis_cfg);
-			if (state->eis && state->imu)
-				eis_set_imu_active(state->eis, 1);
-		}
-	}
-
 	/* Debug OSD */
 	if (vcfg->debug.show_osd) {
 		state->debug_osd = debug_osd_create(
@@ -1226,15 +1178,12 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	 * StopRecvPic (thread still draining ch1) → signal thread
 	 * to stop → join thread. */
 
-	/* Stop IMU thread — the push callback accesses state->eis,
-	 * so the thread must be halted before EIS is destroyed. */
-	if (state->imu)
-		imu_stop(state->imu);
-	if (state->eis) {
-		eis_destroy(state->eis);
-		state->eis = NULL;
-	}
+	/* Stop + destroy IMU.  The push callback is now a stub (EIS was
+	 * removed; see HISTORY 0.7.14) so order vs other teardown steps
+	 * doesn't matter, but keeping the stop-then-destroy split lets a
+	 * future telemetry consumer slot in without rework. */
 	if (state->imu) {
+		imu_stop(state->imu);
 		imu_destroy(state->imu);
 		state->imu = NULL;
 	}
@@ -1308,7 +1257,7 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 }
 
 /* Partial teardown for SIGHUP reinit: tears down VENC channels, binds,
- * output, audio, IMU/EIS but keeps sensor/VIF/VPE running.  The SigmaStar
+ * output, audio, IMU but keeps sensor/VIF/VPE running.  The SigmaStar
  * MIPI PHY does not recover from MI_SNR_Disable/Enable cycles, so the
  * sensor must stay active across reinit. */
 static void star6e_pipeline_stop_venc_level(Star6ePipelineState *state)
@@ -1316,13 +1265,8 @@ static void star6e_pipeline_stop_venc_level(Star6ePipelineState *state)
 	if (!state)
 		return;
 
-	if (state->imu)
-		imu_stop(state->imu);
-	if (state->eis) {
-		eis_destroy(state->eis);
-		state->eis = NULL;
-	}
 	if (state->imu) {
+		imu_stop(state->imu);
 		imu_destroy(state->imu);
 		state->imu = NULL;
 	}
