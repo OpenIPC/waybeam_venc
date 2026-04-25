@@ -129,10 +129,15 @@ static void osd_canvas_from_info(OsdCanvas *out, const DebugOsdCanvasInfo *info,
 	out->height = height;
 }
 
-/* Copy the shared host-side palette into the SDK's i6_rgn_pal shape. */
+/* Copy the shared host-side palette into the SDK's i6_rgn_pal shape.
+ * The SDK struct holds 256 entries; for I4 we only fill the first 16.
+ * Zero the rest so the unused tail isn't stack garbage on the way down
+ * to MI_RGN_Init — defensive even though the kernel almost certainly
+ * ignores entries above the format's reach. */
 static void palette_init(i6_rgn_pal *pal)
 {
 	const OsdPaletteEntry *src = osd_palette();
+	memset(pal, 0, sizeof(*pal));
 	for (unsigned i = 0; i < OSD_PALETTE_SIZE; i++) {
 		pal->element[i].alpha = src[i].alpha;
 		pal->element[i].red   = src[i].red;
@@ -248,7 +253,7 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 		return NULL;
 	}
 
-	/* Create OSD region: full frame, I8 (palette-indexed, 8 bpp) */
+	/* Create OSD region: full frame, I4 (palette-indexed, 4 bpp) */
 	i6_rgn_cnf cnf;
 	memset(&cnf, 0, sizeof(cnf));
 	cnf.type = I6_RGN_TYPE_OSD;
