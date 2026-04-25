@@ -1,5 +1,13 @@
 # EIS Integration Plan — Star6E (SSC338Q / Infinity6E)
 
+> **Status (0.7.14): historical reference.** The EIS module described in
+> "Phase B: Crop-Based EIS" was removed in 0.7.14 — see HISTORY for
+> the rationale (worked in only one validated config; not worth the
+> shipped maintenance surface). This document is retained for the
+> Phase C LDC-warp design notes, which remain valid and would be the
+> starting point for any future stabilization work. The IMU module
+> (Phase A) is also retained, compiled but disabled by default.
+
 ## Investigation Findings
 
 ### Available Hardware APIs (confirmed via libmi_vpe.so symbol export)

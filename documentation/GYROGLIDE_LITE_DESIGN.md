@@ -1,5 +1,11 @@
 # GyroGlide-Lite Design
 
+> **Status (0.7.14): historical / deprecated.** The implementation
+> described here (`src/eis_gyroglide.c`) was removed in 0.7.14.
+> See `EIS_INTEGRATION_PLAN.md` and HISTORY for context. Document
+> retained for posterity in case the algorithm is resurrected on
+> a future BSP that handles `MI_VPE_SetPortCrop` more gracefully.
+
 **A low-latency frame-synchronous 2-axis translational EIS using batched gyro
 integration and crop-window control.**
 

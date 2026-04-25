@@ -490,7 +490,7 @@ static int test_composite_scene_golden(void)
 	OsdDirty d;
 	osd_dirty_reset(&d, tc.c.width, tc.c.height);
 
-	/* Two text panels + 3 nested EIS rects — covers every primitive in
+	/* Two text panels + 3 nested rects — covers every primitive in
 	 * one scene.  Reproduces roughly what star6e_runtime.c draws. */
 	osd_draw_rect(&tc.c, &d, 6, 7, 60, 26, DEBUG_OSD_SEMITRANS_BLACK, 1);
 	osd_draw_string(&tc.c, &d, 8, 8, "fps: 30", 3, DEBUG_OSD_WHITE);

@@ -5,8 +5,9 @@
  * Generic timestamped 6-axis IMU sample ring buffer.
  * Thread-safe (mutex-protected push/read).
  *
- * Extracted from the EIS module's MotionRing for reuse by
- * any frame-synced consumer (EIS, telemetry, logging).
+ * Originally extracted from the (now-removed, 0.7.14) EIS module
+ * for reuse by any frame-synced consumer — telemetry export,
+ * sidecar gcsv logging, future stabilization framework, etc.
  */
 
 #include <stdint.h>
