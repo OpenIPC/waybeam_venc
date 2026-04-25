@@ -243,7 +243,10 @@ int star6e_recorder_write_frame(Star6eRecorderState *state,
 
 	if (state->sync_interval_frames > 0 &&
 	    state->frames_since_sync >= state->sync_interval_frames) {
-		fdatasync(state->fd);
+		/* Non-blocking writeback hint: bounds the dirty page count
+		 * without stalling the encoder thread. Durability checkpoint
+		 * is the fdatasync at recorder stop. */
+		sync_file_range(state->fd, 0, 0, SYNC_FILE_RANGE_WRITE);
 		state->frames_since_sync = 0;
 	}
 
