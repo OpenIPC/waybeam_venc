@@ -608,6 +608,23 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.bitrate == 0 || cfg->video0.bitrate > 200000)
 			return "bitrate must be 1-200000 kbps";
 	}
+	if (strcmp(key, "video0.size") == 0) {
+		uint32_t w = cfg->video0.width;
+		uint32_t h = cfg->video0.height;
+		/* w==0 && h==0 means "auto" (use sensor native) — allowed. */
+		if (w != 0 || h != 0) {
+			if (w < 128 || h < 128 || w > 4096 || h > 4096)
+				return "video0.size width/height must be 128-4096";
+			/* HEVC CTU alignment: width must be multiple of 16,
+			 * height multiple of 8.  MI_VENC_CreateChn rejects
+			 * misaligned widths with MI_ERR_VENC_ILLEGAL_PARAM
+			 * (-1610473469) and the daemon cannot recover. */
+			if (w % 16 != 0)
+				return "video0.size width must be a multiple of 16";
+			if (h % 8 != 0)
+				return "video0.size height must be a multiple of 8";
+		}
+	}
 	if (strcmp(key, "video0.scene_holdoff") == 0 &&
 	    cfg->video0.scene_holdoff == 0)
 		return "video0.scene_holdoff must be >= 1";
