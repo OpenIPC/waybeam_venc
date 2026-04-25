@@ -105,22 +105,6 @@ typedef struct {
 
 typedef struct {
 	bool enabled;
-	char mode[16];            /* "gyroglide" (default) */
-	int margin_percent;       /* 30 */
-	bool test_mode;
-	bool swap_xy;
-	bool invert_x;
-	bool invert_y;
-	/* GyroGlide-specific (ignored by legacy backend) */
-	float gain;               /* 0.8 — correction gain */
-	float deadband_rad;       /* 0.001 — per-frame angle threshold */
-	float recenter_rate;      /* 1.0 — return-to-center speed (1/s) */
-	float max_slew_px;        /* 8.0 — max crop change per frame */
-	float bias_alpha;         /* 0.001 — runtime bias adaptation rate */
-} VencConfigEis;
-
-typedef struct {
-	bool enabled;
 	char dir[VENC_CONFIG_STRING_MAX];
 	char format[16];          /* "hevc" or "ts", default "ts" */
 	char mode[16];            /* "off","mirror","dual","dual-stream" */
@@ -149,7 +133,6 @@ typedef struct {
 	VencConfigFpv fpv;
 	VencConfigAudio audio;
 	VencConfigImu imu;
-	VencConfigEis eis;
 	VencConfigRecord record;
 	VencConfigDebug debug;
 } VencConfig;
