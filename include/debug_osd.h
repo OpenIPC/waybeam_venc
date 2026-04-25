@@ -7,16 +7,18 @@
 extern "C" {
 #endif
 
-/* ARGB4444 color constants: AAAA_RRRR_GGGG_BBBB */
-#define DEBUG_OSD_TRANSPARENT     0x0000
-#define DEBUG_OSD_WHITE           0xFFFF
-#define DEBUG_OSD_RED             0xFF00
-#define DEBUG_OSD_GREEN           0xF0F0
-#define DEBUG_OSD_BLUE            0xF00F
-#define DEBUG_OSD_YELLOW          0xFFF0
-#define DEBUG_OSD_CYAN            0xF0FF
-#define DEBUG_OSD_SEMITRANS_GREEN 0x40A0
-#define DEBUG_OSD_SEMITRANS_BLACK 0xA000
+/* Palette indices for the I8 OSD canvas.  The palette itself (alpha + RGB
+ * per entry) is populated at MI_RGN_Init time in src/debug_osd.c.  Values
+ * 0..8 are the "named" colors; 9..15 are reserved for future use. */
+#define DEBUG_OSD_TRANSPARENT     0
+#define DEBUG_OSD_WHITE           1
+#define DEBUG_OSD_RED             2
+#define DEBUG_OSD_GREEN           3
+#define DEBUG_OSD_BLUE            4
+#define DEBUG_OSD_YELLOW          5
+#define DEBUG_OSD_CYAN            6
+#define DEBUG_OSD_SEMITRANS_GREEN 7
+#define DEBUG_OSD_SEMITRANS_BLACK 8
 
 typedef struct DebugOsdState DebugOsdState;
 
@@ -40,7 +42,8 @@ void debug_osd_text(DebugOsdState *osd, int row, const char *label,
 void debug_osd_sample_cpu(DebugOsdState *osd);
 int debug_osd_get_cpu(DebugOsdState *osd);
 
-/** Spatial primitives at real frame coordinates. */
+/** Spatial primitives at real frame coordinates.  `color` is a palette
+ *  index; only the low byte is used. */
 void debug_osd_rect(DebugOsdState *osd, uint16_t x, uint16_t y,
                     uint16_t w, uint16_t h, uint16_t color, int filled);
 void debug_osd_point(DebugOsdState *osd, uint16_t x, uint16_t y,

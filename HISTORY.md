@@ -1,5 +1,78 @@
 # History
 
+## [0.7.13] - 2026-04-25
+
+Debug OSD: migrate Star6E overlay from `MI_RGN_PIXFMT_I8` (8 bpp) to
+`MI_RGN_PIXFMT_I4` (4 bpp, two pixels per byte).  Follow-up to 0.7.12;
+halves the canvas footprint again (2.0 MB → 1.0 MB at 1920x1080) and
+cuts OSD-on CPU cost a further ~33% on Star6E by writing half the
+bytes per row fill.
+
+- **OsdCanvas API:** `stride_px` renamed to `stride_bytes` (now bytes
+  per row regardless of pixel format).  `width` is still logical
+  pixels.
+- **`osd_fill_row(uint8_t *row, int count, color)`** removed in favor
+  of `osd_fill_pixels(canvas, x, y, count, color)` which handles I4
+  nibble alignment internally:
+    - Unaligned start (odd x): RMW the high nibble of byte (x/2).
+    - Byte-aligned middle: `memset` the doubled-nibble byte
+      `(color << 4) | color` over `(end - x) / 2` bytes.
+    - Unaligned tail (end odd): RMW the low nibble of the last byte.
+  Drawing primitives (`osd_draw_rect`, `osd_draw_char`) call this in
+  place of their old byte-pointer inline math.
+- **`osd_get_pixel`** added so tests can read back the unpacked nibble
+  through the same code path the rasterizer uses; production drawing
+  never reads back.
+- **Palette shrunk to 16 entries** (was 256).  Index assignments
+  unchanged; entries 9..15 are zeroed reserved.
+- **MI_RGN region pixfmt:** `I6_RGN_PIXFMT_I4`.  Wire stride at
+  1920x1080 is 960 bytes (was 1920 for I8; would be 3840 for ARGB4444).
+- **Track-points use case** (filled small rects from upstream PR #23,
+  motion-vector markers): supported unchanged via existing
+  `debug_osd_rect` API; dirty-rect tracking gives sub-canvas clear,
+  more efficient than the upstream's full-canvas `memset(0xFF)`.
+- **Tests:** 76 assertions (was 53).  New cases cover even-x and odd-x
+  nibble writes preserving the sibling, fill_pixels paths for aligned
+  middle / unaligned ends / negative-x clip / past-right clip, and
+  regenerated golden hashes for the now-half-size packed buffer.
+- **Public API source-compatible.**  `debug_osd_rect/point/line/text`
+  signatures unchanged; `DEBUG_OSD_*` constants are still palette
+  indices (now 0..15 max instead of 0..255 max).
+
+Hardware comparison (Star6E IMX335 @ 90 fps, 30 s samples):
+
+| Format     | Actual fps | CPU/core | OSD-on cost vs baseline |
+|------------|-----------:|---------:|------------------------:|
+| Pre-I8 ARGB4444 | 87.00 |    26.80 % | +20.53 pp |
+| I8 (0.7.12) | 90.00 |    17.43 % | +11.30 pp |
+| **I4 (this)** | **90.00** | **11.70 %** | **+5.43 pp** |
+
+I4 cuts OSD CPU −74 % vs the original ARGB4444 path, and hits 2.36×
+the fps-per-CPU% of ARGB4444 (7.69 vs 3.25).
+
+## [0.7.12] - 2026-04-23
+
+Debug OSD: migrate Star6E overlay from `MI_RGN_PIXFMT_ARGB4444` (16 bpp)
+to `MI_RGN_PIXFMT_I8` (8 bpp, palette-indexed).  Halves the canvas
+footprint for the full-frame overlay (e.g. 4.0 MB → 2.0 MB at 1920x1080)
+and removes the hand-rolled NEON row fill in favor of `memset`, which
+the toolchain auto-vectorizes.
+
+- **Pure rasterizer extracted.**  New `src/debug_osd_draw.{c,h}` holds
+  the font, palette, dirty-rect logic, and drawing primitives.  The
+  MI_RGN glue in `src/debug_osd.c` is now a thin wrapper.  The pure
+  module compiles on the host and is exercised by a new
+  `tests/test_debug_osd.c` (53 assertions covering every primitive,
+  clipping, dirty-rect expansion, glyph rendering, and two hashed
+  composite-scene goldens).
+- **Palette matches legacy alpha codes.**  Entries 1..8 map to
+  `DEBUG_OSD_*` color constants; semi-transparent entries reuse the
+  4-bit ARGB4444 codes (0x4 → 68, 0xA → 170) so visual output is
+  unchanged vs. the ARGB4444 implementation.
+- **Public API source-compatible.**  `debug_osd_rect/point/line/text`
+  signatures unchanged; `DEBUG_OSD_*` constants are now palette indices
+  (0..8) but callers only reference them symbolically.
+
 ## [0.7.11] - 2026-04-19
 
 Pre-merge review fixes prior to upstream sync.  Two functional bugs
