@@ -55,6 +55,13 @@ void venc_api_set_config_path(const char *path);
 int venc_api_field_supported_for_backend(const char *backend_name,
 	const char *field_key);
 
+/* Run the same per-field validation that /api/v1/set applies, over an
+ * already-parsed config (e.g. just loaded from disk).  Returns NULL when
+ * every validated field is in range, or a static error message string
+ * pointing at the first offender.  Used by venc_config_load() to refuse
+ * boot on configs that would crash MI_VENC_CreateChn or similar. */
+const char *venc_api_validate_loaded_config(const VencConfig *cfg);
+
 /* Pipeline reinit request flag (shared between API and backend).
  *   0 = no reinit pending
  *   1 = reload config from disk + reinit pipeline (SIGHUP / /api/v1/restart)
