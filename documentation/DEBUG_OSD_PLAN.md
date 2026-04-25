@@ -134,8 +134,9 @@ void my_module_update(Star6ePipelineState *ps, ...)
     if (!ps->debug_osd) return;
 
     /* Text stats — pick row numbers that don't conflict with existing rows.
-     * Rows 0-1 are fps/cpu, rows 3-5 are EIS (when active). */
-    debug_osd_text(ps->debug_osd, 7, "my_val", "%d", some_value);
+     * Rows 0-1 are fps/cpu (rows 3-5 were EIS in 0.7.13 and earlier;
+     * EIS removed in 0.8.0, so 3+ are now free). */
+    debug_osd_text(ps->debug_osd, 3, "my_val", "%d", some_value);
     debug_osd_text(ps->debug_osd, 8, "my_str", "%s", some_string);
 
     /* Spatial primitives at real frame coordinates */
@@ -160,9 +161,6 @@ if (ps->debug_osd) {
     debug_osd_text(ps->debug_osd, 0, "fps", "%u", osd_fps);
     debug_osd_text(ps->debug_osd, 1, "cpu", "%d%%", ...);
 
-    /* EIS visualization (if active) */
-    if (ps->eis) { ... }
-
     /* YOUR MODULE — add here */
     my_module_update(ps, ...);
 
@@ -173,8 +171,8 @@ if (ps->debug_osd) {
 **Rules:**
 - All draw calls must be between `begin_frame` / `end_frame`
 - The frame loop is single-threaded — no locking needed
-- Use rows 6+ for text to avoid conflicting with built-in stats (0-1) and
-  EIS (3-5)
+- Use rows 2+ for text (rows 0-1 are fps/cpu; the old EIS rows 3-5
+  freed up in 0.8.0 when EIS was removed)
 - Coordinates are frame pixels — scale if your data uses different units
 - Keep draw operations minimal — each filled rect and text line has a cost
 

@@ -10,7 +10,7 @@
 | `GET /api/v1/restart` | Disk (`venc.json`) | Full pipeline reinit |
 | `GET /api/v1/set?video0.size=WxH` | In-memory only | Pipeline reinit |
 
-All three rebuild VENC, output, audio, IMU/EIS from the new config.  The
+All three rebuild VENC, output, audio, and IMU from the new config.  The
 sensor, VIF, and VPE stages are preserved to the extent the new resolution
 allows (see below).
 

@@ -1,7 +1,6 @@
 #include "star6e_runtime.h"
 
 #include "debug_osd.h"
-#include "eis.h"
 #include "idr_rate_limit.h"
 #include "imu_bmi270.h"
 #include "pipeline_common.h"
@@ -63,7 +62,7 @@ static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
 
 static volatile sig_atomic_t g_running = 1;
 static volatile sig_atomic_t g_signal_count = 0;
-static struct timespec g_imu_eis_verbose_last = {0};
+static struct timespec g_imu_verbose_last = {0};
 
 /* ── Scene-detector stream decoders ───────────────────────────────────── */
 
@@ -681,7 +680,7 @@ static int star6e_runtime_handle_reinit(Star6eRunnerContext *ctx,
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, cus3a_ts_last);
-	memset(&g_imu_eis_verbose_last, 0, sizeof(g_imu_eis_verbose_last));
+	memset(&g_imu_verbose_last, 0, sizeof(g_imu_verbose_last));
 	*idle_counter = 0;
 
 	printf("> Pipeline reinit complete\n");
@@ -728,13 +727,13 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		return -1;
 	}
 
-	/* Drain IMU FIFO and update EIS crop BEFORE GetStream so the
-	 * new crop position is latched by VPE for the frame currently
-	 * being captured, reducing stabilization latency by one frame. */
+	/* Drain IMU FIFO BEFORE GetStream so any future telemetry/sidecar
+	 * consumer sees fresh samples for the frame currently being
+	 * captured.  Without EIS (removed in 0.8.0) the drained samples
+	 * go to the stub push callback and are discarded — cheap when
+	 * imu.enabled=false, as it is by default. */
 	if (ps->imu)
 		imu_drain(ps->imu);
-	if (ps->eis)
-		eis_update(ps->eis);
 
 	ret = MI_VENC_GetStream(ps->venc_channel, &stream, 40);
 	if (ret != 0) {
@@ -805,30 +804,20 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		}
 	}
 
-	if (vcfg->system.verbose && (ps->imu || ps->eis)) {
-		struct timespec imu_eis_now;
-		clock_gettime(CLOCK_MONOTONIC, &imu_eis_now);
+	if (vcfg->system.verbose && ps->imu) {
+		struct timespec imu_now;
+		clock_gettime(CLOCK_MONOTONIC, &imu_now);
 		long long elapsed_ms =
-			((long long)(imu_eis_now.tv_sec - g_imu_eis_verbose_last.tv_sec) * 1000LL) +
-			((long long)(imu_eis_now.tv_nsec - g_imu_eis_verbose_last.tv_nsec) / 1000000LL);
+			((long long)(imu_now.tv_sec - g_imu_verbose_last.tv_sec) * 1000LL) +
+			((long long)(imu_now.tv_nsec - g_imu_verbose_last.tv_nsec) / 1000000LL);
 		if (elapsed_ms >= 1000) {
-			if (ps->imu) {
-				ImuStats ist;
-				imu_get_stats(ps->imu, &ist);
-				printf("[imu] samples=%lu gyro=(%.3f,%.3f,%.3f)\n",
-					(unsigned long)ist.samples_read,
-					ist.last_gyro_x, ist.last_gyro_y, ist.last_gyro_z);
-			}
-			if (ps->eis) {
-				EisStatus est;
-				eis_get_status(ps->eis, &est);
-				printf("[eis] crop(%u,%u) off(%.1f,%.1f) n=%u ring=%u\n",
-					est.crop_x, est.crop_y,
-					est.offset_x, est.offset_y,
-					est.last_n_samples, est.ring_count);
-			}
+			ImuStats ist;
+			imu_get_stats(ps->imu, &ist);
+			printf("[imu] samples=%lu gyro=(%.3f,%.3f,%.3f)\n",
+				(unsigned long)ist.samples_read,
+				ist.last_gyro_x, ist.last_gyro_y, ist.last_gyro_z);
 			fflush(stdout);
-			g_imu_eis_verbose_last = imu_eis_now;
+			g_imu_verbose_last = imu_now;
 		}
 	}
 
@@ -856,42 +845,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		debug_osd_text(ps->debug_osd, 0, "fps", "%u", osd_fps);
 		debug_osd_text(ps->debug_osd, 1, "cpu", "%d%%",
 			debug_osd_get_cpu(ps->debug_osd));
-
-		if (ps->eis) {
-			EisStatus est;
-			eis_get_status(ps->eis, &est);
-
-			/* 1/3 scale miniature in bottom-right corner */
-			uint16_t iw = (uint16_t)(ps->image_width / 3);
-			uint16_t ih = (uint16_t)(ps->image_height / 3);
-			uint16_t ox = (uint16_t)(ps->image_width - iw - 8);
-			uint16_t oy = (uint16_t)(ps->image_height - ih - 8);
-
-			/* Outer: full sensor area */
-			debug_osd_rect(ps->debug_osd, ox, oy, iw, ih,
-				DEBUG_OSD_WHITE, 0);
-			/* Middle: margin boundary */
-			debug_osd_rect(ps->debug_osd,
-				(uint16_t)(ox + est.margin_x / 3),
-				(uint16_t)(oy + est.margin_y / 3),
-				(uint16_t)(iw - 2 * est.margin_x / 3),
-				(uint16_t)(ih - 2 * est.margin_y / 3),
-				DEBUG_OSD_YELLOW, 0);
-			/* Inner: current crop window */
-			debug_osd_rect(ps->debug_osd,
-				(uint16_t)(ox + est.crop_x / 3),
-				(uint16_t)(oy + est.crop_y / 3),
-				(uint16_t)(est.crop_w / 3),
-				(uint16_t)(est.crop_h / 3),
-				DEBUG_OSD_SEMITRANS_GREEN, 1);
-
-			debug_osd_text(ps->debug_osd, 3, "crop", "%u,%u",
-				est.crop_x, est.crop_y);
-			debug_osd_text(ps->debug_osd, 4, "off", "%.1f,%.1f",
-				est.offset_x, est.offset_y);
-			debug_osd_text(ps->debug_osd, 5, "margin", "%ux%u",
-				est.margin_x, est.margin_y);
-		}
 
 		debug_osd_end_frame(ps->debug_osd);
 	}
