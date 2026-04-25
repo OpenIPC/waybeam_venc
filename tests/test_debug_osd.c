@@ -28,13 +28,14 @@ typedef struct {
 
 static void tc_alloc(TestCanvas *tc, uint32_t w, uint32_t h)
 {
-	/* Stride = width (tight packing).  I8 = one byte per pixel. */
-	size_t pixel_bytes = (size_t)w * h;
+	/* I4 = 2 pixels per byte; round up odd widths to a full byte. */
+	uint32_t stride = (w + 1) / 2;
+	size_t pixel_bytes = (size_t)stride * h;
 	tc->raw_bytes = pixel_bytes + 2 * GUARD_BYTES;
 	tc->raw = malloc(tc->raw_bytes);
 	memset(tc->raw, GUARD_FILL, tc->raw_bytes);
 	tc->c.pixels = tc->raw + GUARD_BYTES;
-	tc->c.stride_px = w;
+	tc->c.stride_bytes = stride;
 	tc->c.width = w;
 	tc->c.height = h;
 	memset(tc->c.pixels, 0, pixel_bytes);
@@ -55,18 +56,23 @@ static int tc_guards_intact(const TestCanvas *tc)
 	return 1;
 }
 
+/* Return the 4-bit palette index at (x, y) by un-packing the nibble.  Uses
+ * the rasterizer's own osd_get_pixel so the test reads back the exact same
+ * way production does.  Bounds-checked. */
 static uint8_t tc_get(const TestCanvas *tc, int x, int y)
 {
-	return tc->c.pixels[y * tc->c.stride_px + x];
+	return osd_get_pixel(&tc->c, x, y);
 }
 
-/* FNV-1a 64-bit hash of the pixel area — small, reproducible across
- * hosts, no external dependency. */
+/* FNV-1a 64-bit hash of the packed nibble buffer — small, reproducible
+ * across hosts, no external dependency.  Note: the hash covers physical
+ * bytes (not logical pixels), so odd-width canvases include the unused
+ * tail nibble, which must be 0 for a clean hash. */
 static uint64_t tc_hash(const TestCanvas *tc)
 {
 	uint64_t h = 0xcbf29ce484222325ULL;
 	const uint8_t *p = tc->c.pixels;
-	size_t n = (size_t)tc->c.width * tc->c.height;
+	size_t n = (size_t)tc->c.stride_bytes * tc->c.height;
 	for (size_t i = 0; i < n; i++) {
 		h ^= p[i];
 		h *= 0x100000001b3ULL;
@@ -143,32 +149,59 @@ static int test_palette_initialized(void)
 	return failures;
 }
 
-static int test_fill_row_bounds(void)
+static int test_fill_pixels_bounds(void)
 {
 	int failures = 0;
 	TestCanvas tc;
 	tc_alloc(&tc, 32, 4);
 
-	/* Fill 10 pixels in the middle of row 1 */
-	osd_fill_row(tc.c.pixels + 1 * tc.c.stride_px + 5, 10, 0xAB);
+	/* Fill 10 pixels in the middle of row 1, starting at odd x=5
+	 * (exercises unaligned-start nibble + middle bytes + unaligned-end). */
+	osd_fill_pixels(&tc.c, 5, 1, 10, 0x0B);
 
 	int ok = 1;
-	for (int x = 5; x < 15; x++) ok &= (tc_get(&tc, x, 1) == 0xAB);
-	CHECK("fill_row_paints_range", ok);
-	CHECK("fill_row_leaves_left_untouched", tc_get(&tc, 4, 1) == 0x00);
-	CHECK("fill_row_leaves_right_untouched", tc_get(&tc, 15, 1) == 0x00);
-	CHECK("fill_row_leaves_other_rows", tc_get(&tc, 10, 0) == 0x00
+	for (int x = 5; x < 15; x++) ok &= (tc_get(&tc, x, 1) == 0x0B);
+	CHECK("fill_paints_range", ok);
+	CHECK("fill_leaves_left_untouched", tc_get(&tc, 4, 1) == 0x00);
+	CHECK("fill_leaves_right_untouched", tc_get(&tc, 15, 1) == 0x00);
+	CHECK("fill_leaves_other_rows", tc_get(&tc, 10, 0) == 0x00
 		&& tc_get(&tc, 10, 2) == 0x00);
-	CHECK("fill_row_guards_intact", tc_guards_intact(&tc));
+	CHECK("fill_guards_intact", tc_guards_intact(&tc));
 
-	/* Edge cases: count=0, count=1 */
+	/* Edge cases: count=0, count=1, even-aligned start */
 	tc_free(&tc);
 	tc_alloc(&tc, 32, 2);
-	osd_fill_row(tc.c.pixels, 0, 0xBE);
-	CHECK("fill_row_count_zero_is_noop", tc_get(&tc, 0, 0) == 0x00);
-	osd_fill_row(tc.c.pixels + 3, 1, 0xBE);
-	CHECK("fill_row_count_one", tc_get(&tc, 3, 0) == 0xBE
+	osd_fill_pixels(&tc.c, 0, 0, 0, 0x0E);
+	CHECK("fill_count_zero_is_noop", tc_get(&tc, 0, 0) == 0x00);
+	osd_fill_pixels(&tc.c, 3, 0, 1, 0x0E);
+	CHECK("fill_count_one_odd_x", tc_get(&tc, 3, 0) == 0x0E
 		&& tc_get(&tc, 2, 0) == 0x00 && tc_get(&tc, 4, 0) == 0x00);
+	osd_fill_pixels(&tc.c, 6, 0, 1, 0x0E);
+	CHECK("fill_count_one_even_x", tc_get(&tc, 6, 0) == 0x0E
+		&& tc_get(&tc, 5, 0) == 0x00 && tc_get(&tc, 7, 0) == 0x00);
+
+	/* Even-aligned start + even count exercises the pure-memset path */
+	tc_free(&tc);
+	tc_alloc(&tc, 32, 2);
+	osd_fill_pixels(&tc.c, 4, 0, 8, 0x0A);
+	for (int x = 4; x < 12; x++)
+		CHECK("fill_aligned_byte_path", tc_get(&tc, x, 0) == 0x0A);
+	CHECK("fill_aligned_left_untouched", tc_get(&tc, 3, 0) == 0x00);
+	CHECK("fill_aligned_right_untouched", tc_get(&tc, 12, 0) == 0x00);
+
+	/* Negative-x clipping: shrink count, anchor at x=0 */
+	tc_free(&tc);
+	tc_alloc(&tc, 16, 2);
+	osd_fill_pixels(&tc.c, -3, 0, 8, 0x09);
+	for (int x = 0; x < 5; x++)
+		CHECK("fill_neg_x_clipped", tc_get(&tc, x, 0) == 0x09);
+	CHECK("fill_neg_x_no_overflow", tc_get(&tc, 5, 0) == 0x00);
+
+	/* Past-right clipping */
+	osd_fill_pixels(&tc.c, 14, 1, 8, 0x07);
+	CHECK("fill_past_right_clipped",
+		tc_get(&tc, 14, 1) == 0x07 && tc_get(&tc, 15, 1) == 0x07);
+	CHECK("fill_past_right_guards", tc_guards_intact(&tc));
 
 	tc_free(&tc);
 	return failures;
@@ -180,20 +213,28 @@ static int test_put_pixel_clipping(void)
 	TestCanvas tc;
 	tc_alloc(&tc, 8, 4);
 
-	osd_put_pixel(&tc.c, 3, 2, 0x12);
-	CHECK("put_pixel_inside", tc_get(&tc, 3, 2) == 0x12);
+	/* I4 nibble packing — verify that writes to even x and odd x both
+	 * land in the right pixel without corrupting the sibling nibble. */
+	osd_put_pixel(&tc.c, 3, 2, 0x02);  /* odd x → high nibble */
+	CHECK("put_pixel_odd_x", tc_get(&tc, 3, 2) == 0x02);
+	CHECK("put_pixel_odd_x_sibling_clean", tc_get(&tc, 2, 2) == 0x00);
+	osd_put_pixel(&tc.c, 4, 2, 0x05);  /* even x → low nibble */
+	CHECK("put_pixel_even_x", tc_get(&tc, 4, 2) == 0x05);
+	CHECK("put_pixel_even_x_sibling_clean", tc_get(&tc, 5, 2) == 0x00);
 
-	osd_put_pixel(&tc.c, -1, 0, 0xDE);
-	osd_put_pixel(&tc.c, 0, -1, 0xDE);
-	osd_put_pixel(&tc.c, 8, 0, 0xDE);
-	osd_put_pixel(&tc.c, 0, 4, 0xDE);
-	osd_put_pixel(&tc.c, 100, 100, 0xDE);
+	osd_put_pixel(&tc.c, -1, 0, 0x0D);
+	osd_put_pixel(&tc.c, 0, -1, 0x0D);
+	osd_put_pixel(&tc.c, 8, 0, 0x0D);
+	osd_put_pixel(&tc.c, 0, 4, 0x0D);
+	osd_put_pixel(&tc.c, 100, 100, 0x0D);
 	CHECK("put_pixel_oob_no_op_guards", tc_guards_intact(&tc));
 	int clean = 1;
 	for (uint32_t y = 0; y < tc.c.height; y++)
-		for (uint32_t x = 0; x < tc.c.width; x++)
-			if (!(x == 3 && y == 2) && tc_get(&tc, x, y) != 0)
+		for (uint32_t x = 0; x < tc.c.width; x++) {
+			int set = ((x == 3 && y == 2) || (x == 4 && y == 2));
+			if (!set && tc_get(&tc, x, y) != 0)
 				clean = 0;
+		}
 	CHECK("put_pixel_oob_leaves_canvas_clean", clean);
 
 	tc_free(&tc);
@@ -304,21 +345,21 @@ static int test_line_bresenham(void)
 	osd_dirty_reset(&d, tc.c.width, tc.c.height);
 
 	/* 45° diagonal from (0,0) to (5,5) */
-	osd_draw_line(&tc.c, &d, 0, 0, 5, 5, 0xAB);
+	osd_draw_line(&tc.c, &d, 0, 0, 5, 5, 0x0B);
 
 	int diag_ok = 1;
 	for (int i = 0; i <= 5; i++)
-		if (tc_get(&tc, i, i) != 0xAB) diag_ok = 0;
+		if (tc_get(&tc, i, i) != 0x0B) diag_ok = 0;
 	CHECK("line_diagonal_drawn", diag_ok);
 
 	TestCanvas tc2;
 	tc_alloc(&tc2, 8, 8);
 	OsdDirty d2;
 	osd_dirty_reset(&d2, tc2.c.width, tc2.c.height);
-	osd_draw_line(&tc2.c, &d2, 5, 5, 0, 0, 0xAB);
+	osd_draw_line(&tc2.c, &d2, 5, 5, 0, 0, 0x0B);
 	int same = 1;
 	for (int i = 0; i <= 5; i++)
-		if (tc_get(&tc2, i, i) != 0xAB) same = 0;
+		if (tc_get(&tc2, i, i) != 0x0B) same = 0;
 	CHECK("line_reverse_same_pixels", same);
 
 	CHECK("line_guards_intact", tc_guards_intact(&tc)
@@ -434,7 +475,7 @@ static int test_draw_string_golden(void)
 
 	uint64_t h = tc_hash(&tc);
 	CHECK("draw_string_golden", golden_check(
-		"draw_string_fps_30", h, 0x9a7546a58896f7c8ULL));
+		"draw_string_fps_30", h, 0x84663957bc2d8246ULL));
 	CHECK("draw_string_guards_intact", tc_guards_intact(&tc));
 
 	tc_free(&tc);
@@ -462,7 +503,7 @@ static int test_composite_scene_golden(void)
 
 	uint64_t h = tc_hash(&tc);
 	CHECK("composite_scene_golden", golden_check(
-		"composite_scene", h, 0xc3a3f9101f2fe33bULL));
+		"composite_scene", h, 0xe3d17e4522b7ae84ULL));
 	CHECK("composite_scene_guards_intact", tc_guards_intact(&tc));
 
 	tc_free(&tc);
@@ -507,8 +548,9 @@ static int test_dirty_rect_clear(void)
 	osd_draw_rect(&tc.c, &d, 2, 2, 4, 4, 0x01, 1);
 	osd_draw_rect(&tc.c, &d, 20, 8, 4, 4, 0x01, 1);
 
-	/* Paint a pixel outside the dirty bbox — should survive the clear */
-	tc.c.pixels[0 * tc.c.stride_px + 31] = 0xAA;
+	/* Paint a pixel outside the dirty bbox — should survive the clear.
+	 * Use osd_put_pixel so the I4 nibble packing is correct. */
+	osd_put_pixel(&tc.c, 31, 0, 0x0A);
 
 	osd_clear_dirty(&tc.c, &d);
 
@@ -518,7 +560,7 @@ static int test_dirty_rect_clear(void)
 			if (tc_get(&tc, x, y) != 0) zeroed = 0;
 	CHECK("clear_zeroes_dirty", zeroed);
 	CHECK("clear_preserves_outside",
-		tc_get(&tc, 31, 0) == 0xAA);
+		tc_get(&tc, 31, 0) == 0x0A);
 	CHECK("clear_guards_intact", tc_guards_intact(&tc));
 
 	tc_free(&tc);
@@ -529,7 +571,7 @@ int test_debug_osd(void)
 {
 	int failures = 0;
 	failures += test_palette_initialized();
-	failures += test_fill_row_bounds();
+	failures += test_fill_pixels_bounds();
 	failures += test_put_pixel_clipping();
 	failures += test_rect_filled();
 	failures += test_rect_hollow();

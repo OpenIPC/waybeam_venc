@@ -7,14 +7,18 @@
  * buffer (OsdCanvas) so it can be unit-tested on the host without any
  * MI_RGN dependency.
  *
- * Pixels are 8-bit palette indices (MI_RGN I8 format on the target).
+ * Pixels are 4-bit palette indices packed two-per-byte (MI_RGN I4 format
+ * on the target).  Even-x → low nibble, odd-x → high nibble of the byte
+ * at offset (y * stride_bytes + x/2).  This matches the convention used
+ * by the SigmaStar SDK and the upstream PR #23 reference implementation.
+ *
  * The palette itself is owned by src/debug_osd.c and uploaded to the
  * SDK via MI_RGN_Init; the rasterizer never inspects colors. */
 
 typedef struct {
-	uint8_t  *pixels;     /* base pointer, one byte per pixel */
-	uint32_t  stride_px;  /* pixels per row (bytes for I8) */
-	uint32_t  width;
+	uint8_t  *pixels;       /* base pointer, 2 pixels per byte */
+	uint32_t  stride_bytes; /* bytes per row (= width/2 + alignment) */
+	uint32_t  width;        /* logical pixels per row */
 	uint32_t  height;
 } OsdCanvas;
 
@@ -31,11 +35,20 @@ int osd_dirty_empty(const OsdDirty *d);
 /** Expand dirty bbox to include (x,y), clamped to canvas bounds. */
 void osd_dirty_expand(OsdDirty *d, const OsdCanvas *c, int x, int y);
 
-/** Fill `count` pixels at `row` with palette index `color`. */
-void osd_fill_row(uint8_t *row, int count, uint8_t color);
+/** Fill `count` pixels starting at canvas (x, y) with palette index
+ *  `color`.  Handles I4 nibble packing internally including unaligned
+ *  start (odd x), unaligned end (last x even), and the byte-aligned
+ *  middle (memset of the doubled-nibble byte).  Silently clipped to
+ *  canvas bounds. */
+void osd_fill_pixels(const OsdCanvas *c, int x, int y, int count,
+                     uint8_t color);
 
 /** Write one pixel; silently clipped when out of bounds. */
 void osd_put_pixel(const OsdCanvas *c, int x, int y, uint8_t color);
+
+/** Read one pixel; returns 0 (transparent) when out of bounds.
+ *  Exposed for tests; production drawing never reads back. */
+uint8_t osd_get_pixel(const OsdCanvas *c, int x, int y);
 
 /** Clear the dirty bbox to 0 (transparent index).  No-op when dirty is empty. */
 void osd_clear_dirty(const OsdCanvas *c, const OsdDirty *d);
@@ -64,10 +77,12 @@ typedef struct {
 	uint8_t alpha, red, green, blue;
 } OsdPaletteEntry;
 
-#define OSD_PALETTE_SIZE 256
+/* I4 has only 16 palette entries.  Indices 0..8 are DEBUG_OSD_* colors,
+ * 9..15 are zeroed reserved entries. */
+#define OSD_PALETTE_SIZE 16
 
 /** Return the fixed palette used by the debug OSD.  Index 0 is always
- *  fully transparent.  Indices 1..8 are the DEBUG_OSD_* colors; 9..255
+ *  fully transparent.  Indices 1..8 are the DEBUG_OSD_* colors; 9..15
  *  are zeroed reserved entries. */
 const OsdPaletteEntry *osd_palette(void);
 

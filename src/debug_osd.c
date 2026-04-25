@@ -124,7 +124,7 @@ static void osd_canvas_from_info(OsdCanvas *out, const DebugOsdCanvasInfo *info,
                                  uint32_t width, uint32_t height)
 {
 	out->pixels = (uint8_t *)(uintptr_t)info->virtAddr;
-	out->stride_px = info->u32Stride;  /* I8: 1 byte/pixel */
+	out->stride_bytes = info->u32Stride;  /* I4: width/2 + alignment */
 	out->width = width;
 	out->height = height;
 }
@@ -252,7 +252,7 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 	i6_rgn_cnf cnf;
 	memset(&cnf, 0, sizeof(cnf));
 	cnf.type = I6_RGN_TYPE_OSD;
-	cnf.pixFmt = I6_RGN_PIXFMT_I8;
+	cnf.pixFmt = I6_RGN_PIXFMT_I4;
 	cnf.size.width = frame_w;
 	cnf.size.height = frame_h;
 
@@ -294,12 +294,14 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 		return NULL;
 	}
 
-	/* Clear canvas to transparent on first create */
+	/* Clear canvas to transparent on first create.  I4 transparent is
+	 * palette index 0; the packed nibble byte for it is 0x00, so a flat
+	 * memset of stride_bytes per row clears both pixels in each byte. */
 	{
 		uint8_t *pixels = (uint8_t *)(uintptr_t)ctx->canvas.virtAddr;
 		uint32_t stride = ctx->canvas.u32Stride;
 		for (uint32_t y = 0; y < frame_h; y++)
-			memset(pixels + y * stride, 0, frame_w);
+			memset(pixels + y * stride, 0, stride);
 		ctx->fnUpdateCanvas(RGN_HANDLE);
 	}
 

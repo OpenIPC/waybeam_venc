@@ -5,9 +5,10 @@
 #include <string.h>
 
 /* ── Palette ──────────────────────────────────────────────────────────
- * Indices must match DEBUG_OSD_* in include/debug_osd.h.  Alpha values
- * match the 4-bit ARGB4444 codes the legacy implementation used
- * (0x4 → 68, 0xA → 170, 0xF → 255) so visual output is unchanged. */
+ * I4 fits exactly 16 entries; we use 9.  Indices must match DEBUG_OSD_*
+ * in include/debug_osd.h.  Alpha values match the 4-bit ARGB4444 codes
+ * the legacy implementation used (0x4 → 68, 0xA → 170, 0xF → 255) so
+ * visual output is unchanged. */
 static const OsdPaletteEntry g_palette[OSD_PALETTE_SIZE] = {
 	[DEBUG_OSD_TRANSPARENT]       = {   0,   0,   0,   0 },
 	[DEBUG_OSD_WHITE]             = { 255, 255, 255, 255 },
@@ -154,21 +155,82 @@ void osd_dirty_expand(OsdDirty *d, const OsdCanvas *c, int x, int y)
 	if ((uint16_t)y > d->y1) d->y1 = (uint16_t)y;
 }
 
-/* ── Row fill ──────────────────────────────────────────────────────── */
+/* ── I4 nibble helpers ──────────────────────────────────────────────
+ *
+ * Pixel x is stored in:
+ *   byte = pixels[y * stride_bytes + x/2]
+ *   nibble = byte >> ((x & 1) * 4)        ← even-x in low nibble
+ *
+ * The masks below are indexed by (x & 1):
+ *   keep_mask[0] = 0xF0 (preserve high nibble when writing low)
+ *   keep_mask[1] = 0x0F (preserve low nibble when writing high) */
+static const uint8_t i4_keep_mask[2] = { 0xF0, 0x0F };
+static const uint8_t i4_shift[2]      = {    0,    4 };
 
-void osd_fill_row(uint8_t *row, int count, uint8_t color)
-{
-	if (count > 0)
-		memset(row, color, (size_t)count);
-}
-
-/* ── Pixel ──────────────────────────────────────────────────────────── */
+/* ── Pixel R/W ──────────────────────────────────────────────────────── */
 
 void osd_put_pixel(const OsdCanvas *c, int x, int y, uint8_t color)
 {
 	if (x < 0 || x >= (int)c->width || y < 0 || y >= (int)c->height)
 		return;
-	c->pixels[y * c->stride_px + x] = color;
+	uint8_t *byte = &c->pixels[y * c->stride_bytes + (x >> 1)];
+	uint8_t nibble = (uint8_t)(color & 0x0F);
+	int idx = x & 1;
+	*byte = (uint8_t)((*byte & i4_keep_mask[idx]) |
+	                  (nibble << i4_shift[idx]));
+}
+
+uint8_t osd_get_pixel(const OsdCanvas *c, int x, int y)
+{
+	if (x < 0 || x >= (int)c->width || y < 0 || y >= (int)c->height)
+		return 0;
+	uint8_t byte = c->pixels[y * c->stride_bytes + (x >> 1)];
+	return (uint8_t)((byte >> i4_shift[x & 1]) & 0x0F);
+}
+
+/* ── Row fill ──────────────────────────────────────────────────────── */
+
+void osd_fill_pixels(const OsdCanvas *c, int x, int y, int count,
+                     uint8_t color)
+{
+	if (count <= 0 || y < 0 || y >= (int)c->height)
+		return;
+	if (x >= (int)c->width)
+		return;
+	if (x < 0) {
+		count += x;  /* x is negative — shrink count */
+		x = 0;
+		if (count <= 0)
+			return;
+	}
+	if (x + count > (int)c->width)
+		count = (int)c->width - x;
+
+	uint8_t *row = &c->pixels[y * c->stride_bytes];
+	uint8_t nibble = (uint8_t)(color & 0x0F);
+	uint8_t packed = (uint8_t)((nibble << 4) | nibble);
+
+	int end = x + count;  /* exclusive */
+
+	/* Unaligned start: x is odd → only the high nibble of byte (x>>1)
+	 * gets written, low nibble preserved. */
+	if (x & 1) {
+		uint8_t *byte = &row[x >> 1];
+		*byte = (uint8_t)((*byte & 0x0F) | (nibble << 4));
+		x++;
+	}
+	/* Byte-aligned middle: x is now even.  Write packed bytes until we
+	 * hit a tail nibble. */
+	int aligned_end = end & ~1;  /* round down to even */
+	if (aligned_end > x)
+		memset(&row[x >> 1], packed, (size_t)((aligned_end - x) >> 1));
+	x = aligned_end;
+	/* Unaligned tail: end is odd → write only the low nibble of the
+	 * final byte, high nibble preserved. */
+	if (x < end) {
+		uint8_t *byte = &row[x >> 1];
+		*byte = (uint8_t)((*byte & 0xF0) | nibble);
+	}
 }
 
 void osd_clear_dirty(const OsdCanvas *c, const OsdDirty *d)
@@ -177,7 +239,7 @@ void osd_clear_dirty(const OsdCanvas *c, const OsdDirty *d)
 		return;
 	int clear_w = d->x1 - d->x0 + 1;
 	for (uint32_t y = d->y0; y <= d->y1 && y < c->height; y++)
-		osd_fill_row(c->pixels + y * c->stride_px + d->x0, clear_w, 0);
+		osd_fill_pixels(c, d->x0, (int)y, clear_w, 0);
 }
 
 /* ── Rectangles ────────────────────────────────────────────────────── */
@@ -204,13 +266,13 @@ void osd_draw_rect(const OsdCanvas *c, OsdDirty *d,
 
 	if (filled) {
 		for (int row = y0; row <= y1; row++)
-			osd_fill_row(c->pixels + row * c->stride_px + x0, span, color);
+			osd_fill_pixels(c, x0, row, span, color);
 	} else {
-		osd_fill_row(c->pixels + y0 * c->stride_px + x0, span, color);
-		osd_fill_row(c->pixels + y1 * c->stride_px + x0, span, color);
+		osd_fill_pixels(c, x0, y0, span, color);
+		osd_fill_pixels(c, x0, y1, span, color);
 		for (int row = y0; row <= y1; row++) {
-			c->pixels[row * c->stride_px + x0] = color;
-			c->pixels[row * c->stride_px + x1] = color;
+			osd_put_pixel(c, x0, row, color);
+			osd_put_pixel(c, x1, row, color);
 		}
 	}
 }
@@ -276,12 +338,10 @@ void osd_draw_char(const OsdCanvas *c, OsdDirty *d,
 				int row_y = cy + sy;
 				if (row_y < 0 || row_y >= (int)c->height)
 					continue;
-				if (cx >= 0 && cx + s <= (int)c->width)
-					osd_fill_row(c->pixels + row_y * c->stride_px + cx,
-						s, color);
-				else
-					for (int sx = 0; sx < s; sx++)
-						osd_put_pixel(c, cx + sx, row_y, color);
+				/* osd_fill_pixels handles clipping + nibble
+				 * alignment internally — no need to special-case
+				 * partially-offscreen glyph rows. */
+				osd_fill_pixels(c, cx, row_y, s, color);
 			}
 		}
 	}
