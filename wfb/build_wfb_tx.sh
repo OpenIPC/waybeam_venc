@@ -260,7 +260,7 @@ if [ "$DO_DEPLOY" = "1" ]; then
     echo "  shm_ring_stats --help"
     echo ""
     echo "  # Full test — start venc with SHM, then consumer:"
-    echo "  venc -c /etc/venc.json &    # config: server = shm://venc_wfb"
+    echo "  venc &                      # always reads /etc/venc.json (set server = shm://venc_wfb)"
     echo "  sleep 1"
     echo "  shm_ring_stats venc_wfb     # check ring created"
     echo "  shm_consumer_test venc_wfb 5 # read 5 seconds of packets"

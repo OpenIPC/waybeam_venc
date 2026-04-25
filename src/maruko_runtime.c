@@ -80,9 +80,19 @@ static int maruko_reinit_pipeline(MarukoRunnerContext *ctx)
 	venc_api_clear_reinit();
 
 	if (reinit_mode == 1) {
+		VencConfig tmp_cfg;
 		printf("> [maruko] reinit: reloading config from disk\n");
-		venc_config_defaults(&ctx->vcfg);
-		(void)venc_config_load(VENC_CONFIG_DEFAULT_PATH, &ctx->vcfg);
+		venc_config_defaults(&tmp_cfg);
+		if (venc_config_load(VENC_CONFIG_DEFAULT_PATH, &tmp_cfg) != 0) {
+			/* Parse or validation failure — keep the prior in-memory
+			 * config so the daemon stays on a known-good state instead
+			 * of running with a partially-loaded mix of defaults and
+			 * disk values. */
+			fprintf(stderr,
+				"> [maruko] config reload failed, keeping prior in-memory config\n");
+		} else {
+			ctx->vcfg = tmp_cfg;
+		}
 	}
 
 	/* Lock sensor to the mode that was running before teardown.
