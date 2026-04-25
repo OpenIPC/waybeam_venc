@@ -1,5 +1,74 @@
 # History
 
+## [0.8.1] - 2026-04-25
+
+SD-card recording browser (dashboard tab + JSON API):
+
+- **New `Recordings` tab on the dashboard** (`web/dashboard.html`).
+  Fourth tab next to `Settings | API Reference | Image Quality`; the
+  REC indicator in the top bar is now clickable and switches to it.
+  Lists `.ts`/`.hevc` files in the configured `record.dir`, shows
+  free/total bytes, current `record.mode`, live `recording:` state
+  with frames + bytes + segment counter, start/stop buttons, per-file
+  download + delete.  A 2 s poll of `/api/v1/recordings` +
+  `/api/v1/record/status` runs while the tab is visible so the active
+  recording's counters tick live; interval is cleared on tab switch.
+- **Mode-aware start/stop gating.**  When `record.mode` is `dual` or
+  `dual-stream` and `record.enabled` is true, the dedicated recording
+  thread owns the recorder and the runtime silently skips the HTTP
+  `/api/v1/record/start|stop` poll (`star6e_runtime.c`'s `if (!ps->dual)`
+  guard).  The tab now reads `record.mode` from `/api/v1/config` and
+  disables the Start/Stop buttons with a reason note in those cases,
+  instead of letting clicks succeed but produce nothing.  Full truth
+  table in `README.md`.
+- **New JSON endpoints** (documented in `HTTP_API_CONTRACT.md`):
+  - `GET /api/v1/recordings` — list files with `name`, `size`, `mtime`
+    plus `free_bytes` / `total_bytes`.  Built in a growing heap buffer
+    with proper JSON escaping (no silent truncation, no corruption of
+    filenames containing `"` or `\`).  Capped at 512 entries; the
+    response includes a `truncated` flag that the UI surfaces as a
+    warning so the user doesn't assume old files vanished.
+  - `GET /api/v1/recordings/download?file=<name>` — streams the file
+    via the new shared `httpd_send_file()` helper (`send(MSG_NOSIGNAL)`
+    so a mid-download client disconnect can't kill the server; RFC 5987
+    `filename*=UTF-8''…` header).
+  - `GET /api/v1/recordings/delete?file=<name>` — `unlink()`.  Refuses
+    the currently-recording file by comparing inodes via `(dev, ino)`
+    (a path-string compare would be defeated by trailing slashes or
+    symlinks); returns 409 `record_active` in that case.
+- **Shared httpd plumbing**, reusable by future endpoints:
+  - `httpd_query_param()` — URL-decoding (percent + `+`) query parser
+    in `venc_httpd.c`.
+  - `httpd_send_file()` — streams a file with proper `Content-Length`
+    and `Content-Disposition`; shares socket helpers already used by
+    the rest of the server.
+  - `venc_api_get_record_dir()` + `venc_api_fill_record_status()` —
+    mutex-safe accessors exposing the active config directory + live
+    recorder state (used to safely read config from the httpd thread).
+- **Safety.**  Filenames validated (no path separators, no leading `.`,
+  no control bytes); all JSON output properly escaped; no large stack
+  frames on the httpd thread (entries buffer is `calloc`'d).
+- **HTTP API contract** bumped `0.6.2` → `0.6.3` (non-breaking: three
+  new endpoints, one new error code `record_active`).
+- **Tests.**  `tests/test_venc_httpd.c` +11 cases for
+  `httpd_query_param` covering percent-decoding, `+` → space, UTF-8,
+  prefix collisions, empty values, trailing / invalid `%`, and buffer
+  truncation safety.
+- **Build.**  `tools/build_webui.py` and Makefile updated: dashboard
+  blob re-regenerated from `web/dashboard.html`; new `src/venc_recordings.c`
+  added to `CONFIG_SRC` and `TEST_LIB_SRCS`.
+
+Implements the intent of PR #48 (PaddyP90) while fixing the safety
+bugs flagged in that review: filename validation including `..`, JSON
+escaping, heap buffer sizing, disconnect handling, and mutex-safe
+config access.  Star6E only; Maruko lacks the `MI_VENC_TS_RECORDER`
+plumbing so `/api/v1/record/status` reports `active: false`
+there — but the list/download/delete endpoints still work for files
+placed in `record.dir` by other means.
+
+Originally drafted as a 0.7.12 fork-only release before the v0.8.0
+upstream catch-up; rebased onto v0.8.0 and re-released as 0.8.1.
+
 ## [0.8.0] - 2026-04-25
 
 Drop the EIS module and migrate the Star6E debug OSD from

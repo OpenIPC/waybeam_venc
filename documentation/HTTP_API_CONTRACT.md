@@ -15,7 +15,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.6.2`
+- `contract_version`: `0.6.3`
 - `status`: `active`
 
 ## Governance Rules
@@ -57,6 +57,7 @@
 | `invalid_request` | 400 | Missing or malformed parameters |
 | `validation_failed` | 400/409 | Value rejected by field or config validation |
 | `not_found` | 404 | Unknown field or route |
+| `record_active` | 409 | Action blocked while recording is in progress |
 | `not_implemented` | 501 | Apply callback not available for this field |
 | `internal_error` | 500 | Server-side failure |
 
@@ -789,6 +790,73 @@ Response `200`:
 `stop_reason` values: `"none"` (currently recording), `"manual"`, `"disk_full"`,
 `"write_error"`.
 
+### `GET /api/v1/recordings`
+
+List `.ts` and `.hevc` files in the configured `record.dir` along with
+disk-usage totals.
+
+```bash
+wget -q -O- "http://<device-ip>/api/v1/recordings"
+```
+
+Response `200`:
+```json
+{
+  "ok": true,
+  "data": {
+    "dir": "/mnt/mmcblk0p1",
+    "free_bytes": 1234567890,
+    "total_bytes": 15000000000,
+    "files": [
+      { "name": "rec_01h00m00s_abcd.ts", "size": 12345678, "mtime": 1713600000 }
+    ],
+    "truncated": false
+  }
+}
+```
+
+Error `503 not_available` — directory not mounted.
+Error `500 internal_error` — cannot read directory or out of memory.
+
+The listing is capped at 512 entries; `truncated` is `true` when the
+cap was hit and older recordings were not included.  `free_bytes` /
+`total_bytes` are `-1` when `statvfs` is unavailable.
+
+### `GET /api/v1/recordings/download?file=<name>`
+
+Stream a single recording as an `attachment` download.  `file` must be
+a plain name from the listing — leading `.`, path separators and
+control bytes are rejected.
+
+```bash
+wget "http://<device-ip>/api/v1/recordings/download?file=rec_01h00m00s_abcd.ts"
+```
+
+`Content-Type` is `video/mp2t` for `.ts` files and
+`application/octet-stream` for `.hevc`.
+
+Error `400 invalid_request` — missing or unsafe `file` parameter.
+Error `404 not_found` — file does not exist in `record.dir`.
+
+### `GET /api/v1/recordings/delete?file=<name>`
+
+Remove a recording from `record.dir`.
+
+```bash
+wget -q -O- "http://<device-ip>/api/v1/recordings/delete?file=rec_01h00m00s_abcd.ts"
+```
+
+Response `200`:
+```json
+{"ok":true}
+```
+
+Error `400 invalid_request` — missing or unsafe `file` parameter.
+Error `404 not_found` — file already gone.
+Error `409 record_active` — file is currently being written; stop
+recording first.
+Error `500 delete_failed` — filesystem error.
+
 ### `GET /request/idr`
 
 Request an IDR (keyframe) from the encoder.
@@ -914,6 +982,17 @@ Behavior:
 - `GET` endpoints must remain consistent across backends.
 
 ## Change Log (Contract)
+- `0.6.3`:
+  - Added `GET /api/v1/recordings` — list files with size/mtime plus
+    `free_bytes` / `total_bytes` for the configured `record.dir`.
+  - Added `GET /api/v1/recordings/download?file=<name>` — stream a
+    recording as an attachment download.
+  - Added `GET /api/v1/recordings/delete?file=<name>` — delete a file;
+    refuses the currently-active recording with `409 record_active`.
+  - New error code `record_active` (409) for actions blocked while
+    recording.
+  - Browser UI for the above endpoints lives in the `Recordings` tab on
+    the dashboard at `/`; there is no separate HTML route.
 - `0.6.2`:
   - Added `isp.keepAspect` (boolean, default `true`) to config schema.
     When `false`, VIF captures the full sensor area and VPE scales without

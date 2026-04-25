@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
@@ -10,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -171,6 +173,139 @@ int httpd_send_error(int client_fd, int status_code,
 		message ? message : "unknown error");
 	if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
 	return httpd_send_json(client_fd, status_code, buf);
+}
+
+/* ── Query string + file streaming helpers ───────────────────────────── */
+
+static int hex_nibble(int c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+int httpd_query_param(const HttpRequest *req, const char *key,
+	char *out, size_t out_sz)
+{
+	if (!req || !key || !out || out_sz == 0)
+		return -1;
+
+	size_t klen = strlen(key);
+	const char *q = req->query;
+	while (q && *q) {
+		if (*q == '&') { q++; continue; }
+		int match = (strncmp(q, key, klen) == 0) &&
+			(q[klen] == '=' || q[klen] == '&' || q[klen] == '\0');
+		const char *val_start = NULL;
+		if (match) {
+			val_start = (q[klen] == '=') ? q + klen + 1 : q + klen;
+			size_t i = 0;
+			while (*val_start && *val_start != '&' && i < out_sz - 1) {
+				if (*val_start == '+') {
+					out[i++] = ' ';
+					val_start++;
+				} else if (*val_start == '%' &&
+				           val_start[1] && val_start[2]) {
+					int hi = hex_nibble((unsigned char)val_start[1]);
+					int lo = hex_nibble((unsigned char)val_start[2]);
+					if (hi >= 0 && lo >= 0) {
+						out[i++] = (char)((hi << 4) | lo);
+						val_start += 3;
+					} else {
+						out[i++] = *val_start++;
+					}
+				} else {
+					out[i++] = *val_start++;
+				}
+			}
+			out[i] = '\0';
+			return 0;
+		}
+		/* advance to next '&' */
+		while (*q && *q != '&') q++;
+	}
+	return -1;
+}
+
+int httpd_send_file(int client_fd, const char *path,
+	const char *content_type, const char *download_name)
+{
+	if (!path || !content_type)
+		return -1;
+
+	int file_fd = open(path, O_RDONLY);
+	if (file_fd < 0) {
+		int status = (errno == ENOENT) ? 404 : 500;
+		const char *code = (errno == ENOENT) ? "not_found" : "internal_error";
+		const char *msg = (errno == ENOENT) ? "file not found" :
+			"cannot open file";
+		return httpd_send_error(client_fd, status, code, msg);
+	}
+
+	struct stat st;
+	if (fstat(file_fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+		close(file_fd);
+		return httpd_send_error(client_fd, 400, "invalid_request",
+			"not a regular file");
+	}
+
+	char header[768];
+	int hlen;
+	if (download_name && download_name[0]) {
+		/* Content-Disposition with a percent-encoded filename so that
+		 * unusual characters cannot break out of the header quoting. */
+		char enc[256];
+		size_t ei = 0;
+		for (const unsigned char *p = (const unsigned char *)download_name;
+		     *p && ei + 4 < sizeof(enc); p++) {
+			if (isalnum(*p) || *p == '.' || *p == '_' || *p == '-')
+				enc[ei++] = (char)*p;
+			else
+				ei += (size_t)snprintf(enc + ei, sizeof(enc) - ei,
+					"%%%02X", *p);
+		}
+		enc[ei] = '\0';
+		hlen = snprintf(header, sizeof(header),
+			"HTTP/1.0 200 OK\r\n"
+			"Content-Type: %s\r\n"
+			"Content-Length: %lld\r\n"
+			"Content-Disposition: attachment; filename*=UTF-8''%s\r\n"
+			"Cache-Control: no-store\r\n"
+			"Connection: close\r\n"
+			"\r\n",
+			content_type, (long long)st.st_size, enc);
+	} else {
+		hlen = snprintf(header, sizeof(header),
+			"HTTP/1.0 200 OK\r\n"
+			"Content-Type: %s\r\n"
+			"Content-Length: %lld\r\n"
+			"Connection: close\r\n"
+			"\r\n",
+			content_type, (long long)st.st_size);
+	}
+
+	if (write_socket_all(client_fd, header, hlen) != 0) {
+		close(file_fd);
+		return -1;
+	}
+
+	char buf[16384];
+	for (;;) {
+		ssize_t n = read(file_fd, buf, sizeof(buf));
+		if (n == 0) break;
+		if (n < 0) {
+			if (errno == EINTR) continue;
+			close(file_fd);
+			return -1;
+		}
+		if (write_socket_all(client_fd, buf, (int)n) != 0) {
+			close(file_fd);
+			return -1;
+		}
+	}
+	close(file_fd);
+	return 0;
 }
 
 /* ── Request parsing ─────────────────────────────────────────────────── */
