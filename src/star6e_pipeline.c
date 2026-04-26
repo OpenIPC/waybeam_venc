@@ -931,19 +931,16 @@ static void star6e_pipeline_imu_push(void *ctx, const ImuSample *sample)
 	(void)sample;
 }
 
-/* Track whether CUS3A has been enabled.  Without MI_SYS_Exit(), the kernel
- * ISP driver retains CUS3A state, so re-enabling (100→110→111 sequence)
- * causes a mutex deadlock.  ISP bin and exposure cap are safe to reapply. */
+/* Tracks whether CUS3A has been enabled in this MI_SYS lifetime.  Cleared
+ * by star6e_pipeline_stop(), which is always followed by MI_SYS_Exit (in
+ * either runner_teardown or restart_pipeline) — so the next start runs
+ * a true cold sequence including CUS3A enable. */
 static int g_isp_initialized = 0;
 
-/* Track the last-loaded ISP bin path so we can skip the reload on reinit
- * when nothing has changed.  The vendor AE inside the bin writes a default
- * shutter (~10000us on IMX335) to the sensor register on load, which
- * extends VTS and pins the sensor at ~100 fps.  MI_SNR_SetFps(same value)
- * is a no-op in the sensor driver's pCus_SetFPS path, so there is no
- * reliable way to undo the damage without power-cycling the sensor (which
- * breaks MIPI sync on I6E).  Safer to avoid reloading the bin at all when
- * the operator hasn't changed it. */
+/* Tracks the last-loaded ISP bin path within this MI_SYS lifetime so we
+ * skip redundant reloads.  Cleared by star6e_pipeline_stop() since the
+ * following MI_SYS_Exit releases ISP driver state and the next start
+ * needs to reload the bin against the fresh kernel. */
 static char g_last_isp_bin_path[256] = {0};
 
 /* Phase 3: assign port structs, issue all MI_SYS bind calls, init output,
@@ -1167,15 +1164,14 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	if (!state)
 		return;
 
-	/* Userspace CUS3A thread is torn down by the runtime layer; reset
-	 * its handoff marker so the next pipeline_start re-runs the apply.
-	 * g_isp_initialized and g_last_isp_bin_path are intentionally NOT
-	 * cleared — MI_SYS_Init/Exit only fire in runner_init/teardown, so
-	 * the kernel ISP driver retains CUS3A state and the AE-from-bin
-	 * sensor register settings across reinit.  Re-running CUS3A enable
-	 * deadlocks the kernel mutex; reloading the bin pins the IMX335
-	 * sensor at the bin's default shutter (~100 fps).  See
-	 * star6e_audio.c for the matching AI device persist note. */
+	/* Clear userspace persist flags.  Caller (runner_teardown or
+	 * runtime restart_pipeline) will follow with MI_SYS_Exit + a fresh
+	 * MI_SYS_Init, so the kernel ISP/CUS3A state is genuinely cold on
+	 * the next pipeline_start.  Skipping these clears would leave
+	 * stale "already initialised" flags that bypass the very work the
+	 * fresh kernel state expects us to redo. */
+	g_isp_initialized = 0;
+	g_last_isp_bin_path[0] = '\0';
 	g_cus3a_handoff_done = 0;
 	venc_api_clear_active_precrop();
 

@@ -5,6 +5,9 @@
 #include <unistd.h>
 
 #include "backend.h"
+#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)
+#include "star6e_runtime.h"
+#endif
 
 static int is_another_venc_running(void)
 {
@@ -88,5 +91,16 @@ int main(int argc, char* argv[])
 	}
 
 	printf("> SoC backend build: %s\n", backend->name);
-	return backend_execute(backend);
+	int rc = backend_execute(backend);
+
+#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)
+	/* SIGHUP / /api/v1/restart on Star6E exits cleanly here and forks
+	 * a successor process for true cold restart.  See
+	 * star6e_runtime_respawn_after_exit() for the rationale —
+	 * in-process MI_SYS_Exit + MI_SYS_Init is broken on this BSP. */
+	if (star6e_runtime_respawn_pending())
+		star6e_runtime_respawn_after_exit();
+#endif
+
+	return rc;
 }

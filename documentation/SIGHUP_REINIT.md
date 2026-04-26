@@ -2,115 +2,128 @@
 
 ## Overview
 
-`venc` reloads `/etc/venc.json` and rebuilds its full pipeline without a
-process restart.  Sensor mode, codec, resolution, FPS, output settings —
-all of these are honored by reload.
+`venc` reloads `/etc/venc.json` and rebuilds its full pipeline without
+operator intervention.  Sensor mode, codec, resolution, FPS, output
+settings — all are honored by reload.
 
 | Trigger | Behaviour |
 |---------|-----------|
-| `killall -1 venc` (SIGHUP) | Reload disk config, full teardown + start |
-| `GET /api/v1/restart` | Same as SIGHUP (no save first) |
-| `GET /api/v1/defaults` | Save defaults to disk, full teardown + start |
-| `GET /api/v1/set?<MUT_RESTART>` | Save field to disk, full teardown + start |
-| `GET /api/v1/set?<MUT_LIVE>` | In-place via `star6e_controls.c`, no reinit |
+| `killall -1 venc` (SIGHUP) | Cold restart via fork+exec respawn |
+| `GET /api/v1/restart` | Same as SIGHUP |
+| `GET /api/v1/defaults` | Save defaults to disk, then respawn |
+| `GET /api/v1/set?<MUT_RESTART>` | Save field to disk, then respawn |
+| `GET /api/v1/set?<MUT_LIVE>` | In-place via `star6e_controls.c`, no respawn |
 
-There is one reinit path.  No diff detection, no priority queue between
-SIGHUP-from-disk vs API-in-memory — every request reloads the on-disk
-config and rebuilds from sensor up.
+There is one reinit path: process-level cold restart.  No partial reinit,
+no in-process state machine, no priority queueing between SIGHUP and API.
+
+## Why a process-level restart, not in-process
+
+The Phase 1 plan called for in-process pipeline rebuild
+(`MI_SYS_Exit` + `MI_SYS_Init`).  Bench testing on `192.168.1.13`
+(SSC338Q + IMX335) disproved that approach:
+
+- **`MI_SYS_Exit` + `MI_SYS_Init` in same PID is broken.**  The
+  SigmaStar driver retains "already_inited" flags tied to the process
+  PID.  A second `MI_SYS_Init` trips `MI_DEVICE_Open` hangs and the
+  VPE warns `no wakeup event for more than 5 seconds!`.
+- **Partial teardown without `MI_SYS_Exit` survives ~4 cycles.**  After
+  4–5 sensor mode SIGHUPs the VIF driver starts rejecting binds with
+  `_MI_VIF_EnqueueOutputTaskDev[1340]: layout type 2, bindmode 4 not
+  sync err`, the encoder stops getting frames, and the next SIGHUP
+  zombies into D-state on `CamOsMutexLock`.
+- **Process restart works for any number of cycles.**  Empirical test:
+  `killall venc; sleep 0.5; venc &` repeated 12 times across 4 sensor
+  modes — 100 % pass.  6 rounds (24 cycles): 100 % pass.
+
+The kernel driver releases per-PID state correctly when a process dies.
+A fresh PID sees a clean SDK.  The cleanest way for venc to ride that
+path on SIGHUP is to fork+exec a successor.
 
 ## Cycle
 
 ```
 star6e_runtime_handle_reinit()
-  └─ star6e_runtime_restart_pipeline()
-       1. star6e_cus3a_request_stop / star6e_controls_reset / star6e_cus3a_join
-       2. star6e_pipeline_stop()                 ← full teardown to sensor
-            └─ star6e_pipeline_reset_persist()   ← g_isp_initialized,
-                                                   g_last_isp_bin_path,
-                                                   g_cus3a_handoff_done
-       3. venc_config_defaults() + venc_config_load(/etc/venc.json)
-       4. star6e_pipeline_start()                ← cold start
-       5. star6e_runtime_apply_startup_controls()
-       6. install_signal_handlers()
+  1. set g_respawn_after_exit = 1
+  2. set g_running = 0  ── exits the main run loop
+
+star6e_runner_run() returns ──► backend_execute returns to main()
+  3. backend_ops->teardown(ctx)  ── normal clean shutdown:
+       cus3a stop, pipeline_stop, recorder/audio/IMU teardown,
+       MI_SYS_Exit, VPE SCL preset, mi_deinit, watchdog fork
+  4. main() checks star6e_runtime_respawn_pending()  ── true
+  5. star6e_runtime_respawn_after_exit():
+       fork() → child sleeps 500 ms (lets kernel reap parent),
+       resets signal mask, reopens /tmp/venc.log,
+       execv("/proc/self/exe", {"venc", NULL})
+  6. parent returns from main() → process exits cleanly
+
+  Child becomes the new venc with a fresh PID, runs the normal cold-
+  start sequence (mi_init, MI_SYS_Init, sensor unlock, ISP bin load,
+  pipeline_start, apply_startup_controls).
 ```
 
-Any non-zero return propagates to `star6e_runner_run()`, which exits the
-process with that code.  The watchdog fork in `star6e_runner_teardown()`
-escalates to `kill -9` and `sysrq-b` if teardown itself hangs.
+The fork happens **after** the parent's full teardown, not before.  If
+the child were created earlier it would inherit the parent's MI device
+fds and the kernel's per-PID cleanup wouldn't fully fire when the
+parent calls `MI_SYS_Exit`.
 
-## Hard fail, no fallback
-
-Per the operator design:
-
-- Single path: full teardown + reload + start.  No partial reinit.  No
-  state machine.
-- Hard fail: any teardown or start failure exits with non-zero.  No
-  silent partial fallback.
+The watchdog forked inside `star6e_runner_teardown` renames itself via
+`prctl(PR_SET_NAME, "venc-wd")` so the new venc's
+`is_another_venc_running()` skips it.  Without this rename the
+respawned process sees a still-alive `comm == "venc"` watchdog and
+exits with "venc already running".
 
 ## Bench-validated working envelope
 
-| Pattern | Status |
+Verified on Star6E SSC338Q + IMX335 @ `192.168.1.13`:
+
+| Pattern | Result |
 |---|---|
-| Single mode change (e.g. 30 fps → 90 fps) | works |
-| Up to ~4 consecutive cross-mode SIGHUPs | works (1.5–4.5 s per cycle) |
-| 5+ consecutive cross-mode SIGHUPs | **degrades** — VIF reports `layout type 2 bindmode 4 not sync err`, encoder stops producing frames, next SIGHUP zombies |
+| Single mode change SIGHUP | works |
+| Cross-mode rotation 0→1→2→3, 3 rounds (12 cycles) | 100 % pass |
+| Cross-mode rotation 0→1→2→3, 6 rounds (24 cycles) | 100 % pass |
+| Cycle time (SIGHUP → "Respawning" log line) | 393–795 ms |
+| Cycle time (SIGHUP → new venc HTTP up) | ~13 s (cold init) |
+| `dmesg` faults | 0 |
 
-The degradation appears to be the SigmaStar VIF/MIPI subsystem failing
-to fully reset after repeated `MI_SNR_Disable`/`Enable` cycles within
-a short window.  Once degraded, recovery requires `echo b >
-/proc/sysrq-trigger` (see `CRASH_LOG.md`).
+Cold init dominates the perceived restart latency.  The HTTP API is
+unreachable for ~13 seconds during respawn — operators changing sensor
+mode rarely (the typical case) accept this; the alternative
+(in-process partial reinit) is fast for the first 4 cycles and broken
+forever after.
 
-In practice, an operator changes sensor mode rarely — this release
-covers that workflow.  Torture-style rapid rotation is not supported
-on this BSP.
+## Persist hacks (still required)
 
-## Timeouts
+`g_ai_persist` in `star6e_audio.c` keeps the kernel AI device alive
+across the audio teardown call inside `pipeline_stop`.  Cycling
+`MI_AI_Disable` on a kernel-tracked device deadlocks `CamOsMutexLock`,
+which would hang `pipeline_stop` past the watchdog window and trigger
+a sysrq-b reboot.  The kernel cleans up AI state on process exit
+regardless of whether userspace called `MI_AI_Disable`, so the persist
+guard is safe.
 
-| Where | Value |
-|---|---|
-| `handle_signal()` shutdown `alarm()` | 2 s |
-| `star6e_runner_teardown()` watchdog poll | 6 × 500 ms |
-| `star6e_runner_teardown()` post-`SIGKILL` grace | 1 s |
-| `star6e_pipeline_wait_isp_channel()` cap | 2000 ms (kept) |
-| `drain_venc_channel()` per channel | 150 ms |
-| ISP `dlopen` fallback `usleep` | 100 ms (kept) |
-
-Total successful cycle: 1.5–3.5 s on Star6E in bench testing (mode-
-dependent — higher FPS modes take longer because more sensor/ISP
-warmup is needed).  Maruko cold start is ~1 s; Star6E rebuilds more
-state.
-
-## Historical: why partial reinit existed (0.3.2 – 0.8.x)
-
-HISTORY 0.3.2 backed out a full teardown path because `MI_SNR_Disable` +
-`MI_SNR_Enable` cycles on the I6E MIPI D-PHY put VIF into a fault state,
-hung `MI_VENC_StopRecvPic`, and put the process in D-state.  The stopgap
-was `star6e_pipeline_stop_venc_level()` — tear down VENC/output/audio
-but keep sensor/VIF/VPE running across reinit.
-
-That stopgap survived for several releases because `MI_SNR_Disable` was
-considered unrecoverable.  Several subsequent fixes — drain-before-
-`StopRecvPic` ordering, the watchdog fork, `pre_init_teardown`, the
-VPE SCL clock preset — collectively made the full sensor cycle
-survivable, and the partial path was retired.
-
-If a regression reintroduces the D-state hang on `MI_SNR_Disable`,
-restoring the partial path is a documented escape hatch (see git
-history before 0.9.0 for `star6e_pipeline_stop_venc_level()` and
-`star6e_pipeline_reinit()`).
+`g_isp_initialized` and `g_last_isp_bin_path` in `star6e_pipeline.c`
+are cleared in `pipeline_stop`.  No load-bearing reason to skip — the
+ISP/CUS3A subsystem is always paired with `MI_SYS_Exit` in the same
+shutdown.
 
 ## ISP channel readiness
 
-`MI_VPE_CreateChannel` starts ISP channel initialisation asynchronously.
-Any ISP API call issued before the kernel logs `MhalCameraOpen` will
-receive `[MS_CAM_IspApiGet][ERROR - ISP channel [0] have NOT been
-created.`  Two guards prevent this:
+`MI_VPE_CreateChannel` starts ISP channel initialisation
+asynchronously.  Any ISP API call before the kernel logs
+`MhalCameraOpen` returns `[MS_CAM_IspApiGet][ERROR - ISP channel [0]
+have NOT been created.`  Two guards prevent this:
 
-1. `star6e_pipeline_wait_isp_channel()` — polls
-   `MI_ISP_IQ_GetParaInitStatus` for up to 500 ms after a new VIF→VPE
-   bind is established.  Fires every reinit (every reinit destroys VPE).
-2. `star6e_pipeline_wait_isp_ready()` — polls again before the ISP bin
+1. `star6e_pipeline_wait_isp_channel()` polls
+   `MI_ISP_IQ_GetParaInitStatus` for up to 2000 ms after a new VIF→VPE
+   bind is established.
+2. `star6e_pipeline_wait_isp_ready()` polls again before the ISP bin
    load writes registers.
+
+Both timeouts kept at the original SDK-tested values — bench testing
+showed cuts to 500 ms cause "ISP channel readiness timeout" warnings
+on some imx335 modes.
 
 ## GCC `flatten` attribute
 
@@ -121,3 +134,11 @@ moment `MI_VPE_CreateChannel` is called.  At `-Os`, GCC may emit
 layout and causing `MI_ISP_IQ_GetParaInitStatus` to return error 6.
 `flatten` forces all static callees inline, restoring the monolithic
 stack frame the driver expects.
+
+## Recovery
+
+If a respawn flow somehow gets wedged (e.g. the parent's watchdog
+escalates to sysrq-b because pipeline_stop hung in a kernel D-state),
+the device reboots cleanly and S95venc starts a fresh venc.  See
+`documentation/CRASH_LOG.md` for the `echo b > /proc/sysrq-trigger`
+remote-recovery trick used during bring-up of this design.

@@ -2,57 +2,55 @@
 
 ## [0.9.0] - 2026-04-26
 
-Full teardown + reload on SIGHUP and `/api/v1/restart` (Star6E):
+SIGHUP / `/api/v1/restart` rebuild the full pipeline including a
+sensor-mode change, via process-level fork+exec respawn (Star6E).
 
 - **Single reinit path.**  `SIGHUP`, `GET /api/v1/restart`,
-  `GET /api/v1/defaults`, and `MUT_RESTART` `/api/v1/set` all enqueue the
-  same request: full pipeline teardown to sensor, reload `/etc/venc.json`
-  from disk, cold start.  Sensor mode switches (e.g. imx335 mode 0 → 3,
-  60 fps → 120 fps) now work without a process restart.
-- **`star6e_pipeline_stop()` clears `g_cus3a_handoff_done`** so the
-  next start re-applies the userspace CUS3A handoff.  Other persist
-  flags (`g_isp_initialized`, `g_last_isp_bin_path`, `g_ai_persist`)
-  are intentionally kept across reinit — see below.
+  `GET /api/v1/defaults`, and `MUT_RESTART` `/api/v1/set` all enqueue
+  the same request: clean teardown of the running venc, fork a child
+  that execv's `/proc/self/exe`, parent exits.  The child inherits
+  zero MI/ISP/sensor state from the kernel driver — it's a true cold
+  boot at the SDK level, identical to a `killall venc; venc &` cycle.
+- **`venc_api_request_reinit()` collapsed** from `int mode` (0/1/2
+  priority queueing) to bool.  Every call site — SIGHUP handler,
+  `/api/v1/restart`, `/api/v1/defaults`, `MUT_RESTART` set — enqueues
+  the same request.
 - **Removed:** `star6e_pipeline_reinit()` and
-  `star6e_pipeline_stop_venc_level()` (the partial-reinit codepath the
-  full teardown supersedes).  See git history for the escape hatch.
-- **`venc_api_request_reinit()` collapsed** from `int mode` (0/1/2 with
-  priority queueing) to bool.  All call sites — SIGHUP handler,
-  `/api/v1/restart`, `/api/v1/defaults`, `MUT_RESTART` set —
-  enqueue the same request.
-- **Persist guards kept across reinit** (audio AI device, ISP CUS3A
-  enable, ISP bin path).  The Phase 1 plan assumed full teardown means
-  cold init, but `MI_SYS_Init`/`MI_SYS_Exit` only fire in
-  `runner_init`/`runner_teardown` — the kernel AI/ISP driver state
-  survives reinit, and re-cycling it deadlocks `CamOsMutexLock` (AI)
-  or pins IMX335 to ~100 fps (bin reload).  See `documentation/CRASH_LOG.md`
-  for the bench evidence.
-- **Tighter timeouts** on shutdown paths only: `alarm()` 5 → 2 s,
+  `star6e_pipeline_stop_venc_level()` (partial-reinit codepath
+  replaced by process-level respawn).  See git history for the
+  abandoned escape hatch.
+- **New helpers:**
+  - `star6e_runtime_respawn_pending()` — `main()` checks this after
+    backend teardown.
+  - `star6e_runtime_respawn_after_exit()` — fork+execv successor.
+  - `prctl(PR_SET_NAME, "venc-wd")` in the watchdog fork so the new
+    venc's `is_another_venc_running()` skips it.
+- **Audio `g_ai_persist` hack kept** — pipeline_stop's
+  MI_AI_Disable cycle deadlocks `CamOsMutexLock` and would hang the
+  parent's teardown past the watchdog window.  Kernel cleans up AI
+  state on process exit anyway.
+- **Watchdog timeouts** (process exit only): `alarm()` 5 → 2 s,
   watchdog poll 8 × 1 s → 6 × 500 ms, post-`SIGKILL` grace 3 → 1 s,
-  VENC drain 500 → 150 ms.  200 ms reinit-coalesce debounce removed.
-  ISP channel wait (2000 ms) and ISP `dlopen` fallback (100 ms) kept
-  at the original values — bench testing showed the ISP channel
-  legitimately takes >500 ms to ready on some imx335 modes after a
-  fresh VPE create.
-- **Hard fail**: any teardown or start failure exits non-zero.  No
-  silent partial fallback.  The watchdog (`fork` + `kill -9` +
-  `sysrq-b`) remains the worst-case safety net.
-- Maruko backend untouched (out of scope; port follows after Star6E
-  validates).
-- Docs: `documentation/SIGHUP_REINIT.md` rewritten;
+  VENC drain 500 → 150 ms.  ISP channel wait kept at 2000 ms (bench
+  testing showed cuts cause "ISP channel readiness timeout" warnings).
+- Maruko backend untouched (the rcvalue-vs-bool ripple from the
+  reinit signature change is the only edit; the Maruko in-process
+  reinit path stays).
+- Docs: `documentation/SIGHUP_REINIT.md` rewritten with the
+  fork+exec design and full bench evidence;
   `documentation/LIVE_FPS_CONTROL.md` "Mode Switching Limitation"
-  section removed; `documentation/CRASH_LOG.md` added.
+  section removed; `documentation/CRASH_LOG.md` added with the
+  sysrq-b remote-recovery trick.
 
-**Bench status (2026-04-26, imx335 @ 192.168.1.13):** single sensor
-mode changes via SIGHUP work cleanly.  Cross-mode rotation tested at
-4 changes/round with cycle times 1.5–4.5 s.  **Limitation:** repeated
-rapid mode rotation (≥ 5 cross-mode hops in a row, particularly
-involving mode 3/120 fps) degrades after several cycles into a VIF
-"layout type 2 bindmode 4 not sync" error and the encoder stops
-producing frames.  Recovery: `echo b > /proc/sysrq-trigger` (see
-CRASH_LOG.md).  In practice operators change sensor mode rarely; this
-release is suitable for that workflow but should not be used for
-torture-style mode cycling.
+**Bench validation (2026-04-26, imx335 @ 192.168.1.13):** 24/24
+consecutive cross-mode SIGHUPs (modes 0→1→2→3, 6 rounds) with no
+degradation, no zombies, no dmesg faults.  Cycle time 393–795 ms to
+respawn marker; ~13 s to new venc HTTP up (cold start dominates).
+Phase 1 plan's in-process `MI_SYS_Exit` + `MI_SYS_Init` approach was
+empirically disproven (PID-tied "already_inited" flags trip
+`MI_DEVICE_Open` hangs); partial-reinit-without-MI_SYS-Exit survives
+~4 cycles before VIF bindmode sync errors.  Process-level respawn is
+the only path that scales.
 
 ## [0.8.1] - 2026-04-25
 
