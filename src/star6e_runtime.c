@@ -591,7 +591,7 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
  * MI_SYS_Exit.  Bench-validated against 12 consecutive cross-mode sensor
  * SIGHUPs (rounds 0→1→2→3 ×3) with no degradation. */
 
-static volatile sig_atomic_t g_respawn_after_exit = 0;
+static int g_respawn_after_exit = 0;
 
 void star6e_runtime_respawn_after_exit(void)
 {
@@ -605,30 +605,30 @@ void star6e_runtime_respawn_after_exit(void)
 	}
 
 	if (child > 0) {
-		/* Parent: print so /tmp/venc.log captures the handoff,
-		 * then return — caller exits process. */
 		fprintf(stderr,
 			"> Respawning: parent %d → child %d\n",
 			(int)getpid(), (int)child);
 		return;
 	}
 
-	/* Child: brief settle for the kernel to reap the parent and
-	 * release any per-pid SDK state.  Could poll on getppid()==1 but
-	 * a fixed sleep is simpler and reliable in practice. */
-	(void)prctl(PR_SET_NAME, "venc-resp", 0, 0, 0);
-	usleep(500 * 1000);
+	(void)prctl(PR_SET_NAME, VENC_COMM_RESPAWN, 0, 0, 0);
 
-	/* Reset signal mask — we may have inherited a blocked set. */
+	/* Wait for the parent to exit so the kernel reaps the per-pid SDK
+	 * state before we exec.  Polling getppid() catches the actual exit
+	 * (orphaned child reparents to init / pid 1) instead of guessing
+	 * with a fixed sleep — guards against teardown latency spikes that
+	 * a static usleep would race.  Cap at 5 s as a backstop in case
+	 * a non-init subreaper inserts itself between us and pid 1. */
+	for (int i = 0; i < 50 && getppid() != 1; i++)
+		usleep(100 * 1000);
+
 	sigset_t empty;
 	sigemptyset(&empty);
 	sigprocmask(SIG_SETMASK, &empty, NULL);
 
-	/* Re-route stdout/stderr to the venc.log file the operator expects.
-	 * The parent already closed its own copies during teardown; this is
-	 * a fresh open in append mode so the pre-respawn log tail stays
-	 * available for diagnosis. */
-	int log = open("/tmp/venc.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+	/* Re-route stdout/stderr to /tmp/venc.log in append mode so the
+	 * pre-respawn tail stays available for diagnosis. */
+	int log = open(VENC_LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
 	if (log >= 0) {
 		dup2(log, STDOUT_FILENO);
 		dup2(log, STDERR_FILENO);
@@ -637,22 +637,18 @@ void star6e_runtime_respawn_after_exit(void)
 	}
 
 	char *args[] = { (char *)"venc", NULL };
-	execv("/proc/self/exe", args);
+	execv(VENC_SELF_EXE_PATH, args);
 	/* exec failed — fall through and exit so init/operator notices */
 	_exit(127);
 }
 
 int star6e_runtime_respawn_pending(void)
 {
-	return g_respawn_after_exit ? 1 : 0;
+	return g_respawn_after_exit;
 }
 
-static int star6e_runtime_handle_reinit(Star6eRunnerContext *ctx,
-	struct timespec *cus3a_ts_last, unsigned int *idle_counter,
-	int *handled)
+static int star6e_runtime_handle_reinit(int *handled)
 {
-	(void)ctx; (void)cus3a_ts_last; (void)idle_counter;
-
 	*handled = 0;
 
 	if (!venc_api_get_reinit())
@@ -913,8 +909,7 @@ static int star6e_runner_run(void *opaque)
 	}
 
 	while (g_running) {
-		ret = star6e_runtime_handle_reinit(ctx, &cus3a_ts_last,
-			&idle_counter, &handled);
+		ret = star6e_runtime_handle_reinit(&handled);
 		if (ret != 0) {
 			return ret;
 		}
@@ -950,12 +945,12 @@ static void star6e_runner_teardown(void *opaque)
 		if (watchdog == 0) {
 			/* Rename so /proc/<pid>/comm reads "venc-wd" instead of
 			 * "venc".  Required for SIGHUP-respawn flow: the new
-			 * venc spawned by respawn_via_child() runs
-			 * is_another_venc_running() at startup; without this
-			 * rename the still-alive watchdog (kept around to
-			 * SIGKILL/sysrq-b a hung parent) reads as "venc" and
-			 * the respawn aborts with "venc already running". */
-			(void)prctl(PR_SET_NAME, "venc-wd", 0, 0, 0);
+			 * venc spawned by star6e_runtime_respawn_after_exit()
+			 * runs is_another_venc_running() at startup; without
+			 * this rename the still-alive watchdog (kept around
+			 * to SIGKILL/sysrq-b a hung parent) reads as "venc"
+			 * and the respawn aborts with "venc already running". */
+			(void)prctl(PR_SET_NAME, VENC_COMM_WATCHDOG, 0, 0, 0);
 			/* Close inherited stdout — it may be a pipe from the
 			 * audio stdout filter.  Keeping it open prevents the
 			 * filter thread's read() from seeing EOF, which

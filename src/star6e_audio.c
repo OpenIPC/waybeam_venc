@@ -686,7 +686,7 @@ void star6e_audio_teardown(Star6eAudioState *state)
 	 * audio thread joined cleanly but the channel/device disable below
 	 * hanging, and the watchdog SIGKILL'ing us before MI_SYS_Exit could
 	 * run.  In-process reinit no longer rebuilds the pipeline (we
-	 * fork+exec for that — see respawn_via_child in star6e_runtime.c),
+	 * fork+exec for that — see star6e_runtime_respawn_after_exit),
 	 * so the only consumer of this teardown is the final shutdown,
 	 * where kernel-side cleanup runs on process exit anyway. */
 

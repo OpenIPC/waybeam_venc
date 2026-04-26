@@ -1,5 +1,19 @@
 # Full Teardown + Reinit on SIGHUP / Restart — Plan
 
+> **Status: SUPERSEDED by Phase 2 implementation (2026-04-26).**  Bench
+> testing on imx335 @ 192.168.1.13 disproved the in-process
+> `MI_SYS_Exit` + `MI_SYS_Init` assumption — the SigmaStar driver
+> retains "already_inited" flags tied to the PID, so the second
+> `MI_SYS_Init` trips `MI_DEVICE_Open` hangs and the VPE warns
+> `no wakeup event for more than 5 seconds!`.  Partial reinit without
+> `MI_SYS_Exit` survived ~4 cycles before the VIF state machine
+> degraded.  The shipped design uses **process-level fork+exec
+> respawn** instead — see `documentation/SIGHUP_REINIT.md` for the
+> actual behaviour and `documentation/CRASH_LOG.md` for the bench
+> evidence.  This file is kept for the design discussion and the
+> validation-matrix that drove the bring-up, but does NOT describe
+> current behaviour.
+
 Status: proposed, not implemented. This is a Phase 1 (Spec) document per
 the workflow in `AGENTS.md`.
 

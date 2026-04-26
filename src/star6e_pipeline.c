@@ -932,9 +932,9 @@ static void star6e_pipeline_imu_push(void *ctx, const ImuSample *sample)
 }
 
 /* Tracks whether CUS3A has been enabled in this MI_SYS lifetime.  Cleared
- * by star6e_pipeline_stop(), which is always followed by MI_SYS_Exit (in
- * either runner_teardown or restart_pipeline) — so the next start runs
- * a true cold sequence including CUS3A enable. */
+ * by star6e_pipeline_stop(), which is always followed by MI_SYS_Exit in
+ * runner_teardown — so the next process start runs a true cold sequence
+ * including CUS3A enable. */
 static int g_isp_initialized = 0;
 
 /* Tracks the last-loaded ISP bin path within this MI_SYS lifetime so we
@@ -1164,12 +1164,12 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	if (!state)
 		return;
 
-	/* Clear userspace persist flags.  Caller (runner_teardown or
-	 * runtime restart_pipeline) will follow with MI_SYS_Exit + a fresh
-	 * MI_SYS_Init, so the kernel ISP/CUS3A state is genuinely cold on
-	 * the next pipeline_start.  Skipping these clears would leave
-	 * stale "already initialised" flags that bypass the very work the
-	 * fresh kernel state expects us to redo. */
+	/* Clear userspace persist flags.  runner_teardown follows with
+	 * MI_SYS_Exit, and the next pipeline_start always runs in a fresh
+	 * process (SIGHUP-respawn forks a successor), so the kernel
+	 * ISP/CUS3A state is genuinely cold on the next start.  Skipping
+	 * these clears would leave stale "already initialised" flags that
+	 * bypass the very work the fresh kernel state expects us to redo. */
 	g_isp_initialized = 0;
 	g_last_isp_bin_path[0] = '\0';
 	g_cus3a_handoff_done = 0;
