@@ -2,6 +2,7 @@
 #include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 #include "backend.h"
@@ -78,6 +79,14 @@ int main(int argc, char* argv[])
 
   (void)argc;
   (void)argv;
+
+  /* Pin /proc/self/comm to "venc" before is_another_venc_running().  The
+   * SIGHUP-respawn path execv's /proc/self/exe, which makes the kernel
+   * derive comm from the symlink basename ("exe") instead of argv[0].
+   * Without this rename, is_another_venc_running() (which matches comm)
+   * silently fails to detect a running respawned instance, and an
+   * externally-launched second venc could start a duplicate. */
+  (void)prctl(PR_SET_NAME, "venc", 0, 0, 0);
 
   if (is_another_venc_running()) {
     printf("venc already running... exiting...\n");
