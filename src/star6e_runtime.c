@@ -148,7 +148,7 @@ static void handle_signal(int sig)
 		static const char msg[] =
 			"\n> SIGHUP received, reinit pending...\n";
 
-		venc_api_request_reinit(1);
+		venc_api_request_reinit();
 		(void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
 		return;
 	}
@@ -161,7 +161,7 @@ static void handle_signal(int sig)
 			"\n> Interrupt received, shutting down...\n";
 
 		(void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
-		alarm(5);
+		alarm(2);
 		return;
 	}
 
@@ -575,75 +575,44 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	return 0;
 }
 
-static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
-	int reinit_mode)
+static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx)
 {
 	Star6ePipelineState *ps = &ctx->ps;
 	VencConfig *vcfg = &ctx->vcfg;
 	int ret;
 
-	uint32_t prev_max_fps = ps->sensor.mode.maxFps;
-
 	star6e_cus3a_request_stop();
-
 	star6e_controls_reset();
-	star6e_pipeline_cus3a_reset();
-
 	star6e_cus3a_join();
+
+	if (ctx->pipeline_started) {
+		star6e_pipeline_stop(ps);
+		ctx->pipeline_started = 0;
+	}
 
 	star6e_recorder_stop(&ps->recorder);
 	star6e_ts_recorder_stop(&ps->ts_recorder);
 	ps->audio.rec_ring = NULL;
 
-	if (reinit_mode == 1) {
-		venc_config_defaults(vcfg);
-		if (venc_config_load(VENC_CONFIG_DEFAULT_PATH, vcfg) != 0) {
-			fprintf(stderr,
-				"ERROR: config reload failed, shutting down\n");
-			return 1;
-		}
+	venc_config_defaults(vcfg);
+	if (venc_config_load(VENC_CONFIG_DEFAULT_PATH, vcfg) != 0) {
+		fprintf(stderr, "ERROR: config reload failed, shutting down\n");
+		return 1;
 	}
 
-	/* Clamp FPS to current sensor mode (mode changes require restart) */
-	if (prev_max_fps > 0 && vcfg->video0.fps > prev_max_fps) {
-		printf("> Reinit: clamping FPS %u -> %u "
-			"(limited by current sensor mode)\n",
-			vcfg->video0.fps, prev_max_fps);
-		vcfg->video0.fps = prev_max_fps;
-	}
-
-	/* Partial reinit: keep sensor/VIF/VPE running, only rebuild VENC.
-	 * The SigmaStar MIPI PHY does not recover from MI_SNR_Disable/Enable
-	 * cycles — full pipeline_stop + pipeline_start stalls the encoder. */
-	ret = star6e_pipeline_reinit(ps, vcfg, &g_sdk_quiet);
+	ret = star6e_pipeline_start(ps, vcfg, &g_sdk_quiet);
 	if (ret != 0) {
-		fprintf(stderr, "ERROR: pipeline reinit failed (%d), shutting down\n",
+		fprintf(stderr,
+			"ERROR: pipeline start failed (%d), shutting down\n",
 			ret);
-		ctx->pipeline_started = 0;
 		return ret;
 	}
+	ctx->pipeline_started = 1;
 
-	star6e_controls_bind(ps, vcfg);
+	ret = star6e_runtime_apply_startup_controls(ctx);
+	if (ret != 0)
+		return ret;
 	install_signal_handlers();
-
-	scene_init(&ctx->scene, ctx->vcfg.video0.scene_threshold,
-		ctx->vcfg.video0.scene_holdoff);
-
-	if (!vcfg->isp.legacy_ae)
-		start_custom_ae(ps, vcfg);
-
-	if (vcfg->fpv.roi_enabled) {
-		star6e_controls_apply_roi_qp(vcfg->fpv.roi_qp);
-	}
-	if (vcfg->video0.qp_delta != 0) {
-		star6e_controls_apply_qp_delta(vcfg->video0.qp_delta);
-	}
-
-	if (!ps->output_enabled) {
-		ps->stored_fps = vcfg->video0.fps;
-		star6e_controls_apply_fps(STAR6E_CONTROLS_IDLE_FPS);
-	}
-
 	return 0;
 }
 
@@ -651,30 +620,19 @@ static int star6e_runtime_handle_reinit(Star6eRunnerContext *ctx,
 	struct timespec *cus3a_ts_last, unsigned int *idle_counter,
 	int *handled)
 {
-	int reinit_mode;
-	int updated;
 	int ret;
 
 	*handled = 0;
 
-	reinit_mode = venc_api_get_reinit();
-	if (!reinit_mode) {
+	if (!venc_api_get_reinit()) {
 		return 0;
 	}
 	*handled = 1;
-
-	usleep(200000);
-	updated = venc_api_get_reinit();
-	if (updated) {
-		reinit_mode = updated;
-	}
 	venc_api_clear_reinit();
 
-	printf("> Reinit requested (mode %d: %s)\n", reinit_mode,
-		reinit_mode == 1 ? "reload config from disk" :
-		"apply in-memory config");
+	printf("> Reinit requested: full teardown + reload from disk\n");
 
-	ret = star6e_runtime_restart_pipeline(ctx, reinit_mode);
+	ret = star6e_runtime_restart_pipeline(ctx);
 	if (ret != 0) {
 		return ret;
 	}
@@ -975,8 +933,8 @@ static void star6e_runner_teardown(void *opaque)
 			 * normally so we don't linger as an orphan. */
 			pid_t parent = getppid();
 			int i;
-			for (i = 0; i < 8; i++) {
-				sleep(1);
+			for (i = 0; i < 6; i++) {
+				usleep(500 * 1000);
 				if (kill(parent, 0) != 0)
 					_exit(0);  /* parent exited cleanly */
 			}
@@ -985,7 +943,7 @@ static void star6e_runner_teardown(void *opaque)
 					"[watchdog] teardown hung, kill -9\n";
 				(void)write(STDERR_FILENO, m1, sizeof(m1) - 1);
 				kill(parent, SIGKILL);
-				sleep(3);
+				sleep(1);
 				if (kill(parent, 0) == 0) {
 					static const char m2[] =
 						"[watchdog] D-state, sysrq reboot\n";

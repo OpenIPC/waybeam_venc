@@ -680,6 +680,15 @@ void star6e_audio_teardown(Star6eAudioState *state)
 	if (!state)
 		return;
 
+	/* Keep g_ai_persist alive across pipeline reinit.  The full
+	 * pipeline_stop tears VENC/VPE/VIF/sensor down to userspace, but
+	 * MI_SYS_Init/Exit only fire in star6e_runner_init/teardown — so
+	 * the kernel AI device survives reinit cycles.  Cycling it via
+	 * MI_AI_Disable/Enable deadlocks on CamOsMutexLock after a few
+	 * iterations (observed on imx335 mode 2/90fps).  The persist marker
+	 * stays set so the next star6e_audio_init() reattaches to the live
+	 * device instead of doing a cold cycle. */
+
 	if (state->started) {
 		state->running = 0;
 		/* Wake encode thread in case it is blocked in pop_wait */
