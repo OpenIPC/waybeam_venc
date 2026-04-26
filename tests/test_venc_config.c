@@ -526,6 +526,76 @@ static int test_audio_roundtrip(void)
 	return failures;
 }
 
+/* Self-policing round-trip: load config/venc.default.json, save it via
+ * venc_config_save (which uses the hand-rolled pretty printer), and assert
+ * the saved bytes are byte-equal to the original.  Any future config field
+ * added to the struct/parser/serializer but missing from the printer (or
+ * the default file) will trip this test. */
+static int test_save_layout_byte_equal(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	venc_config_defaults(&cfg);
+
+	const char *src_path = "config/venc.default.json";
+	int ret = venc_config_load(src_path, &cfg);
+	CHECK("layout_load_default_ok", ret == 0);
+	if (ret != 0) return failures;
+
+	char tmp_path[] = "/tmp/venc_layout_test_XXXXXX";
+	int fd = mkstemp(tmp_path);
+	CHECK("layout_mkstemp_ok", fd >= 0);
+	if (fd < 0) return failures;
+	close(fd);
+
+	int save_rc = venc_config_save(tmp_path, &cfg);
+	CHECK("layout_save_ok", save_rc == 0);
+	if (save_rc != 0) { unlink(tmp_path); return failures; }
+
+	FILE *fa = fopen(src_path, "rb");
+	FILE *fb = fopen(tmp_path, "rb");
+	CHECK("layout_open_files", fa && fb);
+	if (!fa || !fb) {
+		if (fa) fclose(fa);
+		if (fb) fclose(fb);
+		unlink(tmp_path);
+		return failures;
+	}
+
+	fseek(fa, 0, SEEK_END); long sa = ftell(fa); fseek(fa, 0, SEEK_SET);
+	fseek(fb, 0, SEEK_END); long sb = ftell(fb); fseek(fb, 0, SEEK_SET);
+	CHECK("layout_size_equal", sa == sb);
+
+	if (sa == sb && sa > 0) {
+		char *ba = malloc((size_t)sa);
+		char *bb = malloc((size_t)sb);
+		if (ba && bb) {
+			fread(ba, 1, (size_t)sa, fa);
+			fread(bb, 1, (size_t)sb, fb);
+			int eq = memcmp(ba, bb, (size_t)sa) == 0;
+			CHECK("layout_byte_equal", eq);
+			if (!eq) {
+				/* Print the first divergence to ease debugging */
+				for (long i = 0; i < sa; i++) {
+					if (ba[i] != bb[i]) {
+						fprintf(stderr,
+						    "  layout diff at byte %ld: "
+						    "expected 0x%02x got 0x%02x\n",
+						    i, (unsigned char)ba[i],
+						    (unsigned char)bb[i]);
+						break;
+					}
+				}
+			}
+		}
+		free(ba); free(bb);
+	}
+
+	fclose(fa); fclose(fb);
+	unlink(tmp_path);
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_config(void)
@@ -547,5 +617,6 @@ int test_venc_config(void)
 	failures += test_audio_volume_clamping();
 	failures += test_audio_channel_clamping();
 	failures += test_audio_roundtrip();
+	failures += test_save_layout_byte_equal();
 	return failures;
 }

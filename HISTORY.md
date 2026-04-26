@@ -2,6 +2,10 @@
 
 ## [0.9.0] - 2026-04-26
 
+Two themes shipped together:
+
+### SIGHUP / `/api/v1/restart` cold restart via fork+exec (Star6E)
+
 SIGHUP / `/api/v1/restart` rebuild the full pipeline including a
 sensor-mode change, via process-level fork+exec respawn (Star6E).
 
@@ -51,6 +55,30 @@ empirically disproven (PID-tied "already_inited" flags trip
 `MI_DEVICE_Open` hangs); partial-reinit-without-MI_SYS-Exit survives
 ~4 cycles before VIF bindmode sync errors.  Process-level respawn is
 the only path that scales.
+
+### Hand-rolled config pretty printer (stable disk layout for `/etc/venc.json`)
+
+- **Replace `cJSON_Print` in `venc_config_save`** with a hand-rolled
+  emitter (`config_render_pretty` in `src/venc_config.c`). Every WebUI
+  `/api/v1/set` save and every `record.path` save now produces the same
+  canonical layout: 2-space indent, one key per line, `": "` separator,
+  no blank lines between sections, single trailing newline. cJSON's
+  tab-indented "shattered" pretty print is gone from the disk path.
+  Parsing and HTTP API responses still use cJSON unchanged.
+- **Unified layout for `config/venc.default.json`.** The hand-authored
+  irregular layout (some sections one-line, others multi-line, mixed
+  per-section indent rules) is replaced by the same canonical layout the
+  printer emits, so the default file matches what venc actually writes
+  on first save.
+- **Self-policing round-trip test** (`test_save_layout_byte_equal` in
+  `tests/test_venc_config.c`): loads `config/venc.default.json`, saves
+  via `venc_config_save`, asserts the saved bytes are byte-equal to the
+  original. Any future config field added to the struct/parser/serializer
+  but missing from the printer (or the default file) trips the test.
+- **`AGENTS.md` sync rules updated**: the per-section `render_*` helper
+  in `src/venc_config.c` is now an explicit sync point alongside the
+  struct, parser/serializer, API field+alias tables, WebUI `SECTIONS[]`,
+  and `config/venc.default.json`.
 
 ## [0.8.1] - 2026-04-25
 

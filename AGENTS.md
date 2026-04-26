@@ -469,13 +469,21 @@ The config system spans three layers that MUST stay in sync:
 4. **Default config file** (`config/venc.default.json`) — reference config
    showing all available options with sensible defaults.
 
-When adding or removing a config field, update ALL FOUR locations in the same PR:
+When adding or removing a config field, update ALL of the following in the same PR:
 
 - Add the field to `VencConfig` struct and set its default in `venc_config_defaults()`
 - Add parsing in the `load_<section>()` function and serialization in `venc_config_to_json()`
 - Add a `FIELD()` entry in `g_fields[]` and a camelCase alias in `g_aliases[]` if needed
+- Add an emit line in the matching `render_<section>()` helper in
+  `src/venc_config.c` — the hand-rolled pretty printer used by
+  `venc_config_save`. `cJSON_Print` is no longer used for disk writes
+  because it normalised away the canonical layout
 - Add the key to the appropriate `SECTIONS[]` entry in `web/dashboard.html`
-- Add the key with its default value to `config/venc.default.json`
+- Add the key with its default value to `config/venc.default.json` in the
+  unified layout (one key per line, 2-space indent, `": "` separator,
+  integral doubles end in `.0`). The `test_save_layout_byte_equal` test
+  enforces that printer output matches the default file byte-for-byte —
+  skipping the printer or default-file update will fail it
 - Regenerate the embedded gzip: `make webui` (runs `tools/build_webui.py`)
 
 Key naming conventions:
@@ -565,9 +573,10 @@ between them.  `make build` (default) always produces `out/star6e/venc`.
   Fix errors in order; earlier errors often cause later ones.
 - Do NOT switch implementation approach mid-task without re-planning. If the
   current approach fails, diagnose why before changing course.
-- Do NOT add or remove a config field without updating all four layers: C struct/parser,
-  API field+alias tables, WebUI SECTIONS, and default config file. See
-  **Config / WebUI / API Sync Rules** above.
+- Do NOT add or remove a config field without updating every layer: C
+  struct/parser, API field+alias tables, the `render_<section>` pretty
+  printer in `src/venc_config.c`, WebUI SECTIONS, and `config/venc.default.json`.
+  See **Config / WebUI / API Sync Rules** above.
 
 ## Codex delegation
 
