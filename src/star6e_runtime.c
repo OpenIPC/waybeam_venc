@@ -627,15 +627,23 @@ void star6e_runtime_respawn_after_exit(void)
 	sigprocmask(SIG_SETMASK, &empty, NULL);
 
 	/* Re-route stdout/stderr to /tmp/venc.log in append mode so the
-	 * pre-respawn tail stays available for diagnosis. */
+	 * pre-respawn tail stays available for diagnosis.  If dup2 fails
+	 * (e.g. fd table exhaustion from a leaked descriptor we missed in
+	 * teardown) bail before execv — running blind would lose any panic
+	 * output the fresh venc emits. */
 	int log = open(VENC_LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
 	if (log >= 0) {
-		dup2(log, STDOUT_FILENO);
-		dup2(log, STDERR_FILENO);
+		if (dup2(log, STDOUT_FILENO) < 0 ||
+		    dup2(log, STDERR_FILENO) < 0)
+			_exit(127);
 		if (log > 2)
 			close(log);
 	}
 
+	/* argv is intentionally minimal — main.c currently ignores argv, so
+	 * any future flag (e.g. `-c <path>`) added without saving the parent's
+	 * argv into a static and replaying it here would silently disappear
+	 * across SIGHUP-respawn. */
 	char *args[] = { (char *)"venc", NULL };
 	execv(VENC_SELF_EXE_PATH, args);
 	/* exec failed — fall through and exit so init/operator notices */

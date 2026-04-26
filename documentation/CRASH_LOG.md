@@ -23,11 +23,13 @@ specifically to skip that cycle.  The same logic applies to
 `g_isp_initialized` (CUS3A enable deadlock) and `g_last_isp_bin_path`
 (reloading the bin pins IMX335 at ~100 fps).
 
-**Fix:** restore the persist guards.  `star6e_audio_teardown()` keeps
-`g_ai_persist.initialized` set so the next `star6e_audio_init()`
-reattaches to the live AI device.  `star6e_pipeline_stop()` clears
-`g_cus3a_handoff_done` (userspace handoff marker) but leaves
-`g_isp_initialized` and `g_last_isp_bin_path` untouched.
+**Fix:** restore the audio persist guard and replace the in-process reinit
+with process-level fork+exec respawn (see `documentation/SIGHUP_REINIT.md`).
+`star6e_audio_teardown()` keeps `g_ai_persist.initialized` set so the kernel
+AI device is never user-space disabled — kernel cleanup on process exit
+handles it.  `star6e_pipeline_stop()` clears all three userspace flags
+(`g_isp_initialized`, `g_last_isp_bin_path`, `g_cus3a_handoff_done`) since
+the next `pipeline_start` always runs in a fresh PID with cold kernel state.
 
 **Recovery:** `echo b > /proc/sysrq-trigger` over SSH unhung the device.
 Surprisingly, this can succeed even when venc is in D-state and the

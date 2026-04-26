@@ -53,9 +53,9 @@ star6e_runner_run() returns ──► backend_execute returns to main()
        MI_SYS_Exit, VPE SCL preset, mi_deinit, watchdog fork
   4. main() checks star6e_runtime_respawn_pending()  ── true
   5. star6e_runtime_respawn_after_exit():
-       fork() → child sleeps 500 ms (lets kernel reap parent),
-       resets signal mask, reopens /tmp/venc.log,
-       execv("/proc/self/exe", {"venc", NULL})
+       fork() → child polls getppid() until reparented to pid 1
+       (orphan = parent reaped; cap 5 s), resets signal mask,
+       reopens /tmp/venc.log, execv("/proc/self/exe", {"venc", NULL})
   6. parent returns from main() → process exits cleanly
 
   Child becomes the new venc with a fresh PID, runs the normal cold-

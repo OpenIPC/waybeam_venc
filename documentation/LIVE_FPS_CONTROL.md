@@ -88,10 +88,11 @@ correct rate control from the start.
 
 `video0.fps` can be adjusted live (hardware bind decimation, see above).
 
-Switching sensor *mode* (e.g. 90 fps mode → 120 fps mode) is also supported
-without a process restart since 0.9.0 — `SIGHUP` and `/api/v1/restart`
-reload the on-disk config and rebuild the pipeline from sensor up.  See
-`documentation/SIGHUP_REINIT.md`.
+Switching sensor *mode* (e.g. 90 fps mode → 120 fps mode) is supported
+without operator intervention since 0.9.0 — `SIGHUP` and `/api/v1/restart`
+trigger a fork+exec respawn that reloads the on-disk config and rebuilds
+the pipeline from sensor up in a fresh PID.  HTTP API is unreachable for
+~13 s during cold init.  See `documentation/SIGHUP_REINIT.md`.
 
 ## Tested Configurations (IMX335)
 

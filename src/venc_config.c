@@ -675,7 +675,11 @@ static void pp_uint(PrettyBuf *p, unsigned long long v)
  * values try %1.15g first and fall back to %1.17g if the parse doesn't
  * round-trip — same policy cJSON uses, so existing files load identically.
  * Locale is pinned to C around snprintf so a non-C LC_NUMERIC can't
- * smuggle in a comma. */
+ * smuggle in a comma.  setlocale is process-global, so any concurrent
+ * thread printing floats during venc_config_save sees C locale for the
+ * window — harmless on this build (LC_NUMERIC is C by default and venc
+ * never calls setlocale elsewhere), but switch to uselocale() if a
+ * future thread needs a non-C numeric locale. */
 static void pp_double(PrettyBuf *p, double v)
 {
 	char tmp[40];

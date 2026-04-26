@@ -12,6 +12,7 @@
 
 #include "venc_config.h"
 #include "test_helpers.h"
+#include "../lib/cJSON.h"
 
 /* ── Helper: write a temp JSON file ──────────────────────────────────── */
 
@@ -596,6 +597,116 @@ static int test_save_layout_byte_equal(void)
 	return failures;
 }
 
+/* Populated-config round trip: load defaults, mutate string and numeric
+ * fields across every section (escapes, fractional doubles, large ints),
+ * save via the pretty printer, parse the result with cJSON.  This catches
+ * is_last comma bugs in render_<section> helpers — when a developer adds a
+ * field at the end of a section and forgets to flip the previous field's
+ * is_last marker, the produced file gets a trailing comma and cJSON_Parse
+ * fails.  Also exercises the JSON-escape and float-format paths that
+ * test_save_layout_byte_equal does not. */
+static int test_save_layout_populated_round_trip(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	venc_config_defaults(&cfg);
+
+	int ret = venc_config_load("config/venc.default.json", &cfg);
+	CHECK("layout_populated_load_default_ok", ret == 0);
+	if (ret != 0) return failures;
+
+	/* Hammer string fields with characters that exercise every escape
+	 * branch in pp_string (quote, backslash, control chars) and a UTF-8
+	 * byte sequence to confirm raw passthrough above 0x7F. */
+	const char *poison = "x\"\\\b\f\n\r\t\x01""y\xe2\x9c\x93z";
+	snprintf(cfg.isp.sensor_bin, sizeof(cfg.isp.sensor_bin), "%s", poison);
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server), "%s", poison);
+	snprintf(cfg.record.dir, sizeof(cfg.record.dir), "%s", poison);
+	snprintf(cfg.record.server, sizeof(cfg.record.server), "%s", poison);
+
+	/* Force pp_double to take the fractional %1.15g / %1.17g paths. */
+	cfg.video0.gop_size = 0.123456789012345;
+	cfg.record.gop_size = 2.5;
+
+	char tmp_path[] = "/tmp/venc_layout_pop_XXXXXX";
+	int fd = mkstemp(tmp_path);
+	CHECK("layout_populated_mkstemp_ok", fd >= 0);
+	if (fd < 0) return failures;
+	close(fd);
+
+	int save_rc = venc_config_save(tmp_path, &cfg);
+	CHECK("layout_populated_save_ok", save_rc == 0);
+	if (save_rc != 0) { unlink(tmp_path); return failures; }
+
+	FILE *f = fopen(tmp_path, "rb");
+	CHECK("layout_populated_open_saved", f != NULL);
+	if (!f) { unlink(tmp_path); return failures; }
+	fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+	char *buf = malloc((size_t)sz + 1);
+	if (buf) {
+		fread(buf, 1, (size_t)sz, f);
+		buf[sz] = '\0';
+	}
+	fclose(f);
+
+	if (buf) {
+		cJSON *root = cJSON_Parse(buf);
+		CHECK("layout_populated_parses_as_json", root != NULL);
+		if (!root) {
+			const char *err = cJSON_GetErrorPtr();
+			fprintf(stderr,
+				"  cJSON_Parse failed near: %.40s\n",
+				err ? err : "(null)");
+		}
+		if (root) cJSON_Delete(root);
+		free(buf);
+	}
+
+	/* Round-trip back into VencConfig and re-save; second save must be
+	 * byte-equal to the first (printer is deterministic over identical
+	 * input). */
+	VencConfig cfg2;
+	venc_config_defaults(&cfg2);
+	int load_rc = venc_config_load(tmp_path, &cfg2);
+	CHECK("layout_populated_reload_ok", load_rc == 0);
+
+	char tmp2[] = "/tmp/venc_layout_pop2_XXXXXX";
+	int fd2 = mkstemp(tmp2);
+	if (fd2 >= 0) {
+		close(fd2);
+		int rc2 = venc_config_save(tmp2, &cfg2);
+		CHECK("layout_populated_resave_ok", rc2 == 0);
+		if (rc2 == 0) {
+			FILE *fa = fopen(tmp_path, "rb");
+			FILE *fb = fopen(tmp2, "rb");
+			if (fa && fb) {
+				fseek(fa, 0, SEEK_END); long sa = ftell(fa);
+				fseek(fb, 0, SEEK_END); long sb = ftell(fb);
+				CHECK("layout_populated_resave_size_eq", sa == sb);
+				if (sa == sb && sa > 0) {
+					fseek(fa, 0, SEEK_SET);
+					fseek(fb, 0, SEEK_SET);
+					char *ba = malloc((size_t)sa);
+					char *bb = malloc((size_t)sb);
+					if (ba && bb) {
+						fread(ba, 1, (size_t)sa, fa);
+						fread(bb, 1, (size_t)sb, fb);
+						CHECK("layout_populated_resave_byte_eq",
+						    memcmp(ba, bb, (size_t)sa) == 0);
+					}
+					free(ba); free(bb);
+				}
+			}
+			if (fa) fclose(fa);
+			if (fb) fclose(fb);
+		}
+		unlink(tmp2);
+	}
+
+	unlink(tmp_path);
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_config(void)
@@ -618,5 +729,6 @@ int test_venc_config(void)
 	failures += test_audio_channel_clamping();
 	failures += test_audio_roundtrip();
 	failures += test_save_layout_byte_equal();
+	failures += test_save_layout_populated_round_trip();
 	return failures;
 }
