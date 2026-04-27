@@ -976,6 +976,49 @@ static int apply_server(const char *uri)
 	return 0;
 }
 
+static int apply_max_payload_size(uint16_t size)
+{
+	Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
+	uint16_t cap;
+
+	if (!ps)
+		return -1;
+
+	cap = star6e_output_max_payload_cap(&ps->output);
+	if (cap > 0 && size > cap) {
+		fprintf(stderr,
+			"> Cannot live-set max_payload_size=%u: SHM ring slot was "
+			"sized for %u-byte payloads at startup; restart to use a "
+			"larger payload over shm://\n",
+			(unsigned)size, (unsigned)cap);
+		return -1;
+	}
+	if (ps->dual) {
+		uint16_t dcap = star6e_output_max_payload_cap(&ps->dual->output);
+		if (dcap > 0 && size > dcap) {
+			fprintf(stderr,
+				"> Cannot live-set max_payload_size=%u: dual-stream "
+				"SHM ring slot was sized for %u-byte payloads "
+				"at startup\n", (unsigned)size, (unsigned)dcap);
+			return -1;
+		}
+	}
+
+	/* Plain stores — uint16_t writes are atomic on ARM and the encoder
+	 * thread re-reads these once per frame. The next frame uses the new
+	 * value; in-flight fragmentation for the current frame keeps the
+	 * old. */
+	ps->video.rtp_payload_size = size;
+	ps->video.max_frame_size = size;
+	if (ps->dual) {
+		ps->dual->video.rtp_payload_size = size;
+		ps->dual->video.max_frame_size = size;
+	}
+
+	printf("> max_payload_size set to %u (live)\n", (unsigned)size);
+	return 0;
+}
+
 static int apply_mute(bool on)
 {
 	if (!g_star6e_control_ctx.pipeline)
@@ -1013,6 +1056,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_awb_mode = apply_awb_mode,
 	.query_iq_info = star6e_iq_query,
 	.apply_iq_param = star6e_iq_set,
+	.apply_max_payload_size = apply_max_payload_size,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

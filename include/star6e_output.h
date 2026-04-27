@@ -16,10 +16,12 @@
  * path mid-flushes (one extra sendmmsg call) rather than dropping. */
 #define STAR6E_OUTPUT_BATCH_MAX 64
 /* Size of owned per-slot scratch that holds a copy of the RTP header
- * concatenated with payload1. payload1 is either a 3-byte FU-A header
- * (tiny) or an AP packet (up to one MTU). 1616 = 16 header + 1600 payload,
- * comfortably larger than any configured max_payload. */
-#define STAR6E_OUTPUT_BATCH_SLOT_SCRATCH 1616
+ * concatenated with payload1. payload1 is either a 3-byte FU header
+ * (tiny) or an AP packet (up to one MTU). 4096 covers RTP header (12) +
+ * an AP payload up to the live-set max of 4000 (validated in
+ * validate_field_cfg) — sized for jumbo-frame links such as the
+ * Realtek 3993-byte MTU. */
+#define STAR6E_OUTPUT_BATCH_SLOT_SCRATCH 4096
 
 typedef enum {
 	STAR6E_STREAM_MODE_COMPACT = 0,
@@ -119,6 +121,13 @@ int star6e_output_is_rtp(const Star6eOutput *output);
 
 /** Check if active output uses shared memory mode. */
 int star6e_output_is_shm(const Star6eOutput *output);
+
+/** Return the per-RTP-packet payload ceiling allowed by the active
+ *  transport. For SHM this is `slot_data_size - RTP header (12)`; for
+ *  socket transports there is no transport-imposed cap (callers should
+ *  rely on the validate_field_cfg range and scratch-buffer ceiling), so
+ *  this returns UINT16_MAX. Returns 0 for an uninitialized output. */
+uint16_t star6e_output_max_payload_cap(const Star6eOutput *output);
 
 /** Begin accumulating RTP packets for a frame. When the transport is UDP
  *  and SHM is not in use, subsequent star6e_output_send_rtp_parts() calls

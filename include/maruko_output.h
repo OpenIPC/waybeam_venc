@@ -14,9 +14,11 @@
 #define MARUKO_OUTPUT_BATCH_MAX 64
 /* Size of owned per-slot scratch that holds a copy of the RTP header
  * concatenated with payload1. payload1 is either a 3-byte FU-A header
- * (tiny) or an AP packet (up to one MTU). 1616 = 16 header + 1600 payload,
- * comfortably larger than any configured max_payload. */
-#define MARUKO_OUTPUT_BATCH_SLOT_SCRATCH 1616
+ * (tiny) or an AP packet (up to one MTU). 4096 covers RTP header (12) +
+ * an AP payload up to the live-set max of 4000 (validated in
+ * validate_field_cfg) — sized for jumbo-frame links such as the
+ * Realtek 3993-byte MTU. */
+#define MARUKO_OUTPUT_BATCH_SLOT_SCRATCH 4096
 
 /* Per-frame sendmmsg batch. We own `scratch[slot]` containing
  * [RTP header || payload1] concatenated — both the header (built on the
@@ -67,6 +69,12 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 /** Initialize SHM output: create shared memory ring buffer. */
 int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
 	uint16_t max_payload);
+
+/** Return the per-RTP-packet payload ceiling allowed by the active
+ *  transport. For SHM this is `slot_data_size - RTP header (12)`; for
+ *  socket transports there is no transport-imposed cap, so this returns
+ *  UINT16_MAX. Returns 0 for an uninitialized output. */
+uint16_t maruko_output_max_payload_cap(const MarukoOutput *output);
 
 /** Change output destination URI without stopping streaming (udp:// or unix://). */
 int maruko_output_apply_server(MarukoOutput *output, const char *uri);

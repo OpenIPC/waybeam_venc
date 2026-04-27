@@ -68,6 +68,21 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
 	return 0;
 }
 
+uint16_t maruko_output_max_payload_cap(const MarukoOutput *output)
+{
+	uint32_t cap;
+
+	if (!output)
+		return 0;
+	if (!output->ring)
+		return UINT16_MAX;
+	cap = output->ring->slot_data_size;
+	if (cap <= 12)
+		return 0;
+	cap -= 12; /* RTP header */
+	return cap > UINT16_MAX ? UINT16_MAX : (uint16_t)cap;
+}
+
 int maruko_output_apply_server(MarukoOutput *output, const char *uri)
 {
 	VencOutputUri parsed;

@@ -247,6 +247,21 @@ int star6e_output_is_shm(const Star6eOutput *output)
 	return output && output->transport == VENC_OUTPUT_URI_SHM;
 }
 
+uint16_t star6e_output_max_payload_cap(const Star6eOutput *output)
+{
+	uint32_t cap;
+
+	if (!output)
+		return 0;
+	if (!output->ring)
+		return UINT16_MAX;
+	cap = output->ring->slot_data_size;
+	if (cap <= STAR6E_RTP_HEADER_SIZE)
+		return 0;
+	cap -= STAR6E_RTP_HEADER_SIZE;
+	return cap > UINT16_MAX ? UINT16_MAX : (uint16_t)cap;
+}
+
 uint32_t star6e_output_drain_send_errors(Star6eOutput *output)
 {
 	uint32_t n;

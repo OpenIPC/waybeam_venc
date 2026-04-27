@@ -138,6 +138,7 @@ typedef struct {
 	uint32_t frame_width;
 	uint32_t frame_height;
 	VencConfig *vcfg;
+	MarukoBackendConfig *backend_cfg;
 	MI_SYS_ChnPort_t vpe_port;
 	MI_SYS_ChnPort_t venc_port;
 	volatile sig_atomic_t *output_enabled_ptr;
@@ -921,6 +922,32 @@ static int maruko_apply_server(const char *uri)
 	return 0;
 }
 
+static int maruko_apply_max_payload_size(uint16_t size)
+{
+	uint16_t cap;
+
+	if (!g_maruko_output_ptr || !g_ctx.backend_cfg)
+		return -1;
+
+	cap = maruko_output_max_payload_cap(g_maruko_output_ptr);
+	if (cap > 0 && size > cap) {
+		fprintf(stderr,
+			"> Cannot live-set max_payload_size=%u: SHM ring slot was "
+			"sized for %u-byte payloads at startup; restart to use a "
+			"larger payload over shm://\n",
+			(unsigned)size, (unsigned)cap);
+		return -1;
+	}
+
+	/* uint16_t writes are atomic on ARM; the encoder thread re-reads
+	 * cfg->rtp_payload_size / cfg->max_frame_size once per frame. */
+	g_ctx.backend_cfg->rtp_payload_size = size;
+	g_ctx.backend_cfg->max_frame_size = size;
+
+	printf("> max_payload_size set to %u (live)\n", (unsigned)size);
+	return 0;
+}
+
 /* ── Callback table ──────────────────────────────────────────────────── */
 
 static const VencApplyCallbacks g_maruko_apply_cb = {
@@ -942,6 +969,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_awb_mode = maruko_apply_awb_mode,
 	.query_iq_info = maruko_iq_query,
 	.apply_iq_param = maruko_iq_set,
+	.apply_max_payload_size = maruko_apply_max_payload_size,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
@@ -958,6 +986,7 @@ void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
 	g_ctx.frame_width = backend->cfg.image_width;
 	g_ctx.frame_height = backend->cfg.image_height;
 	g_ctx.vcfg = vcfg;
+	g_ctx.backend_cfg = &backend->cfg;
 	g_ctx.vpe_port = backend->vpe_port;
 	g_ctx.venc_port = backend->venc_port;
 	g_ctx.output_enabled_ptr = &backend->output_enabled;

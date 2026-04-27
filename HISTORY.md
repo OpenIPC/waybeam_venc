@@ -1,5 +1,36 @@
 # History
 
+## [0.9.1] - 2026-04-28
+
+Live `outgoing.max_payload_size` (`/api/v1/set?outgoing.maxPayloadSize=...`):
+
+- **Promoted from `MUT_RESTART` to `MUT_LIVE`.** The new size takes effect
+  on the next encoded frame; the in-flight frame finishes packetizing at
+  the old size, so a switch can never tear a single frame's FU/AP
+  fragmentation. Composes with other live fields in a single multi-set
+  request, e.g. `?video0.bitrate=8000&outgoing.maxPayloadSize=4000`.
+- **Range validated to `[576, 4000]`** in `validate_field_cfg()`. Same
+  validation now also gates boot via `venc_api_validate_loaded_config()`,
+  so a bad on-disk config refuses to start instead of crashing later.
+  4000 is sized for jumbo-frame links such as Realtek's 3993-byte MTU
+  (4000 + 12 RTP + 8 UDP + 20 IP = 4040, fits comfortably).
+- **Per-slot scratch bumped from 1616 → 4096 bytes** in both backends
+  (`STAR6E_OUTPUT_BATCH_SLOT_SCRATCH`, `MARUKO_OUTPUT_BATCH_SLOT_SCRATCH`).
+  Required so the sendmmsg() batch can hold an AP packet up to the new
+  4000-byte limit. ~159 KiB extra per backend (64 slots × 2.4 KiB delta).
+- **SHM transport gating.** `shm://` outputs reject live increases that
+  would exceed the ring slot capacity sized at startup
+  (`slot_data_size = startup_max_payload + 12`); a clear error is logged
+  and the apply fails with `500 internal_error`. UDP and Unix datagram
+  transports have no transport-level cap — only the validated range and
+  scratch ceiling apply.
+- New optional callback `VencApplyCallbacks.apply_max_payload_size`,
+  implemented in `star6e_controls.c` (covers dual-stream second channel)
+  and `maruko_controls.c`.
+- Cleaned up a stale `outgoing.max_payload_size` paragraph in
+  `HTTP_API_CONTRACT.md` that described an "adaptive algorithm" no
+  longer in the codebase.
+
 ## [0.9.0] - 2026-04-26
 
 Two themes shipped together:
@@ -79,7 +110,6 @@ the only path that scales.
   in `src/venc_config.c` is now an explicit sync point alongside the
   struct, parser/serializer, API field+alias tables, WebUI `SECTIONS[]`,
   and `config/venc.default.json`.
-
 ## [0.8.1] - 2026-04-25
 
 SD-card recording browser (dashboard tab + JSON API):
