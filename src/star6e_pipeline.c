@@ -777,7 +777,7 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 		return -1;
 	}
 	if (star6e_output_prepare(&pconf->output_setup, vcfg->outgoing.server,
-	    vcfg->outgoing.stream_mode, vcfg->outgoing.max_payload_size,
+	    vcfg->outgoing.stream_mode,
 	    vcfg->outgoing.connected_udp) != 0)
 		return -1;
 

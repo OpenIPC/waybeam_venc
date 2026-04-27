@@ -1169,8 +1169,8 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			fprintf(stderr, "ERROR: [maruko] shm:// requires RTP mode\n");
 			return -1;
 		}
-		if (maruko_output_init_shm(&ctx->output, ctx->cfg.output_uri.endpoint,
-		    ctx->cfg.rtp_payload_size) != 0)
+		if (maruko_output_init_shm(&ctx->output,
+		    ctx->cfg.output_uri.endpoint) != 0)
 			return -1;
 	} else {
 		if (maruko_output_init(&ctx->output, &ctx->cfg.output_uri,

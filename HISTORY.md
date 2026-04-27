@@ -25,17 +25,32 @@ Live `outgoing.max_payload_size` (`/api/v1/set?outgoing.maxPayloadSize=...`):
   per ring vs. the previous "size to configured starting value" scheme,
   but this is paid only when SHM output is actually configured. UDP and
   Unix datagram transports have no transport-level cap — only the
-  validated range and scratch ceiling apply. The
-  `star6e_output_max_payload_cap` / `maruko_output_max_payload_cap`
-  helpers remain as defense-in-depth: they now report the full ceiling
-  for SHM as well, so a value out of the validated range (e.g. via
-  programmatic misuse) is still rejected before write.
+  validated range and scratch ceiling apply.
+- **wfb_tx (or any SHM consumer) compatibility note.** The published
+  `slot_data_size` in the ring header changes from
+  `startup_max_payload + 12` (typically 1412) to a fixed 4012 after this
+  release. Well-behaved consumers using `venc_ring_attach()` already
+  read `slot_data_size` from the header and compute slot stride from
+  it, so they handle the change automatically. A consumer that hard-
+  codes a 1412-byte slot stride or uses a fixed-size read buffer below
+  4012 will need to be updated.
+- **Audio path tracks live updates too.** `Star6eAudioOutput.max_payload_size`
+  is now updated in the live apply alongside the video state, so audio
+  compact-mode chunking uses the new value on the next audio frame
+  (RTP audio doesn't fragment, so the field is unused there but kept in
+  sync for future-proofing).
 - New optional callback `VencApplyCallbacks.apply_max_payload_size`,
   implemented in `star6e_controls.c` (covers dual-stream second channel)
   and `maruko_controls.c`.
-- Cleaned up a stale `outgoing.max_payload_size` paragraph in
-  `HTTP_API_CONTRACT.md` that described an "adaptive algorithm" no
-  longer in the codebase.
+- Cleanups while in the area:
+  - `Star6eOutputSetup.max_frame_size` field and the
+    `max_payload` parameter to `maruko_output_init_shm` were both
+    rendered dead by sizing SHM rings to the ceiling; removed along
+    with the now-redundant `*_output_max_payload_cap` helpers and
+    SHM cap checks (validation is the single gate).
+  - Removed a stale `outgoing.max_payload_size` paragraph in
+    `HTTP_API_CONTRACT.md` that described an "adaptive algorithm" no
+    longer in the codebase.
 
 ## [0.9.0] - 2026-04-26
 

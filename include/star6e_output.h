@@ -17,10 +17,10 @@
 #define STAR6E_OUTPUT_BATCH_MAX 64
 /* Size of owned per-slot scratch that holds a copy of the RTP header
  * concatenated with payload1. payload1 is either a 3-byte FU header
- * (tiny) or an AP packet (up to one MTU). 4096 covers RTP header (12) +
- * an AP payload up to the live-set max of 4000 (validated in
- * validate_field_cfg) — sized for jumbo-frame links such as the
- * Realtek 3993-byte MTU. */
+ * (tiny) or an AP packet (up to one MTU). Worst case at the
+ * VENC_OUTPUT_PAYLOAD_CEILING_BYTES (4000) live-validated max is
+ * 12 (RTP) + 4000 = 4012 bytes; rounded up to 4096 for slack and
+ * alignment. Sized for jumbo-frame links such as the Realtek 3993 MTU. */
 #define STAR6E_OUTPUT_BATCH_SLOT_SCRATCH 4096
 
 typedef enum {
@@ -33,7 +33,6 @@ typedef struct {
 	VencOutputUri uri;
 	int requested_connected_udp;
 	int has_server;
-	uint16_t max_frame_size;
 } Star6eOutputSetup;
 
 /* Per-frame sendmmsg batch. We own `scratch[slot]` containing
@@ -105,7 +104,7 @@ typedef size_t (*Star6eOutputRtpSendFn)(Star6eOutput *output,
 
 /** Validate and prepare output config from URI and stream mode name. */
 int star6e_output_prepare(Star6eOutputSetup *setup, const char *server_uri,
-	const char *stream_mode_name, uint16_t max_frame_size, int connected_udp);
+	const char *stream_mode_name, int connected_udp);
 
 /** Check if output setup is configured for RTP streaming. */
 int star6e_output_setup_is_rtp(const Star6eOutputSetup *setup);
@@ -121,13 +120,6 @@ int star6e_output_is_rtp(const Star6eOutput *output);
 
 /** Check if active output uses shared memory mode. */
 int star6e_output_is_shm(const Star6eOutput *output);
-
-/** Return the per-RTP-packet payload ceiling allowed by the active
- *  transport. For SHM this is `slot_data_size - RTP header (12)`; for
- *  socket transports there is no transport-imposed cap (callers should
- *  rely on the validate_field_cfg range and scratch-buffer ceiling), so
- *  this returns UINT16_MAX. Returns 0 for an uninitialized output. */
-uint16_t star6e_output_max_payload_cap(const Star6eOutput *output);
 
 /** Begin accumulating RTP packets for a frame. When the transport is UDP
  *  and SHM is not in use, subsequent star6e_output_send_rtp_parts() calls

@@ -979,41 +979,27 @@ static int apply_server(const char *uri)
 static int apply_max_payload_size(uint16_t size)
 {
 	Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
-	uint16_t cap;
 
 	if (!ps)
 		return -1;
 
-	cap = star6e_output_max_payload_cap(&ps->output);
-	if (cap > 0 && size > cap) {
-		fprintf(stderr,
-			"> Cannot live-set max_payload_size=%u: SHM ring slot was "
-			"sized for %u-byte payloads at startup; restart to use a "
-			"larger payload over shm://\n",
-			(unsigned)size, (unsigned)cap);
-		return -1;
-	}
-	if (ps->dual) {
-		uint16_t dcap = star6e_output_max_payload_cap(&ps->dual->output);
-		if (dcap > 0 && size > dcap) {
-			fprintf(stderr,
-				"> Cannot live-set max_payload_size=%u: dual-stream "
-				"SHM ring slot was sized for %u-byte payloads "
-				"at startup\n", (unsigned)size, (unsigned)dcap);
-			return -1;
-		}
-	}
-
-	/* Plain stores — uint16_t writes are atomic on ARM and the encoder
-	 * thread re-reads these once per frame. The next frame uses the new
-	 * value; in-flight fragmentation for the current frame keeps the
-	 * old. */
+	/* Validation enforces [VENC_OUTPUT_PAYLOAD_MIN_BYTES,
+	 * VENC_OUTPUT_PAYLOAD_CEILING_BYTES] and the SHM ring is sized to
+	 * the ceiling at startup, so any value reaching here fits every
+	 * transport. Plain uint16_t stores are atomic on ARM; readers
+	 * (encoder thread, audio compact thread) re-read once per frame.
+	 * The next frame uses the new value; in-flight fragmentation for
+	 * the current frame keeps the old. */
 	ps->video.rtp_payload_size = size;
 	ps->video.max_frame_size = size;
 	if (ps->dual) {
 		ps->dual->video.rtp_payload_size = size;
 		ps->dual->video.max_frame_size = size;
 	}
+	/* Audio compact-mode chunking reads this on every audio frame
+	 * (star6e_audio_output_send_compact). RTP audio doesn't fragment so
+	 * the field is unused there, but we keep both modes in sync. */
+	ps->audio.output.max_payload_size = size;
 
 	printf("> max_payload_size set to %u (live)\n", (unsigned)size);
 	return 0;

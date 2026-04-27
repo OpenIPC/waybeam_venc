@@ -132,7 +132,7 @@ static int test_star6e_output_udp_init(void)
 	int ret;
 
 	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600",
-		"rtp", 1400, 0);
+		"rtp", 0);
 	CHECK("star6e output udp prepare", ret == 0);
 	CHECK("star6e output udp setup is rtp", star6e_output_setup_is_rtp(&setup));
 	ret = star6e_output_init(&output, &setup);
@@ -158,7 +158,7 @@ static int test_star6e_output_udp_invalid_host_rejected(void)
 	int ret;
 
 	ret = star6e_output_prepare(&setup, "udp://localhost:5600",
-		"rtp", 1400, 0);
+		"rtp", 0);
 	CHECK("star6e output invalid host prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output invalid host init rejected", ret == -1);
@@ -173,7 +173,7 @@ static int test_star6e_output_udp_apply_server(void)
 	int ret;
 
 	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600",
-		"rtp", 1400, 1);
+		"rtp", 1);
 	CHECK("star6e output udp apply prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output udp apply init", ret == 0);
@@ -201,7 +201,7 @@ static int test_star6e_output_udp_send_rtp(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e output udp rtp receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e output udp rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output udp rtp init", ret == 0);
@@ -238,7 +238,7 @@ static int test_star6e_output_shm_send_rtp(void)
 
 	snprintf(name, sizeof(name), "test_star6e_output_send_%ld", (long)getpid());
 	snprintf(uri, sizeof(uri), "shm://%s", name);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e output shm send prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output shm send init", ret == 0);
@@ -271,7 +271,7 @@ static int test_star6e_output_shm_init(void)
 	int ret;
 
 	snprintf(uri, sizeof(uri), "shm://test_star6e_output_%ld", (long)getpid());
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e output shm prepare", ret == 0);
 	CHECK("star6e output shm setup is rtp", star6e_output_setup_is_rtp(&setup));
 	ret = star6e_output_init(&output, &setup);
@@ -306,7 +306,7 @@ static int test_star6e_output_udp_send_compact(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e output compact receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("star6e output compact prepare", ret == 0);
 	CHECK("star6e output compact setup not rtp",
 		!star6e_output_setup_is_rtp(&setup));
@@ -344,7 +344,7 @@ static int test_star6e_output_unix_send_rtp(void)
 	recv_socket = create_unix_receiver(name);
 	CHECK("star6e unix rtp receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "unix://%s", name);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 1);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 1);
 	CHECK("star6e unix rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e unix rtp init", ret == 0);
@@ -385,7 +385,7 @@ static int test_star6e_output_unix_send_compact(void)
 	recv_socket = create_unix_receiver(name);
 	CHECK("star6e unix compact receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "unix://%s", name);
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("star6e unix compact prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e unix compact init", ret == 0);
@@ -414,7 +414,7 @@ static int test_star6e_output_send_frame_rtp_dispatch(void)
 
 	g_test_star6e_rtp_send_called = 0;
 	g_test_star6e_rtp_send_valid = 0;
-	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 0);
 	CHECK("star6e output send frame rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output send frame rtp init", ret == 0);
@@ -465,7 +465,7 @@ static int test_star6e_output_udp_send_compact_frame(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e output compact frame receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("star6e output compact frame prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output compact frame init", ret == 0);
@@ -517,7 +517,7 @@ static int test_star6e_output_send_frame_compact_dispatch(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e output send frame compact receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("star6e output send frame compact prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output send frame compact init", ret == 0);
@@ -547,7 +547,7 @@ static int test_star6e_output_shm_compact_rejected(void)
 	int ret;
 
 	snprintf(uri, sizeof(uri), "shm://test_star6e_output_bad_%ld", (long)getpid());
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("star6e output shm compact rejected", ret == -1);
 	return failures;
 }
@@ -561,7 +561,7 @@ static int test_star6e_output_shm_apply_server_rejected(void)
 	int ret;
 
 	snprintf(uri, sizeof(uri), "shm://test_star6e_output_apply_%ld", (long)getpid());
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e output shm apply prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output shm apply init", ret == 0);
@@ -578,7 +578,7 @@ static int test_star6e_output_empty_server_prepare(void)
 	int failures = 0;
 	int ret;
 
-	ret = star6e_output_prepare(&setup, "", "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, "", "rtp", 0);
 	CHECK("star6e output empty prepare", ret == 0);
 	CHECK("star6e output empty prepare has no server", setup.has_server == 0);
 	ret = star6e_output_init(&output, &setup);
@@ -596,7 +596,7 @@ static int test_star6e_output_prepare_defaults_to_rtp(void)
 	int ret;
 
 	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600",
-		"unexpected", 1400, 0);
+		"unexpected", 0);
 	CHECK("star6e output default mode prepare", ret == 0);
 	CHECK("star6e output default mode is rtp",
 		star6e_output_setup_is_rtp(&setup));
@@ -633,7 +633,7 @@ static int test_star6e_audio_output_send_rtp(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e audio rtp receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e audio rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio rtp output init", ret == 0);
@@ -692,7 +692,7 @@ static int test_star6e_audio_output_shm_dedicated_local_udp(void)
 	int ret;
 
 	snprintf(uri, sizeof(uri), "shm://test_star6e_audio_shm_%ld", (long)getpid());
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e audio shm prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio shm output init", ret == 0);
@@ -740,7 +740,7 @@ static int test_star6e_audio_output_shared_apply_server(void)
 	snprintf(uri_a, sizeof(uri_a), "udp://127.0.0.1:%u", port_a);
 	snprintf(uri_b, sizeof(uri_b), "udp://127.0.0.1:%u", port_b);
 
-	ret = star6e_output_prepare(&setup, uri_a, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri_a, "compact", 0);
 	CHECK("star6e audio shared prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio shared output init", ret == 0);
@@ -802,7 +802,7 @@ static int test_star6e_audio_output_shared_switch_udp_to_unix(void)
 	snprintf(udp_uri, sizeof(udp_uri), "udp://127.0.0.1:%u", udp_port);
 	snprintf(unix_uri, sizeof(unix_uri), "unix://%s", unix_name);
 
-	ret = star6e_output_prepare(&setup, udp_uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, udp_uri, "compact", 0);
 	CHECK("star6e audio udp->unix prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio udp->unix output init", ret == 0);
@@ -863,7 +863,7 @@ static int test_star6e_audio_output_dedicated_port(void)
 	snprintf(video_uri_a, sizeof(video_uri_a), "udp://127.0.0.1:%u", video_port_a);
 	snprintf(video_uri_b, sizeof(video_uri_b), "udp://127.0.0.1:%u", video_port_b);
 
-	ret = star6e_output_prepare(&setup, video_uri_a, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, video_uri_a, "compact", 0);
 	CHECK("star6e audio dedicated prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio dedicated output init", ret == 0);
@@ -926,7 +926,7 @@ static int test_star6e_audio_output_unix_dedicated_local_udp(void)
 	snprintf(unix_uri_a, sizeof(unix_uri_a), "unix://%s", unix_name_a);
 	snprintf(unix_uri_b, sizeof(unix_uri_b), "unix://%s", unix_name_b);
 
-	ret = star6e_output_prepare(&setup, unix_uri_a, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, unix_uri_a, "compact", 0);
 	CHECK("star6e audio unix dedicated prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio unix dedicated output init", ret == 0);
@@ -977,7 +977,7 @@ static int test_star6e_audio_output_shared_teardown_keeps_video_socket(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e audio shared teardown receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e audio shared teardown prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio shared teardown output init", ret == 0);
@@ -1022,7 +1022,7 @@ static int test_audio_target_cache_gen_tracks_transport(void)
 	snprintf(uri_a, sizeof(uri_a), "udp://127.0.0.1:%u", port_a);
 	snprintf(uri_b, sizeof(uri_b), "udp://127.0.0.1:%u", port_b);
 
-	ret = star6e_output_prepare(&setup, uri_a, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri_a, "compact", 0);
 	CHECK("cache gen prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("cache gen output init", ret == 0);
@@ -1076,7 +1076,7 @@ static int test_audio_target_cache_hit_stable(void)
 	CHECK("cache hit receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
 
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("cache hit prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("cache hit output init", ret == 0);

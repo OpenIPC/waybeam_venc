@@ -164,7 +164,7 @@ static Star6eStreamMode star6e_output_stream_mode_from_name(
 }
 
 int star6e_output_prepare(Star6eOutputSetup *setup, const char *server_uri,
-	const char *stream_mode_name, uint16_t max_frame_size, int connected_udp)
+	const char *stream_mode_name, int connected_udp)
 {
 	if (!setup)
 		return -1;
@@ -172,7 +172,6 @@ int star6e_output_prepare(Star6eOutputSetup *setup, const char *server_uri,
 	star6e_output_setup_reset(setup);
 	setup->stream_mode = star6e_output_stream_mode_from_name(stream_mode_name);
 	setup->requested_connected_udp = connected_udp ? 1 : 0;
-	setup->max_frame_size = max_frame_size;
 
 	if (!server_uri || !server_uri[0])
 		return 0;
@@ -213,10 +212,10 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 		return 0;
 
 	if (setup->uri.type == VENC_OUTPUT_URI_SHM) {
-		/* Size the SHM ring slot to fit the validated payload ceiling
-		 * (not the configured starting value) so live updates inside
-		 * [MIN, CEILING] always fit, matching UDP/unix:// behavior. */
-		(void)setup->max_frame_size;
+		/* Slot fits the validated payload ceiling so any value in
+		 * [VENC_OUTPUT_PAYLOAD_MIN_BYTES,
+		 * VENC_OUTPUT_PAYLOAD_CEILING_BYTES] applies live without
+		 * restart, matching UDP/unix:// behavior. */
 		slot_data = (uint32_t)VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12;
 		output->ring = venc_ring_create(setup->uri.endpoint, 512, slot_data);
 		if (!output->ring) {
@@ -249,21 +248,6 @@ int star6e_output_is_rtp(const Star6eOutput *output)
 int star6e_output_is_shm(const Star6eOutput *output)
 {
 	return output && output->transport == VENC_OUTPUT_URI_SHM;
-}
-
-uint16_t star6e_output_max_payload_cap(const Star6eOutput *output)
-{
-	uint32_t cap;
-
-	if (!output)
-		return 0;
-	if (!output->ring)
-		return UINT16_MAX;
-	cap = output->ring->slot_data_size;
-	if (cap <= STAR6E_RTP_HEADER_SIZE)
-		return 0;
-	cap -= STAR6E_RTP_HEADER_SIZE;
-	return cap > UINT16_MAX ? UINT16_MAX : (uint16_t)cap;
 }
 
 uint32_t star6e_output_drain_send_errors(Star6eOutput *output)

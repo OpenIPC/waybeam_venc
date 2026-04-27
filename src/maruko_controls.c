@@ -924,23 +924,15 @@ static int maruko_apply_server(const char *uri)
 
 static int maruko_apply_max_payload_size(uint16_t size)
 {
-	uint16_t cap;
-
-	if (!g_maruko_output_ptr || !g_ctx.backend_cfg)
+	if (!g_ctx.backend_cfg)
 		return -1;
 
-	cap = maruko_output_max_payload_cap(g_maruko_output_ptr);
-	if (cap > 0 && size > cap) {
-		fprintf(stderr,
-			"> Cannot live-set max_payload_size=%u: SHM ring slot was "
-			"sized for %u-byte payloads at startup; restart to use a "
-			"larger payload over shm://\n",
-			(unsigned)size, (unsigned)cap);
-		return -1;
-	}
-
-	/* uint16_t writes are atomic on ARM; the encoder thread re-reads
-	 * cfg->rtp_payload_size / cfg->max_frame_size once per frame. */
+	/* Validation enforces [VENC_OUTPUT_PAYLOAD_MIN_BYTES,
+	 * VENC_OUTPUT_PAYLOAD_CEILING_BYTES] and the SHM ring is sized to
+	 * the ceiling at startup, so any value reaching here fits every
+	 * transport. Plain uint16_t stores are atomic on ARM; the encoder
+	 * thread re-reads cfg->rtp_payload_size / cfg->max_frame_size once
+	 * per frame. */
 	g_ctx.backend_cfg->rtp_payload_size = size;
 	g_ctx.backend_cfg->max_frame_size = size;
 
@@ -986,6 +978,10 @@ void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
 	g_ctx.frame_width = backend->cfg.image_width;
 	g_ctx.frame_height = backend->cfg.image_height;
 	g_ctx.vcfg = vcfg;
+	/* backend_cfg points into MarukoBackendContext, which lives in the
+	 * runner context for the entire process lifetime. Reinit re-runs
+	 * maruko_config_from_venc and rebinds, so the pointer remains
+	 * valid and the snapshot stays in sync with vcfg. */
 	g_ctx.backend_cfg = &backend->cfg;
 	g_ctx.vpe_port = backend->vpe_port;
 	g_ctx.venc_port = backend->venc_port;

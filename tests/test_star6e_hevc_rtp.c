@@ -69,7 +69,7 @@ static int test_star6e_hevc_rtp_sends_idr_with_prepended_ap(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e hevc rtp receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e hevc rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e hevc rtp init", ret == 0);

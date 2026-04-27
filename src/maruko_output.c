@@ -35,8 +35,7 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	return 0;
 }
 
-int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
-	uint16_t max_payload)
+int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 {
 	uint32_t slot_data;
 
@@ -54,10 +53,9 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
 	memset(&output->batch, 0, sizeof(output->batch));
 	output->batch.socket_handle = -1;
 
-	/* Size the SHM ring slot to fit the validated payload ceiling
-	 * (not the configured starting value) so live updates inside
-	 * [MIN, CEILING] always fit, matching UDP/unix:// behavior. */
-	(void)max_payload;
+	/* Slot fits the validated payload ceiling so any value in
+	 * [VENC_OUTPUT_PAYLOAD_MIN_BYTES, VENC_OUTPUT_PAYLOAD_CEILING_BYTES]
+	 * applies live without restart, matching UDP/unix:// behavior. */
 	slot_data = (uint32_t)VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12;
 	output->ring = venc_ring_create(shm_name, 512, slot_data);
 	if (!output->ring) {
@@ -70,21 +68,6 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
 		slot_data);
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
-}
-
-uint16_t maruko_output_max_payload_cap(const MarukoOutput *output)
-{
-	uint32_t cap;
-
-	if (!output)
-		return 0;
-	if (!output->ring)
-		return UINT16_MAX;
-	cap = output->ring->slot_data_size;
-	if (cap <= 12)
-		return 0;
-	cap -= 12; /* RTP header */
-	return cap > UINT16_MAX ? UINT16_MAX : (uint16_t)cap;
 }
 
 int maruko_output_apply_server(MarukoOutput *output, const char *uri)

@@ -60,7 +60,7 @@ static int test_star6e_video_init_rtp_state(void)
 
 	venc_config_defaults(&cfg);
 
-	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 0);
 	CHECK("star6e video rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e video rtp output init", ret == 0);
@@ -87,7 +87,7 @@ static int test_star6e_video_init_compact_state(void)
 	int ret;
 
 	venc_config_defaults(&cfg);
-	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "compact", 0);
 	CHECK("star6e video compact prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e video compact output init", ret == 0);
@@ -127,7 +127,7 @@ static int test_star6e_video_send_frame_rtp(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e video send receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e video send prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e video send output init", ret == 0);
@@ -179,7 +179,7 @@ static int test_star6e_video_send_frame_disabled(void)
 
 	venc_config_defaults(&cfg);
 
-	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 0);
 	CHECK("star6e video disabled prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e video disabled output init", ret == 0);
@@ -233,7 +233,7 @@ static int test_star6e_video_sidecar_ext(void)
 	CHECK("star6e sidecar probe socket", probe_socket >= 0);
 	cfg.outgoing.sidecar_port = sidecar_port;
 
-	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 0);
 	CHECK("star6e sidecar prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e sidecar output init", ret == 0);
