@@ -54,7 +54,11 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
 	memset(&output->batch, 0, sizeof(output->batch));
 	output->batch.socket_handle = -1;
 
-	slot_data = (uint32_t)max_payload + 12;
+	/* Size the SHM ring slot to fit the validated payload ceiling
+	 * (not the configured starting value) so live updates inside
+	 * [MIN, CEILING] always fit, matching UDP/unix:// behavior. */
+	(void)max_payload;
+	slot_data = (uint32_t)VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12;
 	output->ring = venc_ring_create(shm_name, 512, slot_data);
 	if (!output->ring) {
 		fprintf(stderr, "ERROR: [maruko] venc_ring_create(%s) failed\n",

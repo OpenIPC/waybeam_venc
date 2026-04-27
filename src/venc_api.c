@@ -626,14 +626,15 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		return "video0.scene_holdoff must be >= 1 when scene_threshold > 0";
 	if (strcmp(key, "outgoing.max_payload_size") == 0) {
 		uint16_t v = cfg->outgoing.max_payload_size;
-		/* Lower bound 576 keeps RTP/FU header overhead a small fraction
-		 * of payload; upper bound 4000 fits inside the per-slot scratch
+		/* Lower bound keeps RTP/FU header overhead a small fraction of
+		 * payload; upper bound fits inside the per-slot scratch
 		 * (STAR6E_OUTPUT_BATCH_SLOT_SCRATCH/MARUKO_OUTPUT_BATCH_SLOT_SCRATCH
-		 * = 4096 minus 12-byte RTP header, with headroom). Above that
-		 * range the encoder still works, but UDP datagrams exceed any
+		 * = 4096 minus 12-byte RTP header) and inside the SHM ring slot
+		 * sized at startup. Above that range UDP datagrams exceed any
 		 * realistic single-hop MTU and IP fragmentation defeats the
 		 * point. */
-		if (v < 576 || v > 4000)
+		if (v < VENC_OUTPUT_PAYLOAD_MIN_BYTES ||
+		    v > VENC_OUTPUT_PAYLOAD_CEILING_BYTES)
 			return "outgoing.max_payload_size must be in range [576, 4000]";
 	}
 	return NULL;

@@ -213,7 +213,11 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 		return 0;
 
 	if (setup->uri.type == VENC_OUTPUT_URI_SHM) {
-		slot_data = (uint32_t)setup->max_frame_size + 12;
+		/* Size the SHM ring slot to fit the validated payload ceiling
+		 * (not the configured starting value) so live updates inside
+		 * [MIN, CEILING] always fit, matching UDP/unix:// behavior. */
+		(void)setup->max_frame_size;
+		slot_data = (uint32_t)VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12;
 		output->ring = venc_ring_create(setup->uri.endpoint, 512, slot_data);
 		if (!output->ring) {
 			fprintf(stderr, "ERROR: venc_ring_create(%s) failed\n",

@@ -427,9 +427,9 @@ curl "http://<device-ip>/api/v1/set?outgoing.connected_udp=true"
   standard 1500-MTU path the kernel will IP-fragment, defeating the point.
   Composes with other live fields in a single multi-set request — for example
   `?video0.bitrate=8000&outgoing.maxPayloadSize=4000` applies both atomically.
-  When the active output is `shm://`, the new value must fit the ring slot that
-  was sized at startup (slot capacity = startup `max_payload_size + 12`); larger
-  values are rejected with `500 internal_error` and require a restart.
+  Live updates are accepted across all transports (`udp://`, `unix://`, `shm://`):
+  the SHM ring slot is sized at startup to fit the validated ceiling so any value
+  in range applies live without restart, just like UDP/Unix.
 - `outgoing.connected_udp`: When `true`, calls `connect()` on the UDP socket so the kernel
   returns ICMP port-unreachable errors via `sendmsg()`. Useful for detecting that a receiver
   is down. Default `false` (fire-and-forget).
@@ -995,8 +995,11 @@ Behavior:
     e.g. `?video0.bitrate=8000&outgoing.maxPayloadSize=4000`.
   - Validation range tightened to `[576, 4000]` (boot will refuse a config
     outside that range).
-  - `shm://` outputs reject live increases that exceed the ring slot
-    capacity sized at startup; restart is required to grow beyond that.
+  - SHM ring slot is sized at startup to fit the validated ceiling
+    (4000 + 12 RTP header = 4012 bytes per slot, 8-byte aligned), so
+    `shm://` accepts the full live range with no restart-to-grow caveat,
+    matching `udp://` and `unix://` behavior. Costs ~1.3 MiB extra SHM
+    per ring.
 - `0.6.3`:
   - Added `GET /api/v1/recordings` — list files with size/mtime plus
     `free_bytes` / `total_bytes` for the configured `record.dir`.

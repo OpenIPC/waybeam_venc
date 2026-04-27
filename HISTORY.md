@@ -18,12 +18,18 @@ Live `outgoing.max_payload_size` (`/api/v1/set?outgoing.maxPayloadSize=...`):
   (`STAR6E_OUTPUT_BATCH_SLOT_SCRATCH`, `MARUKO_OUTPUT_BATCH_SLOT_SCRATCH`).
   Required so the sendmmsg() batch can hold an AP packet up to the new
   4000-byte limit. ~159 KiB extra per backend (64 slots × 2.4 KiB delta).
-- **SHM transport gating.** `shm://` outputs reject live increases that
-  would exceed the ring slot capacity sized at startup
-  (`slot_data_size = startup_max_payload + 12`); a clear error is logged
-  and the apply fails with `500 internal_error`. UDP and Unix datagram
-  transports have no transport-level cap — only the validated range and
-  scratch ceiling apply.
+- **SHM parity with UDP/Unix.** SHM rings are sized at startup to fit
+  the validated ceiling (`VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12` =
+  4012 bytes per slot, 8-byte aligned), so `shm://` accepts the full
+  live range without a restart-to-grow caveat. Costs ~1.3 MiB extra SHM
+  per ring vs. the previous "size to configured starting value" scheme,
+  but this is paid only when SHM output is actually configured. UDP and
+  Unix datagram transports have no transport-level cap — only the
+  validated range and scratch ceiling apply. The
+  `star6e_output_max_payload_cap` / `maruko_output_max_payload_cap`
+  helpers remain as defense-in-depth: they now report the full ceiling
+  for SHM as well, so a value out of the validated range (e.g. via
+  programmatic misuse) is still rejected before write.
 - New optional callback `VencApplyCallbacks.apply_max_payload_size`,
   implemented in `star6e_controls.c` (covers dual-stream second channel)
   and `maruko_controls.c`.
