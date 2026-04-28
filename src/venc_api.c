@@ -1,6 +1,7 @@
 #include "venc_api.h"
 #include "idr_rate_limit.h"
 #include "pipeline_common.h"
+#include "rtp_packetizer.h"
 #include "sensor_select.h"
 #include "star6e_recorder.h"
 #include "venc_httpd.h"
@@ -12,6 +13,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Guard the live max_payload_size ceiling against future tightenings:
+ * - RTP_BUFFER_MAX is the hard cap inside the packetizer (silently
+ *   truncates above it).
+ * - SHM ring slot_data_size is uint32 in the header but published as
+ *   uint16-fitting (slot_data + 12 must fit into the 65535 cap that
+ *   venc_ring_create rejects). */
+_Static_assert(VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12 <= RTP_BUFFER_MAX,
+	"VENC_OUTPUT_PAYLOAD_CEILING_BYTES exceeds RTP_BUFFER_MAX cap");
+_Static_assert(VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12 <= 65535,
+	"VENC_OUTPUT_PAYLOAD_CEILING_BYTES would overflow SHM slot_data_size");
 
 /* ── Shared state (set by venc_api_register) ─────────────────────────── */
 

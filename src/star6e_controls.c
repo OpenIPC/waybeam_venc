@@ -1001,7 +1001,10 @@ static int apply_max_payload_size(uint16_t size)
 	 * the field is unused there, but we keep both modes in sync. */
 	ps->audio.output.max_payload_size = size;
 
-	printf("> max_payload_size set to %u (live)\n", (unsigned)size);
+	/* Use stderr (unbuffered, bypasses the audio stdout filter pipe in
+	 * star6e_audio.c) so the live-apply trace lands in the log even
+	 * when stdout is captured by the filter. */
+	fprintf(stderr, "> max_payload_size set to %u (live)\n", (unsigned)size);
 	return 0;
 }
 

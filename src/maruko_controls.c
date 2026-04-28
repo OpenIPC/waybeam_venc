@@ -936,7 +936,9 @@ static int maruko_apply_max_payload_size(uint16_t size)
 	g_ctx.backend_cfg->rtp_payload_size = size;
 	g_ctx.backend_cfg->max_frame_size = size;
 
-	printf("> max_payload_size set to %u (live)\n", (unsigned)size);
+	/* stderr (unbuffered) so the live trace lands in the log even when
+	 * stdout is buffered or captured by the audio filter. */
+	fprintf(stderr, "> max_payload_size set to %u (live)\n", (unsigned)size);
 	return 0;
 }
 
