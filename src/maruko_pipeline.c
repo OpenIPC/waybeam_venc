@@ -1488,24 +1488,24 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			ctx->venc_channel, &stream);
 
 		{
-			RtpSidecarShmInfo shm_info;
-			const RtpSidecarShmInfo *shm_ptr = NULL;
+			RtpSidecarTransportInfo tinfo;
+			const RtpSidecarTransportInfo *tinfo_ptr = NULL;
 			if (ctx->output.ring) {
 				venc_ring_fill_t fill;
 				if (venc_ring_get_fill(ctx->output.ring, &fill) == 0) {
-					shm_info.fill_pct = fill.fill_pct;
-					shm_info.in_pressure = ctx->output.in_pressure ? 1 : 0;
-					shm_info.full_drops = (uint32_t)fill.full_drops;
-					shm_info.pressure_drops =
+					tinfo.fill_pct = fill.fill_pct;
+					tinfo.in_pressure = ctx->output.in_pressure ? 1 : 0;
+					tinfo.transport_drops = (uint32_t)fill.full_drops;
+					tinfo.pressure_drops =
 						(uint32_t)ctx->output.pressure_drops;
-					shm_info.writes = (uint32_t)fill.writes;
-					shm_ptr = &shm_info;
+					tinfo.packets_sent = (uint32_t)fill.writes;
+					tinfo_ptr = &tinfo;
 				}
 			}
-			rtp_sidecar_send_frame_shm(&sidecar, rtp_state.ssrc,
+			rtp_sidecar_send_frame_transport(&sidecar, rtp_state.ssrc,
 				frame_rtp_ts, seq_before,
 				(uint16_t)(rtp_state.seq - seq_before),
-				capture_us, ready_us, &enc_info, shm_ptr);
+				capture_us, ready_us, &enc_info, tinfo_ptr);
 		}
 
 		if (ctx->cfg.verbose) {

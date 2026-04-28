@@ -47,9 +47,9 @@
     "connectedUdp": true,
     "audioPort": 5601,
     "sidecarPort": 5602,
-    "shmBackpressure": true,
-    "shmHighWaterPct": 75,
-    "shmLowWaterPct": 50
+    "backpressure": true,
+    "highWaterPct": 75,
+    "lowWaterPct": 50
   },
   "fpv": {
     "roiEnabled": true,

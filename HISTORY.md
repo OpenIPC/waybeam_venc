@@ -2,36 +2,51 @@
 
 ## [0.9.2] - 2026-04-28
 
-SHM ring backpressure (Level 1 + Level 2):
+Output backpressure (Level 1 + Level 2):
 
-- **Level 1 — observability.** New `GET /api/v1/shm/status` endpoint returns
-  ring fill, lifetime counters (`writes`, `reads`, `fullDrops`,
-  `oversizeDrops`, `badSlotDrops`), live watermark config, current
+- **Level 1 — observability.** New `GET /api/v1/transport/status`
+  endpoint returns the active output transport (`shm` / `udp` / `unix`),
+  output queue fill, lifetime delivery counters (`packetsSent`,
+  `transportDrops`, `oversizeDrops`), live watermark config, current
   hysteresis state (`inPressure`), and the producer-local
-  `pressureDrops` counter. Also new `query_shm_status` callback in
-  `VencApplyCallbacks` (Star6E + Maruko both implement it).
-- **Sidecar trailer.** `RTP_SIDECAR_FLAG_SHM_INFO` (0x04) +
-  `RtpSidecarShmInfoWire` (16 bytes). Appended after the optional
-  ENC_INFO trailer when a SHM ring is active. Old probes that don't
-  recognise the flag read just the base frame (and ENC_INFO if present)
-  and ignore the trailing bytes — no protocol version bump.
+  `pressureDrops` counter. Also new `query_transport_status` callback
+  in `VencApplyCallbacks` (Star6E + Maruko both implement it).
+- **Sidecar trailer.** `RTP_SIDECAR_FLAG_TRANSPORT_INFO` (0x04) +
+  `RtpSidecarTransportInfoWire` (16 bytes). Appended after the
+  optional ENC_INFO trailer when a transport with a queue model is
+  active.  Field semantics map across transports:
+  `fill_pct` is `(write-read)/slot_count` for SHM and
+  `SIOCOUTQ/SO_SNDBUF` for unix:// (UNIX coverage planned in a
+  follow-up; UDP intentionally out of scope — the lossy datagram
+  model means kernel-queue fill is a noisy signal and the right
+  control point is the radio link layer / `link_controller`).  Old
+  probes that don't recognise the flag read just the base frame (and
+  ENC_INFO if present) and ignore the trailing bytes — no protocol
+  version bump.
 - **Level 2 — local FPS skip.** Producer-side hysteresis: enter
-  pressure when ring fill ≥ `outgoing.shmHighWaterPct` (default 75),
-  exit when fill < `outgoing.shmLowWaterPct` (default 50). While in
+  pressure when fill ≥ `outgoing.highWaterPct` (default 75), exit
+  when fill < `outgoing.lowWaterPct` (default 50).  While in
   pressure, frames are dropped before any RTP packet is enqueued —
   no torn FU fragments, no advancing RTP seq, no sidecar emission.
   Receiver sees a clean frame-aligned gap that FEC handles cleanly.
-  Disabled with `outgoing.shmBackpressure=false`.
-- **Config knobs (live, MUT_LIVE):** `outgoing.shmBackpressure` (bool,
-  default true), `outgoing.shmHighWaterPct` (uint8, default 75),
-  `outgoing.shmLowWaterPct` (uint8, default 50). Validator enforces
-  `0 ≤ lo < hi ≤ 100` at boot and on every `/api/v1/set`. Live changes
-  flow through the new `LIVE_GROUP_SHM_BACKPRESSURE` passive group —
-  cfg is committed atomically; the per-frame producer reads the cfg
-  fields directly each tick (no callback dispatch needed).
+  Disabled with `outgoing.backpressure=false`.
+- **Config knobs (live, MUT_LIVE):** `outgoing.backpressure` (bool,
+  default true), `outgoing.highWaterPct` (uint8, default 75),
+  `outgoing.lowWaterPct` (uint8, default 50).  Validator enforces
+  `0 ≤ lo < hi ≤ 100` at boot and on every `/api/v1/set`.  Live
+  changes flow through the new `LIVE_GROUP_BACKPRESSURE` passive
+  group — cfg committed atomically; the per-frame producer reads the
+  cfg fields directly each tick (no callback dispatch needed).
+- **Names.** Wire identifiers, config knobs and the endpoint were
+  scoped from "shm_*" to "transport_*" / "backpressure_*" before any
+  consumer shipped, on the basis that the hysteresis model and the
+  trailer are equally meaningful for any transport with a queue and
+  not just for shared memory.  No deprecated aliases retained — the
+  PR isn't merged yet, so churn cost is zero.
 - **Tests added:** Star6E hysteresis state machine
   (`test_star6e_output_backpressure_hysteresis`), validator boundary
-  cases (`test_live_set_shm_watermarks`).
+  cases (`test_live_set_backpressure_watermarks`), wire-layout
+  (`test_star6e_video_sidecar_transport_layouts`).
 - **Stale-ring hardening.** `venc_ring_create()` now `shm_unlink()`s
   the name before `O_EXCL`-creating a fresh inode, instead of
   `O_CREAT|O_TRUNC` reusing the existing one. After a SIGKILL'd venc

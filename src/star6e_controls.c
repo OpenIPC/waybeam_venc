@@ -1026,29 +1026,47 @@ static int apply_mute(bool on)
 	return 0;
 }
 
-static char *query_shm_status(void)
+static const char *output_transport_name(const Star6eOutput *o)
+{
+	if (!o)
+		return "none";
+	if (o->ring)
+		return "shm";
+	switch (o->transport) {
+	case VENC_OUTPUT_URI_UDP:  return "udp";
+	case VENC_OUTPUT_URI_UNIX: return "unix";
+	default:                   return "none";
+	}
+}
+
+static char *query_transport_status(void)
 {
 	Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
 	const VencConfig *vcfg = g_star6e_control_ctx.vcfg;
 	venc_ring_fill_t fill;
 	char buf[768];
+	const char *transport;
 	int pos;
 
 	if (!ps || !vcfg)
 		return NULL;
+	transport = output_transport_name(&ps->output);
 	if (!ps->output.ring) {
-		/* No active SHM output — surface that fact instead of NULL so
-		 * callers can distinguish "backend has no SHM hook" (NULL) from
-		 * "active output is udp/unix" (active=false). */
+		/* udp:// / unix:// queue-fill query lands here — currently
+		 * "active=false" pending UNIX datagram backpressure (see
+		 * roadmap).  The transport discriminator lets consumers
+		 * branch without guessing. */
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":false,"
+			"\"transport\":\"%s\","
 			"\"backpressure\":%s,"
 			"\"highWaterPct\":%u,"
 			"\"lowWaterPct\":%u}}",
-			vcfg->outgoing.shm_backpressure ? "true" : "false",
-			(unsigned)vcfg->outgoing.shm_high_water_pct,
-			(unsigned)vcfg->outgoing.shm_low_water_pct);
+			transport,
+			vcfg->outgoing.backpressure ? "true" : "false",
+			(unsigned)vcfg->outgoing.high_water_pct,
+			(unsigned)vcfg->outgoing.low_water_pct);
 		if (pos < 0 || pos >= (int)sizeof(buf))
 			return NULL;
 		return strdup(buf);
@@ -1059,28 +1077,30 @@ static char *query_shm_status(void)
 	pos = snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"active\":true,"
-		"\"slotCount\":%u,"
-		"\"usedSlots\":%u,"
+		"\"transport\":\"%s\","
 		"\"fillPct\":%u,"
-		"\"writes\":%llu,"
-		"\"fullDrops\":%llu,"
+		"\"inPressure\":%s,"
+		"\"transportDrops\":%llu,"
+		"\"pressureDrops\":%llu,"
+		"\"packetsSent\":%llu,"
 		"\"oversizeDrops\":%llu,"
 		"\"backpressure\":%s,"
 		"\"highWaterPct\":%u,"
 		"\"lowWaterPct\":%u,"
-		"\"inPressure\":%s,"
-		"\"pressureDrops\":%llu}}",
-		(unsigned)fill.slot_count,
-		(unsigned)fill.used_slots,
+		"\"slotCount\":%u,"
+		"\"usedSlots\":%u}}",
+		transport,
 		(unsigned)fill.fill_pct,
-		(unsigned long long)fill.writes,
-		(unsigned long long)fill.full_drops,
-		(unsigned long long)fill.oversize_drops,
-		vcfg->outgoing.shm_backpressure ? "true" : "false",
-		(unsigned)vcfg->outgoing.shm_high_water_pct,
-		(unsigned)vcfg->outgoing.shm_low_water_pct,
 		ps->output.in_pressure ? "true" : "false",
-		(unsigned long long)ps->output.pressure_drops);
+		(unsigned long long)fill.full_drops,
+		(unsigned long long)ps->output.pressure_drops,
+		(unsigned long long)fill.writes,
+		(unsigned long long)fill.oversize_drops,
+		vcfg->outgoing.backpressure ? "true" : "false",
+		(unsigned)vcfg->outgoing.high_water_pct,
+		(unsigned)vcfg->outgoing.low_water_pct,
+		(unsigned)fill.slot_count,
+		(unsigned)fill.used_slots);
 	if (pos < 0 || pos >= (int)sizeof(buf))
 		return NULL;
 	return strdup(buf);
@@ -1106,7 +1126,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.query_iq_info = star6e_iq_query,
 	.apply_iq_param = star6e_iq_set,
 	.apply_max_payload_size = apply_max_payload_size,
-	.query_shm_status = query_shm_status,
+	.query_transport_status = query_transport_status,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

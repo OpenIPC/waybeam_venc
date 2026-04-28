@@ -94,14 +94,17 @@ typedef struct {
 	                                     * audio and video RTP on one socket causes
 	                                     * video decoder instability at the receiver */
 	uint16_t sidecar_port;              /* 0 = disabled */
-	/* SHM ring backpressure: when the producer detects the ring is filling
-	 * faster than the consumer (wfb_tx) can drain, drop entire frames to
-	 * stop pumping RTP packets that would just get clobbered.  Hysteresis
-	 * avoids flapping.  Only relevant when server is shm://; ignored for
-	 * udp:// / unix://.  See documentation on roadmap Level 1+2 backpressure. */
-	bool shm_backpressure;          /* default true */
-	uint8_t shm_high_water_pct;     /* enter pressure state at >= this fill % (default 75) */
-	uint8_t shm_low_water_pct;      /* exit pressure state at < this fill % (default 50) */
+	/* Output backpressure: when the producer detects the output queue
+	 * is filling faster than the consumer can drain, drop entire frames
+	 * to stop pumping RTP packets that would just get clobbered.
+	 * Hysteresis avoids flapping.  Currently meaningful for shm://
+	 * (ring fill).  unix:// support planned; udp:// is intentionally
+	 * out of scope (the lossy datagram model means queue fill is a
+	 * noisy signal — the radio link layer is the right control point
+	 * for UDP-over-WiFi).  See HISTORY for rollout. */
+	bool backpressure;          /* default true */
+	uint8_t high_water_pct;     /* enter pressure at >= fill_pct (default 75) */
+	uint8_t low_water_pct;      /* exit pressure at < fill_pct (default 50) */
 } VencConfigOutgoing;
 
 typedef struct {

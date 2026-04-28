@@ -36,9 +36,9 @@
 /* Subscription timeout: venc stops sending if no message from probe      */
 #define RTP_SIDECAR_SUB_TTL_US    (5 * 1000000ULL)   /* 5 seconds          */
 
-#define RTP_SIDECAR_FLAG_KEYFRAME 0x01
-#define RTP_SIDECAR_FLAG_ENC_INFO 0x02
-#define RTP_SIDECAR_FLAG_SHM_INFO 0x04   /* SHM ring trailer follows ENC_INFO */
+#define RTP_SIDECAR_FLAG_KEYFRAME       0x01
+#define RTP_SIDECAR_FLAG_ENC_INFO       0x02
+#define RTP_SIDECAR_FLAG_TRANSPORT_INFO 0x04 /* transport stats trailer follows */
 
 /*
  * Frame type values carried in the optional encoder-feedback trailer.
@@ -115,28 +115,41 @@ typedef struct {
 } RtpSidecarEncInfoWire;     /* 12 bytes */
 
 /**
- * Optional SHM-ring trailer — venc → probe, 16 bytes.
+ * Optional transport-stats trailer — venc → probe, 16 bytes.
  *
  * Appended after the ENC_INFO trailer (or directly after RtpSidecarFrame
- * when ENC_INFO is absent) when RTP_SIDECAR_FLAG_SHM_INFO is set in
- * RtpSidecarFrame.flags.
+ * when ENC_INFO is absent) when RTP_SIDECAR_FLAG_TRANSPORT_INFO is set
+ * in RtpSidecarFrame.flags.
  *
- * Carries producer-local SHM ring observability: link_controller and
- * other adaptive controllers can react to ring fill / drops without an
- * extra HTTP roundtrip.
+ * Carries producer-local output observability that's meaningful for any
+ * transport with a queueing model (SHM ring, UNIX datagram socket, UDP
+ * socket): output queue fill, backpressure hysteresis state, lifetime
+ * delivery stats.  link_controller and other adaptive controllers can
+ * react without an extra HTTP roundtrip.
+ *
+ * Field semantics by transport:
+ *   shm://   fill_pct = (write-read)/slot_count*100
+ *            transport_drops = ring full → packet dropped
+ *            packets_sent    = ring writes
+ *   unix://  fill_pct = SIOCOUTQ / SO_SNDBUF * 100
+ *            transport_drops = sendmsg(EAGAIN) | ENOBUFS count
+ *            packets_sent    = successful sendmsg count
+ *   udp://   same as unix:// but UDP send queues drain quickly so the
+ *            signal is noisy; backpressure typically belongs at the
+ *            radio link layer (link_controller) rather than the socket.
  *
  * Forward-compat: probes that don't recognise the flag simply read
  * RtpSidecarFrame (and optionally ENC_INFO) and ignore the trailing
  * bytes.  No version bump required.
  */
 typedef struct {
-	uint8_t  fill_pct;          /* current used_slots * 100 / slot_count    */
-	uint8_t  in_pressure;       /* 1 = backpressure hysteresis state active */
-	uint8_t  _pad[2];
-	uint32_t full_drops;        /* lifetime, low 32 bits                    */
-	uint32_t pressure_drops;    /* lifetime, low 32 bits                    */
-	uint32_t writes;            /* lifetime, low 32 bits (rolling)          */
-} RtpSidecarShmInfoWire;      /* 16 bytes */
+	uint8_t  fill_pct;          /* output queue fill: 0..100              */
+	uint8_t  in_pressure;       /* 1 = backpressure hysteresis active     */
+	uint8_t  _pad[2];           /* reserved, must be 0; future flags      */
+	uint32_t transport_drops;   /* drops at the transport layer (low 32)  */
+	uint32_t pressure_drops;    /* frames the producer chose to skip      */
+	uint32_t packets_sent;      /* lifetime delivery count (low 32)       */
+} RtpSidecarTransportInfoWire; /* 16 bytes */
 
 typedef struct {
 	RtpSidecarFrame       frame;
@@ -144,10 +157,10 @@ typedef struct {
 } RtpSidecarFrameExt;         /* 64 bytes */
 
 typedef struct {
-	RtpSidecarFrame        frame;
-	RtpSidecarEncInfoWire  enc;
-	RtpSidecarShmInfoWire  shm;
-} RtpSidecarFrameExtShm;      /* 80 bytes */
+	RtpSidecarFrame              frame;
+	RtpSidecarEncInfoWire        enc;
+	RtpSidecarTransportInfoWire  transport;
+} RtpSidecarFrameExtTransport; /* 80 bytes */
 
 /** Clock sync request — probe → venc, 16 bytes */
 typedef struct {
@@ -183,14 +196,14 @@ typedef struct {
 	uint16_t frames_since_idr;
 } RtpSidecarEncInfo;
 
-/* Host-order SHM ring snapshot passed to rtp_sidecar_send_frame_shm(). */
+/* Host-order transport snapshot passed to rtp_sidecar_send_frame_transport(). */
 typedef struct {
 	uint8_t  fill_pct;
 	uint8_t  in_pressure;
-	uint32_t full_drops;
+	uint32_t transport_drops;
 	uint32_t pressure_drops;
-	uint32_t writes;
-} RtpSidecarShmInfo;
+	uint32_t packets_sent;
+} RtpSidecarTransportInfo;
 
 /* ── Sender state (embedded in backend, not used by probe) ───────────── */
 
@@ -252,18 +265,19 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 	const RtpSidecarEncInfo *enc_info);
 
 /**
- * Same as rtp_sidecar_send_frame but optionally appends an SHM trailer.
- * If shm_info is non-NULL, RTP_SIDECAR_FLAG_SHM_INFO is set in the frame
- * flags and the trailer follows ENC_INFO (or directly follows the base
- * frame when enc_info is NULL).  Old probes that don't recognise the
- * flag read the base frame (and ENC_INFO if present) and ignore the
- * trailing bytes.
+ * Same as rtp_sidecar_send_frame but optionally appends a transport
+ * stats trailer.  If transport_info is non-NULL,
+ * RTP_SIDECAR_FLAG_TRANSPORT_INFO is set in the frame flags and the
+ * trailer follows ENC_INFO (or directly follows the base frame when
+ * enc_info is NULL).  Old probes that don't recognise the flag read
+ * the base frame (and ENC_INFO if present) and ignore the trailing
+ * bytes.
  */
-int rtp_sidecar_send_frame_shm(RtpSidecarSender *s,
+int rtp_sidecar_send_frame_transport(RtpSidecarSender *s,
 	uint32_t ssrc, uint32_t rtp_ts,
 	uint16_t seq_first, uint16_t seq_count,
 	uint64_t capture_us, uint64_t frame_ready_us,
 	const RtpSidecarEncInfo *enc_info,
-	const RtpSidecarShmInfo *shm_info);
+	const RtpSidecarTransportInfo *transport_info);
 
 #endif /* RTP_SIDECAR_H */

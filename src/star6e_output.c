@@ -257,9 +257,9 @@ int star6e_output_should_skip_frame(Star6eOutput *output,
 		return 0;
 	return venc_ring_should_skip_frame(output->ring,
 		&output->in_pressure, &output->pressure_drops,
-		cfg->outgoing.shm_backpressure ? 1 : 0,
-		cfg->outgoing.shm_high_water_pct,
-		cfg->outgoing.shm_low_water_pct);
+		cfg->outgoing.backpressure ? 1 : 0,
+		cfg->outgoing.high_water_pct,
+		cfg->outgoing.low_water_pct);
 }
 
 uint32_t star6e_output_drain_send_errors(Star6eOutput *output)

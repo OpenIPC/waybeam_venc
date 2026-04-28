@@ -901,7 +901,7 @@ static int test_live_set_max_payload_size_bounds(void)
 	return failures;
 }
 
-static int test_live_set_shm_watermarks(void)
+static int test_live_set_backpressure_watermarks(void)
 {
 	int failures = 0;
 	VencConfig cfg;
@@ -914,52 +914,52 @@ static int test_live_set_shm_watermarks(void)
 
 	/* Defaults must be sane. */
 	CHECK("shm watermarks default backpressure on",
-		cfg.outgoing.shm_backpressure == true);
+		cfg.outgoing.backpressure == true);
 	CHECK("shm watermarks default high",
-		cfg.outgoing.shm_high_water_pct == 75);
+		cfg.outgoing.high_water_pct == 75);
 	CHECK("shm watermarks default low",
-		cfg.outgoing.shm_low_water_pct == 50);
+		cfg.outgoing.low_water_pct == 50);
 
 	/* High > 100 rejects. */
 	CHECK("shm high>100 reject",
 		apply_set_query_http(&cfg, "star6e", &cb,
-			"outgoing.shmHighWaterPct=150", &status, response,
+			"outgoing.highWaterPct=150", &status, response,
 			sizeof(response)) == 0);
 	CHECK("shm high>100 status", status == 409);
-	CHECK("shm high>100 unchanged", cfg.outgoing.shm_high_water_pct == 75);
+	CHECK("shm high>100 unchanged", cfg.outgoing.high_water_pct == 75);
 
 	/* Low >= high rejects (lo defaults to 50, set lo=80 with hi=75). */
 	CHECK("shm lo>=hi reject",
 		apply_set_query_http(&cfg, "star6e", &cb,
-			"outgoing.shmLowWaterPct=80", &status, response,
+			"outgoing.lowWaterPct=80", &status, response,
 			sizeof(response)) == 0);
 	CHECK("shm lo>=hi status", status == 409);
 	CHECK("shm lo>=hi error msg",
-		strstr(response, "shm_low_water_pct must be < outgoing.shm_high_water_pct") != NULL);
+		strstr(response, "low_water_pct must be < outgoing.high_water_pct") != NULL);
 
 	/* Multi-set lo+hi together (lo=20, hi=90) accepts. */
 	CHECK("shm multi lo+hi rc",
 		apply_set_query_http(&cfg, "star6e", &cb,
-			"outgoing.shmLowWaterPct=20&outgoing.shmHighWaterPct=90",
+			"outgoing.lowWaterPct=20&outgoing.highWaterPct=90",
 			&status, response, sizeof(response)) == 0);
 	CHECK("shm multi status", status == 200);
-	CHECK("shm multi lo applied", cfg.outgoing.shm_low_water_pct == 20);
-	CHECK("shm multi hi applied", cfg.outgoing.shm_high_water_pct == 90);
+	CHECK("shm multi lo applied", cfg.outgoing.low_water_pct == 20);
+	CHECK("shm multi hi applied", cfg.outgoing.high_water_pct == 90);
 
 	/* Toggle backpressure off and back on. */
 	CHECK("shm bp off rc",
 		apply_set_query_http(&cfg, "star6e", &cb,
-			"outgoing.shmBackpressure=false", &status, response,
+			"outgoing.backpressure=false", &status, response,
 			sizeof(response)) == 0);
 	CHECK("shm bp off status", status == 200);
-	CHECK("shm bp off applied", cfg.outgoing.shm_backpressure == false);
+	CHECK("shm bp off applied", cfg.outgoing.backpressure == false);
 
 	CHECK("shm bp on rc",
 		apply_set_query_http(&cfg, "star6e", &cb,
-			"outgoing.shmBackpressure=true", &status, response,
+			"outgoing.backpressure=true", &status, response,
 			sizeof(response)) == 0);
 	CHECK("shm bp on status", status == 200);
-	CHECK("shm bp on applied", cfg.outgoing.shm_backpressure == true);
+	CHECK("shm bp on applied", cfg.outgoing.backpressure == true);
 
 	return failures;
 }
@@ -1008,7 +1008,7 @@ int test_venc_api(void)
 	failures += test_live_set_rejects_out_of_range_roi_values();
 	failures += test_live_set_max_payload_size_bounds();
 	failures += test_live_set_max_payload_size_no_callback();
-	failures += test_live_set_shm_watermarks();
+	failures += test_live_set_backpressure_watermarks();
 	failures += test_restart_set_accepts_maruko_h264_config();
 	failures += test_restart_set_rejects_star6e_h264_rtp();
 	failures += test_restart_set_accepts_star6e_h264_compact();

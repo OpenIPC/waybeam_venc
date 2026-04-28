@@ -314,7 +314,7 @@ static int test_star6e_video_sidecar_ext(void)
 	return failures;
 }
 
-/* Wire-layout test: rtp_sidecar_send_frame_shm with all four
+/* Wire-layout test: rtp_sidecar_send_frame_transport with all four
  * combinations of {enc_info, shm_info} = {NULL, set}.  Verifies that
  *   - the SHM trailer always lands at the right byte offset, in
  *     particular that the "enc absent, shm present" case slides the
@@ -323,7 +323,7 @@ static int test_star6e_video_sidecar_ext(void)
  *     is appended,
  *   - old probes that read just the base frame (or frame+enc) and
  *     ignore extra bytes get a valid prefix in every layout. */
-static int test_star6e_video_sidecar_shm_layouts(void)
+static int test_star6e_video_sidecar_transport_layouts(void)
 {
 	RtpSidecarSender sender;
 	RtpSidecarSubscribe sub = {0};
@@ -357,7 +357,7 @@ static int test_star6e_video_sidecar_shm_layouts(void)
 	rtp_sidecar_poll(&sender);
 
 	/* Case 1: no enc, no shm — 52 bytes, no flags. */
-	rtp_sidecar_send_frame_shm(&sender, 1, 100, 0, 1, 0, 0, NULL, NULL);
+	rtp_sidecar_send_frame_transport(&sender, 1, 100, 0, 1, 0, 0, NULL, NULL);
 	memset(buf, 0xCC, sizeof(buf));
 	n = recv(probe_socket, buf, sizeof(buf), 0);
 	CHECK("shm layout case1 size",
@@ -370,7 +370,7 @@ static int test_star6e_video_sidecar_shm_layouts(void)
 		RtpSidecarEncInfo enc = {0};
 		enc.frame_type = RTP_SIDECAR_FRAME_P;
 		enc.qp = 30;
-		rtp_sidecar_send_frame_shm(&sender, 1, 200, 1, 1, 0, 0, &enc, NULL);
+		rtp_sidecar_send_frame_transport(&sender, 1, 200, 1, 1, 0, 0, &enc, NULL);
 		memset(buf, 0xCC, sizeof(buf));
 		n = recv(probe_socket, buf, sizeof(buf), 0);
 		CHECK("shm layout case2 size",
@@ -380,76 +380,76 @@ static int test_star6e_video_sidecar_shm_layouts(void)
 			 RTP_SIDECAR_FLAG_ENC_INFO) != 0);
 		CHECK("shm layout case2 no shm flag",
 			(((const RtpSidecarFrame *)buf)->flags &
-			 RTP_SIDECAR_FLAG_SHM_INFO) == 0);
+			 RTP_SIDECAR_FLAG_TRANSPORT_INFO) == 0);
 	}
 
 	/* Case 3: shm only (no enc) — trailer slides up to offset 52,
 	 * total size = 52 + 16 = 68 bytes. */
 	{
-		RtpSidecarShmInfo shm = {0};
-		const RtpSidecarShmInfoWire *trailer;
+		RtpSidecarTransportInfo shm = {0};
+		const RtpSidecarTransportInfoWire *trailer;
 
 		shm.fill_pct = 80;
 		shm.in_pressure = 1;
-		shm.full_drops = 0x11223344;
+		shm.transport_drops = 0x11223344;
 		shm.pressure_drops = 0xAABBCCDD;
-		shm.writes = 0x55667788;
-		rtp_sidecar_send_frame_shm(&sender, 1, 300, 2, 1, 0, 0, NULL, &shm);
+		shm.packets_sent = 0x55667788;
+		rtp_sidecar_send_frame_transport(&sender, 1, 300, 2, 1, 0, 0, NULL, &shm);
 		memset(buf, 0xCC, sizeof(buf));
 		n = recv(probe_socket, buf, sizeof(buf), 0);
 		CHECK("shm layout case3 size",
 			n == (ssize_t)(sizeof(RtpSidecarFrame) +
-			               sizeof(RtpSidecarShmInfoWire)));
+			               sizeof(RtpSidecarTransportInfoWire)));
 		CHECK("shm layout case3 shm flag",
 			(((const RtpSidecarFrame *)buf)->flags &
-			 RTP_SIDECAR_FLAG_SHM_INFO) != 0);
+			 RTP_SIDECAR_FLAG_TRANSPORT_INFO) != 0);
 		CHECK("shm layout case3 no enc flag",
 			(((const RtpSidecarFrame *)buf)->flags &
 			 RTP_SIDECAR_FLAG_ENC_INFO) == 0);
-		trailer = (const RtpSidecarShmInfoWire *)
+		trailer = (const RtpSidecarTransportInfoWire *)
 			(buf + sizeof(RtpSidecarFrame));
 		CHECK("shm layout case3 fill_pct", trailer->fill_pct == 80);
 		CHECK("shm layout case3 in_pressure", trailer->in_pressure == 1);
 		CHECK("shm layout case3 full_drops",
-			ntohl(trailer->full_drops) == 0x11223344u);
+			ntohl(trailer->transport_drops) == 0x11223344u);
 		CHECK("shm layout case3 pressure_drops",
 			ntohl(trailer->pressure_drops) == 0xAABBCCDDu);
 		CHECK("shm layout case3 writes",
-			ntohl(trailer->writes) == 0x55667788u);
+			ntohl(trailer->packets_sent) == 0x55667788u);
 	}
 
 	/* Case 4: enc + shm — total size = 80 bytes, SHM at offset 64. */
 	{
 		RtpSidecarEncInfo enc = {0};
-		RtpSidecarShmInfo shm = {0};
-		const RtpSidecarShmInfoWire *trailer;
+		RtpSidecarTransportInfo shm = {0};
+		const RtpSidecarTransportInfoWire *trailer;
 
 		enc.frame_type = RTP_SIDECAR_FRAME_I;
 		enc.qp = 25;
 		shm.fill_pct = 50;
 		shm.in_pressure = 0;
-		shm.full_drops = 7;
+		shm.transport_drops = 7;
 		shm.pressure_drops = 11;
-		shm.writes = 13;
-		rtp_sidecar_send_frame_shm(&sender, 1, 400, 3, 1, 0, 0, &enc, &shm);
+		shm.packets_sent = 13;
+		rtp_sidecar_send_frame_transport(&sender, 1, 400, 3, 1, 0, 0, &enc, &shm);
 		memset(buf, 0xCC, sizeof(buf));
 		n = recv(probe_socket, buf, sizeof(buf), 0);
 		CHECK("shm layout case4 size",
-			n == (ssize_t)sizeof(RtpSidecarFrameExtShm));
+			n == (ssize_t)sizeof(RtpSidecarFrameExtTransport));
 		CHECK("shm layout case4 both flags",
 			(((const RtpSidecarFrame *)buf)->flags &
-			 (RTP_SIDECAR_FLAG_ENC_INFO | RTP_SIDECAR_FLAG_SHM_INFO))
-			 == (RTP_SIDECAR_FLAG_ENC_INFO | RTP_SIDECAR_FLAG_SHM_INFO));
-		trailer = (const RtpSidecarShmInfoWire *)
-			(buf + offsetof(RtpSidecarFrameExtShm, shm));
+			 (RTP_SIDECAR_FLAG_ENC_INFO | RTP_SIDECAR_FLAG_TRANSPORT_INFO))
+			 == (RTP_SIDECAR_FLAG_ENC_INFO | RTP_SIDECAR_FLAG_TRANSPORT_INFO));
+		trailer = (const RtpSidecarTransportInfoWire *)
+			(buf + offsetof(RtpSidecarFrameExtTransport, transport));
 		CHECK("shm layout case4 fill_pct", trailer->fill_pct == 50);
 		CHECK("shm layout case4 in_pressure", trailer->in_pressure == 0);
 		CHECK("shm layout case4 full_drops",
-			ntohl(trailer->full_drops) == 7u);
+			ntohl(trailer->transport_drops) == 7u);
 		CHECK("shm layout case4 pressure_drops",
 			ntohl(trailer->pressure_drops) == 11u);
 		CHECK("shm layout case4 writes",
-			ntohl(trailer->writes) == 13u);
+			ntohl(trailer->packets_sent) == 13u);
 	}
 
 	rtp_sidecar_sender_close(&sender);
@@ -466,6 +466,6 @@ int test_star6e_video(void)
 	failures += test_star6e_video_send_frame_rtp();
 	failures += test_star6e_video_send_frame_disabled();
 	failures += test_star6e_video_sidecar_ext();
-	failures += test_star6e_video_sidecar_shm_layouts();
+	failures += test_star6e_video_sidecar_transport_layouts();
 	return failures;
 }

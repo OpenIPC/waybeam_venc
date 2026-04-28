@@ -1149,9 +1149,9 @@ static int test_star6e_output_backpressure_hysteresis(void)
 	uint64_t base_drops;
 
 	venc_config_defaults(&cfg);
-	cfg.outgoing.shm_backpressure = true;
-	cfg.outgoing.shm_high_water_pct = 75;
-	cfg.outgoing.shm_low_water_pct = 50;
+	cfg.outgoing.backpressure = true;
+	cfg.outgoing.high_water_pct = 75;
+	cfg.outgoing.low_water_pct = 50;
 
 	snprintf(uri, sizeof(uri), "shm://test_star6e_bp_%ld", (long)getpid());
 	CHECK("bp prepare",
@@ -1197,16 +1197,16 @@ static int test_star6e_output_backpressure_hysteresis(void)
 	CHECK("bp 49pct in_pressure cleared", output.in_pressure == 0);
 
 	/* Disable backpressure — must not enter pressure even when full. */
-	cfg.outgoing.shm_backpressure = false;
+	cfg.outgoing.backpressure = false;
 	fill_ring_to_pct(output.ring, 100);
 	CHECK("bp disabled no-skip",
 		star6e_output_should_skip_frame(&output, &cfg) == 0);
 	CHECK("bp disabled in_pressure", output.in_pressure == 0);
 
 	/* Re-enable but with degenerate watermarks — must defensively no-skip. */
-	cfg.outgoing.shm_backpressure = true;
-	cfg.outgoing.shm_high_water_pct = 50;
-	cfg.outgoing.shm_low_water_pct = 50;
+	cfg.outgoing.backpressure = true;
+	cfg.outgoing.high_water_pct = 50;
+	cfg.outgoing.low_water_pct = 50;
 	CHECK("bp degenerate no-skip",
 		star6e_output_should_skip_frame(&output, &cfg) == 0);
 
@@ -1223,8 +1223,8 @@ static int test_star6e_output_backpressure_hysteresis(void)
 		CHECK("bp udp prepare",
 			star6e_output_prepare(&setup, udp_uri, "rtp", 0) == 0);
 		CHECK("bp udp init", star6e_output_init(&udp_out, &setup) == 0);
-		cfg.outgoing.shm_high_water_pct = 75;
-		cfg.outgoing.shm_low_water_pct = 50;
+		cfg.outgoing.high_water_pct = 75;
+		cfg.outgoing.low_water_pct = 50;
 		CHECK("bp udp no-skip",
 			star6e_output_should_skip_frame(&udp_out, &cfg) == 0);
 		star6e_output_teardown(&udp_out);
