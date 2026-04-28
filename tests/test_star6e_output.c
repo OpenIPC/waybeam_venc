@@ -1149,7 +1149,7 @@ static int test_star6e_output_backpressure_hysteresis(void)
 	Star6eOutput output;
 	VencConfig cfg;
 	int failures = 0;
-	uint64_t base_drops;
+	uint32_t base_drops;
 
 	venc_config_defaults(&cfg);
 	cfg.outgoing.backpressure = true;
@@ -1329,6 +1329,68 @@ static int test_star6e_output_unix_backpressure(void)
 	return failures;
 }
 
+/* Regression guard for the v0.9.2 rollback: post-encode frame-skip
+ * was removed because it broke the H.264/H.265 reference chain.  This
+ * test fills a SHM ring above high_water, observes pressure to assert
+ * the flag flips, then writes a packet via star6e_output_send_rtp_parts
+ * and confirms the packet actually lands in the ring (i.e. the producer
+ * NEVER bails out on the basis of in_pressure).  If a future change
+ * re-introduces a skip-on-pressure shortcut anywhere in the send path,
+ * this assertion fails immediately. */
+static int test_star6e_output_always_sends_under_pressure(void)
+{
+	char uri[64];
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	VencConfig cfg;
+	int failures = 0;
+	uint64_t writes_before;
+	uint64_t writes_after;
+	const uint8_t hdr[12] = { 0x80, 0x97, 0x00, 0x00 };
+	const uint8_t pay[8] = { 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22 };
+
+	venc_config_defaults(&cfg);
+	cfg.outgoing.backpressure = true;
+	cfg.outgoing.high_water_pct = 75;
+	cfg.outgoing.low_water_pct = 50;
+
+	snprintf(uri, sizeof(uri), "shm://test_star6e_always_send_%ld",
+		(long)getpid());
+	CHECK("always-send prepare",
+		star6e_output_prepare(&setup, uri, "rtp", 0) == 0);
+	CHECK("always-send init", star6e_output_init(&output, &setup) == 0);
+
+	/* Drive the ring above high water so observe_pressure asserts. */
+	fill_ring_to_pct(output.ring, 80);
+	star6e_output_observe_pressure(&output, &cfg);
+	CHECK("always-send pressure asserted",
+		output.in_pressure == 1);
+	CHECK("always-send drop counted",
+		output.pressure_drops > 0);
+
+	/* Drain enough room for one slot but stay above low_water so the
+	 * flag remains set when we send. */
+	drain_ring_to_pct(output.ring, 70);
+	CHECK("always-send still in pressure",
+		output.in_pressure == 1);
+
+	/* Snapshot ring writes counter, send a packet, confirm it landed.
+	 * If a regression made the producer skip while in pressure,
+	 * writes_after would equal writes_before. */
+	writes_before = output.ring->stats.writes;
+	CHECK("always-send rtp send rc",
+		star6e_output_send_rtp_parts(&output,
+			hdr, sizeof(hdr),
+			pay, sizeof(pay),
+			NULL, 0) == 0);
+	writes_after = output.ring->stats.writes;
+	CHECK("always-send ring write happened",
+		writes_after == writes_before + 1);
+
+	star6e_output_teardown(&output);
+	return failures;
+}
+
 int test_star6e_output(void)
 {
 	int failures = 0;
@@ -1362,5 +1424,6 @@ int test_star6e_output(void)
 	failures += test_audio_target_cache_hit_stable();
 	failures += test_star6e_output_backpressure_hysteresis();
 	failures += test_star6e_output_unix_backpressure();
+	failures += test_star6e_output_always_sends_under_pressure();
 	return failures;
 }

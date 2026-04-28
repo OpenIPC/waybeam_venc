@@ -913,53 +913,53 @@ static int test_live_set_backpressure_watermarks(void)
 	memset(&cb, 0, sizeof(cb));
 
 	/* Defaults must be sane. */
-	CHECK("shm watermarks default backpressure on",
+	CHECK("watermarks default backpressure on",
 		cfg.outgoing.backpressure == true);
-	CHECK("shm watermarks default high",
+	CHECK("watermarks default high",
 		cfg.outgoing.high_water_pct == 75);
-	CHECK("shm watermarks default low",
+	CHECK("watermarks default low",
 		cfg.outgoing.low_water_pct == 50);
 
 	/* High > 100 rejects. */
-	CHECK("shm high>100 reject",
+	CHECK("high>100 reject",
 		apply_set_query_http(&cfg, "star6e", &cb,
 			"outgoing.highWaterPct=150", &status, response,
 			sizeof(response)) == 0);
-	CHECK("shm high>100 status", status == 409);
-	CHECK("shm high>100 unchanged", cfg.outgoing.high_water_pct == 75);
+	CHECK("high>100 status", status == 409);
+	CHECK("high>100 unchanged", cfg.outgoing.high_water_pct == 75);
 
 	/* Low >= high rejects (lo defaults to 50, set lo=80 with hi=75). */
-	CHECK("shm lo>=hi reject",
+	CHECK("lo>=hi reject",
 		apply_set_query_http(&cfg, "star6e", &cb,
 			"outgoing.lowWaterPct=80", &status, response,
 			sizeof(response)) == 0);
-	CHECK("shm lo>=hi status", status == 409);
-	CHECK("shm lo>=hi error msg",
+	CHECK("lo>=hi status", status == 409);
+	CHECK("lo>=hi error msg",
 		strstr(response, "low_water_pct must be < outgoing.high_water_pct") != NULL);
 
 	/* Multi-set lo+hi together (lo=20, hi=90) accepts. */
-	CHECK("shm multi lo+hi rc",
+	CHECK("multi lo+hi rc",
 		apply_set_query_http(&cfg, "star6e", &cb,
 			"outgoing.lowWaterPct=20&outgoing.highWaterPct=90",
 			&status, response, sizeof(response)) == 0);
-	CHECK("shm multi status", status == 200);
-	CHECK("shm multi lo applied", cfg.outgoing.low_water_pct == 20);
-	CHECK("shm multi hi applied", cfg.outgoing.high_water_pct == 90);
+	CHECK("multi status", status == 200);
+	CHECK("multi lo applied", cfg.outgoing.low_water_pct == 20);
+	CHECK("multi hi applied", cfg.outgoing.high_water_pct == 90);
 
 	/* Toggle backpressure off and back on. */
-	CHECK("shm bp off rc",
+	CHECK("bp off rc",
 		apply_set_query_http(&cfg, "star6e", &cb,
 			"outgoing.backpressure=false", &status, response,
 			sizeof(response)) == 0);
-	CHECK("shm bp off status", status == 200);
-	CHECK("shm bp off applied", cfg.outgoing.backpressure == false);
+	CHECK("bp off status", status == 200);
+	CHECK("bp off applied", cfg.outgoing.backpressure == false);
 
-	CHECK("shm bp on rc",
+	CHECK("bp on rc",
 		apply_set_query_http(&cfg, "star6e", &cb,
 			"outgoing.backpressure=true", &status, response,
 			sizeof(response)) == 0);
-	CHECK("shm bp on status", status == 200);
-	CHECK("shm bp on applied", cfg.outgoing.backpressure == true);
+	CHECK("bp on status", status == 200);
+	CHECK("bp on applied", cfg.outgoing.backpressure == true);
 
 	return failures;
 }

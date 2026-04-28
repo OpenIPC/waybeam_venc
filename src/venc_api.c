@@ -659,10 +659,10 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		uint8_t hi = cfg->outgoing.high_water_pct;
 		uint8_t lo = cfg->outgoing.low_water_pct;
 		/* Watermarks are percent of the output queue capacity (ring
-		 * slot_count for shm://; SO_SNDBUF for unix://).  100% is
-		 * allowed for "never trip" — effectively disables
-		 * backpressure via the high water.  Low must be strictly less
-		 * than high to keep hysteresis non-degenerate. */
+		 * slot_count for shm://; SO_SNDBUF for unix:// and udp://).
+		 * 100% is allowed for "never trip" — effectively keeps the
+		 * pressure flag clear.  Low must be strictly less than high
+		 * to keep hysteresis non-degenerate. */
 		if (hi > 100)
 			return "outgoing.high_water_pct must be in range [0, 100]";
 		if (lo > 100)

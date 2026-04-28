@@ -80,15 +80,21 @@ typedef struct {
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
 	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
 	Star6eOutputBatch batch;
-	/* Transport backpressure state.  Meaningful for any transport with a
-	 * queue: shm:// (ring fill), unix:// / udp:// (SIOCOUTQ / SO_SNDBUF).
-	 * `in_pressure` is the hysteresis flag: enters when fill_pct >=
-	 * cfg->outgoing.high_water_pct, exits when fill_pct <
-	 * cfg->outgoing.low_water_pct.  `pressure_drops` is a producer-local
-	 * counter of frames skipped while in pressure state, surfaced via
-	 * /api/v1/transport/status and the rtp_sidecar transport trailer. */
+	/* Transport-pressure observation state (telemetry only — never gates
+	 * frame transmission).  Meaningful for any transport with a queue:
+	 * shm:// (ring fill), unix:// / udp:// (SIOCOUTQ / SO_SNDBUF).
+	 * `in_pressure` is the hysteresis flag (enters at fill_pct >=
+	 * cfg->outgoing.high_water_pct, exits at fill_pct < lo).
+	 * `pressure_drops` increments whenever the flag is asserted —
+	 * "frames observed in pressure" (the wire field name `pressure_drops`
+	 * is preserved for ABI stability; pre-v0.9.2 it meant "frames
+	 * skipped" but post-encode skip was rolled back, see HISTORY).
+	 * Both surfaced via /api/v1/transport/status and the sidecar
+	 * trailer.  uint32_t (not uint64_t) so the HTTP-thread reader sees
+	 * an atomic single-load on ARMv7; wraps in 24855 days at 120 fps
+	 * continuous pressure — fine. */
 	int in_pressure;
-	uint64_t pressure_drops;
+	uint32_t pressure_drops;
 } Star6eOutput;
 
 typedef struct {

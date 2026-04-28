@@ -144,10 +144,12 @@ typedef struct {
  */
 typedef struct {
 	uint8_t  fill_pct;          /* output queue fill: 0..100              */
-	uint8_t  in_pressure;       /* 1 = backpressure hysteresis active     */
+	uint8_t  in_pressure;       /* 1 = pressure hysteresis flag asserted  */
 	uint8_t  _pad[2];           /* reserved, must be 0; future flags      */
 	uint32_t transport_drops;   /* drops at the transport layer (low 32)  */
-	uint32_t pressure_drops;    /* frames the producer chose to skip      */
+	uint32_t pressure_drops;    /* frames the producer observed in
+	                             * pressure (was "frames skipped" pre-
+	                             * v0.9.2 rollback; ABI name retained)    */
 	uint32_t packets_sent;      /* lifetime delivery count (low 32)       */
 } RtpSidecarTransportInfoWire; /* 16 bytes */
 

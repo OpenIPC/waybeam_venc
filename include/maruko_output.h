@@ -61,13 +61,12 @@ typedef struct {
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
 	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
 	MarukoOutputBatch batch;
-	/* Transport backpressure state.  Meaningful for any active transport
-	 * (ring fill for shm://, SIOCOUTQ / SO_SNDBUF for unix:// / udp://).
-	 * Hysteresis on cfg->outgoing.high_water_pct / low_water_pct;
-	 * pressure_drops surfaced via /api/v1/transport/status and the
-	 * rtp_sidecar transport trailer. */
+	/* Transport-pressure observation (telemetry only — never gates
+	 * frame transmission).  Mirrors Star6eOutput: hysteresis flag plus
+	 * a "frames observed in pressure" counter.  ABI-named pressure_drops
+	 * is uint32_t to keep the HTTP-thread read atomic on ARMv7. */
 	int in_pressure;
-	uint64_t pressure_drops;
+	uint32_t pressure_drops;
 } MarukoOutput;
 
 /** Initialize UDP or Unix socket output from a parsed URI. */

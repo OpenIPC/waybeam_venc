@@ -94,17 +94,24 @@ typedef struct {
 	                                     * audio and video RTP on one socket causes
 	                                     * video decoder instability at the receiver */
 	uint16_t sidecar_port;              /* 0 = disabled */
-	/* Output backpressure: when the producer detects the output queue
-	 * is filling faster than the consumer can drain, drop entire frames
-	 * to stop pumping RTP packets that would just get clobbered.
-	 * Hysteresis avoids flapping.  Currently meaningful for shm://
-	 * (ring fill).  unix:// support planned; udp:// is intentionally
-	 * out of scope (the lossy datagram model means queue fill is a
-	 * noisy signal — the radio link layer is the right control point
-	 * for UDP-over-WiFi).  See HISTORY for rollout. */
-	bool backpressure;          /* default true */
-	uint8_t high_water_pct;     /* enter pressure at >= fill_pct (default 75) */
-	uint8_t low_water_pct;      /* exit pressure at < fill_pct (default 50) */
+	/* Output-pressure observation (telemetry only, NEVER acts on
+	 * frames).  When fill_pct of the active transport queue crosses
+	 * high_water_pct the in_pressure flag is asserted with hysteresis
+	 * down to low_water_pct.  The flag flows out through the sidecar
+	 * trailer (RTP_SIDECAR_FLAG_TRANSPORT_INFO) and through
+	 * /api/v1/transport/status; adaptive consumers (link_controller)
+	 * react by lowering video0.bitrate or sensor fps — adaptation
+	 * upstream of encode is the only graceful degradation path that
+	 * keeps the H.264/H.265 reference chain intact.  Fill source per
+	 * transport: shm:// = (write_idx-read_idx)/slot_count, unix:// /
+	 * udp:// = SIOCOUTQ / SO_SNDBUF.  See HISTORY 0.9.2 for the
+	 * post-encode-skip rollback.  Setting `backpressure=false`
+	 * disables the per-frame observation (skips the SIOCOUTQ ioctl /
+	 * ring-fill load) and keeps the flag clear; useful for noisy UDP
+	 * setups or to shave a few hundred ns / frame. */
+	bool backpressure;          /* default true (observation enabled) */
+	uint8_t high_water_pct;     /* assert in_pressure at >= fill_pct (default 75) */
+	uint8_t low_water_pct;      /* clear in_pressure at < fill_pct (default 50) */
 } VencConfigOutgoing;
 
 typedef struct {

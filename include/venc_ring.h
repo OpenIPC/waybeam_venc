@@ -176,7 +176,7 @@ static inline int venc_ring_get_fill(const venc_ring_t *r,
  * `enabled=0` and degenerate cfg (lo >= hi) still clear the flag so
  * toggling either one does not strand the producer in pressure state. */
 static inline void venc_observe_pressure(uint8_t fill_pct,
-	int *in_pressure, uint64_t *pressure_drops,
+	int *in_pressure, uint32_t *pressure_drops,
 	int enabled, uint8_t high_water_pct, uint8_t low_water_pct)
 {
 	if (!in_pressure || !pressure_drops)
