@@ -122,6 +122,11 @@ static inline int venc_ring_get_fill(const venc_ring_t *r,
 {
 	if (!r || !r->hdr || !out)
 		return -1;
+	/* SPSC invariant: we are the only writer of write_idx, so the
+	 * ACQUIRE load reads the most recent value.  read_idx is owned by
+	 * the consumer (different process); a slightly newer rd than w is
+	 * possible if the consumer drained between our two loads, in which
+	 * case used = 0 is a conservative lower bound. */
 	uint64_t w = __atomic_load_n(&r->hdr->write_idx, __ATOMIC_ACQUIRE);
 	uint64_t rd = __atomic_load_n(&r->hdr->read_idx, __ATOMIC_RELAXED);
 	uint32_t used = (w >= rd) ? (uint32_t)(w - rd) : 0;
@@ -138,6 +143,55 @@ static inline int venc_ring_get_fill(const venc_ring_t *r,
 	out->full_drops = r->stats.full_drops;
 	out->oversize_drops = r->stats.oversize_drops;
 	out->bad_slot_drops = r->stats.bad_slot_drops;
+	return 0;
+}
+
+/* Producer-side hysteresis: should the next frame be dropped because
+ * the consumer is falling behind?
+ *
+ * `in_pressure` is the caller-owned hysteresis flag; this function reads
+ * and writes it in place.  `pressure_drops` is incremented whenever a
+ * skip is decided.  `enabled` gates the whole feature; when disabled,
+ * `in_pressure` is cleared and 0 is returned so re-enabling later starts
+ * from a clean state.  Degenerate cfg (lo >= hi) likewise clears the
+ * flag and returns 0 — without that, a producer already in pressure
+ * when cfg goes degenerate would never see the exit branch and skip
+ * every frame forever.
+ *
+ * Caller passes ring pointer (NULL → no-op for udp:// / unix:// outputs)
+ * and the live watermark settings sampled from cfg.  Returns 1 to
+ * signal skip-this-frame, 0 to send. */
+static inline int venc_ring_should_skip_frame(const venc_ring_t *r,
+	int *in_pressure, uint64_t *pressure_drops,
+	int enabled, uint8_t high_water_pct, uint8_t low_water_pct)
+{
+	venc_ring_fill_t fill;
+
+	if (!r || !in_pressure || !pressure_drops)
+		return 0;
+	if (!enabled) {
+		*in_pressure = 0;
+		return 0;
+	}
+	if (venc_ring_get_fill(r, &fill) != 0)
+		return 0;
+	if (low_water_pct >= high_water_pct) {
+		*in_pressure = 0;
+		return 0;
+	}
+
+	if (*in_pressure) {
+		if (fill.fill_pct < low_water_pct)
+			*in_pressure = 0;
+	} else {
+		if (fill.fill_pct >= high_water_pct)
+			*in_pressure = 1;
+	}
+
+	if (*in_pressure) {
+		(*pressure_drops)++;
+		return 1;
+	}
 	return 0;
 }
 

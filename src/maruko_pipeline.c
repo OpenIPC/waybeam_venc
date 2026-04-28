@@ -1467,6 +1467,14 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 					&ctx->output, &rtp_state, &param_sets,
 					&ctx->cfg,
 					PKTZR_VERBOSE_ACTIVE() ? &frame_pktzr : NULL);
+			} else {
+				/* Backpressure skip: advance RTP clock anyway so the
+				 * receiver's timestamp timeline matches capture
+				 * wallclock — otherwise pressure_drops frames of skip
+				 * shift every subsequent timestamp by N * frame_ticks
+				 * and break A/V sync against the audio stream that
+				 * keeps advancing on its own clock. */
+				rtp_state.timestamp += rtp_state.frame_ticks;
 			}
 		}
 

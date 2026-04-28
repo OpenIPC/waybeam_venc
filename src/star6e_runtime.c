@@ -408,6 +408,12 @@ static void *dual_rec_thread_fn(void *arg)
 					    &d->output, vc)) {
 						(void)star6e_video_send_frame(&d->video,
 							&d->output, &stream, 1, 0, NULL);
+					} else {
+						/* Advance the dual stream's RTP clock so the
+						 * second decoder doesn't fall behind on
+						 * timestamps after a backpressure burst. */
+						d->video.rtp_state.timestamp +=
+							d->video.rtp_frame_ticks;
 					}
 				} else if (d->ts_recorder) {
 					star6e_ts_recorder_write_stream(
@@ -749,6 +755,15 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		if (!star6e_output_should_skip_frame(&ps->output, vcfg)) {
 			(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
 				ps->output_enabled, vcfg->system.verbose, &enc_info);
+		} else {
+			/* Backpressure skip: bypass output write but advance the
+			 * RTP clock anyway so the receiver's timestamp timeline
+			 * stays in lock-step with capture wallclock.  Otherwise
+			 * `pressure_drops` frames of skip would shift every
+			 * subsequent timestamp down by N * frame_ticks, breaking
+			 * jitter buffers and any A/V sync against an audio stream
+			 * that keeps advancing on its own clock. */
+			ps->video.rtp_state.timestamp += ps->video.rtp_frame_ticks;
 		}
 	}
 
