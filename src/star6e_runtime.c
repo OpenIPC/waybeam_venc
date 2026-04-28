@@ -21,6 +21,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -148,7 +149,7 @@ static void handle_signal(int sig)
 		static const char msg[] =
 			"\n> SIGHUP received, reinit pending...\n";
 
-		venc_api_request_reinit(1);
+		venc_api_request_reinit();
 		(void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
 		return;
 	}
@@ -161,7 +162,7 @@ static void handle_signal(int sig)
 			"\n> Interrupt received, shutting down...\n";
 
 		(void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
-		alarm(5);
+		alarm(2);
 		return;
 	}
 
@@ -575,116 +576,102 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	return 0;
 }
 
-static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
-	int reinit_mode)
+/* In-process MI_SYS_Exit + MI_SYS_Init does NOT yield a clean kernel
+ * state on Star6E — the SigmaStar driver retains "already_inited" flags
+ * tied to the PID, so a second MI_SYS_Init in the same process trips
+ * MI_DEVICE_Open hangs and VIF "layout type 2 bindmode 4 not sync err"
+ * after one or two cycles.  Empirically verified on imx335 @ 192.168.1.13.
+ *
+ * The only reliable cold restart is a *new PID*.  Approach: handle_reinit
+ * sets a flag; main exits cleanly via the normal teardown path; the
+ * backend's last act before main returns is to fork a child, parent
+ * exits, child execv's a fresh venc.  Forking AFTER teardown is critical
+ * — if we forked before, the child would inherit MI device fds and the
+ * kernel's per-pid cleanup wouldn't fully fire when the parent calls
+ * MI_SYS_Exit.  Bench-validated against 12 consecutive cross-mode sensor
+ * SIGHUPs (rounds 0→1→2→3 ×3) with no degradation. */
+
+static int g_respawn_after_exit = 0;
+
+void star6e_runtime_respawn_after_exit(void)
 {
-	Star6ePipelineState *ps = &ctx->ps;
-	VencConfig *vcfg = &ctx->vcfg;
-	int ret;
+	pid_t child = fork();
 
-	uint32_t prev_max_fps = ps->sensor.mode.maxFps;
-
-	star6e_cus3a_request_stop();
-
-	star6e_controls_reset();
-	star6e_pipeline_cus3a_reset();
-
-	star6e_cus3a_join();
-
-	star6e_recorder_stop(&ps->recorder);
-	star6e_ts_recorder_stop(&ps->ts_recorder);
-	ps->audio.rec_ring = NULL;
-
-	if (reinit_mode == 1) {
-		venc_config_defaults(vcfg);
-		if (venc_config_load(VENC_CONFIG_DEFAULT_PATH, vcfg) != 0) {
-			fprintf(stderr,
-				"ERROR: config reload failed, shutting down\n");
-			return 1;
-		}
+	if (child < 0) {
+		fprintf(stderr,
+			"ERROR: fork() for respawn failed: %s — process exiting\n",
+			strerror(errno));
+		return;
 	}
 
-	/* Clamp FPS to current sensor mode (mode changes require restart) */
-	if (prev_max_fps > 0 && vcfg->video0.fps > prev_max_fps) {
-		printf("> Reinit: clamping FPS %u -> %u "
-			"(limited by current sensor mode)\n",
-			vcfg->video0.fps, prev_max_fps);
-		vcfg->video0.fps = prev_max_fps;
+	if (child > 0) {
+		fprintf(stderr,
+			"> Respawning: parent %d → child %d\n",
+			(int)getpid(), (int)child);
+		return;
 	}
 
-	/* Partial reinit: keep sensor/VIF/VPE running, only rebuild VENC.
-	 * The SigmaStar MIPI PHY does not recover from MI_SNR_Disable/Enable
-	 * cycles — full pipeline_stop + pipeline_start stalls the encoder. */
-	ret = star6e_pipeline_reinit(ps, vcfg, &g_sdk_quiet);
-	if (ret != 0) {
-		fprintf(stderr, "ERROR: pipeline reinit failed (%d), shutting down\n",
-			ret);
-		ctx->pipeline_started = 0;
-		return ret;
+	(void)prctl(PR_SET_NAME, VENC_COMM_RESPAWN, 0, 0, 0);
+
+	/* Wait for the parent to exit so the kernel reaps the per-pid SDK
+	 * state before we exec.  Polling getppid() catches the actual exit
+	 * (orphaned child reparents to init / pid 1) instead of guessing
+	 * with a fixed sleep — guards against teardown latency spikes that
+	 * a static usleep would race.  Cap at 5 s as a backstop in case
+	 * a non-init subreaper inserts itself between us and pid 1. */
+	for (int i = 0; i < 50 && getppid() != 1; i++)
+		usleep(100 * 1000);
+
+	sigset_t empty;
+	sigemptyset(&empty);
+	sigprocmask(SIG_SETMASK, &empty, NULL);
+
+	/* Re-route stdout/stderr to /tmp/venc.log in append mode so the
+	 * pre-respawn tail stays available for diagnosis.  If dup2 fails
+	 * (e.g. fd table exhaustion from a leaked descriptor we missed in
+	 * teardown) bail before execv — running blind would lose any panic
+	 * output the fresh venc emits. */
+	int log = open(VENC_LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (log >= 0) {
+		if (dup2(log, STDOUT_FILENO) < 0 ||
+		    dup2(log, STDERR_FILENO) < 0)
+			_exit(127);
+		if (log > 2)
+			close(log);
 	}
 
-	star6e_controls_bind(ps, vcfg);
-	install_signal_handlers();
-
-	scene_init(&ctx->scene, ctx->vcfg.video0.scene_threshold,
-		ctx->vcfg.video0.scene_holdoff);
-
-	if (!vcfg->isp.legacy_ae)
-		start_custom_ae(ps, vcfg);
-
-	if (vcfg->fpv.roi_enabled) {
-		star6e_controls_apply_roi_qp(vcfg->fpv.roi_qp);
-	}
-	if (vcfg->video0.qp_delta != 0) {
-		star6e_controls_apply_qp_delta(vcfg->video0.qp_delta);
-	}
-
-	if (!ps->output_enabled) {
-		ps->stored_fps = vcfg->video0.fps;
-		star6e_controls_apply_fps(STAR6E_CONTROLS_IDLE_FPS);
-	}
-
-	return 0;
+	/* argv is intentionally minimal — main.c currently ignores argv, so
+	 * any future flag (e.g. `-c <path>`) added without saving the parent's
+	 * argv into a static and replaying it here would silently disappear
+	 * across SIGHUP-respawn. */
+	char *args[] = { (char *)"venc", NULL };
+	execv(VENC_SELF_EXE_PATH, args);
+	/* exec failed — fall through and exit so init/operator notices */
+	_exit(127);
 }
 
-static int star6e_runtime_handle_reinit(Star6eRunnerContext *ctx,
-	struct timespec *cus3a_ts_last, unsigned int *idle_counter,
-	int *handled)
+int star6e_runtime_respawn_pending(void)
 {
-	int reinit_mode;
-	int updated;
-	int ret;
+	return g_respawn_after_exit;
+}
 
+static int star6e_runtime_handle_reinit(int *handled)
+{
 	*handled = 0;
 
-	reinit_mode = venc_api_get_reinit();
-	if (!reinit_mode) {
+	if (!venc_api_get_reinit())
 		return 0;
-	}
 	*handled = 1;
-
-	usleep(200000);
-	updated = venc_api_get_reinit();
-	if (updated) {
-		reinit_mode = updated;
-	}
 	venc_api_clear_reinit();
 
-	printf("> Reinit requested (mode %d: %s)\n", reinit_mode,
-		reinit_mode == 1 ? "reload config from disk" :
-		"apply in-memory config");
-
-	ret = star6e_runtime_restart_pipeline(ctx, reinit_mode);
-	if (ret != 0) {
-		return ret;
-	}
-
-	clock_gettime(CLOCK_MONOTONIC, cus3a_ts_last);
-	memset(&g_imu_verbose_last, 0, sizeof(g_imu_verbose_last));
-	*idle_counter = 0;
-
-	printf("> Pipeline reinit complete\n");
+	printf("> Reinit requested: cold restart via fork+exec on shutdown\n");
 	fflush(stdout);
+
+	/* Mark for respawn after teardown, then exit the run loop.
+	 * main() will execute backend->teardown (clean MI_SYS_Exit) then
+	 * fork+exec the successor process from a clean state. */
+	g_respawn_after_exit = 1;
+	g_running = 0;
 	return 0;
 }
 
@@ -930,8 +917,7 @@ static int star6e_runner_run(void *opaque)
 	}
 
 	while (g_running) {
-		ret = star6e_runtime_handle_reinit(ctx, &cus3a_ts_last,
-			&idle_counter, &handled);
+		ret = star6e_runtime_handle_reinit(&handled);
 		if (ret != 0) {
 			return ret;
 		}
@@ -965,6 +951,14 @@ static void star6e_runner_teardown(void *opaque)
 	{
 		pid_t watchdog = fork();
 		if (watchdog == 0) {
+			/* Rename so /proc/<pid>/comm reads "venc-wd" instead of
+			 * "venc".  Required for SIGHUP-respawn flow: the new
+			 * venc spawned by star6e_runtime_respawn_after_exit()
+			 * runs is_another_venc_running() at startup; without
+			 * this rename the still-alive watchdog (kept around
+			 * to SIGKILL/sysrq-b a hung parent) reads as "venc"
+			 * and the respawn aborts with "venc already running". */
+			(void)prctl(PR_SET_NAME, VENC_COMM_WATCHDOG, 0, 0, 0);
 			/* Close inherited stdout — it may be a pipe from the
 			 * audio stdout filter.  Keeping it open prevents the
 			 * filter thread's read() from seeing EOF, which
@@ -975,8 +969,8 @@ static void star6e_runner_teardown(void *opaque)
 			 * normally so we don't linger as an orphan. */
 			pid_t parent = getppid();
 			int i;
-			for (i = 0; i < 8; i++) {
-				sleep(1);
+			for (i = 0; i < 6; i++) {
+				usleep(500 * 1000);
 				if (kill(parent, 0) != 0)
 					_exit(0);  /* parent exited cleanly */
 			}
@@ -985,7 +979,7 @@ static void star6e_runner_teardown(void *opaque)
 					"[watchdog] teardown hung, kill -9\n";
 				(void)write(STDERR_FILENO, m1, sizeof(m1) - 1);
 				kill(parent, SIGKILL);
-				sleep(3);
+				sleep(1);
 				if (kill(parent, 0) == 0) {
 					static const char m2[] =
 						"[watchdog] D-state, sysrq reboot\n";

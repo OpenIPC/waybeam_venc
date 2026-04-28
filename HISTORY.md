@@ -1,5 +1,85 @@
 # History
 
+## [0.9.0] - 2026-04-26
+
+Two themes shipped together:
+
+### SIGHUP / `/api/v1/restart` cold restart via fork+exec (Star6E)
+
+SIGHUP / `/api/v1/restart` rebuild the full pipeline including a
+sensor-mode change, via process-level fork+exec respawn (Star6E).
+
+- **Single reinit path.**  `SIGHUP`, `GET /api/v1/restart`,
+  `GET /api/v1/defaults`, and `MUT_RESTART` `/api/v1/set` all enqueue
+  the same request: clean teardown of the running venc, fork a child
+  that execv's `/proc/self/exe`, parent exits.  The child inherits
+  zero MI/ISP/sensor state from the kernel driver — it's a true cold
+  boot at the SDK level, identical to a `killall venc; venc &` cycle.
+- **`venc_api_request_reinit()` collapsed** from `int mode` (0/1/2
+  priority queueing) to bool.  Every call site — SIGHUP handler,
+  `/api/v1/restart`, `/api/v1/defaults`, `MUT_RESTART` set — enqueues
+  the same request.
+- **Removed:** `star6e_pipeline_reinit()` and
+  `star6e_pipeline_stop_venc_level()` (partial-reinit codepath
+  replaced by process-level respawn).  See git history for the
+  abandoned escape hatch.
+- **New helpers:**
+  - `star6e_runtime_respawn_pending()` — `main()` checks this after
+    backend teardown.
+  - `star6e_runtime_respawn_after_exit()` — fork+execv successor.
+  - `prctl(PR_SET_NAME, "venc-wd")` in the watchdog fork so the new
+    venc's `is_another_venc_running()` skips it.
+- **Audio `g_ai_persist` hack kept** — pipeline_stop's
+  MI_AI_Disable cycle deadlocks `CamOsMutexLock` and would hang the
+  parent's teardown past the watchdog window.  Kernel cleans up AI
+  state on process exit anyway.
+- **Watchdog timeouts** (process exit only): `alarm()` 5 → 2 s,
+  watchdog poll 8 × 1 s → 6 × 500 ms, post-`SIGKILL` grace 3 → 1 s,
+  VENC drain 500 → 150 ms.  ISP channel wait kept at 2000 ms (bench
+  testing showed cuts cause "ISP channel readiness timeout" warnings).
+- Maruko backend untouched (the rcvalue-vs-bool ripple from the
+  reinit signature change is the only edit; the Maruko in-process
+  reinit path stays).
+- Docs: `documentation/SIGHUP_REINIT.md` rewritten with the
+  fork+exec design and full bench evidence;
+  `documentation/LIVE_FPS_CONTROL.md` "Mode Switching Limitation"
+  section removed; `documentation/CRASH_LOG.md` added with the
+  sysrq-b remote-recovery trick.
+
+**Bench validation (2026-04-26, imx335 @ 192.168.1.13):** 24/24
+consecutive cross-mode SIGHUPs (modes 0→1→2→3, 6 rounds) with no
+degradation, no zombies, no dmesg faults.  Cycle time 393–795 ms to
+respawn marker; ~13 s to new venc HTTP up (cold start dominates).
+Phase 1 plan's in-process `MI_SYS_Exit` + `MI_SYS_Init` approach was
+empirically disproven (PID-tied "already_inited" flags trip
+`MI_DEVICE_Open` hangs); partial-reinit-without-MI_SYS-Exit survives
+~4 cycles before VIF bindmode sync errors.  Process-level respawn is
+the only path that scales.
+
+### Hand-rolled config pretty printer (stable disk layout for `/etc/venc.json`)
+
+- **Replace `cJSON_Print` in `venc_config_save`** with a hand-rolled
+  emitter (`config_render_pretty` in `src/venc_config.c`). Every WebUI
+  `/api/v1/set` save and every `record.path` save now produces the same
+  canonical layout: 2-space indent, one key per line, `": "` separator,
+  no blank lines between sections, single trailing newline. cJSON's
+  tab-indented "shattered" pretty print is gone from the disk path.
+  Parsing and HTTP API responses still use cJSON unchanged.
+- **Unified layout for `config/venc.default.json`.** The hand-authored
+  irregular layout (some sections one-line, others multi-line, mixed
+  per-section indent rules) is replaced by the same canonical layout the
+  printer emits, so the default file matches what venc actually writes
+  on first save.
+- **Self-policing round-trip test** (`test_save_layout_byte_equal` in
+  `tests/test_venc_config.c`): loads `config/venc.default.json`, saves
+  via `venc_config_save`, asserts the saved bytes are byte-equal to the
+  original. Any future config field added to the struct/parser/serializer
+  but missing from the printer (or the default file) trips the test.
+- **`AGENTS.md` sync rules updated**: the per-section `render_*` helper
+  in `src/venc_config.c` is now an explicit sync point alongside the
+  struct, parser/serializer, API field+alias tables, WebUI `SECTIONS[]`,
+  and `config/venc.default.json`.
+
 ## [0.8.1] - 2026-04-25
 
 SD-card recording browser (dashboard tab + JSON API):

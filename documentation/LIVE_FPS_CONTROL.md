@@ -84,22 +84,15 @@ MI_SYS_BindChnPort2(&vpe_port, &venc_port, bind_src_fps, bind_dst_fps, ...);
 The VENC channel is also created with the config fps (not the sensor fps) for
 correct rate control from the start.
 
-## Mode Switching Limitation
+## Sensor mode switching
 
-Changing sensor modes at runtime (e.g. 90fps mode → 120fps mode) requires a full
-process restart. The SigmaStar kernel driver does not reliably reinitialize the
-MIPI PHY when switching modes in-process — the VIF intermittently shows 0 fps
-after a mode switch reinit (~50% failure rate observed on IMX335).
+`video0.fps` can be adjusted live (hardware bind decimation, see above).
 
-This is a kernel driver limitation, not a venc bug. The kernel's per-process
-module cleanup (triggered by process exit) performs deeper reset than what is
-available through the userspace API (`MI_SYS_Exit`/`MI_SNR_Disable`).
-
-To change sensor modes:
-1. Edit `/etc/venc.json` with the desired FPS
-2. Restart the venc process (`killall venc && venc &`)
-3. Or use `SIGHUP` / `/api/v1/restart` (reloads config from disk, but uses
-   in-process reinit which may stall on mode switches)
+Switching sensor *mode* (e.g. 90 fps mode → 120 fps mode) is supported
+without operator intervention since 0.9.0 — `SIGHUP` and `/api/v1/restart`
+trigger a fork+exec respawn that reloads the on-disk config and rebuilds
+the pipeline from sensor up in a fresh PID.  HTTP API is unreachable for
+~13 s during cold init.  See `documentation/SIGHUP_REINIT.md`.
 
 ## Tested Configurations (IMX335)
 

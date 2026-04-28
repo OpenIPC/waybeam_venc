@@ -65,7 +65,7 @@ static int maruko_runner_init(void *opaque)
 static int maruko_reinit_pipeline(MarukoRunnerContext *ctx)
 {
 	MarukoBackendContext *backend = &ctx->backend;
-	int reinit_mode;
+	bool reinit_pending;
 	int sys_initialized;
 	int ret;
 
@@ -76,10 +76,10 @@ static int maruko_reinit_pipeline(MarukoRunnerContext *ctx)
 	int prev_mode = backend->sensor.mode_index;
 	uint32_t prev_max_fps = backend->sensor.mode.maxFps;
 
-	reinit_mode = venc_api_get_reinit();
+	reinit_pending = venc_api_get_reinit();
 	venc_api_clear_reinit();
 
-	if (reinit_mode == 1) {
+	if (reinit_pending) {
 		VencConfig tmp_cfg;
 		printf("> [maruko] reinit: reloading config from disk\n");
 		venc_config_defaults(&tmp_cfg);
