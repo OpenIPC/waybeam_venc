@@ -75,32 +75,31 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 	return 0;
 }
 
-int maruko_output_should_skip_frame(MarukoOutput *output,
+void maruko_output_observe_pressure(MarukoOutput *output,
 	const VencConfig *cfg)
 {
 	uint8_t fill_pct = 0;
 
 	if (!output || !cfg)
-		return 0;
+		return;
 
 	if (output->ring) {
 		venc_ring_fill_t fill;
 		if (venc_ring_get_fill(output->ring, &fill) != 0)
-			return 0;
+			return;
 		fill_pct = fill.fill_pct;
 	} else if ((output->transport == VENC_OUTPUT_URI_UNIX ||
 	            output->transport == VENC_OUTPUT_URI_UDP) &&
 	           output->socket_handle >= 0) {
 		if (output_socket_get_fill_pct(output->socket_handle,
 		    output->send_buf_capacity, &fill_pct) != 0)
-			return 0;
+			return;
 	} else {
-		/* No transport configured — see star6e equivalent. */
 		output->in_pressure = 0;
-		return 0;
+		return;
 	}
 
-	return venc_check_backpressure(fill_pct,
+	venc_observe_pressure(fill_pct,
 		&output->in_pressure, &output->pressure_drops,
 		cfg->outgoing.backpressure ? 1 : 0,
 		cfg->outgoing.high_water_pct,

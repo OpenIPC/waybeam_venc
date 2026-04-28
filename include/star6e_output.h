@@ -131,22 +131,13 @@ int star6e_output_is_rtp(const Star6eOutput *output);
 /** Check if active output uses shared memory mode. */
 int star6e_output_is_shm(const Star6eOutput *output);
 
-/** Transport backpressure check — returns 1 if the producer should skip
- * the current frame entirely (no RTP packets sent, no rtp_seq advance —
- * the caller is still expected to advance rtp_state.timestamp and emit a
- * sidecar message so the receiver sees the pressure flag).
- *
- * Reads `cfg->outgoing.{backpressure,high_water_pct,low_water_pct}` once,
- * samples fill from the active transport (ring for shm://, SIOCOUTQ for
- * unix:///udp://), updates the in-pressure hysteresis flag on the output,
- * and on the way out increments `output->pressure_drops` if a skip is
- * decided.
- *
- * Returns 0 when no transport is active, when backpressure is disabled,
- * when watermarks are degenerate (lo >= hi), or when the consumer is
- * keeping up.  Cheap: one ACQUIRE + one RELAXED load on the ring header,
- * or one SIOCOUTQ ioctl on socket transports (SO_SNDBUF cached at open). */
-int star6e_output_should_skip_frame(Star6eOutput *output,
+/** Observe transport pressure for telemetry. Updates `output->in_pressure`
+ *  with hysteresis on cfg->outgoing watermarks and increments
+ *  `output->pressure_drops` while in pressure.  Never directs the caller
+ *  to skip — the caller MUST always emit the frame.  See
+ *  `venc_observe_pressure` in venc_ring.h for the rationale (skip-on-
+ *  pressure broke H.265 reference chains). */
+void star6e_output_observe_pressure(Star6eOutput *output,
 	const VencConfig *cfg);
 
 /** Begin accumulating RTP packets for a frame. When the transport is UDP

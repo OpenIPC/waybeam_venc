@@ -146,40 +146,48 @@ static inline int venc_ring_get_fill(const venc_ring_t *r,
 	return 0;
 }
 
-/* Producer-side hysteresis: should the next frame be dropped because
- * the consumer is falling behind?
+/* Observe transport pressure for telemetry only (NOT a skip directive).
  *
- * `fill_pct` is the producer-local output queue fill (0..100), computed
- * differently per transport:
- *   shm://   venc_ring_get_fill(ring).fill_pct
- *   unix://  output_socket_get_fill_pct(fd) using SIOCOUTQ / SO_SNDBUF
- *   udp://   currently disabled — the lossy datagram model means the
- *            kernel send queue is a noisy signal; control belongs at
- *            the radio link layer (see waybeam_wfb_ng/link_controller).
+ * History: this function used to return 1 to mean "skip-this-frame", and
+ * star6e_runtime / maruko_pipeline used that return value to bypass
+ * the encoder output for backpressure-driven frames.  That was wrong:
+ * H.264/H.265 inter-frame coding requires the reference chain to be
+ * intact, so dropping a P-frame post-encode left every following P-frame
+ * in the GOP undecodable at the receiver.  The "graceful degradation"
+ * we thought we had was actually catastrophic stream corruption
+ * masquerading as lower fps on producer-side counters.
  *
- * `in_pressure` is the caller-owned hysteresis flag; this function reads
- * and writes it in place.  `pressure_drops` is incremented whenever a
- * skip is decided.  `enabled` gates the whole feature; when disabled,
- * `in_pressure` is cleared and 0 is returned so re-enabling later starts
- * from a clean state.  Degenerate cfg (lo >= hi) likewise clears the
- * flag and returns 0 — without that, a producer already in pressure
- * when cfg goes degenerate would never see the exit branch and skip
- * every frame forever.
+ * The correct adaptation knobs are upstream of encode:
+ *   - lower the bitrate target (live `video0.bitrate`) — frames stay at
+ *     full fps but get smaller.  link_controller already does this from
+ *     radio stats; the trailer's `fill_pct` lets it react sooner.
+ *   - lower the encoder fps (sensor / MI_SYS_BindChnPort2 framerate
+ *     divider) — fewer frames, all reference chains intact.
  *
- * Returns 1 to signal skip-this-frame, 0 to send. */
-static inline int venc_check_backpressure(uint8_t fill_pct,
+ * This helper now does only observation:
+ *   - applies hysteresis on `*in_pressure` using fill / hi-water / lo-water
+ *   - increments `*pressure_drops` whenever the flag is asserted (the
+ *     counter's wire semantics shift from "frames the producer skipped"
+ *     to "frames the producer observed pressure during"; the wire
+ *     trailer field name is kept for ABI stability)
+ *   - never directs the caller to skip; the caller must always emit
+ *     the frame
+ *
+ * `enabled=0` and degenerate cfg (lo >= hi) still clear the flag so
+ * toggling either one does not strand the producer in pressure state. */
+static inline void venc_observe_pressure(uint8_t fill_pct,
 	int *in_pressure, uint64_t *pressure_drops,
 	int enabled, uint8_t high_water_pct, uint8_t low_water_pct)
 {
 	if (!in_pressure || !pressure_drops)
-		return 0;
+		return;
 	if (!enabled) {
 		*in_pressure = 0;
-		return 0;
+		return;
 	}
 	if (low_water_pct >= high_water_pct) {
 		*in_pressure = 0;
-		return 0;
+		return;
 	}
 
 	if (*in_pressure) {
@@ -190,11 +198,8 @@ static inline int venc_check_backpressure(uint8_t fill_pct,
 			*in_pressure = 1;
 	}
 
-	if (*in_pressure) {
+	if (*in_pressure)
 		(*pressure_drops)++;
-		return 1;
-	}
-	return 0;
 }
 
 /* ── Inline write (producer) ─────────────────────────────────────────── */

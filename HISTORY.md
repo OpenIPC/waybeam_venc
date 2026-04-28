@@ -2,7 +2,9 @@
 
 ## [0.9.2] - 2026-04-28
 
-Output backpressure (universal: shm / unix / udp):
+Transport-pressure observability (the prior "Level 2 — local FPS skip"
+plan was rolled back; see the post-encode-skip note at the end of this
+section).
 
 - **Universal fill source.** Producer-local backpressure now works
   uniformly for every output transport with a queue model:
@@ -34,15 +36,15 @@ Output backpressure (universal: shm / unix / udp):
   Forward-compat: probes that don't recognise the flag read just the
   base frame (and ENC_INFO if present) and ignore the trailing bytes
   — no protocol version bump.
-- **Level 2 — local FPS skip.** Producer-side hysteresis: enter
-  pressure when fill_pct ≥ `outgoing.highWaterPct` (default 75),
-  exit when fill_pct < `outgoing.lowWaterPct` (default 50).  While
-  in pressure, frames are dropped before any RTP packet is enqueued
-  — no torn FU fragments, no advancing RTP seq, no sidecar emission.
-  Receiver sees a clean frame-aligned gap that FEC handles cleanly.
-  RTP timestamp continues to advance per sensor frame so receivers'
-  jitter buffers don't drift against the audio stream's wallclock.
-  Disabled with `outgoing.backpressure=false`.
+- **Hysteresis-driven pressure flag (telemetry only).**  Per-frame
+  observation: enter pressure when fill_pct ≥ `outgoing.highWaterPct`
+  (default 75), exit when fill_pct < `outgoing.lowWaterPct` (default
+  50).  The flag flows out through the sidecar trailer
+  (`in_pressure`) and through `/api/v1/transport/status`.  The
+  `pressureDrops` counter increments while the flag is asserted and
+  serves as a "frames-spent-in-pressure" metric for adaptive
+  consumers.  **The producer never skips a frame on the basis of
+  this flag** — see the rollback note below.
 - **Config knobs (live, MUT_LIVE):** `outgoing.backpressure` (bool,
   default true), `outgoing.highWaterPct` (uint8, default 75),
   `outgoing.lowWaterPct` (uint8, default 50).  Validator enforces
@@ -51,23 +53,42 @@ Output backpressure (universal: shm / unix / udp):
   group — cfg committed atomically; the per-frame producer reads the
   cfg fields directly each tick (no callback dispatch needed).
 - **Architecture note.** The hysteresis state machine sits on a
-  pre-computed `fill_pct` (`venc_check_backpressure` in `venc_ring.h`)
-  so each backend's `*_should_skip_frame` is just a 4-line dispatch:
+  pre-computed `fill_pct` (`venc_observe_pressure` in `venc_ring.h`)
+  so each backend's `*_observe_pressure` is just a 4-line dispatch:
   pick the fill source by transport, hand it to the shared state
-  machine.  Adding a new transport is one branch in `should_skip_frame`
+  machine.  Adding a new transport is one branch in `observe_pressure`
   + one branch in the sidecar emit path + one branch in `query_transport_status`.
 - **Internal/wire renames.**  Identifiers were scoped from "shm_*" to
   "transport_*" / "backpressure_*" before any consumer shipped, on
   the basis that the model is equally meaningful for any transport
   with a queue.  No deprecated aliases retained — PR isn't merged
   yet so churn cost is zero.
-- **Tests added:**
-  - Star6E hysteresis state machine
+- **Post-encode frame-skip rolled back.** The original PR also shipped
+  a producer-side skip path: when the hysteresis flag was asserted,
+  `star6e_runtime` and `maruko_pipeline` would bypass
+  `*_video_send_frame` entirely, advance the RTP timestamp, and emit
+  a sidecar message with `seq_count=0`.  Hardware testing showed the
+  approach was fundamentally broken for inter-frame-coded video:
+  H.264 / H.265 P-frames reference the previous frame in the GOP, so
+  dropping one P-frame leaves every following P-frame in that GOP
+  undecodable at the receiver.  With `gopSize=5` at 120 fps, a
+  pressure storm that "looked clean" on producer-side counters
+  (`packetsSent` and `transport_drops` matched `bp=ON` baseline)
+  produced unreconstructable garbage at the decoder.  The skip path
+  has been removed.  Adaptation under link saturation belongs
+  upstream of encode — either lowering `video0.bitrate` (which
+  link_controller already does from radio stats and the trailer
+  signal) or lowering encoder fps (sensor-side / `MI_SYS_BindChnPort2`
+  divider).  The trailer / status endpoint / hysteresis state machine
+  remain valuable as a fast pressure signal for adaptive consumers;
+  they just no longer pretend to act on it locally.
+- **Tests added / kept:**
+  - Star6E hysteresis state machine — telemetry assertions only
     (`test_star6e_output_backpressure_hysteresis`)
-  - UNIX datagram backpressure end-to-end with a non-reading receiver
+  - UNIX datagram pressure observation with a non-reading receiver
     (`test_star6e_output_unix_backpressure`)
   - Validator boundary cases (`test_live_set_backpressure_watermarks`)
-  - Wire-layout for {enc, shm} combinations
+  - Wire-layout for {enc, transport} combinations
     (`test_star6e_video_sidecar_transport_layouts`)
 - **Stale-ring hardening.** `venc_ring_create()` now `shm_unlink()`s
   the name before `O_EXCL`-creating a fresh inode, instead of

@@ -77,12 +77,12 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 /** Initialize SHM output: create shared memory ring buffer. */
 int maruko_output_init_shm(MarukoOutput *output, const char *shm_name);
 
-/** Transport backpressure check — returns 1 if the producer should skip
- * the current frame entirely.  Mirrors star6e_output_should_skip_frame:
- * picks fill source by transport (ring or SIOCOUTQ), runs hysteresis on
- * cfg->outgoing watermarks, returns 0 when no transport is active or
- * backpressure is disabled. */
-int maruko_output_should_skip_frame(MarukoOutput *output,
+/** Observe transport pressure for telemetry.  Mirrors
+ *  star6e_output_observe_pressure: hysteresis on cfg->outgoing watermarks,
+ *  updates output->in_pressure / output->pressure_drops.  Never directs
+ *  the caller to skip — adaptation belongs upstream of encode (bitrate /
+ *  fps).  See venc_observe_pressure in venc_ring.h. */
+void maruko_output_observe_pressure(MarukoOutput *output,
 	const VencConfig *cfg);
 
 /** Change output destination URI without stopping streaming (udp:// or unix://). */

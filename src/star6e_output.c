@@ -253,42 +253,39 @@ int star6e_output_is_shm(const Star6eOutput *output)
 	return output && output->transport == VENC_OUTPUT_URI_SHM;
 }
 
-int star6e_output_should_skip_frame(Star6eOutput *output,
+void star6e_output_observe_pressure(Star6eOutput *output,
 	const VencConfig *cfg)
 {
 	uint8_t fill_pct = 0;
 
 	if (!output || !cfg)
-		return 0;
+		return;
 
 	/* Pick the fill source based on the active transport:
 	 *   shm://   ring fill (write_idx - read_idx) / slot_count
-	 *   unix://  SIOCOUTQ / SO_SNDBUF (fills when receiver is slow)
-	 *   udp://   same — kernel queue does fill when destination is
-	 *            unreachable or LAN consumer is slow.  For
-	 *            UDP-over-WiFi the NIC drains fast so steady-state
-	 *            fill_pct stays near 0 and the radio-link layer
-	 *            (waybeam_wfb_ng/link_controller) picks up the slack;
-	 *            we enable the gate uniformly so local-UDP setups
-	 *            benefit and the WiFi case is a no-op in practice. */
+	 *   unix://  SIOCOUTQ / SO_SNDBUF
+	 *   udp://   same.  link_controller / external schedulers consume
+	 *            the resulting in_pressure flag via the sidecar trailer
+	 *            and adapt with bitrate / fps writes upstream of encode. */
 	if (output->ring) {
 		venc_ring_fill_t fill;
 		if (venc_ring_get_fill(output->ring, &fill) != 0)
-			return 0;
+			return;
 		fill_pct = fill.fill_pct;
 	} else if ((output->transport == VENC_OUTPUT_URI_UNIX ||
 	            output->transport == VENC_OUTPUT_URI_UDP) &&
 	           output->socket_handle >= 0) {
 		if (output_socket_get_fill_pct(output->socket_handle,
 		    output->send_buf_capacity, &fill_pct) != 0)
-			return 0;
+			return;
 	} else {
-		/* No transport configured — no-op. */
+		/* No transport configured — clear flag so we don't get
+		 * stuck reporting pressure after teardown. */
 		output->in_pressure = 0;
-		return 0;
+		return;
 	}
 
-	return venc_check_backpressure(fill_pct,
+	venc_observe_pressure(fill_pct,
 		&output->in_pressure, &output->pressure_drops,
 		cfg->outgoing.backpressure ? 1 : 0,
 		cfg->outgoing.high_water_pct,

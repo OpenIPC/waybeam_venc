@@ -404,21 +404,13 @@ static void *dual_rec_thread_fn(void *arg)
 				if (d->is_dual_stream) {
 					const VencConfig *vc =
 						g_runner_ctx ? &g_runner_ctx->vcfg : NULL;
-					if (!star6e_output_should_skip_frame(
-					    &d->output, vc)) {
-						(void)star6e_video_send_frame(&d->video,
-							&d->output, &stream, 1, 0, NULL);
-					} else {
-						/* Match single-stream skip path: keep the
-						 * sidecar subscriber alive and report
-						 * pressure flag, then advance the RTP
-						 * clock so the second decoder doesn't fall
-						 * behind on timestamps after a burst. */
-						star6e_video_emit_sidecar_skip(&d->video,
-							&d->output, NULL);
-						d->video.rtp_state.timestamp +=
-							d->video.rtp_frame_ticks;
-					}
+					/* Observe pressure for telemetry, then always
+					 * send.  Producer-side skip would break H.265
+					 * reference chains; bitrate/fps adaptation
+					 * belongs to link_controller. */
+					star6e_output_observe_pressure(&d->output, vc);
+					(void)star6e_video_send_frame(&d->video,
+						&d->output, &stream, 1, 0, NULL);
 				} else if (d->ts_recorder) {
 					star6e_ts_recorder_write_stream(
 						d->ts_recorder, &stream);
@@ -756,25 +748,14 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			star6e_scene_request_idr, &ps->venc_channel);
 		scene_fill_sidecar(&ctx->scene, &enc_info);
 
-		if (!star6e_output_should_skip_frame(&ps->output, vcfg)) {
-			(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
-				ps->output_enabled, vcfg->system.verbose, &enc_info);
-		} else {
-			/* Backpressure skip: bypass output write but
-			 *  - emit a sidecar frame (seq_count=0) so the receiver
-			 *    sees the in_pressure flag rising and link_controller
-			 *    reacts immediately, and so the subscriber's TTL keeps
-			 *    refreshing during multi-second skip storms,
-			 *  - advance the RTP clock so the receiver's timestamp
-			 *    timeline stays in lock-step with capture wallclock.
-			 *    Otherwise `pressure_drops` frames of skip would shift
-			 *    every subsequent timestamp by N * frame_ticks and
-			 *    break A/V sync against the audio stream that keeps
-			 *    advancing on its own clock. */
-			star6e_video_emit_sidecar_skip(&ps->video, &ps->output,
-				&enc_info);
-			ps->video.rtp_state.timestamp += ps->video.rtp_frame_ticks;
-		}
+		/* Observe pressure for telemetry (sidecar trailer carries the
+		 * flag) and always send.  Skipping a P-frame here would break
+		 * the H.265 reference chain for the rest of the GOP, so
+		 * adaptation must happen upstream of encode (bitrate / fps),
+		 * driven by link_controller reading the trailer. */
+		star6e_output_observe_pressure(&ps->output, vcfg);
+		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
+			ps->output_enabled, vcfg->system.verbose, &enc_info);
 	}
 
 	/* In dual/dual-stream mode, ch1 handles recording (see below).

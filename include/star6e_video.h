@@ -39,16 +39,4 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 	int output_enabled, int verbose_enabled,
 	const RtpSidecarEncInfo *enc_info);
 
-/** Emit a sidecar message for a frame the producer chose to skip due to
- *  backpressure.  Polls the sidecar fd (so the subscriber's TTL doesn't
- *  expire during multi-second skip storms), then sends a MSG_FRAME with
- *  seq_count=0 carrying the transport-info trailer with in_pressure /
- *  fill_pct so link_controller and other adaptive consumers see the
- *  pressure flag without waiting for a sent frame.  No-op if the sidecar
- *  is disabled or no subscriber is active.  Captures
- *  state->rtp_state.timestamp at entry so the caller can advance the
- *  timestamp afterwards without affecting the reported frame ts. */
-void star6e_video_emit_sidecar_skip(Star6eVideoState *state,
-	Star6eOutput *output, const RtpSidecarEncInfo *enc_info);
-
 #endif /* STAR6E_VIDEO_H */

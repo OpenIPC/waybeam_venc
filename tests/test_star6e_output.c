@@ -1108,8 +1108,9 @@ static int test_audio_target_cache_hit_stable(void)
 }
 
 /* Drive a SHM ring to a target fill % by writing directly via the ring
- * helper, then call star6e_output_should_skip_frame and assert the
- * hysteresis state machine. */
+ * helper, then call star6e_output_observe_pressure and assert the
+ * hysteresis state machine.  Skip-on-pressure was rolled back (broke
+ * H.265 reference chains); the observation API is telemetry-only now. */
 static void fill_ring_to_pct(venc_ring_t *ring, uint8_t target_pct)
 {
 	uint64_t w = __atomic_load_n(&ring->hdr->write_idx, __ATOMIC_RELAXED);
@@ -1161,58 +1162,54 @@ static int test_star6e_output_backpressure_hysteresis(void)
 	CHECK("bp init", star6e_output_init(&output, &setup) == 0);
 
 	/* Empty ring — must not enter pressure. */
-	CHECK("bp empty no-skip",
-		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	star6e_output_observe_pressure(&output, &cfg);
 	CHECK("bp empty in_pressure", output.in_pressure == 0);
 	CHECK("bp empty drops", output.pressure_drops == 0);
 
 	/* Fill below high water (74%) — still no pressure. */
 	fill_ring_to_pct(output.ring, 74);
-	CHECK("bp 74pct no-skip",
-		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	star6e_output_observe_pressure(&output, &cfg);
 	CHECK("bp 74pct in_pressure", output.in_pressure == 0);
+	CHECK("bp 74pct drops unchanged", output.pressure_drops == 0);
 
-	/* Fill at high water (75%) — enter pressure, this frame dropped. */
+	/* Fill at high water (75%) — enter pressure, drops counter ticks. */
 	fill_ring_to_pct(output.ring, 75);
-	CHECK("bp 75pct skip",
-		star6e_output_should_skip_frame(&output, &cfg) == 1);
+	star6e_output_observe_pressure(&output, &cfg);
 	CHECK("bp 75pct in_pressure", output.in_pressure == 1);
 	base_drops = output.pressure_drops;
 	CHECK("bp 75pct drop counted", base_drops == 1);
 
 	/* Drain to between low and high — must STAY in pressure (hysteresis). */
 	drain_ring_to_pct(output.ring, 60);
-	CHECK("bp 60pct still skip (hysteresis)",
-		star6e_output_should_skip_frame(&output, &cfg) == 1);
+	star6e_output_observe_pressure(&output, &cfg);
 	CHECK("bp 60pct still in_pressure", output.in_pressure == 1);
 	CHECK("bp 60pct drop incremented", output.pressure_drops == base_drops + 1);
 
 	/* Drain at low water (50%) — must STAY in pressure (strict <). */
 	drain_ring_to_pct(output.ring, 50);
-	CHECK("bp 50pct still skip",
-		star6e_output_should_skip_frame(&output, &cfg) == 1);
+	star6e_output_observe_pressure(&output, &cfg);
+	CHECK("bp 50pct still in_pressure", output.in_pressure == 1);
 
-	/* Drain below low water (49%) — exit pressure, this frame sent. */
+	/* Drain below low water (49%) — exit pressure. */
 	drain_ring_to_pct(output.ring, 49);
-	CHECK("bp 49pct no-skip",
-		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	star6e_output_observe_pressure(&output, &cfg);
 	CHECK("bp 49pct in_pressure cleared", output.in_pressure == 0);
 
-	/* Disable backpressure — must not enter pressure even when full. */
+	/* Disable backpressure — must not observe pressure even when full. */
 	cfg.outgoing.backpressure = false;
 	fill_ring_to_pct(output.ring, 100);
-	CHECK("bp disabled no-skip",
-		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	star6e_output_observe_pressure(&output, &cfg);
 	CHECK("bp disabled in_pressure", output.in_pressure == 0);
 
-	/* Re-enable but with degenerate watermarks — must defensively no-skip. */
+	/* Re-enable but with degenerate watermarks — defensive: no flag rise. */
 	cfg.outgoing.backpressure = true;
 	cfg.outgoing.high_water_pct = 50;
 	cfg.outgoing.low_water_pct = 50;
-	CHECK("bp degenerate no-skip",
-		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	star6e_output_observe_pressure(&output, &cfg);
+	CHECK("bp degenerate in_pressure", output.in_pressure == 0);
 
-	/* Non-SHM output (UDP) — backpressure must always be a no-op. */
+	/* Non-SHM output (UDP) — observation runs but stays at 0% fill (no
+	 * receiver to back the kernel send queue up). */
 	star6e_output_teardown(&output);
 	{
 		uint16_t port = 0;
@@ -1227,8 +1224,8 @@ static int test_star6e_output_backpressure_hysteresis(void)
 		CHECK("bp udp init", star6e_output_init(&udp_out, &setup) == 0);
 		cfg.outgoing.high_water_pct = 75;
 		cfg.outgoing.low_water_pct = 50;
-		CHECK("bp udp no-skip",
-			star6e_output_should_skip_frame(&udp_out, &cfg) == 0);
+		star6e_output_observe_pressure(&udp_out, &cfg);
+		CHECK("bp udp in_pressure", udp_out.in_pressure == 0);
 		star6e_output_teardown(&udp_out);
 		if (recv_fd >= 0)
 			close(recv_fd);
@@ -1242,7 +1239,7 @@ static int test_star6e_output_backpressure_hysteresis(void)
  * directly through output->socket_handle so the test doesn't depend on
  * the higher-level RTP send path; the hysteresis state machine itself
  * is already covered by the SHM test.  This test specifically validates
- * the UNIX-fill plumbing and the should_skip_frame transport switch. */
+ * the UNIX-fill plumbing and the observe_pressure transport switch. */
 static int test_star6e_output_unix_backpressure(void)
 {
 	char abstract_name[64];
@@ -1271,8 +1268,8 @@ static int test_star6e_output_unix_backpressure(void)
 		output.transport == VENC_OUTPUT_URI_UNIX);
 
 	/* Empty queue — must not enter pressure. */
-	CHECK("unix bp empty no-skip",
-		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	star6e_output_observe_pressure(&output, &cfg);
+	CHECK("unix bp empty in_pressure", output.in_pressure == 0);
 
 	/* Stuff the queue.  No receiver read → bytes accumulate against the
 	 * sender's SO_SNDBUF accounting.  Stop on first short write or a
@@ -1297,8 +1294,8 @@ static int test_star6e_output_unix_backpressure(void)
 		(void)fcntl(output.socket_handle, F_SETFL, flags);
 	}
 
-	/* Now SIOCOUTQ should report a non-trivial fill_pct.  Run the
-	 * skip check and assert in_pressure / pressure_drops behave. */
+	/* Now SIOCOUTQ should report a non-trivial fill_pct.  Observe and
+	 * check the in_pressure / pressure_drops bookkeeping. */
 	{
 		uint8_t fill_pct = 0;
 		int got_fill = output_socket_get_fill_pct(
@@ -1309,10 +1306,9 @@ static int test_star6e_output_unix_backpressure(void)
 		CHECK("unix bp sndbuf capacity captured",
 			output.send_buf_capacity > 0);
 
-		(void)star6e_output_should_skip_frame(&output, &cfg);
-		/* Whether it skipped depends on the fill_pct vs hi=75
-		 * threshold.  At the very least, in_pressure must reflect
-		 * the high-water decision. */
+		star6e_output_observe_pressure(&output, &cfg);
+		/* When fill_pct ≥ 75 (the high-water default in this test),
+		 * the observation must flip in_pressure on. */
 		if (fill_pct >= 75) {
 			CHECK("unix bp entered pressure",
 				output.in_pressure == 1);
@@ -1321,10 +1317,9 @@ static int test_star6e_output_unix_backpressure(void)
 		}
 	}
 
-	/* Disable backpressure → must not skip even with a full queue. */
+	/* Disable backpressure → flag must clear even with a full queue. */
 	cfg.outgoing.backpressure = false;
-	CHECK("unix bp disabled no-skip",
-		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	star6e_output_observe_pressure(&output, &cfg);
 	CHECK("unix bp disabled in_pressure cleared",
 		output.in_pressure == 0);
 

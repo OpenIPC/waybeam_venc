@@ -457,97 +457,6 @@ static int test_star6e_video_sidecar_transport_layouts(void)
 	return failures;
 }
 
-/* Skip-path sidecar emit: verifies that a frame the producer chose to
- * skip due to backpressure still produces a sidecar message with
- * seq_count=0, in_pressure flag asserted, and TRANSPORT_INFO trailer.
- * Without this the receiver would lose visibility of multi-second
- * skip storms (subscriber TTL expires) and link_controller would
- * react one frame late on every pressure transition. */
-static int test_star6e_video_sidecar_skip_emit(void)
-{
-	VencConfig cfg;
-	Star6eOutputSetup setup;
-	Star6eOutput output;
-	Star6eVideoState state = {0};
-	RtpSidecarSubscribe sub = {0};
-	RtpSidecarEncInfo enc_info = {0};
-	struct sockaddr_in sidecar_addr;
-	uint8_t buf[128];
-	uint32_t ts_before;
-	uint16_t seq_before;
-	uint16_t probe_port;
-	uint16_t sidecar_port;
-	int probe_socket;
-	int failures = 0;
-	ssize_t n;
-	int ret;
-
-	venc_config_defaults(&cfg);
-	ret = reserve_udp_port(&sidecar_port);
-	CHECK("skip emit reserve port", ret == 0);
-	probe_socket = create_udp_receiver(&probe_port);
-	CHECK("skip emit probe socket", probe_socket >= 0);
-	cfg.outgoing.sidecar_port = sidecar_port;
-
-	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 0);
-	CHECK("skip emit prepare", ret == 0);
-	ret = star6e_output_init(&output, &setup);
-	CHECK("skip emit output init", ret == 0);
-	star6e_video_init(&state, &cfg, 30, &output);
-	ts_before = state.rtp_state.timestamp;
-	seq_before = state.rtp_state.seq;
-
-	memset(&sidecar_addr, 0, sizeof(sidecar_addr));
-	sidecar_addr.sin_family = AF_INET;
-	sidecar_addr.sin_port = htons(sidecar_port);
-	sidecar_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	sub.magic = htonl(RTP_SIDECAR_MAGIC);
-	sub.version = RTP_SIDECAR_VERSION;
-	sub.msg_type = RTP_SIDECAR_MSG_SUBSCRIBE;
-	ret = (int)sendto(probe_socket, &sub, sizeof(sub), 0,
-		(struct sockaddr *)&sidecar_addr, sizeof(sidecar_addr));
-	CHECK("skip emit subscribe send", ret == (int)sizeof(sub));
-
-	/* Simulate runtime state on a skipped frame. */
-	output.in_pressure = 1;
-	output.pressure_drops = 7;
-	enc_info.frame_type = RTP_SIDECAR_FRAME_P;
-	enc_info.qp = 32;
-
-	star6e_video_emit_sidecar_skip(&state, &output, &enc_info);
-
-	memset(buf, 0xCC, sizeof(buf));
-	n = recv(probe_socket, buf, sizeof(buf), 0);
-	CHECK("skip emit recv size frame+enc+transport",
-		n == (ssize_t)sizeof(RtpSidecarFrameExtTransport));
-	{
-		const RtpSidecarFrame *frame = (const RtpSidecarFrame *)buf;
-		const RtpSidecarTransportInfoWire *trailer =
-			(const RtpSidecarTransportInfoWire *)
-			(buf + offsetof(RtpSidecarFrameExtTransport, transport));
-		CHECK("skip emit transport flag",
-			(frame->flags & RTP_SIDECAR_FLAG_TRANSPORT_INFO) != 0);
-		CHECK("skip emit enc flag",
-			(frame->flags & RTP_SIDECAR_FLAG_ENC_INFO) != 0);
-		CHECK("skip emit seq_count zero",
-			ntohs(frame->seq_count) == 0);
-		CHECK("skip emit ts unchanged before advance",
-			ntohl(frame->rtp_timestamp) == ts_before);
-		CHECK("skip emit in_pressure", trailer->in_pressure == 1);
-		CHECK("skip emit pressure_drops",
-			ntohl(trailer->pressure_drops) == 7u);
-	}
-	CHECK("skip emit producer ts unchanged",
-		state.rtp_state.timestamp == ts_before);
-	CHECK("skip emit producer seq unchanged",
-		state.rtp_state.seq == seq_before);
-
-	star6e_output_teardown(&output);
-	star6e_video_reset(&state);
-	close(probe_socket);
-	return failures;
-}
-
 int test_star6e_video(void)
 {
 	int failures = 0;
@@ -558,6 +467,5 @@ int test_star6e_video(void)
 	failures += test_star6e_video_send_frame_disabled();
 	failures += test_star6e_video_sidecar_ext();
 	failures += test_star6e_video_sidecar_transport_layouts();
-	failures += test_star6e_video_sidecar_skip_emit();
 	return failures;
 }

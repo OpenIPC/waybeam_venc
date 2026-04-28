@@ -1463,20 +1463,14 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		HevcRtpStats frame_pktzr = {0};
 		if (ctx->output_enabled) {
 			const VencConfig *vc = maruko_controls_vcfg();
-			if (!maruko_output_should_skip_frame(&ctx->output, vc)) {
-				total_bytes = maruko_video_send_frame(&stream,
-					&ctx->output, &rtp_state, &param_sets,
-					&ctx->cfg,
-					PKTZR_VERBOSE_ACTIVE() ? &frame_pktzr : NULL);
-			} else {
-				/* Backpressure skip: advance RTP clock anyway so the
-				 * receiver's timestamp timeline matches capture
-				 * wallclock — otherwise pressure_drops frames of skip
-				 * shift every subsequent timestamp by N * frame_ticks
-				 * and break A/V sync against the audio stream that
-				 * keeps advancing on its own clock. */
-				rtp_state.timestamp += rtp_state.frame_ticks;
-			}
+			/* Observe pressure for telemetry; always send.  See
+			 * star6e_runtime equivalent — post-encode skip breaks
+			 * the H.265 reference chain. */
+			maruko_output_observe_pressure(&ctx->output, vc);
+			total_bytes = maruko_video_send_frame(&stream,
+				&ctx->output, &rtp_state, &param_sets,
+				&ctx->cfg,
+				PKTZR_VERBOSE_ACTIVE() ? &frame_pktzr : NULL);
 		}
 
 		/* Release the encoder stream immediately after the last
