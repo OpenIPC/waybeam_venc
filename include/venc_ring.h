@@ -101,6 +101,46 @@ venc_ring_t *venc_ring_attach(const char *shm_name);
 /* Destroy handle.  If is_owner, also shm_unlink. */
 void venc_ring_destroy(venc_ring_t *r);
 
+/* ── Producer-side observability ─────────────────────────────────────── */
+
+/* Snapshot of ring fill + lifetime counters.  Cheap (one RELAXED load and
+ * one ACQUIRE load on the indices, plus stat reads from local handle).
+ * Returns 0 on success, -1 on bad handle. */
+typedef struct {
+	uint32_t slot_count;
+	uint32_t used_slots;     /* write_idx - read_idx, clamped to slot_count */
+	uint8_t  fill_pct;       /* used_slots * 100 / slot_count */
+	uint64_t writes;
+	uint64_t reads;
+	uint64_t full_drops;
+	uint64_t oversize_drops;
+	uint64_t bad_slot_drops;
+} venc_ring_fill_t;
+
+static inline int venc_ring_get_fill(const venc_ring_t *r,
+	venc_ring_fill_t *out)
+{
+	if (!r || !r->hdr || !out)
+		return -1;
+	uint64_t w = __atomic_load_n(&r->hdr->write_idx, __ATOMIC_ACQUIRE);
+	uint64_t rd = __atomic_load_n(&r->hdr->read_idx, __ATOMIC_RELAXED);
+	uint32_t used = (w >= rd) ? (uint32_t)(w - rd) : 0;
+	uint32_t slot_count = r->hdr->slot_count;
+	if (used > slot_count)
+		used = slot_count;
+	out->slot_count = slot_count;
+	out->used_slots = used;
+	out->fill_pct = slot_count
+		? (uint8_t)((uint64_t)used * 100u / slot_count)
+		: 0u;
+	out->writes = r->stats.writes;
+	out->reads = r->stats.reads;
+	out->full_drops = r->stats.full_drops;
+	out->oversize_drops = r->stats.oversize_drops;
+	out->bad_slot_drops = r->stats.bad_slot_drops;
+	return 0;
+}
+
 /* ── Inline write (producer) ─────────────────────────────────────────── */
 
 static inline venc_ring_slot_t *venc_ring_slot_at(const venc_ring_t *r,

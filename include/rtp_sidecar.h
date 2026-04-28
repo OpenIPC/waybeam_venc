@@ -38,6 +38,7 @@
 
 #define RTP_SIDECAR_FLAG_KEYFRAME 0x01
 #define RTP_SIDECAR_FLAG_ENC_INFO 0x02
+#define RTP_SIDECAR_FLAG_SHM_INFO 0x04   /* SHM ring trailer follows ENC_INFO */
 
 /*
  * Frame type values carried in the optional encoder-feedback trailer.
@@ -113,10 +114,40 @@ typedef struct {
 	uint16_t frames_since_idr; /* controller frames-since-IDR counter        */
 } RtpSidecarEncInfoWire;     /* 12 bytes */
 
+/**
+ * Optional SHM-ring trailer — venc → probe, 16 bytes.
+ *
+ * Appended after the ENC_INFO trailer (or directly after RtpSidecarFrame
+ * when ENC_INFO is absent) when RTP_SIDECAR_FLAG_SHM_INFO is set in
+ * RtpSidecarFrame.flags.
+ *
+ * Carries producer-local SHM ring observability: link_controller and
+ * other adaptive controllers can react to ring fill / drops without an
+ * extra HTTP roundtrip.
+ *
+ * Forward-compat: probes that don't recognise the flag simply read
+ * RtpSidecarFrame (and optionally ENC_INFO) and ignore the trailing
+ * bytes.  No version bump required.
+ */
+typedef struct {
+	uint8_t  fill_pct;          /* current used_slots * 100 / slot_count    */
+	uint8_t  in_pressure;       /* 1 = backpressure hysteresis state active */
+	uint8_t  _pad[2];
+	uint32_t full_drops;        /* lifetime, low 32 bits                    */
+	uint32_t pressure_drops;    /* lifetime, low 32 bits                    */
+	uint32_t writes;            /* lifetime, low 32 bits (rolling)          */
+} RtpSidecarShmInfoWire;      /* 16 bytes */
+
 typedef struct {
 	RtpSidecarFrame       frame;
 	RtpSidecarEncInfoWire enc;
 } RtpSidecarFrameExt;         /* 64 bytes */
+
+typedef struct {
+	RtpSidecarFrame        frame;
+	RtpSidecarEncInfoWire  enc;
+	RtpSidecarShmInfoWire  shm;
+} RtpSidecarFrameExtShm;      /* 80 bytes */
 
 /** Clock sync request — probe → venc, 16 bytes */
 typedef struct {
@@ -151,6 +182,15 @@ typedef struct {
 	uint8_t  idr_inserted;
 	uint16_t frames_since_idr;
 } RtpSidecarEncInfo;
+
+/* Host-order SHM ring snapshot passed to rtp_sidecar_send_frame_shm(). */
+typedef struct {
+	uint8_t  fill_pct;
+	uint8_t  in_pressure;
+	uint32_t full_drops;
+	uint32_t pressure_drops;
+	uint32_t writes;
+} RtpSidecarShmInfo;
 
 /* ── Sender state (embedded in backend, not used by probe) ───────────── */
 
@@ -210,5 +250,20 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 	uint16_t seq_first, uint16_t seq_count,
 	uint64_t capture_us, uint64_t frame_ready_us,
 	const RtpSidecarEncInfo *enc_info);
+
+/**
+ * Same as rtp_sidecar_send_frame but optionally appends an SHM trailer.
+ * If shm_info is non-NULL, RTP_SIDECAR_FLAG_SHM_INFO is set in the frame
+ * flags and the trailer follows ENC_INFO (or directly follows the base
+ * frame when enc_info is NULL).  Old probes that don't recognise the
+ * flag read the base frame (and ENC_INFO if present) and ignore the
+ * trailing bytes.
+ */
+int rtp_sidecar_send_frame_shm(RtpSidecarSender *s,
+	uint32_t ssrc, uint32_t rtp_ts,
+	uint16_t seq_first, uint16_t seq_count,
+	uint64_t capture_us, uint64_t frame_ready_us,
+	const RtpSidecarEncInfo *enc_info,
+	const RtpSidecarShmInfo *shm_info);
 
 #endif /* RTP_SIDECAR_H */

@@ -1026,6 +1026,66 @@ static int apply_mute(bool on)
 	return 0;
 }
 
+static char *query_shm_status(void)
+{
+	Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
+	const VencConfig *vcfg = g_star6e_control_ctx.vcfg;
+	venc_ring_fill_t fill;
+	char buf[768];
+	int pos;
+
+	if (!ps || !vcfg)
+		return NULL;
+	if (!ps->output.ring) {
+		/* No active SHM output — surface that fact instead of NULL so
+		 * callers can distinguish "backend has no SHM hook" (NULL) from
+		 * "active output is udp/unix" (active=false). */
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":false,"
+			"\"backpressure\":%s,"
+			"\"highWaterPct\":%u,"
+			"\"lowWaterPct\":%u}}",
+			vcfg->outgoing.shm_backpressure ? "true" : "false",
+			(unsigned)vcfg->outgoing.shm_high_water_pct,
+			(unsigned)vcfg->outgoing.shm_low_water_pct);
+		if (pos < 0 || pos >= (int)sizeof(buf))
+			return NULL;
+		return strdup(buf);
+	}
+	if (venc_ring_get_fill(ps->output.ring, &fill) != 0)
+		return NULL;
+
+	pos = snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{"
+		"\"active\":true,"
+		"\"slotCount\":%u,"
+		"\"usedSlots\":%u,"
+		"\"fillPct\":%u,"
+		"\"writes\":%llu,"
+		"\"fullDrops\":%llu,"
+		"\"oversizeDrops\":%llu,"
+		"\"backpressure\":%s,"
+		"\"highWaterPct\":%u,"
+		"\"lowWaterPct\":%u,"
+		"\"inPressure\":%s,"
+		"\"pressureDrops\":%llu}}",
+		(unsigned)fill.slot_count,
+		(unsigned)fill.used_slots,
+		(unsigned)fill.fill_pct,
+		(unsigned long long)fill.writes,
+		(unsigned long long)fill.full_drops,
+		(unsigned long long)fill.oversize_drops,
+		vcfg->outgoing.shm_backpressure ? "true" : "false",
+		(unsigned)vcfg->outgoing.shm_high_water_pct,
+		(unsigned)vcfg->outgoing.shm_low_water_pct,
+		ps->output.in_pressure ? "true" : "false",
+		(unsigned long long)ps->output.pressure_drops);
+	if (pos < 0 || pos >= (int)sizeof(buf))
+		return NULL;
+	return strdup(buf);
+}
+
 static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_bitrate = apply_bitrate,
 	.apply_fps = apply_fps,
@@ -1046,6 +1106,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.query_iq_info = star6e_iq_query,
 	.apply_iq_param = star6e_iq_set,
 	.apply_max_payload_size = apply_max_payload_size,
+	.query_shm_status = query_shm_status,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

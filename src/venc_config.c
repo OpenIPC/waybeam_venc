@@ -111,6 +111,9 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->outgoing.stream_mode, sizeof(cfg->outgoing.stream_mode), "rtp");
 	cfg->outgoing.max_payload_size = 1400;
 	cfg->outgoing.connected_udp = true;
+	cfg->outgoing.shm_backpressure = true;
+	cfg->outgoing.shm_high_water_pct = 75;
+	cfg->outgoing.shm_low_water_pct = 50;
 
 	/* fpv */
 	cfg->fpv.roi_enabled = true;
@@ -319,6 +322,12 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 		(int)s->audio_port);
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
 		(int)s->sidecar_port);
+	s->shm_backpressure = json_get_bool(obj, "shmBackpressure",
+		s->shm_backpressure);
+	s->shm_high_water_pct = (uint8_t)json_get_int(obj, "shmHighWaterPct",
+		(int)s->shm_high_water_pct);
+	s->shm_low_water_pct = (uint8_t)json_get_int(obj, "shmLowWaterPct",
+		(int)s->shm_low_water_pct);
 }
 
 static void load_audio(const cJSON *root, VencConfigAudio *a)
@@ -846,13 +855,16 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 static void render_outgoing(PrettyBuf *p, const VencConfig *cfg, int is_last)
 {
 	pp_section_open(p, 1, "outgoing");
-	pp_field_bool(p,   2, "enabled",        cfg->outgoing.enabled,          0);
-	pp_field_string(p, 2, "server",         cfg->outgoing.server,           0);
-	pp_field_string(p, 2, "streamMode",     cfg->outgoing.stream_mode,      0);
-	pp_field_uint(p,   2, "maxPayloadSize", cfg->outgoing.max_payload_size, 0);
-	pp_field_bool(p,   2, "connectedUdp",   cfg->outgoing.connected_udp,    0);
-	pp_field_uint(p,   2, "audioPort",      cfg->outgoing.audio_port,       0);
-	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,     1);
+	pp_field_bool(p,   2, "enabled",         cfg->outgoing.enabled,           0);
+	pp_field_string(p, 2, "server",          cfg->outgoing.server,            0);
+	pp_field_string(p, 2, "streamMode",      cfg->outgoing.stream_mode,       0);
+	pp_field_uint(p,   2, "maxPayloadSize",  cfg->outgoing.max_payload_size,  0);
+	pp_field_bool(p,   2, "connectedUdp",    cfg->outgoing.connected_udp,     0);
+	pp_field_uint(p,   2, "audioPort",       cfg->outgoing.audio_port,        0);
+	pp_field_uint(p,   2, "sidecarPort",     cfg->outgoing.sidecar_port,      0);
+	pp_field_bool(p,   2, "shmBackpressure", cfg->outgoing.shm_backpressure,  0);
+	pp_field_uint(p,   2, "shmHighWaterPct", cfg->outgoing.shm_high_water_pct,0);
+	pp_field_uint(p,   2, "shmLowWaterPct",  cfg->outgoing.shm_low_water_pct, 1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1026,6 +1038,9 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(out, "connectedUdp", cfg->outgoing.connected_udp);
 		cJSON_AddNumberToObject(out, "audioPort", cfg->outgoing.audio_port);
 		cJSON_AddNumberToObject(out, "sidecarPort", cfg->outgoing.sidecar_port);
+		cJSON_AddBoolToObject(out, "shmBackpressure", cfg->outgoing.shm_backpressure);
+		cJSON_AddNumberToObject(out, "shmHighWaterPct", cfg->outgoing.shm_high_water_pct);
+		cJSON_AddNumberToObject(out, "shmLowWaterPct", cfg->outgoing.shm_low_water_pct);
 	}
 
 	/* fpv */

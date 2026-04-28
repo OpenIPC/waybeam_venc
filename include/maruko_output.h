@@ -60,6 +60,11 @@ typedef struct {
 	uint32_t send_errors;
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
 	MarukoOutputBatch batch;
+	/* SHM ring backpressure state — only meaningful when ring != NULL.
+	 * Hysteresis on cfg->outgoing.shm_high_water_pct / shm_low_water_pct;
+	 * pressure_drops surfaced via /api/v1/shm/status and rtp_sidecar. */
+	int in_pressure;
+	uint64_t pressure_drops;
 } MarukoOutput;
 
 /** Initialize UDP or Unix socket output from a parsed URI. */
@@ -68,6 +73,12 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 
 /** Initialize SHM output: create shared memory ring buffer. */
 int maruko_output_init_shm(MarukoOutput *output, const char *shm_name);
+
+/** SHM backpressure check — returns 1 if the producer should skip the
+ * current frame entirely.  Mirrors star6e_output_should_skip_frame.
+ * Returns 0 when the output has no SHM ring or backpressure is off. */
+int maruko_output_should_skip_frame(MarukoOutput *output,
+	const VencConfig *cfg);
 
 /** Change output destination URI without stopping streaming (udp:// or unix://). */
 int maruko_output_apply_server(MarukoOutput *output, const char *uri);

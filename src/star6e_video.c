@@ -117,11 +117,25 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 			state->max_frame_size, send_frame_output_rtp, &rtp_frame);
 
 		if (sidecar_active) {
-			rtp_sidecar_send_frame(&state->sidecar,
+			RtpSidecarShmInfo shm_info;
+			const RtpSidecarShmInfo *shm_ptr = NULL;
+			if (output->ring) {
+				venc_ring_fill_t fill;
+				if (venc_ring_get_fill(output->ring, &fill) == 0) {
+					shm_info.fill_pct = fill.fill_pct;
+					shm_info.in_pressure = output->in_pressure ? 1 : 0;
+					shm_info.full_drops = (uint32_t)fill.full_drops;
+					shm_info.pressure_drops =
+						(uint32_t)output->pressure_drops;
+					shm_info.writes = (uint32_t)fill.writes;
+					shm_ptr = &shm_info;
+				}
+			}
+			rtp_sidecar_send_frame_shm(&state->sidecar,
 				state->rtp_state.ssrc, frame_rtp_ts,
 				seq_before,
 				(uint16_t)(state->rtp_state.seq - seq_before),
-				capture_us, ready_us, enc_info);
+				capture_us, ready_us, enc_info, shm_ptr);
 		}
 	}
 

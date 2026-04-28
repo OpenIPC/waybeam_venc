@@ -79,6 +79,14 @@ typedef struct {
 	uint32_t send_errors;
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
 	Star6eOutputBatch batch;
+	/* SHM ring backpressure state — only meaningful when ring != NULL.
+	 * `in_pressure` is the hysteresis flag: enters when fill_pct >=
+	 * cfg->outgoing.shm_high_water_pct, exits when fill_pct <
+	 * cfg->outgoing.shm_low_water_pct.  `pressure_drops` is a producer-
+	 * local counter of frames skipped while in pressure state, surfaced
+	 * via /api/v1/shm/status and the rtp_sidecar SHM trailer. */
+	int in_pressure;
+	uint64_t pressure_drops;
 } Star6eOutput;
 
 typedef struct {
@@ -120,6 +128,19 @@ int star6e_output_is_rtp(const Star6eOutput *output);
 
 /** Check if active output uses shared memory mode. */
 int star6e_output_is_shm(const Star6eOutput *output);
+
+/** SHM backpressure check — returns 1 if the producer should skip the
+ * current frame entirely (no RTP packets, no sidecar, no rtp_seq advance).
+ *
+ * Reads `cfg->outgoing.shm_*` watermarks once, samples ring fill, updates
+ * the in-pressure hysteresis flag on the output, and on the way out
+ * increments `output->pressure_drops` if a skip is decided.
+ *
+ * Returns 0 when the output has no SHM ring, when shm_backpressure is
+ * disabled, or when the consumer is keeping up.  Cheap (one ACQUIRE +
+ * one RELAXED load on the ring header). */
+int star6e_output_should_skip_frame(Star6eOutput *output,
+	const VencConfig *cfg);
 
 /** Begin accumulating RTP packets for a frame. When the transport is UDP
  *  and SHM is not in use, subsequent star6e_output_send_rtp_parts() calls

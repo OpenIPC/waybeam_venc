@@ -314,6 +314,9 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, connected_udp,     FT_BOOL,   MUT_RESTART),
 	FIELD(outgoing, audio_port,        FT_UINT16, MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
+	FIELD(outgoing, shm_backpressure,  FT_BOOL,   MUT_LIVE),
+	FIELD(outgoing, shm_high_water_pct,FT_UINT8,  MUT_LIVE),
+	FIELD(outgoing, shm_low_water_pct, FT_UINT8,  MUT_LIVE),
 
 	FIELD(isp, legacy_ae,      FT_BOOL,   MUT_RESTART),
 	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
@@ -412,6 +415,9 @@ static const FieldAlias g_field_aliases[] = {
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
+	{ "outgoing.shmBackpressure", "outgoing.shm_backpressure" },
+	{ "outgoing.shmHighWaterPct", "outgoing.shm_high_water_pct" },
+	{ "outgoing.shmLowWaterPct", "outgoing.shm_low_water_pct" },
 	{ "debug.showOsd", "debug.show_osd" },
 };
 
@@ -649,6 +655,21 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		    v > VENC_OUTPUT_PAYLOAD_CEILING_BYTES)
 			return "outgoing.max_payload_size must be in range [576, 4000]";
 	}
+	if (strcmp(key, "outgoing.shm_high_water_pct") == 0 ||
+	    strcmp(key, "outgoing.shm_low_water_pct") == 0) {
+		uint8_t hi = cfg->outgoing.shm_high_water_pct;
+		uint8_t lo = cfg->outgoing.shm_low_water_pct;
+		/* Watermarks are percent of slot_count.  100 % is allowed for
+		 * "never trip" (effectively disable backpressure via the high
+		 * water).  Low must be strictly less than high to keep
+		 * hysteresis non-degenerate. */
+		if (hi > 100)
+			return "outgoing.shm_high_water_pct must be in range [0, 100]";
+		if (lo > 100)
+			return "outgoing.shm_low_water_pct must be in range [0, 100]";
+		if (lo >= hi)
+			return "outgoing.shm_low_water_pct must be < outgoing.shm_high_water_pct";
+	}
 	return NULL;
 }
 
@@ -667,6 +688,8 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"fpv.roi_steps",
 		"fpv.roi_center",
 		"outgoing.max_payload_size",
+		"outgoing.shm_high_water_pct",
+		"outgoing.shm_low_water_pct",
 	};
 	size_t i;
 
@@ -803,6 +826,7 @@ typedef enum {
 	LIVE_GROUP_VERBOSE,
 	LIVE_GROUP_OUTGOING,
 	LIVE_GROUP_MAX_PAYLOAD,
+	LIVE_GROUP_SHM_BACKPRESSURE,
 	LIVE_GROUP_MUTE,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
@@ -961,6 +985,10 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_OUTGOING;
 	if (strcmp(canonical_key, "outgoing.max_payload_size") == 0)
 		return LIVE_GROUP_MAX_PAYLOAD;
+	if (strcmp(canonical_key, "outgoing.shm_backpressure") == 0 ||
+	    strcmp(canonical_key, "outgoing.shm_high_water_pct") == 0 ||
+	    strcmp(canonical_key, "outgoing.shm_low_water_pct") == 0)
+		return LIVE_GROUP_SHM_BACKPRESSURE;
 	if (strcmp(canonical_key, "audio.mute") == 0)
 		return LIVE_GROUP_MUTE;
 
@@ -988,6 +1016,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "outgoing.*";
 	case LIVE_GROUP_MAX_PAYLOAD:
 		return "outgoing.max_payload_size";
+	case LIVE_GROUP_SHM_BACKPRESSURE:
+		return "outgoing.shm_*";
 	case LIVE_GROUP_MUTE:
 		return "audio.mute";
 	default:
@@ -1134,6 +1164,10 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return 1;
 	case LIVE_GROUP_MAX_PAYLOAD:
 		return g_cb->apply_max_payload_size != NULL;
+	case LIVE_GROUP_SHM_BACKPRESSURE:
+		/* Passive group: per-frame producer reads cfg directly each
+		 * tick.  No backend callback needed.  Always supported. */
+		return 1;
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute != NULL;
 	default:
@@ -1190,6 +1224,11 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_MAX_PAYLOAD:
 		dst->outgoing.max_payload_size = src->outgoing.max_payload_size;
+		break;
+	case LIVE_GROUP_SHM_BACKPRESSURE:
+		dst->outgoing.shm_backpressure = src->outgoing.shm_backpressure;
+		dst->outgoing.shm_high_water_pct = src->outgoing.shm_high_water_pct;
+		dst->outgoing.shm_low_water_pct = src->outgoing.shm_low_water_pct;
 		break;
 	case LIVE_GROUP_MUTE:
 		dst->audio.mute = src->audio.mute;
@@ -1287,6 +1326,11 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return 0;
 	case LIVE_GROUP_MAX_PAYLOAD:
 		return g_cb->apply_max_payload_size(cfg->outgoing.max_payload_size);
+	case LIVE_GROUP_SHM_BACKPRESSURE:
+		/* Cfg already committed via commit_config_locked above.  The
+		 * per-frame producer reads cfg->outgoing.shm_* once per frame
+		 * (atomic uint8/bool stores on ARM).  No callback needed. */
+		return 0;
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute(cfg->audio.mute);
 	default:
@@ -2056,6 +2100,23 @@ static int handle_isp_metrics(int fd, const HttpRequest *req, void *ctx)
 	return ret;
 }
 
+static int handle_shm_status(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+	if (!g_cb || !g_cb->query_shm_status) {
+		return httpd_send_error(fd, 501, "not_implemented",
+			"SHM status not available on this backend");
+	}
+	char *text = g_cb->query_shm_status();
+	if (!text) {
+		return httpd_send_error(fd, 500, "internal_error",
+			"SHM status query failed");
+	}
+	int ret = httpd_send_json(fd, 200, text);
+	free(text);
+	return ret;
+}
+
 static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
 {
 	VencConfig snapshot;
@@ -2518,6 +2579,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/iq",           handle_iq, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/modes",        handle_modes, NULL);
 	r |= venc_httpd_route("GET", "/metrics/isp",         handle_isp_metrics, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/shm/status",   handle_shm_status, NULL);
 	r |= venc_httpd_route("GET", "/request/idr",         handle_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/record/start",  handle_record_start, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/record/stop",   handle_record_stop, NULL);

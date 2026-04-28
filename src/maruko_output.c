@@ -70,6 +70,38 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 	return 0;
 }
 
+int maruko_output_should_skip_frame(MarukoOutput *output,
+	const VencConfig *cfg)
+{
+	venc_ring_fill_t fill;
+	uint8_t hi, lo;
+
+	if (!output || !output->ring || !cfg)
+		return 0;
+	if (!cfg->outgoing.shm_backpressure)
+		return 0;
+	if (venc_ring_get_fill(output->ring, &fill) != 0)
+		return 0;
+
+	hi = cfg->outgoing.shm_high_water_pct;
+	lo = cfg->outgoing.shm_low_water_pct;
+	if (lo >= hi)
+		return 0;
+
+	if (output->in_pressure) {
+		if (fill.fill_pct < lo)
+			output->in_pressure = 0;
+	} else {
+		if (fill.fill_pct >= hi)
+			output->in_pressure = 1;
+	}
+
+	if (output->in_pressure)
+		output->pressure_drops++;
+
+	return output->in_pressure;
+}
+
 int maruko_output_apply_server(MarukoOutput *output, const char *uri)
 {
 	VencOutputUri parsed;

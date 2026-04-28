@@ -5,6 +5,7 @@
 #include "isp_runtime.h"
 #include "maruko_bindings.h"
 #include "maruko_config.h"
+#include "maruko_controls.h"
 #include "maruko_output.h"
 #include "maruko_video.h"
 #include "pipeline_common.h"
@@ -1460,10 +1461,13 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		size_t total_bytes = 0;
 		HevcRtpStats frame_pktzr = {0};
 		if (ctx->output_enabled) {
-			total_bytes = maruko_video_send_frame(&stream,
-				&ctx->output, &rtp_state, &param_sets,
-				&ctx->cfg,
-				PKTZR_VERBOSE_ACTIVE() ? &frame_pktzr : NULL);
+			const VencConfig *vc = maruko_controls_vcfg();
+			if (!maruko_output_should_skip_frame(&ctx->output, vc)) {
+				total_bytes = maruko_video_send_frame(&stream,
+					&ctx->output, &rtp_state, &param_sets,
+					&ctx->cfg,
+					PKTZR_VERBOSE_ACTIVE() ? &frame_pktzr : NULL);
+			}
 		}
 
 		/* Release the encoder stream immediately after the last
@@ -1475,10 +1479,26 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		(void)maruko_mi_venc_release_stream(ctx->venc_device,
 			ctx->venc_channel, &stream);
 
-		rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
-			seq_before,
-			(uint16_t)(rtp_state.seq - seq_before),
-			capture_us, ready_us, &enc_info);
+		{
+			RtpSidecarShmInfo shm_info;
+			const RtpSidecarShmInfo *shm_ptr = NULL;
+			if (ctx->output.ring) {
+				venc_ring_fill_t fill;
+				if (venc_ring_get_fill(ctx->output.ring, &fill) == 0) {
+					shm_info.fill_pct = fill.fill_pct;
+					shm_info.in_pressure = ctx->output.in_pressure ? 1 : 0;
+					shm_info.full_drops = (uint32_t)fill.full_drops;
+					shm_info.pressure_drops =
+						(uint32_t)ctx->output.pressure_drops;
+					shm_info.writes = (uint32_t)fill.writes;
+					shm_ptr = &shm_info;
+				}
+			}
+			rtp_sidecar_send_frame_shm(&sidecar, rtp_state.ssrc,
+				frame_rtp_ts, seq_before,
+				(uint16_t)(rtp_state.seq - seq_before),
+				capture_us, ready_us, &enc_info, shm_ptr);
+		}
 
 		if (ctx->cfg.verbose) {
 			StreamMetricsSample sample;

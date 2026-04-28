@@ -1105,6 +1105,136 @@ static int test_audio_target_cache_hit_stable(void)
 	return failures;
 }
 
+/* Drive a SHM ring to a target fill % by writing directly via the ring
+ * helper, then call star6e_output_should_skip_frame and assert the
+ * hysteresis state machine. */
+static void fill_ring_to_pct(venc_ring_t *ring, uint8_t target_pct)
+{
+	uint64_t w = __atomic_load_n(&ring->hdr->write_idx, __ATOMIC_RELAXED);
+	uint64_t rd = __atomic_load_n(&ring->hdr->read_idx, __ATOMIC_RELAXED);
+	uint32_t want = (uint32_t)((uint64_t)ring->hdr->slot_count *
+		target_pct / 100u);
+	uint32_t cur_used = (uint32_t)(w - rd);
+	uint8_t pkt[16] = { 0 };
+
+	while (cur_used < want) {
+		if (venc_ring_write3(ring, pkt, sizeof(pkt), NULL, 0, NULL, 0) != 0)
+			break;
+		cur_used++;
+	}
+}
+
+static void drain_ring_to_pct(venc_ring_t *ring, uint8_t target_pct)
+{
+	uint64_t w = __atomic_load_n(&ring->hdr->write_idx, __ATOMIC_RELAXED);
+	uint64_t rd = __atomic_load_n(&ring->hdr->read_idx, __ATOMIC_RELAXED);
+	uint32_t want = (uint32_t)((uint64_t)ring->hdr->slot_count *
+		target_pct / 100u);
+	uint32_t cur_used = (uint32_t)(w - rd);
+
+	while (cur_used > want) {
+		__atomic_store_n(&ring->hdr->read_idx, rd + 1, __ATOMIC_RELEASE);
+		rd++;
+		cur_used--;
+	}
+}
+
+static int test_star6e_output_backpressure_hysteresis(void)
+{
+	char uri[64];
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	VencConfig cfg;
+	int failures = 0;
+	uint64_t base_drops;
+
+	venc_config_defaults(&cfg);
+	cfg.outgoing.shm_backpressure = true;
+	cfg.outgoing.shm_high_water_pct = 75;
+	cfg.outgoing.shm_low_water_pct = 50;
+
+	snprintf(uri, sizeof(uri), "shm://test_star6e_bp_%ld", (long)getpid());
+	CHECK("bp prepare",
+		star6e_output_prepare(&setup, uri, "rtp", 0) == 0);
+	CHECK("bp init", star6e_output_init(&output, &setup) == 0);
+
+	/* Empty ring — must not enter pressure. */
+	CHECK("bp empty no-skip",
+		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	CHECK("bp empty in_pressure", output.in_pressure == 0);
+	CHECK("bp empty drops", output.pressure_drops == 0);
+
+	/* Fill below high water (74%) — still no pressure. */
+	fill_ring_to_pct(output.ring, 74);
+	CHECK("bp 74pct no-skip",
+		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	CHECK("bp 74pct in_pressure", output.in_pressure == 0);
+
+	/* Fill at high water (75%) — enter pressure, this frame dropped. */
+	fill_ring_to_pct(output.ring, 75);
+	CHECK("bp 75pct skip",
+		star6e_output_should_skip_frame(&output, &cfg) == 1);
+	CHECK("bp 75pct in_pressure", output.in_pressure == 1);
+	base_drops = output.pressure_drops;
+	CHECK("bp 75pct drop counted", base_drops == 1);
+
+	/* Drain to between low and high — must STAY in pressure (hysteresis). */
+	drain_ring_to_pct(output.ring, 60);
+	CHECK("bp 60pct still skip (hysteresis)",
+		star6e_output_should_skip_frame(&output, &cfg) == 1);
+	CHECK("bp 60pct still in_pressure", output.in_pressure == 1);
+	CHECK("bp 60pct drop incremented", output.pressure_drops == base_drops + 1);
+
+	/* Drain at low water (50%) — must STAY in pressure (strict <). */
+	drain_ring_to_pct(output.ring, 50);
+	CHECK("bp 50pct still skip",
+		star6e_output_should_skip_frame(&output, &cfg) == 1);
+
+	/* Drain below low water (49%) — exit pressure, this frame sent. */
+	drain_ring_to_pct(output.ring, 49);
+	CHECK("bp 49pct no-skip",
+		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	CHECK("bp 49pct in_pressure cleared", output.in_pressure == 0);
+
+	/* Disable backpressure — must not enter pressure even when full. */
+	cfg.outgoing.shm_backpressure = false;
+	fill_ring_to_pct(output.ring, 100);
+	CHECK("bp disabled no-skip",
+		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	CHECK("bp disabled in_pressure", output.in_pressure == 0);
+
+	/* Re-enable but with degenerate watermarks — must defensively no-skip. */
+	cfg.outgoing.shm_backpressure = true;
+	cfg.outgoing.shm_high_water_pct = 50;
+	cfg.outgoing.shm_low_water_pct = 50;
+	CHECK("bp degenerate no-skip",
+		star6e_output_should_skip_frame(&output, &cfg) == 0);
+
+	/* Non-SHM output (UDP) — backpressure must always be a no-op. */
+	star6e_output_teardown(&output);
+	{
+		uint16_t port = 0;
+		int recv_fd = create_udp_receiver(&port);
+		Star6eOutput udp_out;
+		char udp_uri[64];
+
+		CHECK("bp udp recv socket", recv_fd >= 0);
+		snprintf(udp_uri, sizeof(udp_uri), "udp://127.0.0.1:%u", port);
+		CHECK("bp udp prepare",
+			star6e_output_prepare(&setup, udp_uri, "rtp", 0) == 0);
+		CHECK("bp udp init", star6e_output_init(&udp_out, &setup) == 0);
+		cfg.outgoing.shm_high_water_pct = 75;
+		cfg.outgoing.shm_low_water_pct = 50;
+		CHECK("bp udp no-skip",
+			star6e_output_should_skip_frame(&udp_out, &cfg) == 0);
+		star6e_output_teardown(&udp_out);
+		if (recv_fd >= 0)
+			close(recv_fd);
+	}
+
+	return failures;
+}
+
 int test_star6e_output(void)
 {
 	int failures = 0;
@@ -1136,5 +1266,6 @@ int test_star6e_output(void)
 	failures += test_star6e_audio_output_shared_teardown_keeps_video_socket();
 	failures += test_audio_target_cache_gen_tracks_transport();
 	failures += test_audio_target_cache_hit_stable();
+	failures += test_star6e_output_backpressure_hysteresis();
 	return failures;
 }

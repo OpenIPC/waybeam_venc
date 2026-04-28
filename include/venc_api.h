@@ -43,6 +43,11 @@ typedef struct {
 	 * not need to reject size-based requests. Returns 0 on success,
 	 * -1 if the backend has no live state to mutate. */
 	int (*apply_max_payload_size)(uint16_t size);
+	/* SHM ring observability snapshot.  Returns malloc'd JSON string
+	 * (caller frees) describing ring fill, lifetime counters, and
+	 * backpressure state, or NULL if the active output is not shm:// or
+	 * the backend has no SHM observability hook. */
+	char *(*query_shm_status)(void);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

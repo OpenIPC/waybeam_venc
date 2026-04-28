@@ -139,6 +139,7 @@ typedef struct {
 	uint32_t frame_height;
 	VencConfig *vcfg;
 	MarukoBackendConfig *backend_cfg;
+	MarukoBackendContext *backend;   /* full backend handle for output/ring access */
 	MI_SYS_ChnPort_t vpe_port;
 	MI_SYS_ChnPort_t venc_port;
 	volatile sig_atomic_t *output_enabled_ptr;
@@ -942,6 +943,63 @@ static int maruko_apply_max_payload_size(uint16_t size)
 	return 0;
 }
 
+static char *maruko_query_shm_status(void)
+{
+	MarukoBackendContext *backend = g_ctx.backend;
+	const VencConfig *vcfg = g_ctx.vcfg;
+	venc_ring_fill_t fill;
+	char buf[768];
+	int pos;
+
+	if (!backend || !vcfg)
+		return NULL;
+	if (!backend->output.ring) {
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":false,"
+			"\"backpressure\":%s,"
+			"\"highWaterPct\":%u,"
+			"\"lowWaterPct\":%u}}",
+			vcfg->outgoing.shm_backpressure ? "true" : "false",
+			(unsigned)vcfg->outgoing.shm_high_water_pct,
+			(unsigned)vcfg->outgoing.shm_low_water_pct);
+		if (pos < 0 || pos >= (int)sizeof(buf))
+			return NULL;
+		return strdup(buf);
+	}
+	if (venc_ring_get_fill(backend->output.ring, &fill) != 0)
+		return NULL;
+
+	pos = snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{"
+		"\"active\":true,"
+		"\"slotCount\":%u,"
+		"\"usedSlots\":%u,"
+		"\"fillPct\":%u,"
+		"\"writes\":%llu,"
+		"\"fullDrops\":%llu,"
+		"\"oversizeDrops\":%llu,"
+		"\"backpressure\":%s,"
+		"\"highWaterPct\":%u,"
+		"\"lowWaterPct\":%u,"
+		"\"inPressure\":%s,"
+		"\"pressureDrops\":%llu}}",
+		(unsigned)fill.slot_count,
+		(unsigned)fill.used_slots,
+		(unsigned)fill.fill_pct,
+		(unsigned long long)fill.writes,
+		(unsigned long long)fill.full_drops,
+		(unsigned long long)fill.oversize_drops,
+		vcfg->outgoing.shm_backpressure ? "true" : "false",
+		(unsigned)vcfg->outgoing.shm_high_water_pct,
+		(unsigned)vcfg->outgoing.shm_low_water_pct,
+		backend->output.in_pressure ? "true" : "false",
+		(unsigned long long)backend->output.pressure_drops);
+	if (pos < 0 || pos >= (int)sizeof(buf))
+		return NULL;
+	return strdup(buf);
+}
+
 /* ── Callback table ──────────────────────────────────────────────────── */
 
 static const VencApplyCallbacks g_maruko_apply_cb = {
@@ -964,6 +1022,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.query_iq_info = maruko_iq_query,
 	.apply_iq_param = maruko_iq_set,
 	.apply_max_payload_size = maruko_apply_max_payload_size,
+	.query_shm_status = maruko_query_shm_status,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
@@ -985,6 +1044,7 @@ void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
 	 * maruko_config_from_venc and rebinds, so the pointer remains
 	 * valid and the snapshot stays in sync with vcfg. */
 	g_ctx.backend_cfg = &backend->cfg;
+	g_ctx.backend = backend;
 	g_ctx.vpe_port = backend->vpe_port;
 	g_ctx.venc_port = backend->venc_port;
 	g_ctx.output_enabled_ptr = &backend->output_enabled;
@@ -995,4 +1055,9 @@ void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
 const VencApplyCallbacks *maruko_controls_callbacks(void)
 {
 	return &g_maruko_apply_cb;
+}
+
+const VencConfig *maruko_controls_vcfg(void)
+{
+	return g_ctx.vcfg;
 }

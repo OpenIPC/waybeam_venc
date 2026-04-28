@@ -1,5 +1,38 @@
 # History
 
+## [0.9.2] - 2026-04-28
+
+SHM ring backpressure (Level 1 + Level 2):
+
+- **Level 1 — observability.** New `GET /api/v1/shm/status` endpoint returns
+  ring fill, lifetime counters (`writes`, `reads`, `fullDrops`,
+  `oversizeDrops`, `badSlotDrops`), live watermark config, current
+  hysteresis state (`inPressure`), and the producer-local
+  `pressureDrops` counter. Also new `query_shm_status` callback in
+  `VencApplyCallbacks` (Star6E + Maruko both implement it).
+- **Sidecar trailer.** `RTP_SIDECAR_FLAG_SHM_INFO` (0x04) +
+  `RtpSidecarShmInfoWire` (16 bytes). Appended after the optional
+  ENC_INFO trailer when a SHM ring is active. Old probes that don't
+  recognise the flag read just the base frame (and ENC_INFO if present)
+  and ignore the trailing bytes — no protocol version bump.
+- **Level 2 — local FPS skip.** Producer-side hysteresis: enter
+  pressure when ring fill ≥ `outgoing.shmHighWaterPct` (default 75),
+  exit when fill < `outgoing.shmLowWaterPct` (default 50). While in
+  pressure, frames are dropped before any RTP packet is enqueued —
+  no torn FU fragments, no advancing RTP seq, no sidecar emission.
+  Receiver sees a clean frame-aligned gap that FEC handles cleanly.
+  Disabled with `outgoing.shmBackpressure=false`.
+- **Config knobs (live, MUT_LIVE):** `outgoing.shmBackpressure` (bool,
+  default true), `outgoing.shmHighWaterPct` (uint8, default 75),
+  `outgoing.shmLowWaterPct` (uint8, default 50). Validator enforces
+  `0 ≤ lo < hi ≤ 100` at boot and on every `/api/v1/set`. Live changes
+  flow through the new `LIVE_GROUP_SHM_BACKPRESSURE` passive group —
+  cfg is committed atomically; the per-frame producer reads the cfg
+  fields directly each tick (no callback dispatch needed).
+- **Tests added:** Star6E hysteresis state machine
+  (`test_star6e_output_backpressure_hysteresis`), validator boundary
+  cases (`test_live_set_shm_watermarks`).
+
 ## [0.9.1] - 2026-04-28
 
 Live `outgoing.max_payload_size` (`/api/v1/set?outgoing.maxPayloadSize=...`):

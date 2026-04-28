@@ -250,6 +250,41 @@ int star6e_output_is_shm(const Star6eOutput *output)
 	return output && output->transport == VENC_OUTPUT_URI_SHM;
 }
 
+int star6e_output_should_skip_frame(Star6eOutput *output,
+	const VencConfig *cfg)
+{
+	venc_ring_fill_t fill;
+	uint8_t hi, lo;
+
+	if (!output || !output->ring || !cfg)
+		return 0;
+	if (!cfg->outgoing.shm_backpressure)
+		return 0;
+	if (venc_ring_get_fill(output->ring, &fill) != 0)
+		return 0;
+
+	hi = cfg->outgoing.shm_high_water_pct;
+	lo = cfg->outgoing.shm_low_water_pct;
+	/* Validator enforces lo < hi <= 100 at /api/v1/set time and at boot,
+	 * but defensively clamp to keep the state machine sane if a manual
+	 * /etc/venc.json edit slips past validation. */
+	if (lo >= hi)
+		return 0;
+
+	if (output->in_pressure) {
+		if (fill.fill_pct < lo)
+			output->in_pressure = 0;
+	} else {
+		if (fill.fill_pct >= hi)
+			output->in_pressure = 1;
+	}
+
+	if (output->in_pressure)
+		output->pressure_drops++;
+
+	return output->in_pressure;
+}
+
 uint32_t star6e_output_drain_send_errors(Star6eOutput *output)
 {
 	uint32_t n;

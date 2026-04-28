@@ -46,7 +46,10 @@
     "maxPayloadSize": 1400,
     "connectedUdp": true,
     "audioPort": 5601,
-    "sidecarPort": 5602
+    "sidecarPort": 5602,
+    "shmBackpressure": true,
+    "shmHighWaterPct": 75,
+    "shmLowWaterPct": 50
   },
   "fpv": {
     "roiEnabled": true,

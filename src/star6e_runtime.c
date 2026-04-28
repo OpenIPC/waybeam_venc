@@ -402,8 +402,13 @@ static void *dual_rec_thread_fn(void *arg)
 			 * to prevent VPE backpressure while pipeline tears down. */
 			if (g_running) {
 				if (d->is_dual_stream) {
-					(void)star6e_video_send_frame(&d->video,
-						&d->output, &stream, 1, 0, NULL);
+					const VencConfig *vc =
+						g_runner_ctx ? &g_runner_ctx->vcfg : NULL;
+					if (!star6e_output_should_skip_frame(
+					    &d->output, vc)) {
+						(void)star6e_video_send_frame(&d->video,
+							&d->output, &stream, 1, 0, NULL);
+					}
 				} else if (d->ts_recorder) {
 					star6e_ts_recorder_write_stream(
 						d->ts_recorder, &stream);
@@ -741,8 +746,10 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			star6e_scene_request_idr, &ps->venc_channel);
 		scene_fill_sidecar(&ctx->scene, &enc_info);
 
-		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
-			ps->output_enabled, vcfg->system.verbose, &enc_info);
+		if (!star6e_output_should_skip_frame(&ps->output, vcfg)) {
+			(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
+				ps->output_enabled, vcfg->system.verbose, &enc_info);
+		}
 	}
 
 	/* In dual/dual-stream mode, ch1 handles recording (see below).

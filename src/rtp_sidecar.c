@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -179,11 +180,12 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 
 /* ── Frame metadata sender ───────────────────────────────────────────── */
 
-int rtp_sidecar_send_frame(RtpSidecarSender *s,
+int rtp_sidecar_send_frame_shm(RtpSidecarSender *s,
 	uint32_t ssrc, uint32_t rtp_ts,
 	uint16_t seq_first, uint16_t seq_count,
 	uint64_t capture_us, uint64_t frame_ready_us,
-	const RtpSidecarEncInfo *enc_info)
+	const RtpSidecarEncInfo *enc_info,
+	const RtpSidecarShmInfo *shm_info)
 {
 	if (!s || s->fd < 0)
 		return 0;  /* disabled */
@@ -197,7 +199,7 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 	if (!sub_active_at(s, now))
 		return 0;  /* no subscriber — channel stays silent */
 
-	RtpSidecarFrameExt msg;
+	RtpSidecarFrameExtShm msg;
 	size_t msg_len = sizeof(msg.frame);
 
 	memset(&msg, 0, sizeof(msg));
@@ -229,7 +231,32 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 		msg.enc.gop_state = enc_info->gop_state;
 		msg.enc.idr_inserted = enc_info->idr_inserted;
 		msg.enc.frames_since_idr = htons(enc_info->frames_since_idr);
-		msg_len = sizeof(msg);
+		msg_len = offsetof(RtpSidecarFrameExtShm, shm);
+	}
+
+	if (shm_info) {
+		/* SHM trailer follows ENC_INFO when present, or sits directly
+		 * after the base frame otherwise.  We always serialise to the
+		 * "after enc" slot in the contiguous struct; when enc is
+		 * absent we slide the trailer up so old probes that read just
+		 * the base frame don't see partial enc bytes between frame
+		 * and shm. */
+		RtpSidecarShmInfoWire wire;
+		size_t shm_offset;
+
+		memset(&wire, 0, sizeof(wire));
+		wire.fill_pct        = shm_info->fill_pct;
+		wire.in_pressure     = shm_info->in_pressure ? 1 : 0;
+		wire.full_drops      = htonl(shm_info->full_drops);
+		wire.pressure_drops  = htonl(shm_info->pressure_drops);
+		wire.writes          = htonl(shm_info->writes);
+
+		msg.frame.flags |= RTP_SIDECAR_FLAG_SHM_INFO;
+		shm_offset = enc_info
+			? offsetof(RtpSidecarFrameExtShm, shm)
+			: sizeof(RtpSidecarFrame);
+		memcpy((uint8_t *)&msg + shm_offset, &wire, sizeof(wire));
+		msg_len = shm_offset + sizeof(wire);
 	}
 
 	ssize_t sent = sendto(s->fd, &msg, msg_len, MSG_DONTWAIT,
@@ -240,4 +267,14 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 		return -1;
 	}
 	return 0;
+}
+
+int rtp_sidecar_send_frame(RtpSidecarSender *s,
+	uint32_t ssrc, uint32_t rtp_ts,
+	uint16_t seq_first, uint16_t seq_count,
+	uint64_t capture_us, uint64_t frame_ready_us,
+	const RtpSidecarEncInfo *enc_info)
+{
+	return rtp_sidecar_send_frame_shm(s, ssrc, rtp_ts, seq_first, seq_count,
+		capture_us, frame_ready_us, enc_info, NULL);
 }
