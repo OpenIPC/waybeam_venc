@@ -164,7 +164,7 @@ static Star6eStreamMode star6e_output_stream_mode_from_name(
 }
 
 int star6e_output_prepare(Star6eOutputSetup *setup, const char *server_uri,
-	const char *stream_mode_name, uint16_t max_frame_size, int connected_udp)
+	const char *stream_mode_name, int connected_udp)
 {
 	if (!setup)
 		return -1;
@@ -172,7 +172,6 @@ int star6e_output_prepare(Star6eOutputSetup *setup, const char *server_uri,
 	star6e_output_setup_reset(setup);
 	setup->stream_mode = star6e_output_stream_mode_from_name(stream_mode_name);
 	setup->requested_connected_udp = connected_udp ? 1 : 0;
-	setup->max_frame_size = max_frame_size;
 
 	if (!server_uri || !server_uri[0])
 		return 0;
@@ -213,7 +212,11 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 		return 0;
 
 	if (setup->uri.type == VENC_OUTPUT_URI_SHM) {
-		slot_data = (uint32_t)setup->max_frame_size + 12;
+		/* Slot fits the validated payload ceiling so any value in
+		 * [VENC_OUTPUT_PAYLOAD_MIN_BYTES,
+		 * VENC_OUTPUT_PAYLOAD_CEILING_BYTES] applies live without
+		 * restart, matching UDP/unix:// behavior. */
+		slot_data = (uint32_t)VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12;
 		output->ring = venc_ring_create(setup->uri.endpoint, 512, slot_data);
 		if (!output->ring) {
 			fprintf(stderr, "ERROR: venc_ring_create(%s) failed\n",

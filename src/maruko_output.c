@@ -35,8 +35,7 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	return 0;
 }
 
-int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
-	uint16_t max_payload)
+int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 {
 	uint32_t slot_data;
 
@@ -54,7 +53,10 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
 	memset(&output->batch, 0, sizeof(output->batch));
 	output->batch.socket_handle = -1;
 
-	slot_data = (uint32_t)max_payload + 12;
+	/* Slot fits the validated payload ceiling so any value in
+	 * [VENC_OUTPUT_PAYLOAD_MIN_BYTES, VENC_OUTPUT_PAYLOAD_CEILING_BYTES]
+	 * applies live without restart, matching UDP/unix:// behavior. */
+	slot_data = (uint32_t)VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12;
 	output->ring = venc_ring_create(shm_name, 512, slot_data);
 	if (!output->ring) {
 		fprintf(stderr, "ERROR: [maruko] venc_ring_create(%s) failed\n",

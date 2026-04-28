@@ -976,6 +976,38 @@ static int apply_server(const char *uri)
 	return 0;
 }
 
+static int apply_max_payload_size(uint16_t size)
+{
+	Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
+
+	if (!ps)
+		return -1;
+
+	/* Validation enforces [VENC_OUTPUT_PAYLOAD_MIN_BYTES,
+	 * VENC_OUTPUT_PAYLOAD_CEILING_BYTES] and the SHM ring is sized to
+	 * the ceiling at startup, so any value reaching here fits every
+	 * transport. Plain uint16_t stores are atomic on ARM; readers
+	 * (encoder thread, audio compact thread) re-read once per frame.
+	 * The next frame uses the new value; in-flight fragmentation for
+	 * the current frame keeps the old. */
+	ps->video.rtp_payload_size = size;
+	ps->video.max_frame_size = size;
+	if (ps->dual) {
+		ps->dual->video.rtp_payload_size = size;
+		ps->dual->video.max_frame_size = size;
+	}
+	/* Audio compact-mode chunking reads this on every audio frame
+	 * (star6e_audio_output_send_compact). RTP audio doesn't fragment so
+	 * the field is unused there, but we keep both modes in sync. */
+	ps->audio.output.max_payload_size = size;
+
+	/* Use stderr (unbuffered, bypasses the audio stdout filter pipe in
+	 * star6e_audio.c) so the live-apply trace lands in the log even
+	 * when stdout is captured by the filter. */
+	fprintf(stderr, "> max_payload_size set to %u (live)\n", (unsigned)size);
+	return 0;
+}
+
 static int apply_mute(bool on)
 {
 	if (!g_star6e_control_ctx.pipeline)
@@ -1013,6 +1045,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_awb_mode = apply_awb_mode,
 	.query_iq_info = star6e_iq_query,
 	.apply_iq_param = star6e_iq_set,
+	.apply_max_payload_size = apply_max_payload_size,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

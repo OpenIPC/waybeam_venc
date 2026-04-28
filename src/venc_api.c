@@ -1,6 +1,7 @@
 #include "venc_api.h"
 #include "idr_rate_limit.h"
 #include "pipeline_common.h"
+#include "rtp_packetizer.h"
 #include "sensor_select.h"
 #include "star6e_recorder.h"
 #include "venc_httpd.h"
@@ -12,6 +13,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Guard the live max_payload_size ceiling against future tightenings:
+ * - RTP_BUFFER_MAX is the hard cap inside the packetizer (silently
+ *   truncates above it).
+ * - SHM ring slot_data_size is uint32 in the header but published as
+ *   uint16-fitting (slot_data + 12 must fit into the 65535 cap that
+ *   venc_ring_create rejects). */
+_Static_assert(VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12 <= RTP_BUFFER_MAX,
+	"VENC_OUTPUT_PAYLOAD_CEILING_BYTES exceeds RTP_BUFFER_MAX cap");
+_Static_assert(VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12 <= 65535,
+	"VENC_OUTPUT_PAYLOAD_CEILING_BYTES would overflow SHM slot_data_size");
 
 /* ── Shared state (set by venc_api_register) ─────────────────────────── */
 
@@ -298,7 +310,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
 	FIELD(outgoing, server,            FT_STRING, MUT_LIVE),
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
-	FIELD(outgoing, max_payload_size,  FT_UINT16, MUT_RESTART),
+	FIELD(outgoing, max_payload_size,  FT_UINT16, MUT_LIVE),
 	FIELD(outgoing, connected_udp,     FT_BOOL,   MUT_RESTART),
 	FIELD(outgoing, audio_port,        FT_UINT16, MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
@@ -624,6 +636,19 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	    cfg->video0.scene_holdoff == 0 &&
 	    cfg->video0.scene_threshold > 0)
 		return "video0.scene_holdoff must be >= 1 when scene_threshold > 0";
+	if (strcmp(key, "outgoing.max_payload_size") == 0) {
+		uint16_t v = cfg->outgoing.max_payload_size;
+		/* Lower bound keeps RTP/FU header overhead a small fraction of
+		 * payload; upper bound fits inside the per-slot scratch
+		 * (STAR6E_OUTPUT_BATCH_SLOT_SCRATCH/MARUKO_OUTPUT_BATCH_SLOT_SCRATCH
+		 * = 4096 minus 12-byte RTP header) and inside the SHM ring slot
+		 * sized at startup. Above that range UDP datagrams exceed any
+		 * realistic single-hop MTU and IP fragmentation defeats the
+		 * point. */
+		if (v < VENC_OUTPUT_PAYLOAD_MIN_BYTES ||
+		    v > VENC_OUTPUT_PAYLOAD_CEILING_BYTES)
+			return "outgoing.max_payload_size must be in range [576, 4000]";
+	}
 	return NULL;
 }
 
@@ -641,6 +666,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"fpv.roi_qp",
 		"fpv.roi_steps",
 		"fpv.roi_center",
+		"outgoing.max_payload_size",
 	};
 	size_t i;
 
@@ -776,6 +802,7 @@ typedef enum {
 	LIVE_GROUP_AWB,
 	LIVE_GROUP_VERBOSE,
 	LIVE_GROUP_OUTGOING,
+	LIVE_GROUP_MAX_PAYLOAD,
 	LIVE_GROUP_MUTE,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
@@ -932,6 +959,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	if (strcmp(canonical_key, "outgoing.enabled") == 0 ||
 	    strcmp(canonical_key, "outgoing.server") == 0)
 		return LIVE_GROUP_OUTGOING;
+	if (strcmp(canonical_key, "outgoing.max_payload_size") == 0)
+		return LIVE_GROUP_MAX_PAYLOAD;
 	if (strcmp(canonical_key, "audio.mute") == 0)
 		return LIVE_GROUP_MUTE;
 
@@ -957,6 +986,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "system.verbose";
 	case LIVE_GROUP_OUTGOING:
 		return "outgoing.*";
+	case LIVE_GROUP_MAX_PAYLOAD:
+		return "outgoing.max_payload_size";
 	case LIVE_GROUP_MUTE:
 		return "audio.mute";
 	default:
@@ -1101,6 +1132,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		    !g_cb->apply_output_enabled)
 			return 0;
 		return 1;
+	case LIVE_GROUP_MAX_PAYLOAD:
+		return g_cb->apply_max_payload_size != NULL;
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute != NULL;
 	default:
@@ -1154,6 +1187,9 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 			snprintf(dst->outgoing.server, sizeof(dst->outgoing.server), "%s",
 				src->outgoing.server);
 		}
+		break;
+	case LIVE_GROUP_MAX_PAYLOAD:
+		dst->outgoing.max_payload_size = src->outgoing.max_payload_size;
 		break;
 	case LIVE_GROUP_MUTE:
 		dst->audio.mute = src->audio.mute;
@@ -1249,6 +1285,8 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		if (touched && touched->outgoing_enabled)
 			return g_cb->apply_output_enabled(cfg->outgoing.enabled);
 		return 0;
+	case LIVE_GROUP_MAX_PAYLOAD:
+		return g_cb->apply_max_payload_size(cfg->outgoing.max_payload_size);
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute(cfg->audio.mute);
 	default:

@@ -36,6 +36,13 @@ typedef struct {
 	char *(*query_iq_info)(void);
 	/* IQ set: param name + value string. Returns 0 on success, -1 on error. */
 	int (*apply_iq_param)(const char *param, const char *value);
+	/* Live-update the RTP/compact max packet payload size in bytes.
+	 * The validator caps requests at VENC_OUTPUT_PAYLOAD_CEILING_BYTES
+	 * and SHM ring slots are sized to that ceiling at startup, so any
+	 * value reaching the callback fits every transport — backends do
+	 * not need to reject size-based requests. Returns 0 on success,
+	 * -1 if the backend has no live state to mutate. */
+	int (*apply_max_payload_size)(uint16_t size);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

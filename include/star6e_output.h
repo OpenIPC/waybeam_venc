@@ -16,10 +16,12 @@
  * path mid-flushes (one extra sendmmsg call) rather than dropping. */
 #define STAR6E_OUTPUT_BATCH_MAX 64
 /* Size of owned per-slot scratch that holds a copy of the RTP header
- * concatenated with payload1. payload1 is either a 3-byte FU-A header
- * (tiny) or an AP packet (up to one MTU). 1616 = 16 header + 1600 payload,
- * comfortably larger than any configured max_payload. */
-#define STAR6E_OUTPUT_BATCH_SLOT_SCRATCH 1616
+ * concatenated with payload1. payload1 is either a 3-byte FU header
+ * (tiny) or an AP packet (up to one MTU). Worst case at the
+ * VENC_OUTPUT_PAYLOAD_CEILING_BYTES (4000) live-validated max is
+ * 12 (RTP) + 4000 = 4012 bytes; rounded up to 4096 for slack and
+ * alignment. Sized for jumbo-frame links such as the Realtek 3993 MTU. */
+#define STAR6E_OUTPUT_BATCH_SLOT_SCRATCH 4096
 
 typedef enum {
 	STAR6E_STREAM_MODE_COMPACT = 0,
@@ -31,7 +33,6 @@ typedef struct {
 	VencOutputUri uri;
 	int requested_connected_udp;
 	int has_server;
-	uint16_t max_frame_size;
 } Star6eOutputSetup;
 
 /* Per-frame sendmmsg batch. We own `scratch[slot]` containing
@@ -103,7 +104,7 @@ typedef size_t (*Star6eOutputRtpSendFn)(Star6eOutput *output,
 
 /** Validate and prepare output config from URI and stream mode name. */
 int star6e_output_prepare(Star6eOutputSetup *setup, const char *server_uri,
-	const char *stream_mode_name, uint16_t max_frame_size, int connected_udp);
+	const char *stream_mode_name, int connected_udp);
 
 /** Check if output setup is configured for RTP streaming. */
 int star6e_output_setup_is_rtp(const Star6eOutputSetup *setup);

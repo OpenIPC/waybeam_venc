@@ -411,18 +411,25 @@ curl "http://<device-ip>/api/v1/set?outgoing.server=udp://<receiver-ip>:5600"
 ### Stream Mode and Send Feedback
 
 ```bash
-# These require pipeline restart
+# Live: change max payload size on the fly (576..4000)
+curl "http://<device-ip>/api/v1/set?outgoing.maxPayloadSize=4000"
+
+# Restart-only
 curl "http://<device-ip>/api/v1/set?outgoing.stream_mode=compact"
 curl "http://<device-ip>/api/v1/set?outgoing.connected_udp=true"
 ```
 
 - `outgoing.stream_mode`: `"rtp"` (default) or `"compact"`. Determines packetization format.
-- `outgoing.max_payload_size`: Maximum RTP payload size in bytes. Default `1400`.
-  Applies to both RTP (FU fragmentation threshold) and compact modes. Values above 1400
-  are supported for jumbo-frame networks.
-  Default `0` (disabled — uses fixed `maxPayloadSize`). When non-zero, the adaptive
-  algorithm adjusts the effective payload size to hit this target, clamped to
-  `[1000, maxPayloadSize]`.
+- `outgoing.max_payload_size`: Maximum RTP/compact packet payload in bytes. Default `1400`.
+  `MUT_LIVE` — applies on the next encoded frame; in-flight packetization for the
+  current frame keeps the old size. Range `[576, 4000]`. Values above ~1472 require
+  end-to-end MTU support (e.g. Realtek's 3993-byte jumbo-frame links); on a
+  standard 1500-MTU path the kernel will IP-fragment, defeating the point.
+  Composes with other live fields in a single multi-set request — for example
+  `?video0.bitrate=8000&outgoing.maxPayloadSize=4000` applies both atomically.
+  Live updates are accepted across all transports (`udp://`, `unix://`, `shm://`):
+  the SHM ring slot is sized at startup to fit the validated ceiling so any value
+  in range applies live without restart, just like UDP/Unix.
 - `outgoing.connected_udp`: When `true`, calls `connect()` on the UDP socket so the kernel
   returns ICMP port-unreachable errors via `sendmsg()`. Useful for detecting that a receiver
   is down. Default `false` (fire-and-forget).
@@ -982,6 +989,17 @@ Behavior:
 - `GET` endpoints must remain consistent across backends.
 
 ## Change Log (Contract)
+- `0.8.2`:
+  - `outgoing.max_payload_size` is now `MUT_LIVE` (was `MUT_RESTART`) and
+    can be batched with other live fields in a single `/api/v1/set` call,
+    e.g. `?video0.bitrate=8000&outgoing.maxPayloadSize=4000`.
+  - Validation range tightened to `[576, 4000]` (boot will refuse a config
+    outside that range).
+  - SHM ring slot is sized at startup to fit the validated ceiling
+    (4000 + 12 RTP header = 4012 bytes per slot, 8-byte aligned), so
+    `shm://` accepts the full live range with no restart-to-grow caveat,
+    matching `udp://` and `unix://` behavior. Costs ~1.3 MiB extra SHM
+    per ring.
 - `0.6.3`:
   - Added `GET /api/v1/recordings` — list files with size/mtime plus
     `free_bytes` / `total_bytes` for the configured `record.dir`.

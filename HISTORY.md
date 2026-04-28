@@ -1,5 +1,57 @@
 # History
 
+## [0.9.1] - 2026-04-28
+
+Live `outgoing.max_payload_size` (`/api/v1/set?outgoing.maxPayloadSize=...`):
+
+- **Promoted from `MUT_RESTART` to `MUT_LIVE`.** The new size takes effect
+  on the next encoded frame; the in-flight frame finishes packetizing at
+  the old size, so a switch can never tear a single frame's FU/AP
+  fragmentation. Composes with other live fields in a single multi-set
+  request, e.g. `?video0.bitrate=8000&outgoing.maxPayloadSize=4000`.
+- **Range validated to `[576, 4000]`** in `validate_field_cfg()`. Same
+  validation now also gates boot via `venc_api_validate_loaded_config()`,
+  so a bad on-disk config refuses to start instead of crashing later.
+  4000 is sized for jumbo-frame links such as Realtek's 3993-byte MTU
+  (4000 + 12 RTP + 8 UDP + 20 IP = 4040, fits comfortably).
+- **Per-slot scratch bumped from 1616 → 4096 bytes** in both backends
+  (`STAR6E_OUTPUT_BATCH_SLOT_SCRATCH`, `MARUKO_OUTPUT_BATCH_SLOT_SCRATCH`).
+  Required so the sendmmsg() batch can hold an AP packet up to the new
+  4000-byte limit. ~159 KiB extra per backend (64 slots × 2.4 KiB delta).
+- **SHM parity with UDP/Unix.** SHM rings are sized at startup to fit
+  the validated ceiling (`VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12` =
+  4012 bytes per slot, 8-byte aligned), so `shm://` accepts the full
+  live range without a restart-to-grow caveat. Costs ~1.3 MiB extra SHM
+  per ring vs. the previous "size to configured starting value" scheme,
+  but this is paid only when SHM output is actually configured. UDP and
+  Unix datagram transports have no transport-level cap — only the
+  validated range and scratch ceiling apply.
+- **wfb_tx (or any SHM consumer) compatibility note.** The published
+  `slot_data_size` in the ring header changes from
+  `startup_max_payload + 12` (typically 1412) to a fixed 4012 after this
+  release. Well-behaved consumers using `venc_ring_attach()` already
+  read `slot_data_size` from the header and compute slot stride from
+  it, so they handle the change automatically. A consumer that hard-
+  codes a 1412-byte slot stride or uses a fixed-size read buffer below
+  4012 will need to be updated.
+- **Audio path tracks live updates too.** `Star6eAudioOutput.max_payload_size`
+  is now updated in the live apply alongside the video state, so audio
+  compact-mode chunking uses the new value on the next audio frame
+  (RTP audio doesn't fragment, so the field is unused there but kept in
+  sync for future-proofing).
+- New optional callback `VencApplyCallbacks.apply_max_payload_size`,
+  implemented in `star6e_controls.c` (covers dual-stream second channel)
+  and `maruko_controls.c`.
+- Cleanups while in the area:
+  - `Star6eOutputSetup.max_frame_size` field and the
+    `max_payload` parameter to `maruko_output_init_shm` were both
+    rendered dead by sizing SHM rings to the ceiling; removed along
+    with the now-redundant `*_output_max_payload_cap` helpers and
+    SHM cap checks (validation is the single gate).
+  - Removed a stale `outgoing.max_payload_size` paragraph in
+    `HTTP_API_CONTRACT.md` that described an "adaptive algorithm" no
+    longer in the codebase.
+
 ## [0.9.0] - 2026-04-26
 
 Two themes shipped together:
@@ -79,7 +131,6 @@ the only path that scales.
   in `src/venc_config.c` is now an explicit sync point alongside the
   struct, parser/serializer, API field+alias tables, WebUI `SECTIONS[]`,
   and `config/venc.default.json`.
-
 ## [0.8.1] - 2026-04-25
 
 SD-card recording browser (dashboard tab + JSON API):
