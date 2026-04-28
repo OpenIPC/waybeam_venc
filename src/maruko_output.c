@@ -24,6 +24,7 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	output->requested_connected_udp = requested_connected_udp ? 1 : 0;
 	output->connected_udp = 0;
 	output->send_errors = 0;
+	output->send_buf_capacity = 0;
 	memset(&output->batch, 0, sizeof(output->batch));
 	output->batch.socket_handle = -1;
 
@@ -31,6 +32,9 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	    &output->dst_len, &output->transport, uri,
 	    output->requested_connected_udp, &output->connected_udp) != 0)
 		return -1;
+	if (output_socket_capture_capacity(output->socket_handle,
+	    &output->send_buf_capacity) != 0)
+		output->send_buf_capacity = 0;
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
 }
@@ -50,6 +54,7 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 	output->requested_connected_udp = 0;
 	output->connected_udp = 0;
 	output->send_errors = 0;
+	output->send_buf_capacity = 0;
 	memset(&output->batch, 0, sizeof(output->batch));
 	output->batch.socket_handle = -1;
 
@@ -87,7 +92,7 @@ int maruko_output_should_skip_frame(MarukoOutput *output,
 	            output->transport == VENC_OUTPUT_URI_UDP) &&
 	           output->socket_handle >= 0) {
 		if (output_socket_get_fill_pct(output->socket_handle,
-		    &fill_pct) != 0)
+		    output->send_buf_capacity, &fill_pct) != 0)
 			return 0;
 	} else {
 		/* No transport configured — see star6e equivalent. */
@@ -129,6 +134,9 @@ int maruko_output_apply_server(MarukoOutput *output, const char *uri)
 		__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* restore even */
 		return -1;
 	}
+	if (output_socket_capture_capacity(output->socket_handle,
+	    &output->send_buf_capacity) != 0)
+		output->send_buf_capacity = 0;
 	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* even = stable */
 	return 0;
 }

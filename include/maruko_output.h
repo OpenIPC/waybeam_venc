@@ -59,10 +59,13 @@ typedef struct {
 	int connected_udp;           /* actual kernel state — set by configure() */
 	uint32_t send_errors;
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
+	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
 	MarukoOutputBatch batch;
-	/* SHM ring backpressure state — only meaningful when ring != NULL.
-	 * Hysteresis on cfg->outgoing.shm_high_water_pct / shm_low_water_pct;
-	 * pressure_drops surfaced via /api/v1/shm/status and rtp_sidecar. */
+	/* Transport backpressure state.  Meaningful for any active transport
+	 * (ring fill for shm://, SIOCOUTQ / SO_SNDBUF for unix:// / udp://).
+	 * Hysteresis on cfg->outgoing.high_water_pct / low_water_pct;
+	 * pressure_drops surfaced via /api/v1/transport/status and the
+	 * rtp_sidecar transport trailer. */
 	int in_pressure;
 	uint64_t pressure_drops;
 } MarukoOutput;
@@ -74,9 +77,11 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 /** Initialize SHM output: create shared memory ring buffer. */
 int maruko_output_init_shm(MarukoOutput *output, const char *shm_name);
 
-/** SHM backpressure check — returns 1 if the producer should skip the
- * current frame entirely.  Mirrors star6e_output_should_skip_frame.
- * Returns 0 when the output has no SHM ring or backpressure is off. */
+/** Transport backpressure check — returns 1 if the producer should skip
+ * the current frame entirely.  Mirrors star6e_output_should_skip_frame:
+ * picks fill source by transport (ring or SIOCOUTQ), runs hysteresis on
+ * cfg->outgoing watermarks, returns 0 when no transport is active or
+ * backpressure is disabled. */
 int maruko_output_should_skip_frame(MarukoOutput *output,
 	const VencConfig *cfg);
 

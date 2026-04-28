@@ -78,13 +78,15 @@ typedef struct {
 	venc_ring_t *ring;
 	uint32_t send_errors;
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
+	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
 	Star6eOutputBatch batch;
-	/* SHM ring backpressure state — only meaningful when ring != NULL.
+	/* Transport backpressure state.  Meaningful for any transport with a
+	 * queue: shm:// (ring fill), unix:// / udp:// (SIOCOUTQ / SO_SNDBUF).
 	 * `in_pressure` is the hysteresis flag: enters when fill_pct >=
-	 * cfg->outgoing.shm_high_water_pct, exits when fill_pct <
-	 * cfg->outgoing.shm_low_water_pct.  `pressure_drops` is a producer-
-	 * local counter of frames skipped while in pressure state, surfaced
-	 * via /api/v1/shm/status and the rtp_sidecar SHM trailer. */
+	 * cfg->outgoing.high_water_pct, exits when fill_pct <
+	 * cfg->outgoing.low_water_pct.  `pressure_drops` is a producer-local
+	 * counter of frames skipped while in pressure state, surfaced via
+	 * /api/v1/transport/status and the rtp_sidecar transport trailer. */
 	int in_pressure;
 	uint64_t pressure_drops;
 } Star6eOutput;
@@ -129,16 +131,21 @@ int star6e_output_is_rtp(const Star6eOutput *output);
 /** Check if active output uses shared memory mode. */
 int star6e_output_is_shm(const Star6eOutput *output);
 
-/** SHM backpressure check — returns 1 if the producer should skip the
- * current frame entirely (no RTP packets, no sidecar, no rtp_seq advance).
+/** Transport backpressure check — returns 1 if the producer should skip
+ * the current frame entirely (no RTP packets sent, no rtp_seq advance —
+ * the caller is still expected to advance rtp_state.timestamp and emit a
+ * sidecar message so the receiver sees the pressure flag).
  *
- * Reads `cfg->outgoing.shm_*` watermarks once, samples ring fill, updates
- * the in-pressure hysteresis flag on the output, and on the way out
- * increments `output->pressure_drops` if a skip is decided.
+ * Reads `cfg->outgoing.{backpressure,high_water_pct,low_water_pct}` once,
+ * samples fill from the active transport (ring for shm://, SIOCOUTQ for
+ * unix:///udp://), updates the in-pressure hysteresis flag on the output,
+ * and on the way out increments `output->pressure_drops` if a skip is
+ * decided.
  *
- * Returns 0 when the output has no SHM ring, when shm_backpressure is
- * disabled, or when the consumer is keeping up.  Cheap (one ACQUIRE +
- * one RELAXED load on the ring header). */
+ * Returns 0 when no transport is active, when backpressure is disabled,
+ * when watermarks are degenerate (lo >= hi), or when the consumer is
+ * keeping up.  Cheap: one ACQUIRE + one RELAXED load on the ring header,
+ * or one SIOCOUTQ ioctl on socket transports (SO_SNDBUF cached at open). */
 int star6e_output_should_skip_frame(Star6eOutput *output,
 	const VencConfig *cfg);
 

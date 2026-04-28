@@ -1089,7 +1089,7 @@ static char *query_transport_status(void)
 	           ps->output.socket_handle >= 0) {
 		uint8_t fill_pct = 0;
 		if (output_socket_get_fill_pct(ps->output.socket_handle,
-		    &fill_pct) != 0)
+		    ps->output.send_buf_capacity, &fill_pct) != 0)
 			fill_pct = 0;
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"

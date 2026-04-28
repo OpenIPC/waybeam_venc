@@ -409,9 +409,13 @@ static void *dual_rec_thread_fn(void *arg)
 						(void)star6e_video_send_frame(&d->video,
 							&d->output, &stream, 1, 0, NULL);
 					} else {
-						/* Advance the dual stream's RTP clock so the
-						 * second decoder doesn't fall behind on
-						 * timestamps after a backpressure burst. */
+						/* Match single-stream skip path: keep the
+						 * sidecar subscriber alive and report
+						 * pressure flag, then advance the RTP
+						 * clock so the second decoder doesn't fall
+						 * behind on timestamps after a burst. */
+						star6e_video_emit_sidecar_skip(&d->video,
+							&d->output, NULL);
 						d->video.rtp_state.timestamp +=
 							d->video.rtp_frame_ticks;
 					}
@@ -756,13 +760,19 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
 				ps->output_enabled, vcfg->system.verbose, &enc_info);
 		} else {
-			/* Backpressure skip: bypass output write but advance the
-			 * RTP clock anyway so the receiver's timestamp timeline
-			 * stays in lock-step with capture wallclock.  Otherwise
-			 * `pressure_drops` frames of skip would shift every
-			 * subsequent timestamp down by N * frame_ticks, breaking
-			 * jitter buffers and any A/V sync against an audio stream
-			 * that keeps advancing on its own clock. */
+			/* Backpressure skip: bypass output write but
+			 *  - emit a sidecar frame (seq_count=0) so the receiver
+			 *    sees the in_pressure flag rising and link_controller
+			 *    reacts immediately, and so the subscriber's TTL keeps
+			 *    refreshing during multi-second skip storms,
+			 *  - advance the RTP clock so the receiver's timestamp
+			 *    timeline stays in lock-step with capture wallclock.
+			 *    Otherwise `pressure_drops` frames of skip would shift
+			 *    every subsequent timestamp by N * frame_ticks and
+			 *    break A/V sync against the audio stream that keeps
+			 *    advancing on its own clock. */
+			star6e_video_emit_sidecar_skip(&ps->video, &ps->output,
+				&enc_info);
 			ps->video.rtp_state.timestamp += ps->video.rtp_frame_ticks;
 		}
 	}

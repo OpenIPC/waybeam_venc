@@ -236,6 +236,9 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 	    &output->dst_len, &output->transport, &setup->uri,
 	    output->requested_connected_udp, &output->connected_udp) != 0)
 		return -1;
+	if (output_socket_capture_capacity(output->socket_handle,
+	    &output->send_buf_capacity) != 0)
+		output->send_buf_capacity = 0;
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
 }
@@ -277,7 +280,7 @@ int star6e_output_should_skip_frame(Star6eOutput *output,
 	            output->transport == VENC_OUTPUT_URI_UDP) &&
 	           output->socket_handle >= 0) {
 		if (output_socket_get_fill_pct(output->socket_handle,
-		    &fill_pct) != 0)
+		    output->send_buf_capacity, &fill_pct) != 0)
 			return 0;
 	} else {
 		/* No transport configured — no-op. */
@@ -684,6 +687,9 @@ int star6e_output_apply_server(Star6eOutput *output, const char *uri)
 		__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* restore even */
 		return -1;
 	}
+	if (output_socket_capture_capacity(output->socket_handle,
+	    &output->send_buf_capacity) != 0)
+		output->send_buf_capacity = 0;
 	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* even = stable */
 	return 0;
 }

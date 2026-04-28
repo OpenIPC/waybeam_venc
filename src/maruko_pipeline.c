@@ -1507,6 +1507,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			            ctx->output.transport == VENC_OUTPUT_URI_UDP) &&
 			           ctx->output.socket_handle >= 0) {
 				if (output_socket_get_fill_pct(ctx->output.socket_handle,
+				    ctx->output.send_buf_capacity,
 				    &tinfo.fill_pct) == 0)
 					tinfo_ptr = &tinfo;
 			}

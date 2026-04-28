@@ -226,22 +226,39 @@ int output_socket_send_parts(int socket_handle,
 	return sent < 0 ? -1 : 0;
 }
 
-int output_socket_get_fill_pct(int socket_handle, uint8_t *out_pct)
+int output_socket_capture_capacity(int socket_handle, int *out_capacity)
 {
-	int queued = 0;
 	int sndbuf = 0;
 	socklen_t sndbuf_len = sizeof(sndbuf);
-	uint64_t pct;
 
-	if (socket_handle < 0 || !out_pct)
-		return -1;
-	if (ioctl(socket_handle, SIOCOUTQ, &queued) != 0)
+	if (socket_handle < 0 || !out_capacity)
 		return -1;
 	if (getsockopt(socket_handle, SOL_SOCKET, SO_SNDBUF, &sndbuf,
 	    &sndbuf_len) != 0)
 		return -1;
 	if (sndbuf <= 0)
 		return -1;
+	*out_capacity = sndbuf;
+	return 0;
+}
+
+int output_socket_get_fill_pct(int socket_handle, int sndbuf_capacity,
+	uint8_t *out_pct)
+{
+	int queued = 0;
+	int sndbuf;
+	uint64_t pct;
+
+	if (socket_handle < 0 || !out_pct)
+		return -1;
+	if (ioctl(socket_handle, SIOCOUTQ, &queued) != 0)
+		return -1;
+
+	if (sndbuf_capacity > 0) {
+		sndbuf = sndbuf_capacity;
+	} else if (output_socket_capture_capacity(socket_handle, &sndbuf) != 0) {
+		return -1;
+	}
 
 	/* Linux reports SO_SNDBUF as 2× the requested size (kernel internal
 	 * accounting).  Both queued and sndbuf use the same units, so the

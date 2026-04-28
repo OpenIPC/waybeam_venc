@@ -315,12 +315,12 @@ static int test_star6e_video_sidecar_ext(void)
 }
 
 /* Wire-layout test: rtp_sidecar_send_frame_transport with all four
- * combinations of {enc_info, shm_info} = {NULL, set}.  Verifies that
- *   - the SHM trailer always lands at the right byte offset, in
- *     particular that the "enc absent, shm present" case slides the
- *     trailer up to offset 52 instead of 64,
- *   - the SHM_INFO flag bit is set when (and only when) the trailer
- *     is appended,
+ * combinations of {enc_info, transport_info} = {NULL, set}.  Verifies:
+ *   - the transport trailer always lands at the right byte offset, in
+ *     particular that the "enc absent, transport present" case slides
+ *     the trailer up to offset 52 instead of 64,
+ *   - the TRANSPORT_INFO flag bit is set when (and only when) the
+ *     trailer is appended,
  *   - old probes that read just the base frame (or frame+enc) and
  *     ignore extra bytes get a valid prefix in every layout. */
 static int test_star6e_video_sidecar_transport_layouts(void)
@@ -337,12 +337,12 @@ static int test_star6e_video_sidecar_transport_layouts(void)
 	int ret;
 
 	ret = reserve_udp_port(&sidecar_port);
-	CHECK("shm layout reserve port", ret == 0);
+	CHECK("transport layout reserve port", ret == 0);
 	probe_socket = create_udp_receiver(&probe_port);
-	CHECK("shm layout probe socket", probe_socket >= 0);
+	CHECK("transport layout probe socket", probe_socket >= 0);
 
 	ret = rtp_sidecar_sender_init(&sender, sidecar_port);
-	CHECK("shm layout sender init", ret == 0);
+	CHECK("transport layout sender init", ret == 0);
 
 	memset(&sidecar_addr, 0, sizeof(sidecar_addr));
 	sidecar_addr.sin_family = AF_INET;
@@ -353,16 +353,16 @@ static int test_star6e_video_sidecar_transport_layouts(void)
 	sub.msg_type = RTP_SIDECAR_MSG_SUBSCRIBE;
 	ret = (int)sendto(probe_socket, &sub, sizeof(sub), 0,
 		(struct sockaddr *)&sidecar_addr, sizeof(sidecar_addr));
-	CHECK("shm layout subscribe send", ret == (int)sizeof(sub));
+	CHECK("transport layout subscribe send", ret == (int)sizeof(sub));
 	rtp_sidecar_poll(&sender);
 
 	/* Case 1: no enc, no shm — 52 bytes, no flags. */
 	rtp_sidecar_send_frame_transport(&sender, 1, 100, 0, 1, 0, 0, NULL, NULL);
 	memset(buf, 0xCC, sizeof(buf));
 	n = recv(probe_socket, buf, sizeof(buf), 0);
-	CHECK("shm layout case1 size",
+	CHECK("transport layout case1 size",
 		n == (ssize_t)sizeof(RtpSidecarFrame));
-	CHECK("shm layout case1 no flags",
+	CHECK("transport layout case1 no flags",
 		((const RtpSidecarFrame *)buf)->flags == 0);
 
 	/* Case 2: enc only — 64 bytes, ENC_INFO flag set. */
@@ -373,12 +373,12 @@ static int test_star6e_video_sidecar_transport_layouts(void)
 		rtp_sidecar_send_frame_transport(&sender, 1, 200, 1, 1, 0, 0, &enc, NULL);
 		memset(buf, 0xCC, sizeof(buf));
 		n = recv(probe_socket, buf, sizeof(buf), 0);
-		CHECK("shm layout case2 size",
+		CHECK("transport layout case2 size",
 			n == (ssize_t)sizeof(RtpSidecarFrameExt));
-		CHECK("shm layout case2 enc flag",
+		CHECK("transport layout case2 enc flag",
 			(((const RtpSidecarFrame *)buf)->flags &
 			 RTP_SIDECAR_FLAG_ENC_INFO) != 0);
-		CHECK("shm layout case2 no shm flag",
+		CHECK("transport layout case2 no transport flag",
 			(((const RtpSidecarFrame *)buf)->flags &
 			 RTP_SIDECAR_FLAG_TRANSPORT_INFO) == 0);
 	}
@@ -397,24 +397,24 @@ static int test_star6e_video_sidecar_transport_layouts(void)
 		rtp_sidecar_send_frame_transport(&sender, 1, 300, 2, 1, 0, 0, NULL, &shm);
 		memset(buf, 0xCC, sizeof(buf));
 		n = recv(probe_socket, buf, sizeof(buf), 0);
-		CHECK("shm layout case3 size",
+		CHECK("transport layout case3 size",
 			n == (ssize_t)(sizeof(RtpSidecarFrame) +
 			               sizeof(RtpSidecarTransportInfoWire)));
-		CHECK("shm layout case3 shm flag",
+		CHECK("transport layout case3 transport flag",
 			(((const RtpSidecarFrame *)buf)->flags &
 			 RTP_SIDECAR_FLAG_TRANSPORT_INFO) != 0);
-		CHECK("shm layout case3 no enc flag",
+		CHECK("transport layout case3 no enc flag",
 			(((const RtpSidecarFrame *)buf)->flags &
 			 RTP_SIDECAR_FLAG_ENC_INFO) == 0);
 		trailer = (const RtpSidecarTransportInfoWire *)
 			(buf + sizeof(RtpSidecarFrame));
-		CHECK("shm layout case3 fill_pct", trailer->fill_pct == 80);
-		CHECK("shm layout case3 in_pressure", trailer->in_pressure == 1);
-		CHECK("shm layout case3 full_drops",
+		CHECK("transport layout case3 fill_pct", trailer->fill_pct == 80);
+		CHECK("transport layout case3 in_pressure", trailer->in_pressure == 1);
+		CHECK("transport layout case3 transport_drops",
 			ntohl(trailer->transport_drops) == 0x11223344u);
-		CHECK("shm layout case3 pressure_drops",
+		CHECK("transport layout case3 pressure_drops",
 			ntohl(trailer->pressure_drops) == 0xAABBCCDDu);
-		CHECK("shm layout case3 writes",
+		CHECK("transport layout case3 packets_sent",
 			ntohl(trailer->packets_sent) == 0x55667788u);
 	}
 
@@ -434,25 +434,116 @@ static int test_star6e_video_sidecar_transport_layouts(void)
 		rtp_sidecar_send_frame_transport(&sender, 1, 400, 3, 1, 0, 0, &enc, &shm);
 		memset(buf, 0xCC, sizeof(buf));
 		n = recv(probe_socket, buf, sizeof(buf), 0);
-		CHECK("shm layout case4 size",
+		CHECK("transport layout case4 size",
 			n == (ssize_t)sizeof(RtpSidecarFrameExtTransport));
-		CHECK("shm layout case4 both flags",
+		CHECK("transport layout case4 both flags",
 			(((const RtpSidecarFrame *)buf)->flags &
 			 (RTP_SIDECAR_FLAG_ENC_INFO | RTP_SIDECAR_FLAG_TRANSPORT_INFO))
 			 == (RTP_SIDECAR_FLAG_ENC_INFO | RTP_SIDECAR_FLAG_TRANSPORT_INFO));
 		trailer = (const RtpSidecarTransportInfoWire *)
 			(buf + offsetof(RtpSidecarFrameExtTransport, transport));
-		CHECK("shm layout case4 fill_pct", trailer->fill_pct == 50);
-		CHECK("shm layout case4 in_pressure", trailer->in_pressure == 0);
-		CHECK("shm layout case4 full_drops",
+		CHECK("transport layout case4 fill_pct", trailer->fill_pct == 50);
+		CHECK("transport layout case4 in_pressure", trailer->in_pressure == 0);
+		CHECK("transport layout case4 transport_drops",
 			ntohl(trailer->transport_drops) == 7u);
-		CHECK("shm layout case4 pressure_drops",
+		CHECK("transport layout case4 pressure_drops",
 			ntohl(trailer->pressure_drops) == 11u);
-		CHECK("shm layout case4 writes",
+		CHECK("transport layout case4 packets_sent",
 			ntohl(trailer->packets_sent) == 13u);
 	}
 
 	rtp_sidecar_sender_close(&sender);
+	close(probe_socket);
+	return failures;
+}
+
+/* Skip-path sidecar emit: verifies that a frame the producer chose to
+ * skip due to backpressure still produces a sidecar message with
+ * seq_count=0, in_pressure flag asserted, and TRANSPORT_INFO trailer.
+ * Without this the receiver would lose visibility of multi-second
+ * skip storms (subscriber TTL expires) and link_controller would
+ * react one frame late on every pressure transition. */
+static int test_star6e_video_sidecar_skip_emit(void)
+{
+	VencConfig cfg;
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	Star6eVideoState state = {0};
+	RtpSidecarSubscribe sub = {0};
+	RtpSidecarEncInfo enc_info = {0};
+	struct sockaddr_in sidecar_addr;
+	uint8_t buf[128];
+	uint32_t ts_before;
+	uint16_t seq_before;
+	uint16_t probe_port;
+	uint16_t sidecar_port;
+	int probe_socket;
+	int failures = 0;
+	ssize_t n;
+	int ret;
+
+	venc_config_defaults(&cfg);
+	ret = reserve_udp_port(&sidecar_port);
+	CHECK("skip emit reserve port", ret == 0);
+	probe_socket = create_udp_receiver(&probe_port);
+	CHECK("skip emit probe socket", probe_socket >= 0);
+	cfg.outgoing.sidecar_port = sidecar_port;
+
+	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 0);
+	CHECK("skip emit prepare", ret == 0);
+	ret = star6e_output_init(&output, &setup);
+	CHECK("skip emit output init", ret == 0);
+	star6e_video_init(&state, &cfg, 30, &output);
+	ts_before = state.rtp_state.timestamp;
+	seq_before = state.rtp_state.seq;
+
+	memset(&sidecar_addr, 0, sizeof(sidecar_addr));
+	sidecar_addr.sin_family = AF_INET;
+	sidecar_addr.sin_port = htons(sidecar_port);
+	sidecar_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	sub.magic = htonl(RTP_SIDECAR_MAGIC);
+	sub.version = RTP_SIDECAR_VERSION;
+	sub.msg_type = RTP_SIDECAR_MSG_SUBSCRIBE;
+	ret = (int)sendto(probe_socket, &sub, sizeof(sub), 0,
+		(struct sockaddr *)&sidecar_addr, sizeof(sidecar_addr));
+	CHECK("skip emit subscribe send", ret == (int)sizeof(sub));
+
+	/* Simulate runtime state on a skipped frame. */
+	output.in_pressure = 1;
+	output.pressure_drops = 7;
+	enc_info.frame_type = RTP_SIDECAR_FRAME_P;
+	enc_info.qp = 32;
+
+	star6e_video_emit_sidecar_skip(&state, &output, &enc_info);
+
+	memset(buf, 0xCC, sizeof(buf));
+	n = recv(probe_socket, buf, sizeof(buf), 0);
+	CHECK("skip emit recv size frame+enc+transport",
+		n == (ssize_t)sizeof(RtpSidecarFrameExtTransport));
+	{
+		const RtpSidecarFrame *frame = (const RtpSidecarFrame *)buf;
+		const RtpSidecarTransportInfoWire *trailer =
+			(const RtpSidecarTransportInfoWire *)
+			(buf + offsetof(RtpSidecarFrameExtTransport, transport));
+		CHECK("skip emit transport flag",
+			(frame->flags & RTP_SIDECAR_FLAG_TRANSPORT_INFO) != 0);
+		CHECK("skip emit enc flag",
+			(frame->flags & RTP_SIDECAR_FLAG_ENC_INFO) != 0);
+		CHECK("skip emit seq_count zero",
+			ntohs(frame->seq_count) == 0);
+		CHECK("skip emit ts unchanged before advance",
+			ntohl(frame->rtp_timestamp) == ts_before);
+		CHECK("skip emit in_pressure", trailer->in_pressure == 1);
+		CHECK("skip emit pressure_drops",
+			ntohl(trailer->pressure_drops) == 7u);
+	}
+	CHECK("skip emit producer ts unchanged",
+		state.rtp_state.timestamp == ts_before);
+	CHECK("skip emit producer seq unchanged",
+		state.rtp_state.seq == seq_before);
+
+	star6e_output_teardown(&output);
+	star6e_video_reset(&state);
 	close(probe_socket);
 	return failures;
 }
@@ -467,5 +558,6 @@ int test_star6e_video(void)
 	failures += test_star6e_video_send_frame_disabled();
 	failures += test_star6e_video_sidecar_ext();
 	failures += test_star6e_video_sidecar_transport_layouts();
+	failures += test_star6e_video_sidecar_skip_emit();
 	return failures;
 }

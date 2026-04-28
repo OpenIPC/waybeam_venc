@@ -1302,9 +1302,12 @@ static int test_star6e_output_unix_backpressure(void)
 	{
 		uint8_t fill_pct = 0;
 		int got_fill = output_socket_get_fill_pct(
-			output.socket_handle, &fill_pct);
+			output.socket_handle,
+			output.send_buf_capacity, &fill_pct);
 		CHECK("unix bp fill_pct readable", got_fill == 0);
 		CHECK("unix bp fill_pct above lo", fill_pct >= 50);
+		CHECK("unix bp sndbuf capacity captured",
+			output.send_buf_capacity > 0);
 
 		(void)star6e_output_should_skip_frame(&output, &cfg);
 		/* Whether it skipped depends on the fill_pct vs hi=75
