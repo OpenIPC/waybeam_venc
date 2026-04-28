@@ -50,7 +50,18 @@ venc_ring_t *venc_ring_create(const char *shm_name, uint32_t slot_count,
 	else
 		snprintf(name, sizeof(name), "/%s", shm_name);
 
-	int fd = shm_open(name, O_CREAT | O_RDWR | O_TRUNC, 0666);
+	/* Stale-ring guard: a previous producer killed by SIGKILL (or
+	 * crashing before venc_ring_destroy()) leaves /dev/shm/<name>
+	 * with init_complete=1 and an old wfb_tx still mmap'd to it.
+	 * O_TRUNC reuses the same inode and races wfb_tx through
+	 * magic=0/init_complete=0 during memset() while it still has
+	 * stale slot_stride / epoch cached locally — silent corrupt
+	 * reads or hangs. Instead, unlink the name (existing mappings
+	 * remain valid on the orphaned inode until the consumer
+	 * detaches), then O_EXCL-create a fresh inode the old consumer
+	 * never saw. */
+	(void)shm_unlink(name);
+	int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
 	if (fd < 0) {
 		fprintf(stderr, "[venc_ring] shm_open(%s) failed: %s\n",
 		        name, strerror(errno));

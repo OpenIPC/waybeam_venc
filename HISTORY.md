@@ -32,6 +32,15 @@ SHM ring backpressure (Level 1 + Level 2):
 - **Tests added:** Star6E hysteresis state machine
   (`test_star6e_output_backpressure_hysteresis`), validator boundary
   cases (`test_live_set_shm_watermarks`).
+- **Stale-ring hardening.** `venc_ring_create()` now `shm_unlink()`s
+  the name before `O_EXCL`-creating a fresh inode, instead of
+  `O_CREAT|O_TRUNC` reusing the existing one. After a SIGKILL'd venc
+  is restarted while the old wfb_tx still has the ring mmapped, the
+  old consumer keeps reading the orphaned inode (no SIGBUS, no race
+  through magic=0/init_complete=0) until its watchdog detaches and
+  re-attaches by name to the new inode. Pairs with the consumer-side
+  per-iter epoch guard in `waybeam_wfb_ng/poc/shm-input.patch`. New
+  regression test: `test_producer_restart_orphans_old_inode`.
 
 ## [0.9.1] - 2026-04-28
 
