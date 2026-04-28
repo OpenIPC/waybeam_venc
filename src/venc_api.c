@@ -164,16 +164,14 @@ static char g_record_start_dir[256];
 static pthread_mutex_t g_record_mutex = PTHREAD_MUTEX_INITIALIZER;
 static VencRecordStatusFn g_record_status_fn;
 
-void venc_api_request_reinit(int mode)
+void venc_api_request_reinit(void)
 {
-	/* Don't downgrade: mode 1 (reload) takes priority over mode 2 (in-memory) */
-	if (mode > g_reinit)
-		g_reinit = mode;
+	g_reinit = 1;
 }
 
-int venc_api_get_reinit(void)
+bool venc_api_get_reinit(void)
 {
-	return (int)g_reinit;
+	return g_reinit != 0;
 }
 
 void venc_api_clear_reinit(void)
@@ -1633,7 +1631,7 @@ static int process_restart_set_query(const SetQueryParam *param,
 	 * matches.  Failure is logged by the helper — leave as void since the
 	 * reinit is still the right next step even if persistence stalled. */
 	(void)venc_api_save_config_to_disk(&new_cfg);
-	venc_api_request_reinit(2);
+	venc_api_request_reinit();
 	if (!jval) {
 		*status_code = 500;
 		return make_error_json("internal_error", "out of memory",
@@ -2042,12 +2040,11 @@ static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
 	snapshot = fresh;
 	pthread_mutex_unlock(&g_cfg_mutex);
 	save_rc = venc_api_save_config_to_disk(&snapshot);
-	/* Mode 1 (reload-from-disk) is correct only when the disk save
-	 * succeeded — otherwise the reload would silently overlay the stale
-	 * on-disk config onto the in-memory defaults and revert most of
-	 * them.  On save failure use mode 2 (apply in-memory) so the
-	 * operator at least gets the defaults they asked for at runtime. */
-	venc_api_request_reinit(save_rc == 0 ? 1 : 2);
+	/* Reinit always reloads the on-disk config.  On save failure the
+	 * caller sees saved:false in the response and can decide whether to
+	 * retry; reapplying the in-memory defaults silently would diverge
+	 * from disk and confuse the next reload. */
+	venc_api_request_reinit();
 	snprintf(resp, sizeof(resp),
 		"{\"defaults\":true,\"reinit\":true,\"saved\":%s}",
 		save_rc == 0 ? "true" : "false");
@@ -2062,7 +2059,7 @@ static int handle_restart(int fd, const HttpRequest *req, void *ctx)
 	 * manual file swap (scp, editor) followed by /api/v1/restart reloads
 	 * exactly what the operator put on disk.  Persistence happens at the
 	 * /api/v1/set level (LIVE and RESTART both now save per set). */
-	venc_api_request_reinit(1);
+	venc_api_request_reinit();
 	return httpd_send_ok(fd, "{\"reinit\":true}");
 }
 

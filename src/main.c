@@ -2,9 +2,13 @@
 #include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 #include "backend.h"
+#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)
+#include "star6e_runtime.h"
+#endif
 
 static int is_another_venc_running(void)
 {
@@ -76,6 +80,14 @@ int main(int argc, char* argv[])
   (void)argc;
   (void)argv;
 
+  /* Pin /proc/self/comm to "venc" before is_another_venc_running().  The
+   * SIGHUP-respawn path execv's /proc/self/exe, which makes the kernel
+   * derive comm from the symlink basename ("exe") instead of argv[0].
+   * Without this rename, is_another_venc_running() (which matches comm)
+   * silently fails to detect a running respawned instance, and an
+   * externally-launched second venc could start a duplicate. */
+  (void)prctl(PR_SET_NAME, "venc", 0, 0, 0);
+
   if (is_another_venc_running()) {
     printf("venc already running... exiting...\n");
     return 1;
@@ -88,5 +100,16 @@ int main(int argc, char* argv[])
 	}
 
 	printf("> SoC backend build: %s\n", backend->name);
-	return backend_execute(backend);
+	int rc = backend_execute(backend);
+
+#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)
+	/* SIGHUP / /api/v1/restart on Star6E exits cleanly here and forks
+	 * a successor process for true cold restart.  See
+	 * star6e_runtime_respawn_after_exit() for the rationale —
+	 * in-process MI_SYS_Exit + MI_SYS_Init is broken on this BSP. */
+	if (star6e_runtime_respawn_pending())
+		star6e_runtime_respawn_after_exit();
+#endif
+
+	return rc;
 }

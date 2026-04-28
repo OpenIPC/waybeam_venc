@@ -90,12 +90,8 @@ void star6e_pipeline_stop_dual(Star6ePipelineState *state);
 int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	SdkQuietState *sdk_quiet);
 
-/** Partial reinit: tear down VENC/output/audio and rebuild.
- *  Keeps sensor/VIF/VPE running to avoid MIPI PHY stall. */
-int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
-	SdkQuietState *sdk_quiet);
-
-/** Stop streaming, unbind hardware, and release pipeline resources. */
+/** Stop streaming, unbind hardware, and release pipeline resources.
+ *  Also clears pipeline-level persist state so the next start is cold. */
 void star6e_pipeline_stop(Star6ePipelineState *state);
 
 /** Disable VPE prescaler (cleanup during shutdown). */

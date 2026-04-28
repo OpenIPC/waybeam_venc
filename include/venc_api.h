@@ -63,11 +63,11 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 const char *venc_api_validate_loaded_config(const VencConfig *cfg);
 
 /* Pipeline reinit request flag (shared between API and backend).
- *   0 = no reinit pending
- *   1 = reload config from disk + reinit pipeline (SIGHUP / /api/v1/restart)
- *   2 = reinit pipeline with current in-memory config (API field change) */
-void venc_api_request_reinit(int mode);
-int  venc_api_get_reinit(void);
+ * One path: full teardown + reload from disk + start.  SIGHUP,
+ * /api/v1/restart, /api/v1/defaults, and MUT_RESTART /api/v1/set
+ * all enqueue the same request. */
+void venc_api_request_reinit(void);
+bool venc_api_get_reinit(void);
 void venc_api_clear_reinit(void);
 
 /* Record control flags (set by HTTP thread, consumed by main loop). */

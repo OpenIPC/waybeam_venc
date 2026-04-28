@@ -1,5 +1,9 @@
 {
-  "system": { "webPort": 80, "overclockLevel": 1, "verbose": false },
+  "system": {
+    "webPort": 80,
+    "overclockLevel": 1,
+    "verbose": false
+  },
   "sensor": {
     "index": -1,
     "mode": -1,
@@ -11,11 +15,18 @@
   },
   "isp": {
     "sensorBin": "",
-    "legacyAe": true, "aeFps": 15, "gainMax": 0,
-    "awbMode": "auto", "awbCt": 5500,
+    "legacyAe": true,
+    "aeFps": 15,
+    "gainMax": 0,
+    "awbMode": "auto",
+    "awbCt": 5500,
     "keepAspect": true
   },
-  "image": { "mirror": false, "flip": false, "rotate": 0 },
+  "image": {
+    "mirror": false,
+    "flip": false,
+    "rotate": 0
+  },
   "video0": {
     "codec": "h265",
     "rcMode": "cbr",
@@ -37,7 +48,13 @@
     "audioPort": 5601,
     "sidecarPort": 5602
   },
-  "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.4, "noiseLevel": 0 },
+  "fpv": {
+    "roiEnabled": true,
+    "roiQp": 0,
+    "roiSteps": 2,
+    "roiCenter": 0.4,
+    "noiseLevel": 0
+  },
   "audio": {
     "enabled": false,
     "sampleRate": 48000,
@@ -57,14 +74,14 @@
   },
   "record": {
     "enabled": false,
-    "mode": "mirror",
     "dir": "/mnt/mmcblk0p1",
     "format": "ts",
+    "mode": "mirror",
     "maxSeconds": 300,
     "maxMB": 500,
     "bitrate": 0,
     "fps": 0,
-    "gopSize": 0,
+    "gopSize": 0.0,
     "server": ""
   },
   "debug": {

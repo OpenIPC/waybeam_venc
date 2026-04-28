@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -548,6 +549,403 @@ int venc_config_parse_output_uri(const char *uri, VencOutputUri *out)
 	return -1;
 }
 
+/* ── Hand-rolled pretty printer (used by venc_config_save) ──────────────
+ *
+ * Produces a deterministic, unified layout for /etc/venc.json so WebUI
+ * saves diff cleanly against the canonical default and stay byte-stable
+ * across writes.  cJSON_Print's tab-indented one-key-per-line output is
+ * not used for disk writes; cJSON is still used for parsing and for
+ * single-line HTTP response bodies elsewhere.
+ *
+ * Layout: 2-space indent, one key per line, ": " separator, no blank
+ * lines between sections, single trailing newline at EOF.
+ *
+ * Adding a config field requires updating the matching render_<section>
+ * helper here AND config/venc.default.json.  The byte-equal round-trip
+ * test in tests/test_venc_config.c enforces this. */
+
+typedef struct {
+	char *buf;
+	size_t len;
+	size_t cap;
+	int oom;
+} PrettyBuf;
+
+static void pp_init(PrettyBuf *p)
+{
+	p->buf = NULL;
+	p->len = 0;
+	p->cap = 0;
+	p->oom = 0;
+}
+
+static int pp_reserve(PrettyBuf *p, size_t extra)
+{
+	if (p->oom)
+		return -1;
+	size_t need = p->len + extra + 1;
+	if (need <= p->cap)
+		return 0;
+	size_t new_cap = p->cap ? p->cap : 1024;
+	while (new_cap < need)
+		new_cap *= 2;
+	char *nb = realloc(p->buf, new_cap);
+	if (!nb) {
+		p->oom = 1;
+		return -1;
+	}
+	p->buf = nb;
+	p->cap = new_cap;
+	return 0;
+}
+
+static void pp_raw(PrettyBuf *p, const char *s, size_t n)
+{
+	if (pp_reserve(p, n) != 0)
+		return;
+	memcpy(p->buf + p->len, s, n);
+	p->len += n;
+	p->buf[p->len] = '\0';
+}
+
+static void pp_str(PrettyBuf *p, const char *s)
+{
+	pp_raw(p, s, strlen(s));
+}
+
+static void pp_indent(PrettyBuf *p, int depth)
+{
+	for (int i = 0; i < depth; i++)
+		pp_raw(p, "  ", 2);
+}
+
+/* JSON-escape a string into the buffer, including surrounding quotes. */
+static void pp_string(PrettyBuf *p, const char *s)
+{
+	pp_raw(p, "\"", 1);
+	if (!s) {
+		pp_raw(p, "\"", 1);
+		return;
+	}
+	for (const unsigned char *u = (const unsigned char *)s; *u; u++) {
+		unsigned char c = *u;
+		switch (c) {
+		case '"':  pp_raw(p, "\\\"", 2); break;
+		case '\\': pp_raw(p, "\\\\", 2); break;
+		case '\b': pp_raw(p, "\\b",  2); break;
+		case '\f': pp_raw(p, "\\f",  2); break;
+		case '\n': pp_raw(p, "\\n",  2); break;
+		case '\r': pp_raw(p, "\\r",  2); break;
+		case '\t': pp_raw(p, "\\t",  2); break;
+		default:
+			if (c < 0x20) {
+				char esc[8];
+				snprintf(esc, sizeof(esc), "\\u%04x", c);
+				pp_str(p, esc);
+			} else {
+				pp_raw(p, (const char *)&c, 1);
+			}
+			break;
+		}
+	}
+	pp_raw(p, "\"", 1);
+}
+
+static void pp_bool(PrettyBuf *p, bool v)
+{
+	pp_str(p, v ? "true" : "false");
+}
+
+static void pp_int(PrettyBuf *p, long long v)
+{
+	char tmp[32];
+	snprintf(tmp, sizeof(tmp), "%lld", v);
+	pp_str(p, tmp);
+}
+
+static void pp_uint(PrettyBuf *p, unsigned long long v)
+{
+	char tmp[32];
+	snprintf(tmp, sizeof(tmp), "%llu", v);
+	pp_str(p, tmp);
+}
+
+/* Doubles: integral values print as "N.0" to keep the float hint in the
+ * file (matches the hand-authored default's `gopSize: 1.0`).  Fractional
+ * values try %1.15g first and fall back to %1.17g if the parse doesn't
+ * round-trip — same policy cJSON uses, so existing files load identically.
+ * Locale is pinned to C around snprintf so a non-C LC_NUMERIC can't
+ * smuggle in a comma.  setlocale is process-global, so any concurrent
+ * thread printing floats during venc_config_save sees C locale for the
+ * window — harmless on this build (LC_NUMERIC is C by default and venc
+ * never calls setlocale elsewhere), but switch to uselocale() if a
+ * future thread needs a non-C numeric locale. */
+static void pp_double(PrettyBuf *p, double v)
+{
+	char tmp[40];
+	const char *saved_locale = setlocale(LC_NUMERIC, NULL);
+	char saved[32];
+	saved[0] = '\0';
+	if (saved_locale)
+		snprintf(saved, sizeof(saved), "%s", saved_locale);
+	setlocale(LC_NUMERIC, "C");
+
+	int is_finite = (v == v) && (v - v == 0.0);  /* NaN fails ==, inf fails - */
+	int is_integral = is_finite && (v >= -9.2233720368547758e18) &&
+		(v <= 9.2233720368547758e18) && ((double)(long long)v == v);
+
+	if (!is_finite) {
+		snprintf(tmp, sizeof(tmp), "0.0");
+	} else if (is_integral) {
+		snprintf(tmp, sizeof(tmp), "%lld.0", (long long)v);
+	} else {
+		snprintf(tmp, sizeof(tmp), "%1.15g", v);
+		double parsed = 0.0;
+		if (sscanf(tmp, "%lg", &parsed) != 1 || parsed != v)
+			snprintf(tmp, sizeof(tmp), "%1.17g", v);
+	}
+
+	if (saved[0])
+		setlocale(LC_NUMERIC, saved);
+	pp_str(p, tmp);
+}
+
+/* Emit `<indent>"key": ` (no trailing newline). */
+static void pp_key(PrettyBuf *p, int depth, const char *key)
+{
+	pp_indent(p, depth);
+	pp_string(p, key);
+	pp_raw(p, ": ", 2);
+}
+
+/* Field emitters: write `  "key": value,\n` (or no comma if is_last). */
+static void pp_field_bool(PrettyBuf *p, int depth, const char *key, bool v,
+	int is_last)
+{
+	pp_key(p, depth, key);
+	pp_bool(p, v);
+	pp_str(p, is_last ? "\n" : ",\n");
+}
+
+static void pp_field_int(PrettyBuf *p, int depth, const char *key,
+	long long v, int is_last)
+{
+	pp_key(p, depth, key);
+	pp_int(p, v);
+	pp_str(p, is_last ? "\n" : ",\n");
+}
+
+static void pp_field_uint(PrettyBuf *p, int depth, const char *key,
+	unsigned long long v, int is_last)
+{
+	pp_key(p, depth, key);
+	pp_uint(p, v);
+	pp_str(p, is_last ? "\n" : ",\n");
+}
+
+static void pp_field_double(PrettyBuf *p, int depth, const char *key,
+	double v, int is_last)
+{
+	pp_key(p, depth, key);
+	pp_double(p, v);
+	pp_str(p, is_last ? "\n" : ",\n");
+}
+
+static void pp_field_string(PrettyBuf *p, int depth, const char *key,
+	const char *v, int is_last)
+{
+	pp_key(p, depth, key);
+	pp_string(p, v);
+	pp_str(p, is_last ? "\n" : ",\n");
+}
+
+/* Section open/close: `<indent>"name": {\n` ... `<indent>}` (with comma
+ * if not last). */
+static void pp_section_open(PrettyBuf *p, int depth, const char *name)
+{
+	pp_indent(p, depth);
+	pp_string(p, name);
+	pp_str(p, ": {\n");
+}
+
+static void pp_section_close(PrettyBuf *p, int depth, int is_last)
+{
+	pp_indent(p, depth);
+	pp_str(p, is_last ? "}\n" : "},\n");
+}
+
+/* ── Per-section renderers (mirror config_to_cjson key order) ──────── */
+
+static void render_system(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "system");
+	pp_field_uint(p,   2, "webPort",         cfg->system.web_port,         0);
+	pp_field_int(p,    2, "overclockLevel",  cfg->system.overclock_level,  0);
+	pp_field_bool(p,   2, "verbose",         cfg->system.verbose,          1);
+	pp_section_close(p, 1, is_last);
+}
+
+static void render_sensor(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "sensor");
+	pp_field_int(p,    2, "index",          cfg->sensor.index,          0);
+	pp_field_int(p,    2, "mode",           cfg->sensor.mode,           0);
+	pp_field_bool(p,   2, "unlockEnabled",  cfg->sensor.unlock_enabled, 0);
+	pp_field_uint(p,   2, "unlockCmd",      cfg->sensor.unlock_cmd,     0);
+	pp_field_uint(p,   2, "unlockReg",      cfg->sensor.unlock_reg,     0);
+	pp_field_uint(p,   2, "unlockValue",    cfg->sensor.unlock_value,   0);
+	pp_field_int(p,    2, "unlockDir",      cfg->sensor.unlock_dir,     1);
+	pp_section_close(p, 1, is_last);
+}
+
+static void render_isp(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "isp");
+	pp_field_string(p, 2, "sensorBin",  cfg->isp.sensor_bin,  0);
+	pp_field_bool(p,   2, "legacyAe",   cfg->isp.legacy_ae,   0);
+	pp_field_uint(p,   2, "aeFps",      cfg->isp.ae_fps,      0);
+	pp_field_uint(p,   2, "gainMax",    cfg->isp.gain_max,    0);
+	pp_field_string(p, 2, "awbMode",    cfg->isp.awb_mode,    0);
+	pp_field_uint(p,   2, "awbCt",      cfg->isp.awb_ct,      0);
+	pp_field_bool(p,   2, "keepAspect", cfg->isp.keep_aspect, 1);
+	pp_section_close(p, 1, is_last);
+}
+
+static void render_image(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "image");
+	pp_field_bool(p,   2, "mirror", cfg->image.mirror, 0);
+	pp_field_bool(p,   2, "flip",   cfg->image.flip,   0);
+	pp_field_int(p,    2, "rotate", cfg->image.rotate, 1);
+	pp_section_close(p, 1, is_last);
+}
+
+static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "video0");
+	pp_field_string(p, 2, "codec",  cfg->video0.codec,  0);
+	pp_field_string(p, 2, "rcMode", cfg->video0.rc_mode, 0);
+	pp_field_uint(p,   2, "fps",    cfg->video0.fps,    0);
+	if (cfg->video0.width > 0 && cfg->video0.height > 0) {
+		char size_buf[32];
+		snprintf(size_buf, sizeof(size_buf), "%ux%u",
+			cfg->video0.width, cfg->video0.height);
+		pp_field_string(p, 2, "size", size_buf, 0);
+	} else {
+		pp_field_string(p, 2, "size", "auto", 0);
+	}
+	pp_field_uint(p,   2, "bitrate",        cfg->video0.bitrate,         0);
+	pp_field_double(p, 2, "gopSize",        cfg->video0.gop_size,        0);
+	pp_field_int(p,    2, "qpDelta",        cfg->video0.qp_delta,        0);
+	pp_field_bool(p,   2, "frameLost",      cfg->video0.frame_lost,      0);
+	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
+	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   1);
+	pp_section_close(p, 1, is_last);
+}
+
+static void render_outgoing(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "outgoing");
+	pp_field_bool(p,   2, "enabled",        cfg->outgoing.enabled,          0);
+	pp_field_string(p, 2, "server",         cfg->outgoing.server,           0);
+	pp_field_string(p, 2, "streamMode",     cfg->outgoing.stream_mode,      0);
+	pp_field_uint(p,   2, "maxPayloadSize", cfg->outgoing.max_payload_size, 0);
+	pp_field_bool(p,   2, "connectedUdp",   cfg->outgoing.connected_udp,    0);
+	pp_field_uint(p,   2, "audioPort",      cfg->outgoing.audio_port,       0);
+	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,     1);
+	pp_section_close(p, 1, is_last);
+}
+
+static void render_fpv(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "fpv");
+	pp_field_bool(p,   2, "roiEnabled", cfg->fpv.roi_enabled, 0);
+	pp_field_int(p,    2, "roiQp",      cfg->fpv.roi_qp,      0);
+	pp_field_uint(p,   2, "roiSteps",   cfg->fpv.roi_steps,   0);
+	pp_field_double(p, 2, "roiCenter",  cfg->fpv.roi_center,  0);
+	pp_field_int(p,    2, "noiseLevel", cfg->fpv.noise_level, 1);
+	pp_section_close(p, 1, is_last);
+}
+
+static void render_audio(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "audio");
+	pp_field_bool(p,   2, "enabled",    cfg->audio.enabled,     0);
+	pp_field_uint(p,   2, "sampleRate", cfg->audio.sample_rate, 0);
+	pp_field_uint(p,   2, "channels",   cfg->audio.channels,    0);
+	pp_field_string(p, 2, "codec",      cfg->audio.codec,       0);
+	pp_field_int(p,    2, "volume",     cfg->audio.volume,      0);
+	pp_field_bool(p,   2, "mute",       cfg->audio.mute,        1);
+	pp_section_close(p, 1, is_last);
+}
+
+static void render_imu(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	char addr_buf[8];
+	snprintf(addr_buf, sizeof(addr_buf), "0x%02x", cfg->imu.i2c_addr);
+
+	pp_section_open(p, 1, "imu");
+	pp_field_bool(p,   2, "enabled",      cfg->imu.enabled,         0);
+	pp_field_string(p, 2, "i2cDevice",    cfg->imu.i2c_device,      0);
+	pp_field_string(p, 2, "i2cAddr",      addr_buf,                 0);
+	pp_field_int(p,    2, "sampleRateHz", cfg->imu.sample_rate_hz,  0);
+	pp_field_int(p,    2, "gyroRangeDps", cfg->imu.gyro_range_dps,  0);
+	pp_field_string(p, 2, "calFile",      cfg->imu.cal_file,        0);
+	pp_field_int(p,    2, "calSamples",   cfg->imu.cal_samples,     1);
+	pp_section_close(p, 1, is_last);
+}
+
+static void render_record(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "record");
+	pp_field_bool(p,   2, "enabled",    cfg->record.enabled,     0);
+	pp_field_string(p, 2, "dir",        cfg->record.dir,         0);
+	pp_field_string(p, 2, "format",     cfg->record.format,      0);
+	pp_field_string(p, 2, "mode",       cfg->record.mode,        0);
+	pp_field_uint(p,   2, "maxSeconds", cfg->record.max_seconds, 0);
+	pp_field_uint(p,   2, "maxMB",      cfg->record.max_mb,      0);
+	pp_field_uint(p,   2, "bitrate",    cfg->record.bitrate,     0);
+	pp_field_uint(p,   2, "fps",        cfg->record.fps,         0);
+	pp_field_double(p, 2, "gopSize",    cfg->record.gop_size,    0);
+	pp_field_string(p, 2, "server",     cfg->record.server,      1);
+	pp_section_close(p, 1, is_last);
+}
+
+static void render_debug(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "debug");
+	pp_field_bool(p,   2, "showOsd", cfg->debug.show_osd, 1);
+	pp_section_close(p, 1, is_last);
+}
+
+/* Top-level: build the canonical pretty layout into a malloc'd string.
+ * Caller must free.  Returns NULL on allocation failure. */
+static char *config_render_pretty(const VencConfig *cfg)
+{
+	PrettyBuf p;
+	pp_init(&p);
+
+	pp_str(&p, "{\n");
+	render_system(&p,   cfg, 0);
+	render_sensor(&p,   cfg, 0);
+	render_isp(&p,      cfg, 0);
+	render_image(&p,    cfg, 0);
+	render_video0(&p,   cfg, 0);
+	render_outgoing(&p, cfg, 0);
+	render_fpv(&p,      cfg, 0);
+	render_audio(&p,    cfg, 0);
+	render_imu(&p,      cfg, 0);
+	render_record(&p,   cfg, 0);
+	render_debug(&p,    cfg, 1);
+	pp_str(&p, "}");
+
+	if (p.oom) {
+		free(p.buf);
+		return NULL;
+	}
+	return p.buf;
+}
+
 /* ── Serialize to JSON ────────────────────────────────────────────────── */
 
 static cJSON *config_to_cjson(const VencConfig *cfg)
@@ -702,10 +1100,8 @@ char *venc_config_to_json_string(const VencConfig *cfg)
 
 int venc_config_save(const char *path, const VencConfig *cfg)
 {
-	cJSON *root = config_to_cjson(cfg);
-	if (!root) return -1;
-	char *json = cJSON_Print(root);  /* pretty-printed */
-	cJSON_Delete(root);
+	if (!cfg) return -1;
+	char *json = config_render_pretty(cfg);
 	if (!json) return -1;
 
 	/* Atomic write: write to temp file in the same directory as the *real*
