@@ -2,33 +2,46 @@
 
 ## [0.9.2] - 2026-04-28
 
-Output backpressure (Level 1 + Level 2):
+Output backpressure (universal: shm / unix / udp):
 
+- **Universal fill source.** Producer-local backpressure now works
+  uniformly for every output transport with a queue model:
+    `shm://`   `(write_idx - read_idx) / slot_count`
+    `unix://`  `SIOCOUTQ / SO_SNDBUF`
+    `udp://`   `SIOCOUTQ / SO_SNDBUF`
+  For UDP-over-WiFi the kernel send queue rarely fills (NIC drains
+  fast) so the gate is a no-op in practice and the radio-link layer
+  (`waybeam_wfb_ng/link_controller`) does the actual adaptive control.
+  For local UDP and unix:// (e.g. gstreamer consumer) a slow consumer
+  fills the kernel queue and the gate trips correctly — empirically
+  validated on Linux 6.x by sending raw datagrams to a non-reading
+  receiver and watching SIOCOUTQ rise to SO_SNDBUF cap.
 - **Level 1 — observability.** New `GET /api/v1/transport/status`
-  endpoint returns the active output transport (`shm` / `udp` / `unix`),
-  output queue fill, lifetime delivery counters (`packetsSent`,
-  `transportDrops`, `oversizeDrops`), live watermark config, current
-  hysteresis state (`inPressure`), and the producer-local
-  `pressureDrops` counter. Also new `query_transport_status` callback
-  in `VencApplyCallbacks` (Star6E + Maruko both implement it).
+  endpoint returns the active output transport (`"shm"` / `"udp"` /
+  `"unix"` discriminator), queue fill, lifetime delivery counters
+  (SHM only — `packetsSent`, `transportDrops`, `oversizeDrops`),
+  live watermark config, current hysteresis state (`inPressure`),
+  and the producer-local `pressureDrops` counter (all transports).
+  Also new `query_transport_status` callback in `VencApplyCallbacks`
+  (Star6E + Maruko both implement).  For unix:// / udp:// the
+  socket-side lifetime counters are not yet tracked — `transportDrops`
+  and `packetsSent` are absent from the JSON for those transports;
+  the sidecar trailer carries 0s.  Future work: count
+  sendmsg(EAGAIN/ENOBUFS) and successful sends in `output_socket_send_parts`.
 - **Sidecar trailer.** `RTP_SIDECAR_FLAG_TRANSPORT_INFO` (0x04) +
-  `RtpSidecarTransportInfoWire` (16 bytes). Appended after the
-  optional ENC_INFO trailer when a transport with a queue model is
-  active.  Field semantics map across transports:
-  `fill_pct` is `(write-read)/slot_count` for SHM and
-  `SIOCOUTQ/SO_SNDBUF` for unix:// (UNIX coverage planned in a
-  follow-up; UDP intentionally out of scope — the lossy datagram
-  model means kernel-queue fill is a noisy signal and the right
-  control point is the radio link layer / `link_controller`).  Old
-  probes that don't recognise the flag read just the base frame (and
-  ENC_INFO if present) and ignore the trailing bytes — no protocol
-  version bump.
+  `RtpSidecarTransportInfoWire` (16 bytes).  Appended after the
+  optional ENC_INFO trailer when any non-zero transport is active.
+  Forward-compat: probes that don't recognise the flag read just the
+  base frame (and ENC_INFO if present) and ignore the trailing bytes
+  — no protocol version bump.
 - **Level 2 — local FPS skip.** Producer-side hysteresis: enter
-  pressure when fill ≥ `outgoing.highWaterPct` (default 75), exit
-  when fill < `outgoing.lowWaterPct` (default 50).  While in
-  pressure, frames are dropped before any RTP packet is enqueued —
-  no torn FU fragments, no advancing RTP seq, no sidecar emission.
+  pressure when fill_pct ≥ `outgoing.highWaterPct` (default 75),
+  exit when fill_pct < `outgoing.lowWaterPct` (default 50).  While
+  in pressure, frames are dropped before any RTP packet is enqueued
+  — no torn FU fragments, no advancing RTP seq, no sidecar emission.
   Receiver sees a clean frame-aligned gap that FEC handles cleanly.
+  RTP timestamp continues to advance per sensor frame so receivers'
+  jitter buffers don't drift against the audio stream's wallclock.
   Disabled with `outgoing.backpressure=false`.
 - **Config knobs (live, MUT_LIVE):** `outgoing.backpressure` (bool,
   default true), `outgoing.highWaterPct` (uint8, default 75),
@@ -37,16 +50,25 @@ Output backpressure (Level 1 + Level 2):
   changes flow through the new `LIVE_GROUP_BACKPRESSURE` passive
   group — cfg committed atomically; the per-frame producer reads the
   cfg fields directly each tick (no callback dispatch needed).
-- **Names.** Wire identifiers, config knobs and the endpoint were
-  scoped from "shm_*" to "transport_*" / "backpressure_*" before any
-  consumer shipped, on the basis that the hysteresis model and the
-  trailer are equally meaningful for any transport with a queue and
-  not just for shared memory.  No deprecated aliases retained — the
-  PR isn't merged yet, so churn cost is zero.
-- **Tests added:** Star6E hysteresis state machine
-  (`test_star6e_output_backpressure_hysteresis`), validator boundary
-  cases (`test_live_set_backpressure_watermarks`), wire-layout
-  (`test_star6e_video_sidecar_transport_layouts`).
+- **Architecture note.** The hysteresis state machine sits on a
+  pre-computed `fill_pct` (`venc_check_backpressure` in `venc_ring.h`)
+  so each backend's `*_should_skip_frame` is just a 4-line dispatch:
+  pick the fill source by transport, hand it to the shared state
+  machine.  Adding a new transport is one branch in `should_skip_frame`
+  + one branch in the sidecar emit path + one branch in `query_transport_status`.
+- **Internal/wire renames.**  Identifiers were scoped from "shm_*" to
+  "transport_*" / "backpressure_*" before any consumer shipped, on
+  the basis that the model is equally meaningful for any transport
+  with a queue.  No deprecated aliases retained — PR isn't merged
+  yet so churn cost is zero.
+- **Tests added:**
+  - Star6E hysteresis state machine
+    (`test_star6e_output_backpressure_hysteresis`)
+  - UNIX datagram backpressure end-to-end with a non-reading receiver
+    (`test_star6e_output_unix_backpressure`)
+  - Validator boundary cases (`test_live_set_backpressure_watermarks`)
+  - Wire-layout for {enc, shm} combinations
+    (`test_star6e_video_sidecar_transport_layouts`)
 - **Stale-ring hardening.** `venc_ring_create()` now `shm_unlink()`s
   the name before `O_EXCL`-creating a fresh inode, instead of
   `O_CREAT|O_TRUNC` reusing the existing one. After a SIGKILL'd venc

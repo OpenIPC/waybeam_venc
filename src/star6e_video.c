@@ -1,6 +1,7 @@
 #include "star6e_video.h"
 #include "star6e_audio.h"
 
+#include "output_socket.h"
 #include "rtp_session.h"
 #include "timing.h"
 
@@ -119,18 +120,31 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 		if (sidecar_active) {
 			RtpSidecarTransportInfo tinfo;
 			const RtpSidecarTransportInfo *tinfo_ptr = NULL;
+			memset(&tinfo, 0, sizeof(tinfo));
+			tinfo.in_pressure = output->in_pressure ? 1 : 0;
+			tinfo.pressure_drops = (uint32_t)output->pressure_drops;
+
 			if (output->ring) {
 				venc_ring_fill_t fill;
 				if (venc_ring_get_fill(output->ring, &fill) == 0) {
 					tinfo.fill_pct = fill.fill_pct;
-					tinfo.in_pressure = output->in_pressure ? 1 : 0;
 					tinfo.transport_drops = (uint32_t)fill.full_drops;
-					tinfo.pressure_drops =
-						(uint32_t)output->pressure_drops;
 					tinfo.packets_sent = (uint32_t)fill.writes;
 					tinfo_ptr = &tinfo;
 				}
+			} else if ((output->transport == VENC_OUTPUT_URI_UNIX ||
+			            output->transport == VENC_OUTPUT_URI_UDP) &&
+			           output->socket_handle >= 0) {
+				/* Socket transports: fill_pct from SIOCOUTQ/SO_SNDBUF.
+				 * transport_drops/packets_sent are lifetime counters
+				 * that aren't tracked yet for the socket path —
+				 * intentionally left 0 in this release; future work
+				 * can wire those counters from output_socket_send_parts. */
+				if (output_socket_get_fill_pct(output->socket_handle,
+				    &tinfo.fill_pct) == 0)
+					tinfo_ptr = &tinfo;
 			}
+
 			rtp_sidecar_send_frame_transport(&state->sidecar,
 				state->rtp_state.ssrc, frame_rtp_ts,
 				seq_before,

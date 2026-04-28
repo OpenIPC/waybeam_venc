@@ -1,8 +1,10 @@
 #include "star6e_output.h"
 
+#include "output_socket.h"
 #include "test_helpers.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -1235,6 +1237,100 @@ static int test_star6e_output_backpressure_hysteresis(void)
 	return failures;
 }
 
+/* UNIX datagram backpressure: with a receiver bound but not reading, the
+ * sender's SIOCOUTQ rises until SO_SNDBUF caps it.  We send raw bytes
+ * directly through output->socket_handle so the test doesn't depend on
+ * the higher-level RTP send path; the hysteresis state machine itself
+ * is already covered by the SHM test.  This test specifically validates
+ * the UNIX-fill plumbing and the should_skip_frame transport switch. */
+static int test_star6e_output_unix_backpressure(void)
+{
+	char abstract_name[64];
+	char uri[80];
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	VencConfig cfg;
+	int recv_fd = -1;
+	int failures = 0;
+
+	venc_config_defaults(&cfg);
+	cfg.outgoing.backpressure = true;
+	cfg.outgoing.high_water_pct = 75;
+	cfg.outgoing.low_water_pct = 50;
+
+	snprintf(abstract_name, sizeof(abstract_name),
+		"test_unix_bp_%ld", (long)getpid());
+	recv_fd = create_unix_receiver(abstract_name);
+	CHECK("unix bp recv socket", recv_fd >= 0);
+
+	snprintf(uri, sizeof(uri), "unix://%s", abstract_name);
+	CHECK("unix bp prepare",
+		star6e_output_prepare(&setup, uri, "rtp", 0) == 0);
+	CHECK("unix bp init", star6e_output_init(&output, &setup) == 0);
+	CHECK("unix bp transport",
+		output.transport == VENC_OUTPUT_URI_UNIX);
+
+	/* Empty queue — must not enter pressure. */
+	CHECK("unix bp empty no-skip",
+		star6e_output_should_skip_frame(&output, &cfg) == 0);
+
+	/* Stuff the queue.  No receiver read → bytes accumulate against the
+	 * sender's SO_SNDBUF accounting.  Stop on first short write or a
+	 * fixed cap so the test never hangs. */
+	{
+		char payload[1024];
+		int sent = 0;
+		int flags;
+
+		memset(payload, 'X', sizeof(payload));
+		flags = fcntl(output.socket_handle, F_GETFL, 0);
+		(void)fcntl(output.socket_handle, F_SETFL, flags | O_NONBLOCK);
+		for (int i = 0; i < 4096; i++) {
+			ssize_t n = sendto(output.socket_handle, payload,
+				sizeof(payload), 0,
+				(const struct sockaddr *)&output.dst,
+				output.dst_len);
+			if (n > 0) sent++;
+			else break;
+		}
+		CHECK("unix bp pumped some packets", sent > 0);
+		(void)fcntl(output.socket_handle, F_SETFL, flags);
+	}
+
+	/* Now SIOCOUTQ should report a non-trivial fill_pct.  Run the
+	 * skip check and assert in_pressure / pressure_drops behave. */
+	{
+		uint8_t fill_pct = 0;
+		int got_fill = output_socket_get_fill_pct(
+			output.socket_handle, &fill_pct);
+		CHECK("unix bp fill_pct readable", got_fill == 0);
+		CHECK("unix bp fill_pct above lo", fill_pct >= 50);
+
+		(void)star6e_output_should_skip_frame(&output, &cfg);
+		/* Whether it skipped depends on the fill_pct vs hi=75
+		 * threshold.  At the very least, in_pressure must reflect
+		 * the high-water decision. */
+		if (fill_pct >= 75) {
+			CHECK("unix bp entered pressure",
+				output.in_pressure == 1);
+			CHECK("unix bp drop counted",
+				output.pressure_drops > 0);
+		}
+	}
+
+	/* Disable backpressure → must not skip even with a full queue. */
+	cfg.outgoing.backpressure = false;
+	CHECK("unix bp disabled no-skip",
+		star6e_output_should_skip_frame(&output, &cfg) == 0);
+	CHECK("unix bp disabled in_pressure cleared",
+		output.in_pressure == 0);
+
+	star6e_output_teardown(&output);
+	if (recv_fd >= 0)
+		close(recv_fd);
+	return failures;
+}
+
 int test_star6e_output(void)
 {
 	int failures = 0;
@@ -1267,5 +1363,6 @@ int test_star6e_output(void)
 	failures += test_audio_target_cache_gen_tracks_transport();
 	failures += test_audio_target_cache_hit_stable();
 	failures += test_star6e_output_backpressure_hysteresis();
+	failures += test_star6e_output_unix_backpressure();
 	return failures;
 }

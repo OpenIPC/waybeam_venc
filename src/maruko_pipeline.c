@@ -8,6 +8,7 @@
 #include "maruko_controls.h"
 #include "maruko_output.h"
 #include "maruko_video.h"
+#include "output_socket.h"
 #include "pipeline_common.h"
 #include "rtp_sidecar.h"
 #include "sensor_select.h"
@@ -1490,17 +1491,24 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		{
 			RtpSidecarTransportInfo tinfo;
 			const RtpSidecarTransportInfo *tinfo_ptr = NULL;
+			memset(&tinfo, 0, sizeof(tinfo));
+			tinfo.in_pressure = ctx->output.in_pressure ? 1 : 0;
+			tinfo.pressure_drops = (uint32_t)ctx->output.pressure_drops;
+
 			if (ctx->output.ring) {
 				venc_ring_fill_t fill;
 				if (venc_ring_get_fill(ctx->output.ring, &fill) == 0) {
 					tinfo.fill_pct = fill.fill_pct;
-					tinfo.in_pressure = ctx->output.in_pressure ? 1 : 0;
 					tinfo.transport_drops = (uint32_t)fill.full_drops;
-					tinfo.pressure_drops =
-						(uint32_t)ctx->output.pressure_drops;
 					tinfo.packets_sent = (uint32_t)fill.writes;
 					tinfo_ptr = &tinfo;
 				}
+			} else if ((ctx->output.transport == VENC_OUTPUT_URI_UNIX ||
+			            ctx->output.transport == VENC_OUTPUT_URI_UDP) &&
+			           ctx->output.socket_handle >= 0) {
+				if (output_socket_get_fill_pct(ctx->output.socket_handle,
+				    &tinfo.fill_pct) == 0)
+					tinfo_ptr = &tinfo;
 			}
 			rtp_sidecar_send_frame_transport(&sidecar, rtp_state.ssrc,
 				frame_rtp_ts, seq_before,

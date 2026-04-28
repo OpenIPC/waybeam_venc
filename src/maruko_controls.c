@@ -4,6 +4,7 @@
 #include "maruko_bindings.h"
 #include "maruko_iq.h"
 #include "maruko_output.h"
+#include "output_socket.h"
 #include "pipeline_common.h"
 #include "venc_config.h"
 
@@ -952,6 +953,7 @@ static const char *maruko_output_transport_name(const MarukoOutput *o)
 	switch (o->transport) {
 	case VENC_OUTPUT_URI_UDP:  return "udp";
 	case VENC_OUTPUT_URI_UNIX: return "unix";
+	case VENC_OUTPUT_URI_SHM:  return "shm";
 	default:                   return "none";
 	}
 }
@@ -960,7 +962,6 @@ static char *maruko_query_transport_status(void)
 {
 	MarukoBackendContext *backend = g_ctx.backend;
 	const VencConfig *vcfg = g_ctx.vcfg;
-	venc_ring_fill_t fill;
 	char buf[768];
 	const char *transport;
 	int pos;
@@ -968,7 +969,63 @@ static char *maruko_query_transport_status(void)
 	if (!backend || !vcfg)
 		return NULL;
 	transport = maruko_output_transport_name(&backend->output);
-	if (!backend->output.ring) {
+
+	if (backend->output.ring) {
+		venc_ring_fill_t fill;
+		if (venc_ring_get_fill(backend->output.ring, &fill) != 0)
+			return NULL;
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":true,"
+			"\"transport\":\"%s\","
+			"\"fillPct\":%u,"
+			"\"inPressure\":%s,"
+			"\"transportDrops\":%llu,"
+			"\"pressureDrops\":%llu,"
+			"\"packetsSent\":%llu,"
+			"\"oversizeDrops\":%llu,"
+			"\"backpressure\":%s,"
+			"\"highWaterPct\":%u,"
+			"\"lowWaterPct\":%u,"
+			"\"slotCount\":%u,"
+			"\"usedSlots\":%u}}",
+			transport,
+			(unsigned)fill.fill_pct,
+			backend->output.in_pressure ? "true" : "false",
+			(unsigned long long)fill.full_drops,
+			(unsigned long long)backend->output.pressure_drops,
+			(unsigned long long)fill.writes,
+			(unsigned long long)fill.oversize_drops,
+			vcfg->outgoing.backpressure ? "true" : "false",
+			(unsigned)vcfg->outgoing.high_water_pct,
+			(unsigned)vcfg->outgoing.low_water_pct,
+			(unsigned)fill.slot_count,
+			(unsigned)fill.used_slots);
+	} else if ((backend->output.transport == VENC_OUTPUT_URI_UNIX ||
+	            backend->output.transport == VENC_OUTPUT_URI_UDP) &&
+	           backend->output.socket_handle >= 0) {
+		uint8_t fill_pct = 0;
+		if (output_socket_get_fill_pct(backend->output.socket_handle,
+		    &fill_pct) != 0)
+			fill_pct = 0;
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":true,"
+			"\"transport\":\"%s\","
+			"\"fillPct\":%u,"
+			"\"inPressure\":%s,"
+			"\"pressureDrops\":%llu,"
+			"\"backpressure\":%s,"
+			"\"highWaterPct\":%u,"
+			"\"lowWaterPct\":%u}}",
+			transport,
+			(unsigned)fill_pct,
+			backend->output.in_pressure ? "true" : "false",
+			(unsigned long long)backend->output.pressure_drops,
+			vcfg->outgoing.backpressure ? "true" : "false",
+			(unsigned)vcfg->outgoing.high_water_pct,
+			(unsigned)vcfg->outgoing.low_water_pct);
+	} else {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":false,"
@@ -980,40 +1037,7 @@ static char *maruko_query_transport_status(void)
 			vcfg->outgoing.backpressure ? "true" : "false",
 			(unsigned)vcfg->outgoing.high_water_pct,
 			(unsigned)vcfg->outgoing.low_water_pct);
-		if (pos < 0 || pos >= (int)sizeof(buf))
-			return NULL;
-		return strdup(buf);
 	}
-	if (venc_ring_get_fill(backend->output.ring, &fill) != 0)
-		return NULL;
-
-	pos = snprintf(buf, sizeof(buf),
-		"{\"ok\":true,\"data\":{"
-		"\"active\":true,"
-		"\"transport\":\"%s\","
-		"\"fillPct\":%u,"
-		"\"inPressure\":%s,"
-		"\"transportDrops\":%llu,"
-		"\"pressureDrops\":%llu,"
-		"\"packetsSent\":%llu,"
-		"\"oversizeDrops\":%llu,"
-		"\"backpressure\":%s,"
-		"\"highWaterPct\":%u,"
-		"\"lowWaterPct\":%u,"
-		"\"slotCount\":%u,"
-		"\"usedSlots\":%u}}",
-		transport,
-		(unsigned)fill.fill_pct,
-		backend->output.in_pressure ? "true" : "false",
-		(unsigned long long)fill.full_drops,
-		(unsigned long long)backend->output.pressure_drops,
-		(unsigned long long)fill.writes,
-		(unsigned long long)fill.oversize_drops,
-		vcfg->outgoing.backpressure ? "true" : "false",
-		(unsigned)vcfg->outgoing.high_water_pct,
-		(unsigned)vcfg->outgoing.low_water_pct,
-		(unsigned)fill.slot_count,
-		(unsigned)fill.used_slots);
 	if (pos < 0 || pos >= (int)sizeof(buf))
 		return NULL;
 	return strdup(buf);

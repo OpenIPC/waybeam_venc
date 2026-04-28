@@ -149,6 +149,14 @@ static inline int venc_ring_get_fill(const venc_ring_t *r,
 /* Producer-side hysteresis: should the next frame be dropped because
  * the consumer is falling behind?
  *
+ * `fill_pct` is the producer-local output queue fill (0..100), computed
+ * differently per transport:
+ *   shm://   venc_ring_get_fill(ring).fill_pct
+ *   unix://  output_socket_get_fill_pct(fd) using SIOCOUTQ / SO_SNDBUF
+ *   udp://   currently disabled — the lossy datagram model means the
+ *            kernel send queue is a noisy signal; control belongs at
+ *            the radio link layer (see waybeam_wfb_ng/link_controller).
+ *
  * `in_pressure` is the caller-owned hysteresis flag; this function reads
  * and writes it in place.  `pressure_drops` is incremented whenever a
  * skip is decided.  `enabled` gates the whole feature; when disabled,
@@ -158,33 +166,27 @@ static inline int venc_ring_get_fill(const venc_ring_t *r,
  * when cfg goes degenerate would never see the exit branch and skip
  * every frame forever.
  *
- * Caller passes ring pointer (NULL → no-op for udp:// / unix:// outputs)
- * and the live watermark settings sampled from cfg.  Returns 1 to
- * signal skip-this-frame, 0 to send. */
-static inline int venc_ring_should_skip_frame(const venc_ring_t *r,
+ * Returns 1 to signal skip-this-frame, 0 to send. */
+static inline int venc_check_backpressure(uint8_t fill_pct,
 	int *in_pressure, uint64_t *pressure_drops,
 	int enabled, uint8_t high_water_pct, uint8_t low_water_pct)
 {
-	venc_ring_fill_t fill;
-
-	if (!r || !in_pressure || !pressure_drops)
+	if (!in_pressure || !pressure_drops)
 		return 0;
 	if (!enabled) {
 		*in_pressure = 0;
 		return 0;
 	}
-	if (venc_ring_get_fill(r, &fill) != 0)
-		return 0;
 	if (low_water_pct >= high_water_pct) {
 		*in_pressure = 0;
 		return 0;
 	}
 
 	if (*in_pressure) {
-		if (fill.fill_pct < low_water_pct)
+		if (fill_pct < low_water_pct)
 			*in_pressure = 0;
 	} else {
-		if (fill.fill_pct >= high_water_pct)
+		if (fill_pct >= high_water_pct)
 			*in_pressure = 1;
 	}
 

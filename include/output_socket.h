@@ -36,4 +36,18 @@ int output_socket_send_parts(int socket_handle,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len);
 
+/** Producer-side queue-fill snapshot for udp:// / unix:// outputs.
+ *
+ * Reads SIOCOUTQ (current bytes in send queue) and divides by SO_SNDBUF
+ * (queue capacity).  Linux reports SO_SNDBUF as 2× the requested size
+ * (the doubling is internal kernel bookkeeping); we treat the reported
+ * value as the comparison capacity, matching how any consumer would
+ * read it.
+ *
+ * Returns 0 on success and writes 0..100 into *out_pct.  Returns -1
+ * for fd < 0 or any of the syscalls failing.  On UDP the queue drains
+ * fast (kernel hands to NIC) so values >0 are rare in steady state;
+ * on UNIX datagram a slow consumer can hold it pinned near 100. */
+int output_socket_get_fill_pct(int socket_handle, uint8_t *out_pct);
+
 #endif /* OUTPUT_SOCKET_H */
