@@ -75,35 +75,47 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 	return 0;
 }
 
-void maruko_output_observe_pressure(MarukoOutput *output,
-	const VencConfig *cfg)
+void maruko_output_observe_pressure(MarukoOutput *output)
 {
 	uint8_t fill_pct = 0;
+	uint32_t full_drops = 0;
+	uint32_t writes = 0;
+	uint32_t oversize_drops = 0;
+	int have_fill = 0;
 
-	if (!output || !cfg)
+	if (!output)
 		return;
 
 	if (output->ring) {
 		venc_ring_fill_t fill;
-		if (venc_ring_get_fill(output->ring, &fill) != 0)
-			return;
-		fill_pct = fill.fill_pct;
+		if (venc_ring_get_fill(output->ring, &fill) == 0) {
+			fill_pct = fill.fill_pct;
+			full_drops = (uint32_t)fill.full_drops;
+			writes = (uint32_t)fill.writes;
+			oversize_drops = (uint32_t)fill.oversize_drops;
+			have_fill = 1;
+		}
 	} else if ((output->transport == VENC_OUTPUT_URI_UNIX ||
 	            output->transport == VENC_OUTPUT_URI_UDP) &&
 	           output->socket_handle >= 0) {
 		if (output_socket_get_fill_pct(output->socket_handle,
-		    output->send_buf_capacity, &fill_pct) != 0)
-			return;
-	} else {
-		output->in_pressure = 0;
+		    output->send_buf_capacity, &fill_pct) == 0)
+			have_fill = 1;
+	}
+
+	if (!have_fill) {
+		__atomic_store_n(&output->in_pressure, 0, __ATOMIC_RELAXED);
 		return;
 	}
 
 	venc_observe_pressure(fill_pct,
-		&output->in_pressure, &output->pressure_drops,
-		cfg->outgoing.backpressure ? 1 : 0,
-		cfg->outgoing.high_water_pct,
-		cfg->outgoing.low_water_pct);
+		&output->in_pressure, &output->pressure_drops);
+
+	__atomic_store_n(&output->last_fill_pct, fill_pct, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->last_full_drops, full_drops, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->last_writes, writes, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->last_oversize_drops, oversize_drops,
+		__ATOMIC_RELAXED);
 }
 
 int maruko_output_apply_server(MarukoOutput *output, const char *uri)

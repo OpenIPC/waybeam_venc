@@ -218,6 +218,12 @@ typedef struct {
 	uint64_t           frame_id;       /* monotonic frame counter          */
 } RtpSidecarSender;
 
+/* True iff the sidecar socket is open AND a probe is currently subscribed.
+ * Producer hot path uses this to gate transport-pressure observation —
+ * the only consumer of in_pressure / pressure_drops / fill_pct is the
+ * trailer, so observation is dead work when no one is listening. */
+int rtp_sidecar_is_subscribed(const RtpSidecarSender *s);
+
 /**
  * Initialise the sender.
  *

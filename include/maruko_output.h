@@ -61,12 +61,16 @@ typedef struct {
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
 	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
 	MarukoOutputBatch batch;
-	/* Transport-pressure observation (telemetry only — never gates
-	 * frame transmission).  Mirrors Star6eOutput: hysteresis flag plus
-	 * a "frames observed in pressure" counter.  ABI-named pressure_drops
-	 * is uint32_t to keep the HTTP-thread read atomic on ARMv7. */
+	/* Transport-pressure observation cache.  Mirrors Star6eOutput; see
+	 * the docstring there.  Populated once per frame by
+	 * maruko_output_observe_pressure, read by the sidecar emit and by
+	 * /api/v1/transport/status on the HTTP thread. */
 	int in_pressure;
 	uint32_t pressure_drops;
+	uint8_t last_fill_pct;
+	uint32_t last_full_drops;
+	uint32_t last_writes;
+	uint32_t last_oversize_drops;
 } MarukoOutput;
 
 /** Initialize UDP or Unix socket output from a parsed URI. */
@@ -77,12 +81,12 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 int maruko_output_init_shm(MarukoOutput *output, const char *shm_name);
 
 /** Observe transport pressure for telemetry.  Mirrors
- *  star6e_output_observe_pressure: hysteresis on cfg->outgoing watermarks,
- *  updates output->in_pressure / output->pressure_drops.  Never directs
- *  the caller to skip — adaptation belongs upstream of encode (bitrate /
- *  fps).  See venc_observe_pressure in venc_ring.h. */
-void maruko_output_observe_pressure(MarukoOutput *output,
-	const VencConfig *cfg);
+ *  star6e_output_observe_pressure: hysteresis flag + in-pressure counter,
+ *  caches fill_pct and SHM lifetime stats for the sidecar emit /
+ *  /api/v1/transport/status to read without a second query.  Should
+ *  only be called when there is a sidecar subscriber — the data has
+ *  no other live consumer on the producer hot path. */
+void maruko_output_observe_pressure(MarukoOutput *output);
 
 /** Change output destination URI without stopping streaming (udp:// or unix://). */
 int maruko_output_apply_server(MarukoOutput *output, const char *uri);

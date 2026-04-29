@@ -961,14 +961,20 @@ static const char *maruko_output_transport_name(const MarukoOutput *o)
 static char *maruko_query_transport_status(void)
 {
 	MarukoBackendContext *backend = g_ctx.backend;
-	const VencConfig *vcfg = g_ctx.vcfg;
-	char buf[768];
+	char buf[640];
 	const char *transport;
 	int pos;
+	int in_pressure;
+	uint32_t pressure_drops;
 
-	if (!backend || !vcfg)
+	if (!backend)
 		return NULL;
 	transport = maruko_output_transport_name(&backend->output);
+
+	in_pressure = __atomic_load_n(&backend->output.in_pressure,
+		__ATOMIC_RELAXED);
+	pressure_drops = __atomic_load_n(&backend->output.pressure_drops,
+		__ATOMIC_RELAXED);
 
 	if (backend->output.ring) {
 		venc_ring_fill_t fill;
@@ -980,25 +986,19 @@ static char *maruko_query_transport_status(void)
 			"\"transport\":\"%s\","
 			"\"fillPct\":%u,"
 			"\"inPressure\":%s,"
-			"\"transportDrops\":%llu,"
-			"\"pressureDrops\":%llu,"
+			"\"transportDrops\":%u,"
+			"\"pressureDrops\":%u,"
 			"\"packetsSent\":%llu,"
 			"\"oversizeDrops\":%llu,"
-			"\"backpressure\":%s,"
-			"\"highWaterPct\":%u,"
-			"\"lowWaterPct\":%u,"
 			"\"slotCount\":%u,"
 			"\"usedSlots\":%u}}",
 			transport,
 			(unsigned)fill.fill_pct,
-			backend->output.in_pressure ? "true" : "false",
-			(unsigned long long)fill.full_drops,
-			(unsigned long long)backend->output.pressure_drops,
+			in_pressure ? "true" : "false",
+			(unsigned)fill.full_drops,
+			(unsigned)pressure_drops,
 			(unsigned long long)fill.writes,
 			(unsigned long long)fill.oversize_drops,
-			vcfg->outgoing.backpressure ? "true" : "false",
-			(unsigned)vcfg->outgoing.high_water_pct,
-			(unsigned)vcfg->outgoing.low_water_pct,
 			(unsigned)fill.slot_count,
 			(unsigned)fill.used_slots);
 	} else if ((backend->output.transport == VENC_OUTPUT_URI_UNIX ||
@@ -1014,29 +1014,17 @@ static char *maruko_query_transport_status(void)
 			"\"transport\":\"%s\","
 			"\"fillPct\":%u,"
 			"\"inPressure\":%s,"
-			"\"pressureDrops\":%llu,"
-			"\"backpressure\":%s,"
-			"\"highWaterPct\":%u,"
-			"\"lowWaterPct\":%u}}",
+			"\"pressureDrops\":%u}}",
 			transport,
 			(unsigned)fill_pct,
-			backend->output.in_pressure ? "true" : "false",
-			(unsigned long long)backend->output.pressure_drops,
-			vcfg->outgoing.backpressure ? "true" : "false",
-			(unsigned)vcfg->outgoing.high_water_pct,
-			(unsigned)vcfg->outgoing.low_water_pct);
+			in_pressure ? "true" : "false",
+			(unsigned)pressure_drops);
 	} else {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":false,"
-			"\"transport\":\"%s\","
-			"\"backpressure\":%s,"
-			"\"highWaterPct\":%u,"
-			"\"lowWaterPct\":%u}}",
-			transport,
-			vcfg->outgoing.backpressure ? "true" : "false",
-			(unsigned)vcfg->outgoing.high_water_pct,
-			(unsigned)vcfg->outgoing.low_water_pct);
+			"\"transport\":\"%s\"}}",
+			transport);
 	}
 	if (pos < 0 || pos >= (int)sizeof(buf))
 		return NULL;

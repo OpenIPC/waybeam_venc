@@ -35,6 +35,13 @@ static int sub_active_at(const RtpSidecarSender *s, uint64_t now)
 	return s->sub_expires_us != 0 && now < s->sub_expires_us;
 }
 
+int rtp_sidecar_is_subscribed(const RtpSidecarSender *s)
+{
+	if (!s || s->fd < 0)
+		return 0;
+	return sub_active_at(s, wb_monotonic_us());
+}
+
 static void sub_refresh_at(RtpSidecarSender *s, const struct sockaddr_in *src,
 	uint64_t now)
 {

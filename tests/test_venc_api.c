@@ -901,69 +901,6 @@ static int test_live_set_max_payload_size_bounds(void)
 	return failures;
 }
 
-static int test_live_set_backpressure_watermarks(void)
-{
-	int failures = 0;
-	VencConfig cfg;
-	VencApplyCallbacks cb;
-	int status = 0;
-	char response[1024];
-
-	venc_config_defaults(&cfg);
-	memset(&cb, 0, sizeof(cb));
-
-	/* Defaults must be sane. */
-	CHECK("watermarks default backpressure on",
-		cfg.outgoing.backpressure == true);
-	CHECK("watermarks default high",
-		cfg.outgoing.high_water_pct == 75);
-	CHECK("watermarks default low",
-		cfg.outgoing.low_water_pct == 50);
-
-	/* High > 100 rejects. */
-	CHECK("high>100 reject",
-		apply_set_query_http(&cfg, "star6e", &cb,
-			"outgoing.highWaterPct=150", &status, response,
-			sizeof(response)) == 0);
-	CHECK("high>100 status", status == 409);
-	CHECK("high>100 unchanged", cfg.outgoing.high_water_pct == 75);
-
-	/* Low >= high rejects (lo defaults to 50, set lo=80 with hi=75). */
-	CHECK("lo>=hi reject",
-		apply_set_query_http(&cfg, "star6e", &cb,
-			"outgoing.lowWaterPct=80", &status, response,
-			sizeof(response)) == 0);
-	CHECK("lo>=hi status", status == 409);
-	CHECK("lo>=hi error msg",
-		strstr(response, "low_water_pct must be < outgoing.high_water_pct") != NULL);
-
-	/* Multi-set lo+hi together (lo=20, hi=90) accepts. */
-	CHECK("multi lo+hi rc",
-		apply_set_query_http(&cfg, "star6e", &cb,
-			"outgoing.lowWaterPct=20&outgoing.highWaterPct=90",
-			&status, response, sizeof(response)) == 0);
-	CHECK("multi status", status == 200);
-	CHECK("multi lo applied", cfg.outgoing.low_water_pct == 20);
-	CHECK("multi hi applied", cfg.outgoing.high_water_pct == 90);
-
-	/* Toggle backpressure off and back on. */
-	CHECK("bp off rc",
-		apply_set_query_http(&cfg, "star6e", &cb,
-			"outgoing.backpressure=false", &status, response,
-			sizeof(response)) == 0);
-	CHECK("bp off status", status == 200);
-	CHECK("bp off applied", cfg.outgoing.backpressure == false);
-
-	CHECK("bp on rc",
-		apply_set_query_http(&cfg, "star6e", &cb,
-			"outgoing.backpressure=true", &status, response,
-			sizeof(response)) == 0);
-	CHECK("bp on status", status == 200);
-	CHECK("bp on applied", cfg.outgoing.backpressure == true);
-
-	return failures;
-}
-
 static int test_live_set_max_payload_size_no_callback(void)
 {
 	int failures = 0;
@@ -1008,7 +945,6 @@ int test_venc_api(void)
 	failures += test_live_set_rejects_out_of_range_roi_values();
 	failures += test_live_set_max_payload_size_bounds();
 	failures += test_live_set_max_payload_size_no_callback();
-	failures += test_live_set_backpressure_watermarks();
 	failures += test_restart_set_accepts_maruko_h264_config();
 	failures += test_restart_set_rejects_star6e_h264_rtp();
 	failures += test_restart_set_accepts_star6e_h264_compact();

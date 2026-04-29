@@ -314,9 +314,6 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, connected_udp,     FT_BOOL,   MUT_RESTART),
 	FIELD(outgoing, audio_port,        FT_UINT16, MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
-	FIELD(outgoing, backpressure,      FT_BOOL,   MUT_LIVE),
-	FIELD(outgoing, high_water_pct,    FT_UINT8,  MUT_LIVE),
-	FIELD(outgoing, low_water_pct,     FT_UINT8,  MUT_LIVE),
 
 	FIELD(isp, legacy_ae,      FT_BOOL,   MUT_RESTART),
 	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
@@ -415,8 +412,6 @@ static const FieldAlias g_field_aliases[] = {
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
-	{ "outgoing.highWaterPct",  "outgoing.high_water_pct"   },
-	{ "outgoing.lowWaterPct",   "outgoing.low_water_pct"    },
 	{ "debug.showOsd", "debug.show_osd" },
 };
 
@@ -654,22 +649,6 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		    v > VENC_OUTPUT_PAYLOAD_CEILING_BYTES)
 			return "outgoing.max_payload_size must be in range [576, 4000]";
 	}
-	if (strcmp(key, "outgoing.high_water_pct") == 0 ||
-	    strcmp(key, "outgoing.low_water_pct") == 0) {
-		uint8_t hi = cfg->outgoing.high_water_pct;
-		uint8_t lo = cfg->outgoing.low_water_pct;
-		/* Watermarks are percent of the output queue capacity (ring
-		 * slot_count for shm://; SO_SNDBUF for unix:// and udp://).
-		 * 100% is allowed for "never trip" — effectively keeps the
-		 * pressure flag clear.  Low must be strictly less than high
-		 * to keep hysteresis non-degenerate. */
-		if (hi > 100)
-			return "outgoing.high_water_pct must be in range [0, 100]";
-		if (lo > 100)
-			return "outgoing.low_water_pct must be in range [0, 100]";
-		if (lo >= hi)
-			return "outgoing.low_water_pct must be < outgoing.high_water_pct";
-	}
 	return NULL;
 }
 
@@ -688,8 +667,6 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"fpv.roi_steps",
 		"fpv.roi_center",
 		"outgoing.max_payload_size",
-		"outgoing.high_water_pct",
-		"outgoing.low_water_pct",
 	};
 	size_t i;
 
@@ -826,7 +803,6 @@ typedef enum {
 	LIVE_GROUP_VERBOSE,
 	LIVE_GROUP_OUTGOING,
 	LIVE_GROUP_MAX_PAYLOAD,
-	LIVE_GROUP_BACKPRESSURE,
 	LIVE_GROUP_MUTE,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
@@ -985,10 +961,6 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_OUTGOING;
 	if (strcmp(canonical_key, "outgoing.max_payload_size") == 0)
 		return LIVE_GROUP_MAX_PAYLOAD;
-	if (strcmp(canonical_key, "outgoing.backpressure") == 0 ||
-	    strcmp(canonical_key, "outgoing.high_water_pct") == 0 ||
-	    strcmp(canonical_key, "outgoing.low_water_pct") == 0)
-		return LIVE_GROUP_BACKPRESSURE;
 	if (strcmp(canonical_key, "audio.mute") == 0)
 		return LIVE_GROUP_MUTE;
 
@@ -1016,8 +988,6 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "outgoing.*";
 	case LIVE_GROUP_MAX_PAYLOAD:
 		return "outgoing.max_payload_size";
-	case LIVE_GROUP_BACKPRESSURE:
-		return "outgoing.backpressure/high_water_pct/low_water_pct";
 	case LIVE_GROUP_MUTE:
 		return "audio.mute";
 	default:
@@ -1164,10 +1134,6 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return 1;
 	case LIVE_GROUP_MAX_PAYLOAD:
 		return g_cb->apply_max_payload_size != NULL;
-	case LIVE_GROUP_BACKPRESSURE:
-		/* Passive group: per-frame producer reads cfg directly each
-		 * tick.  No backend callback needed.  Always supported. */
-		return 1;
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute != NULL;
 	default:
@@ -1224,11 +1190,6 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_MAX_PAYLOAD:
 		dst->outgoing.max_payload_size = src->outgoing.max_payload_size;
-		break;
-	case LIVE_GROUP_BACKPRESSURE:
-		dst->outgoing.backpressure = src->outgoing.backpressure;
-		dst->outgoing.high_water_pct = src->outgoing.high_water_pct;
-		dst->outgoing.low_water_pct = src->outgoing.low_water_pct;
 		break;
 	case LIVE_GROUP_MUTE:
 		dst->audio.mute = src->audio.mute;
@@ -1326,12 +1287,6 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return 0;
 	case LIVE_GROUP_MAX_PAYLOAD:
 		return g_cb->apply_max_payload_size(cfg->outgoing.max_payload_size);
-	case LIVE_GROUP_BACKPRESSURE:
-		/* Cfg already committed via commit_config_locked above.  The
-		 * per-frame producer reads cfg->outgoing.{backpressure,
-		 * high_water_pct, low_water_pct} once per frame (atomic
-		 * uint8/bool stores on ARM).  No callback needed. */
-		return 0;
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute(cfg->audio.mute);
 	default:

@@ -120,30 +120,30 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 		if (sidecar_active) {
 			RtpSidecarTransportInfo tinfo;
 			const RtpSidecarTransportInfo *tinfo_ptr = NULL;
-			memset(&tinfo, 0, sizeof(tinfo));
-			tinfo.in_pressure = output->in_pressure ? 1 : 0;
-			tinfo.pressure_drops = (uint32_t)output->pressure_drops;
 
-			if (output->ring) {
-				venc_ring_fill_t fill;
-				if (venc_ring_get_fill(output->ring, &fill) == 0) {
-					tinfo.fill_pct = fill.fill_pct;
-					tinfo.transport_drops = (uint32_t)fill.full_drops;
-					tinfo.packets_sent = (uint32_t)fill.writes;
-					tinfo_ptr = &tinfo;
-				}
-			} else if ((output->transport == VENC_OUTPUT_URI_UNIX ||
-			            output->transport == VENC_OUTPUT_URI_UDP) &&
-			           output->socket_handle >= 0) {
-				/* Socket transports: fill_pct from SIOCOUTQ/SO_SNDBUF.
-				 * transport_drops/packets_sent are lifetime counters
-				 * that aren't tracked yet for the socket path —
-				 * intentionally left 0 in this release; future work
-				 * can wire those counters from output_socket_send_parts. */
-				if (output_socket_get_fill_pct(output->socket_handle,
-				    output->send_buf_capacity,
-				    &tinfo.fill_pct) == 0)
-					tinfo_ptr = &tinfo;
+			/* Producer thread already populated output->last_*
+			 * fields and the in_pressure / pressure_drops state
+			 * inside star6e_output_observe_pressure() at the top
+			 * of the frame.  Read those instead of re-querying —
+			 * one SIOCOUTQ ioctl / ring-fill load per frame
+			 * instead of two.  Trailer is only emitted when the
+			 * runtime decided to observe (i.e. a probe is
+			 * subscribed); same thread, no atomic load needed. */
+			if (output->ring ||
+			    ((output->transport == VENC_OUTPUT_URI_UNIX ||
+			      output->transport == VENC_OUTPUT_URI_UDP) &&
+			     output->socket_handle >= 0)) {
+				memset(&tinfo, 0, sizeof(tinfo));
+				tinfo.fill_pct = output->last_fill_pct;
+				tinfo.in_pressure = output->in_pressure ? 1 : 0;
+				tinfo.pressure_drops = output->pressure_drops;
+				/* Socket transports leave transport_drops /
+				 * packets_sent at 0 — future work will count
+				 * sendmsg(EAGAIN/ENOBUFS) inside
+				 * output_socket_send_parts. */
+				tinfo.transport_drops = output->last_full_drops;
+				tinfo.packets_sent = output->last_writes;
+				tinfo_ptr = &tinfo;
 			}
 
 			rtp_sidecar_send_frame_transport(&state->sidecar,

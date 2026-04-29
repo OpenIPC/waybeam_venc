@@ -94,24 +94,6 @@ typedef struct {
 	                                     * audio and video RTP on one socket causes
 	                                     * video decoder instability at the receiver */
 	uint16_t sidecar_port;              /* 0 = disabled */
-	/* Output-pressure observation (telemetry only, NEVER acts on
-	 * frames).  When fill_pct of the active transport queue crosses
-	 * high_water_pct the in_pressure flag is asserted with hysteresis
-	 * down to low_water_pct.  The flag flows out through the sidecar
-	 * trailer (RTP_SIDECAR_FLAG_TRANSPORT_INFO) and through
-	 * /api/v1/transport/status; adaptive consumers (link_controller)
-	 * react by lowering video0.bitrate or sensor fps — adaptation
-	 * upstream of encode is the only graceful degradation path that
-	 * keeps the H.264/H.265 reference chain intact.  Fill source per
-	 * transport: shm:// = (write_idx-read_idx)/slot_count, unix:// /
-	 * udp:// = SIOCOUTQ / SO_SNDBUF.  See HISTORY 0.9.2 for the
-	 * post-encode-skip rollback.  Setting `backpressure=false`
-	 * disables the per-frame observation (skips the SIOCOUTQ ioctl /
-	 * ring-fill load) and keeps the flag clear; useful for noisy UDP
-	 * setups or to shave a few hundred ns / frame. */
-	bool backpressure;          /* default true (observation enabled) */
-	uint8_t high_water_pct;     /* assert in_pressure at >= fill_pct (default 75) */
-	uint8_t low_water_pct;      /* clear in_pressure at < fill_pct (default 50) */
 } VencConfigOutgoing;
 
 typedef struct {

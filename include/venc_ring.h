@@ -146,6 +146,16 @@ static inline int venc_ring_get_fill(const venc_ring_t *r,
 	return 0;
 }
 
+/* Hysteresis watermarks for transport-pressure observation.  Hardcoded
+ * (not configurable) — the prior `outgoing.{backpressure,highWaterPct,
+ * lowWaterPct}` config knobs were dropped because the value never lived
+ * outside the sidecar trailer (frame-skip was rolled back in v0.9.2)
+ * and exposing tuning knobs for a passive telemetry signal was more
+ * noise than useful.  75/50 matches the values that shipped during the
+ * v0.9.2 hardware-bench. */
+#define VENC_PRESSURE_HIGH_WATER_PCT 75u
+#define VENC_PRESSURE_LOW_WATER_PCT  50u
+
 /* Observe transport pressure for telemetry only (NOT a skip directive).
  *
  * History: this function used to return 1 to mean "skip-this-frame", and
@@ -153,48 +163,22 @@ static inline int venc_ring_get_fill(const venc_ring_t *r,
  * the encoder output for backpressure-driven frames.  That was wrong:
  * H.264/H.265 inter-frame coding requires the reference chain to be
  * intact, so dropping a P-frame post-encode left every following P-frame
- * in the GOP undecodable at the receiver.  The "graceful degradation"
- * we thought we had was actually catastrophic stream corruption
- * masquerading as lower fps on producer-side counters.
- *
- * The correct adaptation knobs are upstream of encode:
- *   - lower the bitrate target (live `video0.bitrate`) — frames stay at
- *     full fps but get smaller.  link_controller already does this from
- *     radio stats; the trailer's `fill_pct` lets it react sooner.
- *   - lower the encoder fps (sensor / MI_SYS_BindChnPort2 framerate
- *     divider) — fewer frames, all reference chains intact.
- *
- * This helper now does only observation:
- *   - applies hysteresis on `*in_pressure` using fill / hi-water / lo-water
- *   - increments `*pressure_drops` whenever the flag is asserted (the
- *     counter's wire semantics shift from "frames the producer skipped"
- *     to "frames the producer observed pressure during"; the wire
- *     trailer field name is kept for ABI stability)
- *   - never directs the caller to skip; the caller must always emit
- *     the frame
- *
- * `enabled=0` and degenerate cfg (lo >= hi) still clear the flag so
- * toggling either one does not strand the producer in pressure state. */
+ * in the GOP undecodable at the receiver.  Adaptation belongs upstream
+ * of encode (lower bitrate, lower fps) — driven by link_controller
+ * reading the trailer.  This helper just maintains the hysteresis flag
+ * and the "frames observed in pressure" counter (wire field name
+ * `pressure_drops` retained for ABI stability across the rollback). */
 static inline void venc_observe_pressure(uint8_t fill_pct,
-	int *in_pressure, uint32_t *pressure_drops,
-	int enabled, uint8_t high_water_pct, uint8_t low_water_pct)
+	int *in_pressure, uint32_t *pressure_drops)
 {
 	if (!in_pressure || !pressure_drops)
 		return;
-	if (!enabled) {
-		*in_pressure = 0;
-		return;
-	}
-	if (low_water_pct >= high_water_pct) {
-		*in_pressure = 0;
-		return;
-	}
 
 	if (*in_pressure) {
-		if (fill_pct < low_water_pct)
+		if (fill_pct < VENC_PRESSURE_LOW_WATER_PCT)
 			*in_pressure = 0;
 	} else {
-		if (fill_pct >= high_water_pct)
+		if (fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT)
 			*in_pressure = 1;
 	}
 

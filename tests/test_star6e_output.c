@@ -1147,14 +1147,8 @@ static int test_star6e_output_backpressure_hysteresis(void)
 	char uri[64];
 	Star6eOutputSetup setup;
 	Star6eOutput output;
-	VencConfig cfg;
 	int failures = 0;
 	uint32_t base_drops;
-
-	venc_config_defaults(&cfg);
-	cfg.outgoing.backpressure = true;
-	cfg.outgoing.high_water_pct = 75;
-	cfg.outgoing.low_water_pct = 50;
 
 	snprintf(uri, sizeof(uri), "shm://test_star6e_bp_%ld", (long)getpid());
 	CHECK("bp prepare",
@@ -1162,51 +1156,40 @@ static int test_star6e_output_backpressure_hysteresis(void)
 	CHECK("bp init", star6e_output_init(&output, &setup) == 0);
 
 	/* Empty ring — must not enter pressure. */
-	star6e_output_observe_pressure(&output, &cfg);
+	star6e_output_observe_pressure(&output);
 	CHECK("bp empty in_pressure", output.in_pressure == 0);
 	CHECK("bp empty drops", output.pressure_drops == 0);
+	CHECK("bp empty cached fill", output.last_fill_pct == 0);
 
 	/* Fill below high water (74%) — still no pressure. */
 	fill_ring_to_pct(output.ring, 74);
-	star6e_output_observe_pressure(&output, &cfg);
+	star6e_output_observe_pressure(&output);
 	CHECK("bp 74pct in_pressure", output.in_pressure == 0);
 	CHECK("bp 74pct drops unchanged", output.pressure_drops == 0);
 
 	/* Fill at high water (75%) — enter pressure, drops counter ticks. */
 	fill_ring_to_pct(output.ring, 75);
-	star6e_output_observe_pressure(&output, &cfg);
+	star6e_output_observe_pressure(&output);
 	CHECK("bp 75pct in_pressure", output.in_pressure == 1);
 	base_drops = output.pressure_drops;
 	CHECK("bp 75pct drop counted", base_drops == 1);
+	CHECK("bp 75pct cached fill", output.last_fill_pct >= 75);
 
 	/* Drain to between low and high — must STAY in pressure (hysteresis). */
 	drain_ring_to_pct(output.ring, 60);
-	star6e_output_observe_pressure(&output, &cfg);
+	star6e_output_observe_pressure(&output);
 	CHECK("bp 60pct still in_pressure", output.in_pressure == 1);
 	CHECK("bp 60pct drop incremented", output.pressure_drops == base_drops + 1);
 
 	/* Drain at low water (50%) — must STAY in pressure (strict <). */
 	drain_ring_to_pct(output.ring, 50);
-	star6e_output_observe_pressure(&output, &cfg);
+	star6e_output_observe_pressure(&output);
 	CHECK("bp 50pct still in_pressure", output.in_pressure == 1);
 
 	/* Drain below low water (49%) — exit pressure. */
 	drain_ring_to_pct(output.ring, 49);
-	star6e_output_observe_pressure(&output, &cfg);
+	star6e_output_observe_pressure(&output);
 	CHECK("bp 49pct in_pressure cleared", output.in_pressure == 0);
-
-	/* Disable backpressure — must not observe pressure even when full. */
-	cfg.outgoing.backpressure = false;
-	fill_ring_to_pct(output.ring, 100);
-	star6e_output_observe_pressure(&output, &cfg);
-	CHECK("bp disabled in_pressure", output.in_pressure == 0);
-
-	/* Re-enable but with degenerate watermarks — defensive: no flag rise. */
-	cfg.outgoing.backpressure = true;
-	cfg.outgoing.high_water_pct = 50;
-	cfg.outgoing.low_water_pct = 50;
-	star6e_output_observe_pressure(&output, &cfg);
-	CHECK("bp degenerate in_pressure", output.in_pressure == 0);
 
 	/* Non-SHM output (UDP) — observation runs but stays at 0% fill (no
 	 * receiver to back the kernel send queue up). */
@@ -1222,9 +1205,7 @@ static int test_star6e_output_backpressure_hysteresis(void)
 		CHECK("bp udp prepare",
 			star6e_output_prepare(&setup, udp_uri, "rtp", 0) == 0);
 		CHECK("bp udp init", star6e_output_init(&udp_out, &setup) == 0);
-		cfg.outgoing.high_water_pct = 75;
-		cfg.outgoing.low_water_pct = 50;
-		star6e_output_observe_pressure(&udp_out, &cfg);
+		star6e_output_observe_pressure(&udp_out);
 		CHECK("bp udp in_pressure", udp_out.in_pressure == 0);
 		star6e_output_teardown(&udp_out);
 		if (recv_fd >= 0)
@@ -1246,14 +1227,8 @@ static int test_star6e_output_unix_backpressure(void)
 	char uri[80];
 	Star6eOutputSetup setup;
 	Star6eOutput output;
-	VencConfig cfg;
 	int recv_fd = -1;
 	int failures = 0;
-
-	venc_config_defaults(&cfg);
-	cfg.outgoing.backpressure = true;
-	cfg.outgoing.high_water_pct = 75;
-	cfg.outgoing.low_water_pct = 50;
 
 	snprintf(abstract_name, sizeof(abstract_name),
 		"test_unix_bp_%ld", (long)getpid());
@@ -1268,7 +1243,7 @@ static int test_star6e_output_unix_backpressure(void)
 		output.transport == VENC_OUTPUT_URI_UNIX);
 
 	/* Empty queue — must not enter pressure. */
-	star6e_output_observe_pressure(&output, &cfg);
+	star6e_output_observe_pressure(&output);
 	CHECK("unix bp empty in_pressure", output.in_pressure == 0);
 
 	/* Stuff the queue.  No receiver read → bytes accumulate against the
@@ -1306,22 +1281,19 @@ static int test_star6e_output_unix_backpressure(void)
 		CHECK("unix bp sndbuf capacity captured",
 			output.send_buf_capacity > 0);
 
-		star6e_output_observe_pressure(&output, &cfg);
-		/* When fill_pct ≥ 75 (the high-water default in this test),
-		 * the observation must flip in_pressure on. */
+		star6e_output_observe_pressure(&output);
+		/* When fill_pct ≥ 75 (the hardcoded high-water mark in
+		 * venc_ring.h), observation must flip in_pressure on and
+		 * cache the value. */
 		if (fill_pct >= 75) {
 			CHECK("unix bp entered pressure",
 				output.in_pressure == 1);
 			CHECK("unix bp drop counted",
 				output.pressure_drops > 0);
+			CHECK("unix bp cached fill",
+				output.last_fill_pct >= 75);
 		}
 	}
-
-	/* Disable backpressure → flag must clear even with a full queue. */
-	cfg.outgoing.backpressure = false;
-	star6e_output_observe_pressure(&output, &cfg);
-	CHECK("unix bp disabled in_pressure cleared",
-		output.in_pressure == 0);
 
 	star6e_output_teardown(&output);
 	if (recv_fd >= 0)
@@ -1342,17 +1314,11 @@ static int test_star6e_output_always_sends_under_pressure(void)
 	char uri[64];
 	Star6eOutputSetup setup;
 	Star6eOutput output;
-	VencConfig cfg;
 	int failures = 0;
 	uint64_t writes_before;
 	uint64_t writes_after;
 	const uint8_t hdr[12] = { 0x80, 0x97, 0x00, 0x00 };
 	const uint8_t pay[8] = { 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22 };
-
-	venc_config_defaults(&cfg);
-	cfg.outgoing.backpressure = true;
-	cfg.outgoing.high_water_pct = 75;
-	cfg.outgoing.low_water_pct = 50;
 
 	snprintf(uri, sizeof(uri), "shm://test_star6e_always_send_%ld",
 		(long)getpid());
@@ -1362,7 +1328,7 @@ static int test_star6e_output_always_sends_under_pressure(void)
 
 	/* Drive the ring above high water so observe_pressure asserts. */
 	fill_ring_to_pct(output.ring, 80);
-	star6e_output_observe_pressure(&output, &cfg);
+	star6e_output_observe_pressure(&output);
 	CHECK("always-send pressure asserted",
 		output.in_pressure == 1);
 	CHECK("always-send drop counted",

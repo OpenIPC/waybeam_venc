@@ -36,28 +36,34 @@ section).
   Forward-compat: probes that don't recognise the flag read just the
   base frame (and ENC_INFO if present) and ignore the trailing bytes
   — no protocol version bump.
-- **Hysteresis-driven pressure flag (telemetry only).**  Per-frame
-  observation: enter pressure when fill_pct ≥ `outgoing.highWaterPct`
-  (default 75), exit when fill_pct < `outgoing.lowWaterPct` (default
-  50).  The flag flows out through the sidecar trailer
+- **Hysteresis-driven pressure flag (telemetry only).**  Hardcoded
+  watermarks `VENC_PRESSURE_HIGH_WATER_PCT=75` /
+  `VENC_PRESSURE_LOW_WATER_PCT=50` in `venc_ring.h` — no live config
+  surface.  Enter pressure when fill_pct ≥ HIGH, exit when fill_pct
+  < LOW.  The flag flows out through the sidecar trailer
   (`in_pressure`) and through `/api/v1/transport/status`.  The
   `pressureDrops` counter increments while the flag is asserted and
   serves as a "frames-spent-in-pressure" metric for adaptive
   consumers.  **The producer never skips a frame on the basis of
   this flag** — see the rollback note below.
-- **Config knobs (live, MUT_LIVE):** `outgoing.backpressure` (bool,
-  default true), `outgoing.highWaterPct` (uint8, default 75),
-  `outgoing.lowWaterPct` (uint8, default 50).  Validator enforces
-  `0 ≤ lo < hi ≤ 100` at boot and on every `/api/v1/set`.  Live
-  changes flow through the new `LIVE_GROUP_BACKPRESSURE` passive
-  group — cfg committed atomically; the per-frame producer reads the
-  cfg fields directly each tick (no callback dispatch needed).
+- **Auto-gated observation.** `*_observe_pressure` is only called
+  per-frame when a sidecar probe is subscribed
+  (`rtp_sidecar_is_subscribed`); when nobody is listening, the SIOCOUTQ
+  ioctl / ring-fill load is skipped entirely.  Observation caches its
+  fill_pct + lifetime stats into the output struct so the sidecar emit
+  in the same frame reads the cache instead of re-querying — one
+  query per frame on the producer hot path instead of two.  No live
+  config surface for backpressure: prior `outgoing.backpressure /
+  highWaterPct / lowWaterPct` knobs were dropped (the value never
+  affected anything outside the trailer once frame-skip was rolled
+  back, and exposing tuning knobs for a passive telemetry signal was
+  noise).
 - **Architecture note.** The hysteresis state machine sits on a
   pre-computed `fill_pct` (`venc_observe_pressure` in `venc_ring.h`)
-  so each backend's `*_observe_pressure` is just a 4-line dispatch:
-  pick the fill source by transport, hand it to the shared state
-  machine.  Adding a new transport is one branch in `observe_pressure`
-  + one branch in the sidecar emit path + one branch in `query_transport_status`.
+  so each backend's `*_observe_pressure` is a transport-dispatch
+  helper: pick the fill source, hand it to the shared state machine,
+  cache the result.  Adding a new transport is one branch in
+  `observe_pressure` + one branch in `query_transport_status`.
 - **Internal/wire renames.**  Identifiers were scoped from "shm_*" to
   "transport_*" / "backpressure_*" before any consumer shipped, on
   the basis that the model is equally meaningful for any transport
@@ -87,7 +93,8 @@ section).
     (`test_star6e_output_backpressure_hysteresis`)
   - UNIX datagram pressure observation with a non-reading receiver
     (`test_star6e_output_unix_backpressure`)
-  - Validator boundary cases (`test_live_set_backpressure_watermarks`)
+  - Always-send invariant under pressure
+    (`test_star6e_output_always_sends_under_pressure`)
   - Wire-layout for {enc, transport} combinations
     (`test_star6e_video_sidecar_transport_layouts`)
 - **Stale-ring hardening.** `venc_ring_create()` now `shm_unlink()`s

@@ -1461,12 +1461,14 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 		size_t total_bytes = 0;
 		HevcRtpStats frame_pktzr = {0};
+		int sidecar_subscribed = rtp_sidecar_is_subscribed(&sidecar);
 		if (ctx->output_enabled) {
-			const VencConfig *vc = maruko_controls_vcfg();
-			/* Observe pressure for telemetry; always send.  See
-			 * star6e_runtime equivalent — post-encode skip breaks
-			 * the H.265 reference chain. */
-			maruko_output_observe_pressure(&ctx->output, vc);
+			/* Observe pressure only when a sidecar probe is
+			 * subscribed — see star6e_runtime equivalent.  Always
+			 * sending: post-encode skip breaks the H.265 reference
+			 * chain (HISTORY 0.9.2). */
+			if (sidecar_subscribed)
+				maruko_output_observe_pressure(&ctx->output);
 			total_bytes = maruko_video_send_frame(&stream,
 				&ctx->output, &rtp_state, &param_sets,
 				&ctx->cfg,
@@ -1482,28 +1484,25 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		(void)maruko_mi_venc_release_stream(ctx->venc_device,
 			ctx->venc_channel, &stream);
 
-		{
+		if (sidecar_subscribed) {
 			RtpSidecarTransportInfo tinfo;
 			const RtpSidecarTransportInfo *tinfo_ptr = NULL;
-			memset(&tinfo, 0, sizeof(tinfo));
-			tinfo.in_pressure = ctx->output.in_pressure ? 1 : 0;
-			tinfo.pressure_drops = (uint32_t)ctx->output.pressure_drops;
 
-			if (ctx->output.ring) {
-				venc_ring_fill_t fill;
-				if (venc_ring_get_fill(ctx->output.ring, &fill) == 0) {
-					tinfo.fill_pct = fill.fill_pct;
-					tinfo.transport_drops = (uint32_t)fill.full_drops;
-					tinfo.packets_sent = (uint32_t)fill.writes;
-					tinfo_ptr = &tinfo;
-				}
-			} else if ((ctx->output.transport == VENC_OUTPUT_URI_UNIX ||
-			            ctx->output.transport == VENC_OUTPUT_URI_UDP) &&
-			           ctx->output.socket_handle >= 0) {
-				if (output_socket_get_fill_pct(ctx->output.socket_handle,
-				    ctx->output.send_buf_capacity,
-				    &tinfo.fill_pct) == 0)
-					tinfo_ptr = &tinfo;
+			/* Producer already cached fill_pct + lifetime stats
+			 * inside maruko_output_observe_pressure() above —
+			 * read the cache instead of re-querying.  One
+			 * SIOCOUTQ ioctl / ring-fill load per frame, not two. */
+			if (ctx->output.ring ||
+			    ((ctx->output.transport == VENC_OUTPUT_URI_UNIX ||
+			      ctx->output.transport == VENC_OUTPUT_URI_UDP) &&
+			     ctx->output.socket_handle >= 0)) {
+				memset(&tinfo, 0, sizeof(tinfo));
+				tinfo.fill_pct = ctx->output.last_fill_pct;
+				tinfo.in_pressure = ctx->output.in_pressure ? 1 : 0;
+				tinfo.pressure_drops = ctx->output.pressure_drops;
+				tinfo.transport_drops = ctx->output.last_full_drops;
+				tinfo.packets_sent = ctx->output.last_writes;
+				tinfo_ptr = &tinfo;
 			}
 			rtp_sidecar_send_frame_transport(&sidecar, rtp_state.ssrc,
 				frame_rtp_ts, seq_before,

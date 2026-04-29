@@ -1044,14 +1044,23 @@ static const char *output_transport_name(const Star6eOutput *o)
 static char *query_transport_status(void)
 {
 	Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
-	const VencConfig *vcfg = g_star6e_control_ctx.vcfg;
-	char buf[768];
+	char buf[640];
 	const char *transport;
 	int pos;
+	int in_pressure;
+	uint32_t pressure_drops;
 
-	if (!ps || !vcfg)
+	if (!ps)
 		return NULL;
 	transport = output_transport_name(&ps->output);
+
+	/* Producer thread updates these only when a sidecar probe is
+	 * subscribed.  Off-thread RELAXED loads — naturally aligned, no
+	 * ordering needed for telemetry. */
+	in_pressure = __atomic_load_n(&ps->output.in_pressure,
+		__ATOMIC_RELAXED);
+	pressure_drops = __atomic_load_n(&ps->output.pressure_drops,
+		__ATOMIC_RELAXED);
 
 	if (ps->output.ring) {
 		venc_ring_fill_t fill;
@@ -1063,25 +1072,19 @@ static char *query_transport_status(void)
 			"\"transport\":\"%s\","
 			"\"fillPct\":%u,"
 			"\"inPressure\":%s,"
-			"\"transportDrops\":%llu,"
-			"\"pressureDrops\":%llu,"
+			"\"transportDrops\":%u,"
+			"\"pressureDrops\":%u,"
 			"\"packetsSent\":%llu,"
 			"\"oversizeDrops\":%llu,"
-			"\"backpressure\":%s,"
-			"\"highWaterPct\":%u,"
-			"\"lowWaterPct\":%u,"
 			"\"slotCount\":%u,"
 			"\"usedSlots\":%u}}",
 			transport,
 			(unsigned)fill.fill_pct,
-			ps->output.in_pressure ? "true" : "false",
-			(unsigned long long)fill.full_drops,
-			(unsigned long long)ps->output.pressure_drops,
+			in_pressure ? "true" : "false",
+			(unsigned)fill.full_drops,
+			(unsigned)pressure_drops,
 			(unsigned long long)fill.writes,
 			(unsigned long long)fill.oversize_drops,
-			vcfg->outgoing.backpressure ? "true" : "false",
-			(unsigned)vcfg->outgoing.high_water_pct,
-			(unsigned)vcfg->outgoing.low_water_pct,
 			(unsigned)fill.slot_count,
 			(unsigned)fill.used_slots);
 	} else if ((ps->output.transport == VENC_OUTPUT_URI_UNIX ||
@@ -1097,31 +1100,17 @@ static char *query_transport_status(void)
 			"\"transport\":\"%s\","
 			"\"fillPct\":%u,"
 			"\"inPressure\":%s,"
-			"\"pressureDrops\":%llu,"
-			"\"backpressure\":%s,"
-			"\"highWaterPct\":%u,"
-			"\"lowWaterPct\":%u}}",
+			"\"pressureDrops\":%u}}",
 			transport,
 			(unsigned)fill_pct,
-			ps->output.in_pressure ? "true" : "false",
-			(unsigned long long)ps->output.pressure_drops,
-			vcfg->outgoing.backpressure ? "true" : "false",
-			(unsigned)vcfg->outgoing.high_water_pct,
-			(unsigned)vcfg->outgoing.low_water_pct);
+			in_pressure ? "true" : "false",
+			(unsigned)pressure_drops);
 	} else {
-		/* No transport configured — active=false, just surface the
-		 * cfg state so consumers can read defaults. */
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":false,"
-			"\"transport\":\"%s\","
-			"\"backpressure\":%s,"
-			"\"highWaterPct\":%u,"
-			"\"lowWaterPct\":%u}}",
-			transport,
-			vcfg->outgoing.backpressure ? "true" : "false",
-			(unsigned)vcfg->outgoing.high_water_pct,
-			(unsigned)vcfg->outgoing.low_water_pct);
+			"\"transport\":\"%s\"}}",
+			transport);
 	}
 	if (pos < 0 || pos >= (int)sizeof(buf))
 		return NULL;
