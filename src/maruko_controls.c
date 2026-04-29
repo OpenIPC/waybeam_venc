@@ -4,6 +4,7 @@
 #include "maruko_bindings.h"
 #include "maruko_iq.h"
 #include "maruko_output.h"
+#include "output_socket.h"
 #include "pipeline_common.h"
 #include "venc_config.h"
 
@@ -138,6 +139,8 @@ typedef struct {
 	uint32_t frame_width;
 	uint32_t frame_height;
 	VencConfig *vcfg;
+	MarukoBackendConfig *backend_cfg;
+	MarukoBackendContext *backend;   /* full backend handle for output/ring access */
 	MI_SYS_ChnPort_t vpe_port;
 	MI_SYS_ChnPort_t venc_port;
 	volatile sig_atomic_t *output_enabled_ptr;
@@ -921,6 +924,118 @@ static int maruko_apply_server(const char *uri)
 	return 0;
 }
 
+static int maruko_apply_max_payload_size(uint16_t size)
+{
+	if (!g_ctx.backend_cfg)
+		return -1;
+
+	/* Validation enforces [VENC_OUTPUT_PAYLOAD_MIN_BYTES,
+	 * VENC_OUTPUT_PAYLOAD_CEILING_BYTES] and the SHM ring is sized to
+	 * the ceiling at startup, so any value reaching here fits every
+	 * transport. Plain uint16_t stores are atomic on ARM; the encoder
+	 * thread re-reads cfg->rtp_payload_size / cfg->max_frame_size once
+	 * per frame. */
+	g_ctx.backend_cfg->rtp_payload_size = size;
+	g_ctx.backend_cfg->max_frame_size = size;
+
+	/* stderr (unbuffered) so the live trace lands in the log even when
+	 * stdout is buffered or captured by the audio filter. */
+	fprintf(stderr, "> max_payload_size set to %u (live)\n", (unsigned)size);
+	return 0;
+}
+
+static const char *maruko_output_transport_name(const MarukoOutput *o)
+{
+	if (!o)
+		return "none";
+	if (o->ring)
+		return "shm";
+	switch (o->transport) {
+	case VENC_OUTPUT_URI_UDP:  return "udp";
+	case VENC_OUTPUT_URI_UNIX: return "unix";
+	case VENC_OUTPUT_URI_SHM:  return "shm";
+	default:                   return "none";
+	}
+}
+
+static char *maruko_query_transport_status(void)
+{
+	MarukoBackendContext *backend = g_ctx.backend;
+	char buf[640];
+	const char *transport;
+	int pos;
+	uint32_t pressure_drops;
+
+	if (!backend)
+		return NULL;
+	transport = maruko_output_transport_name(&backend->output);
+
+	pressure_drops = __atomic_load_n(&backend->output.pressure_drops,
+		__ATOMIC_RELAXED);
+
+	if (backend->output.ring) {
+		venc_ring_fill_t fill;
+		int in_pressure;
+		if (venc_ring_get_fill(backend->output.ring, &fill) != 0)
+			return NULL;
+		/* See star6e_controls equivalent: HTTP `inPressure` is a
+		 * point-in-time snapshot derived from the freshly-queried
+		 * fill_pct; the cached hysteresis flag would go stale after
+		 * a probe disconnects. */
+		in_pressure = fill.fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":true,"
+			"\"transport\":\"%s\","
+			"\"fillPct\":%u,"
+			"\"inPressure\":%s,"
+			"\"transportDrops\":%u,"
+			"\"pressureDrops\":%u,"
+			"\"packetsSent\":%llu,"
+			"\"oversizeDrops\":%llu,"
+			"\"slotCount\":%u,"
+			"\"usedSlots\":%u}}",
+			transport,
+			(unsigned)fill.fill_pct,
+			in_pressure ? "true" : "false",
+			(unsigned)fill.full_drops,
+			(unsigned)pressure_drops,
+			(unsigned long long)fill.writes,
+			(unsigned long long)fill.oversize_drops,
+			(unsigned)fill.slot_count,
+			(unsigned)fill.used_slots);
+	} else if ((backend->output.transport == VENC_OUTPUT_URI_UNIX ||
+	            backend->output.transport == VENC_OUTPUT_URI_UDP) &&
+	           backend->output.socket_handle >= 0) {
+		uint8_t fill_pct = 0;
+		int in_pressure;
+		if (output_socket_get_fill_pct(backend->output.socket_handle,
+		    backend->output.send_buf_capacity, &fill_pct) != 0)
+			fill_pct = 0;
+		in_pressure = fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":true,"
+			"\"transport\":\"%s\","
+			"\"fillPct\":%u,"
+			"\"inPressure\":%s,"
+			"\"pressureDrops\":%u}}",
+			transport,
+			(unsigned)fill_pct,
+			in_pressure ? "true" : "false",
+			(unsigned)pressure_drops);
+	} else {
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":false,"
+			"\"transport\":\"%s\"}}",
+			transport);
+	}
+	if (pos < 0 || pos >= (int)sizeof(buf))
+		return NULL;
+	return strdup(buf);
+}
+
 /* ── Callback table ──────────────────────────────────────────────────── */
 
 static const VencApplyCallbacks g_maruko_apply_cb = {
@@ -942,6 +1057,8 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_awb_mode = maruko_apply_awb_mode,
 	.query_iq_info = maruko_iq_query,
 	.apply_iq_param = maruko_iq_set,
+	.apply_max_payload_size = maruko_apply_max_payload_size,
+	.query_transport_status = maruko_query_transport_status,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
@@ -958,6 +1075,12 @@ void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
 	g_ctx.frame_width = backend->cfg.image_width;
 	g_ctx.frame_height = backend->cfg.image_height;
 	g_ctx.vcfg = vcfg;
+	/* backend_cfg points into MarukoBackendContext, which lives in the
+	 * runner context for the entire process lifetime. Reinit re-runs
+	 * maruko_config_from_venc and rebinds, so the pointer remains
+	 * valid and the snapshot stays in sync with vcfg. */
+	g_ctx.backend_cfg = &backend->cfg;
+	g_ctx.backend = backend;
 	g_ctx.vpe_port = backend->vpe_port;
 	g_ctx.venc_port = backend->venc_port;
 	g_ctx.output_enabled_ptr = &backend->output_enabled;
@@ -968,4 +1091,9 @@ void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
 const VencApplyCallbacks *maruko_controls_callbacks(void)
 {
 	return &g_maruko_apply_cb;
+}
+
+const VencConfig *maruko_controls_vcfg(void)
+{
+	return g_ctx.vcfg;
 }

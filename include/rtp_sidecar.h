@@ -36,8 +36,9 @@
 /* Subscription timeout: venc stops sending if no message from probe      */
 #define RTP_SIDECAR_SUB_TTL_US    (5 * 1000000ULL)   /* 5 seconds          */
 
-#define RTP_SIDECAR_FLAG_KEYFRAME 0x01
-#define RTP_SIDECAR_FLAG_ENC_INFO 0x02
+#define RTP_SIDECAR_FLAG_KEYFRAME       0x01
+#define RTP_SIDECAR_FLAG_ENC_INFO       0x02
+#define RTP_SIDECAR_FLAG_TRANSPORT_INFO 0x04 /* transport stats trailer follows */
 
 /*
  * Frame type values carried in the optional encoder-feedback trailer.
@@ -113,10 +114,55 @@ typedef struct {
 	uint16_t frames_since_idr; /* controller frames-since-IDR counter        */
 } RtpSidecarEncInfoWire;     /* 12 bytes */
 
+/**
+ * Optional transport-stats trailer — venc → probe, 16 bytes.
+ *
+ * Appended after the ENC_INFO trailer (or directly after RtpSidecarFrame
+ * when ENC_INFO is absent) when RTP_SIDECAR_FLAG_TRANSPORT_INFO is set
+ * in RtpSidecarFrame.flags.
+ *
+ * Carries producer-local output observability that's meaningful for any
+ * transport with a queueing model (SHM ring, UNIX datagram socket, UDP
+ * socket): output queue fill, backpressure hysteresis state, lifetime
+ * delivery stats.  link_controller and other adaptive controllers can
+ * react without an extra HTTP roundtrip.
+ *
+ * Field semantics by transport:
+ *   shm://   fill_pct = (write-read)/slot_count*100
+ *            transport_drops = ring full → packet dropped
+ *            packets_sent    = ring writes
+ *   unix://  fill_pct = SIOCOUTQ / SO_SNDBUF * 100
+ *            transport_drops = sendmsg(EAGAIN) | ENOBUFS count
+ *            packets_sent    = successful sendmsg count
+ *   udp://   same as unix:// but UDP send queues drain quickly so the
+ *            signal is noisy; backpressure typically belongs at the
+ *            radio link layer (link_controller) rather than the socket.
+ *
+ * Forward-compat: probes that don't recognise the flag simply read
+ * RtpSidecarFrame (and optionally ENC_INFO) and ignore the trailing
+ * bytes.  No version bump required.
+ */
+typedef struct {
+	uint8_t  fill_pct;          /* output queue fill: 0..100              */
+	uint8_t  in_pressure;       /* 1 = pressure hysteresis flag asserted  */
+	uint8_t  _pad[2];           /* reserved, must be 0; future flags      */
+	uint32_t transport_drops;   /* drops at the transport layer (low 32)  */
+	uint32_t pressure_drops;    /* frames the producer observed in
+	                             * pressure (was "frames skipped" pre-
+	                             * v0.9.2 rollback; ABI name retained)    */
+	uint32_t packets_sent;      /* lifetime delivery count (low 32)       */
+} RtpSidecarTransportInfoWire; /* 16 bytes */
+
 typedef struct {
 	RtpSidecarFrame       frame;
 	RtpSidecarEncInfoWire enc;
 } RtpSidecarFrameExt;         /* 64 bytes */
+
+typedef struct {
+	RtpSidecarFrame              frame;
+	RtpSidecarEncInfoWire        enc;
+	RtpSidecarTransportInfoWire  transport;
+} RtpSidecarFrameExtTransport; /* 80 bytes */
 
 /** Clock sync request — probe → venc, 16 bytes */
 typedef struct {
@@ -152,6 +198,15 @@ typedef struct {
 	uint16_t frames_since_idr;
 } RtpSidecarEncInfo;
 
+/* Host-order transport snapshot passed to rtp_sidecar_send_frame_transport(). */
+typedef struct {
+	uint8_t  fill_pct;
+	uint8_t  in_pressure;
+	uint32_t transport_drops;
+	uint32_t pressure_drops;
+	uint32_t packets_sent;
+} RtpSidecarTransportInfo;
+
 /* ── Sender state (embedded in backend, not used by probe) ───────────── */
 
 typedef struct {
@@ -162,6 +217,12 @@ typedef struct {
 	                                    /*   0 = no subscriber              */
 	uint64_t           frame_id;       /* monotonic frame counter          */
 } RtpSidecarSender;
+
+/* True iff the sidecar socket is open AND a probe is currently subscribed.
+ * Producer hot path uses this to gate transport-pressure observation —
+ * the only consumer of in_pressure / pressure_drops / fill_pct is the
+ * trailer, so observation is dead work when no one is listening. */
+int rtp_sidecar_is_subscribed(const RtpSidecarSender *s);
 
 /**
  * Initialise the sender.
@@ -210,5 +271,21 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 	uint16_t seq_first, uint16_t seq_count,
 	uint64_t capture_us, uint64_t frame_ready_us,
 	const RtpSidecarEncInfo *enc_info);
+
+/**
+ * Same as rtp_sidecar_send_frame but optionally appends a transport
+ * stats trailer.  If transport_info is non-NULL,
+ * RTP_SIDECAR_FLAG_TRANSPORT_INFO is set in the frame flags and the
+ * trailer follows ENC_INFO (or directly follows the base frame when
+ * enc_info is NULL).  Old probes that don't recognise the flag read
+ * the base frame (and ENC_INFO if present) and ignore the trailing
+ * bytes.
+ */
+int rtp_sidecar_send_frame_transport(RtpSidecarSender *s,
+	uint32_t ssrc, uint32_t rtp_ts,
+	uint16_t seq_first, uint16_t seq_count,
+	uint64_t capture_us, uint64_t frame_ready_us,
+	const RtpSidecarEncInfo *enc_info,
+	const RtpSidecarTransportInfo *transport_info);
 
 #endif /* RTP_SIDECAR_H */

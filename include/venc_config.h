@@ -12,6 +12,17 @@ extern "C" {
 #define VENC_CONFIG_DEFAULT_PATH "/etc/venc.json"
 #define VENC_CONFIG_STRING_MAX 256
 
+/* Upper bound on outgoing.max_payload_size in bytes. Validation enforces
+ * this in venc_api_validate_loaded_config() and the live `/api/v1/set`
+ * path. SHM ring slots are sized at startup to fit
+ * VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12 (RTP header) so any value in
+ * [VENC_OUTPUT_PAYLOAD_MIN_BYTES, VENC_OUTPUT_PAYLOAD_CEILING_BYTES] can
+ * be applied live regardless of the configured starting value, matching
+ * UDP / unix:// behavior. Sized for jumbo-frame links such as the
+ * Realtek 3993-byte MTU (4000 + 12 RTP + 8 UDP + 20 IP = 4040). */
+#define VENC_OUTPUT_PAYLOAD_CEILING_BYTES 4000
+#define VENC_OUTPUT_PAYLOAD_MIN_BYTES 576
+
 /* ── Sub-structs mirroring JSON sections ─────────────────────────────── */
 
 typedef struct {

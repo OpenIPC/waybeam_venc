@@ -12,6 +12,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <sys/mman.h>
 
 #include "venc_ring.h"
 #include "test_helpers.h"
@@ -546,6 +547,56 @@ static int test_destroy_clears_init(void)
 	return failures;
 }
 
+/* ── Hardening: producer restart with attached consumer ─────────────── */
+
+static int test_producer_restart_orphans_old_inode(void)
+{
+	int failures = 0;
+
+	/* Step 1: producer A creates the ring, consumer C attaches. */
+	venc_ring_t *prod_a = venc_ring_create("test_relink", 4, 64);
+	CHECK("rl_create_a", prod_a != NULL);
+	uint32_t epoch_a = prod_a->hdr->epoch;
+
+	venc_ring_t *cons_c = venc_ring_attach("test_relink");
+	CHECK("rl_attach_c", cons_c != NULL);
+	CHECK("rl_c_sees_epoch_a", cons_c->hdr->epoch == epoch_a);
+
+	/* Step 2: simulate SIGKILL of producer A. Drop the local mapping
+	 * without calling venc_ring_destroy() — /dev/shm/test_relink
+	 * persists with init_complete=1, and consumer C still mmaps it. */
+	munmap(prod_a->hdr, prod_a->map_size);
+	free(prod_a);
+
+	/* Step 3: producer B starts with the same name. Must succeed
+	 * (shm_unlink + O_EXCL handles the stale file) and pick a fresh
+	 * epoch. Sleep 2 ms so CLOCK_MONOTONIC ms tick advances —
+	 * otherwise the new epoch can collide with epoch_a in the test. */
+	struct timespec ts = {0, 2 * 1000 * 1000};
+	nanosleep(&ts, NULL);
+
+	venc_ring_t *prod_b = venc_ring_create("test_relink", 4, 64);
+	CHECK("rl_create_b", prod_b != NULL);
+	CHECK("rl_b_new_epoch", prod_b->hdr->epoch != epoch_a);
+
+	/* Step 4: consumer C is mapped to the orphaned inode and still
+	 * sees A's epoch. (This is the property the wfb_tx-side guard
+	 * uses to detect producer restart and force re-attach.) */
+	CHECK("rl_c_still_sees_epoch_a", cons_c->hdr->epoch == epoch_a);
+
+	/* Step 5: a fresh consumer attaching by name now resolves to
+	 * producer B's inode, sees B's epoch. */
+	venc_ring_t *cons_c2 = venc_ring_attach("test_relink");
+	CHECK("rl_attach_c2", cons_c2 != NULL);
+	CHECK("rl_c2_sees_epoch_b", cons_c2->hdr->epoch == prod_b->hdr->epoch);
+
+	venc_ring_destroy(cons_c2);
+	venc_ring_destroy(cons_c);
+	venc_ring_destroy(prod_b);
+
+	return failures;
+}
+
 /* ── Entry point ────────────────────────────────────────────────────── */
 
 int test_venc_ring(void)
@@ -568,6 +619,7 @@ int test_venc_ring(void)
 	failures += test_stats_counters();
 	failures += test_write_u16_overflow();
 	failures += test_destroy_clears_init();
+	failures += test_producer_restart_orphans_old_inode();
 
 	return failures;
 }

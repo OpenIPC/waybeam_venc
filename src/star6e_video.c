@@ -1,6 +1,7 @@
 #include "star6e_video.h"
 #include "star6e_audio.h"
 
+#include "output_socket.h"
 #include "rtp_session.h"
 #include "timing.h"
 
@@ -117,11 +118,39 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 			state->max_frame_size, send_frame_output_rtp, &rtp_frame);
 
 		if (sidecar_active) {
-			rtp_sidecar_send_frame(&state->sidecar,
+			RtpSidecarTransportInfo tinfo;
+			const RtpSidecarTransportInfo *tinfo_ptr = NULL;
+
+			/* Producer thread already populated output->last_*
+			 * fields and the in_pressure / pressure_drops state
+			 * inside star6e_output_observe_pressure() at the top
+			 * of the frame.  Read those instead of re-querying —
+			 * one SIOCOUTQ ioctl / ring-fill load per frame
+			 * instead of two.  Trailer is only emitted when the
+			 * runtime decided to observe (i.e. a probe is
+			 * subscribed); same thread, no atomic load needed. */
+			if (output->ring ||
+			    ((output->transport == VENC_OUTPUT_URI_UNIX ||
+			      output->transport == VENC_OUTPUT_URI_UDP) &&
+			     output->socket_handle >= 0)) {
+				memset(&tinfo, 0, sizeof(tinfo));
+				tinfo.fill_pct = output->last_fill_pct;
+				tinfo.in_pressure = output->in_pressure ? 1 : 0;
+				tinfo.pressure_drops = output->pressure_drops;
+				/* Socket transports leave transport_drops /
+				 * packets_sent at 0 — future work will count
+				 * sendmsg(EAGAIN/ENOBUFS) inside
+				 * output_socket_send_parts. */
+				tinfo.transport_drops = output->last_full_drops;
+				tinfo.packets_sent = output->last_writes;
+				tinfo_ptr = &tinfo;
+			}
+
+			rtp_sidecar_send_frame_transport(&state->sidecar,
 				state->rtp_state.ssrc, frame_rtp_ts,
 				seq_before,
 				(uint16_t)(state->rtp_state.seq - seq_before),
-				capture_us, ready_us, enc_info);
+				capture_us, ready_us, enc_info, tinfo_ptr);
 		}
 	}
 

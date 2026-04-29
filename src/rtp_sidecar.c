@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -32,6 +33,13 @@ static inline uint64_t sidecar_htobe64(uint64_t v)
 static int sub_active_at(const RtpSidecarSender *s, uint64_t now)
 {
 	return s->sub_expires_us != 0 && now < s->sub_expires_us;
+}
+
+int rtp_sidecar_is_subscribed(const RtpSidecarSender *s)
+{
+	if (!s || s->fd < 0)
+		return 0;
+	return sub_active_at(s, wb_monotonic_us());
 }
 
 static void sub_refresh_at(RtpSidecarSender *s, const struct sockaddr_in *src,
@@ -179,11 +187,12 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 
 /* ── Frame metadata sender ───────────────────────────────────────────── */
 
-int rtp_sidecar_send_frame(RtpSidecarSender *s,
+int rtp_sidecar_send_frame_transport(RtpSidecarSender *s,
 	uint32_t ssrc, uint32_t rtp_ts,
 	uint16_t seq_first, uint16_t seq_count,
 	uint64_t capture_us, uint64_t frame_ready_us,
-	const RtpSidecarEncInfo *enc_info)
+	const RtpSidecarEncInfo *enc_info,
+	const RtpSidecarTransportInfo *transport_info)
 {
 	if (!s || s->fd < 0)
 		return 0;  /* disabled */
@@ -197,7 +206,7 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 	if (!sub_active_at(s, now))
 		return 0;  /* no subscriber — channel stays silent */
 
-	RtpSidecarFrameExt msg;
+	RtpSidecarFrameExtTransport msg;
 	size_t msg_len = sizeof(msg.frame);
 
 	memset(&msg, 0, sizeof(msg));
@@ -229,7 +238,32 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 		msg.enc.gop_state = enc_info->gop_state;
 		msg.enc.idr_inserted = enc_info->idr_inserted;
 		msg.enc.frames_since_idr = htons(enc_info->frames_since_idr);
-		msg_len = sizeof(msg);
+		msg_len = offsetof(RtpSidecarFrameExtTransport, transport);
+	}
+
+	if (transport_info) {
+		/* Trailer follows ENC_INFO when present, or sits directly
+		 * after the base frame otherwise.  We always serialise to
+		 * the "after enc" slot in the contiguous struct; when enc is
+		 * absent we slide the trailer up so old probes that read
+		 * just the base frame don't see partial enc bytes between
+		 * frame and transport. */
+		RtpSidecarTransportInfoWire wire;
+		size_t trailer_offset;
+
+		memset(&wire, 0, sizeof(wire));
+		wire.fill_pct        = transport_info->fill_pct;
+		wire.in_pressure     = transport_info->in_pressure ? 1 : 0;
+		wire.transport_drops = htonl(transport_info->transport_drops);
+		wire.pressure_drops  = htonl(transport_info->pressure_drops);
+		wire.packets_sent    = htonl(transport_info->packets_sent);
+
+		msg.frame.flags |= RTP_SIDECAR_FLAG_TRANSPORT_INFO;
+		trailer_offset = enc_info
+			? offsetof(RtpSidecarFrameExtTransport, transport)
+			: sizeof(RtpSidecarFrame);
+		memcpy((uint8_t *)&msg + trailer_offset, &wire, sizeof(wire));
+		msg_len = trailer_offset + sizeof(wire);
 	}
 
 	ssize_t sent = sendto(s->fd, &msg, msg_len, MSG_DONTWAIT,
@@ -240,4 +274,15 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 		return -1;
 	}
 	return 0;
+}
+
+int rtp_sidecar_send_frame(RtpSidecarSender *s,
+	uint32_t ssrc, uint32_t rtp_ts,
+	uint16_t seq_first, uint16_t seq_count,
+	uint64_t capture_us, uint64_t frame_ready_us,
+	const RtpSidecarEncInfo *enc_info)
+{
+	return rtp_sidecar_send_frame_transport(s, ssrc, rtp_ts,
+		seq_first, seq_count, capture_us, frame_ready_us,
+		enc_info, NULL);
 }
