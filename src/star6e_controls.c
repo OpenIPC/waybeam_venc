@@ -1047,25 +1047,32 @@ static char *query_transport_status(void)
 	char buf[640];
 	const char *transport;
 	int pos;
-	int in_pressure;
 	uint32_t pressure_drops;
 
 	if (!ps)
 		return NULL;
 	transport = output_transport_name(&ps->output);
 
-	/* Producer thread updates these only when a sidecar probe is
-	 * subscribed.  Off-thread RELAXED loads — naturally aligned, no
-	 * ordering needed for telemetry. */
-	in_pressure = __atomic_load_n(&ps->output.in_pressure,
-		__ATOMIC_RELAXED);
+	/* `pressure_drops` accumulates while a sidecar probe is subscribed
+	 * (the only time observation runs).  Off-thread RELAXED load —
+	 * naturally aligned, no ordering needed for telemetry. */
 	pressure_drops = __atomic_load_n(&ps->output.pressure_drops,
 		__ATOMIC_RELAXED);
 
 	if (ps->output.ring) {
 		venc_ring_fill_t fill;
+		int in_pressure;
 		if (venc_ring_get_fill(ps->output.ring, &fill) != 0)
 			return NULL;
+		/* HTTP `inPressure` is a point-in-time snapshot derived
+		 * from the live fill_pct queried for this response — NOT
+		 * the cached hysteresis flag.  The cached flag only updates
+		 * while a sidecar probe is subscribed and would go stale
+		 * once the probe disconnected, leaving HTTP readers seeing
+		 * "true" against an empty ring.  The trailer keeps the
+		 * hysteresis flag for adaptive consumers; HTTP wants
+		 * "is the ring full right now?". */
+		in_pressure = fill.fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":true,"
@@ -1091,9 +1098,11 @@ static char *query_transport_status(void)
 	            ps->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           ps->output.socket_handle >= 0) {
 		uint8_t fill_pct = 0;
+		int in_pressure;
 		if (output_socket_get_fill_pct(ps->output.socket_handle,
 		    ps->output.send_buf_capacity, &fill_pct) != 0)
 			fill_pct = 0;
+		in_pressure = fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":true,"

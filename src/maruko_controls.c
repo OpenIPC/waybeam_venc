@@ -964,22 +964,25 @@ static char *maruko_query_transport_status(void)
 	char buf[640];
 	const char *transport;
 	int pos;
-	int in_pressure;
 	uint32_t pressure_drops;
 
 	if (!backend)
 		return NULL;
 	transport = maruko_output_transport_name(&backend->output);
 
-	in_pressure = __atomic_load_n(&backend->output.in_pressure,
-		__ATOMIC_RELAXED);
 	pressure_drops = __atomic_load_n(&backend->output.pressure_drops,
 		__ATOMIC_RELAXED);
 
 	if (backend->output.ring) {
 		venc_ring_fill_t fill;
+		int in_pressure;
 		if (venc_ring_get_fill(backend->output.ring, &fill) != 0)
 			return NULL;
+		/* See star6e_controls equivalent: HTTP `inPressure` is a
+		 * point-in-time snapshot derived from the freshly-queried
+		 * fill_pct; the cached hysteresis flag would go stale after
+		 * a probe disconnects. */
+		in_pressure = fill.fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":true,"
@@ -1005,9 +1008,11 @@ static char *maruko_query_transport_status(void)
 	            backend->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           backend->output.socket_handle >= 0) {
 		uint8_t fill_pct = 0;
+		int in_pressure;
 		if (output_socket_get_fill_pct(backend->output.socket_handle,
 		    backend->output.send_buf_capacity, &fill_pct) != 0)
 			fill_pct = 0;
+		in_pressure = fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":true,"
