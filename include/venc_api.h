@@ -43,6 +43,13 @@ typedef struct {
 	 * not need to reject size-based requests. Returns 0 on success,
 	 * -1 if the backend has no live state to mutate. */
 	int (*apply_max_payload_size)(uint16_t size);
+	/* Output transport observability snapshot.  Returns malloc'd JSON
+	 * string (caller frees) describing output queue fill, lifetime
+	 * delivery counters, and backpressure state.  The JSON includes a
+	 * "transport" discriminator field ("shm" | "udp" | "unix") so
+	 * consumers don't have to guess.  Returns NULL only if the
+	 * backend has no observability hook at all. */
+	char *(*query_transport_status)(void);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

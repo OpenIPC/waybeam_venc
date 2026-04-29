@@ -78,7 +78,33 @@ typedef struct {
 	venc_ring_t *ring;
 	uint32_t send_errors;
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
+	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
 	Star6eOutputBatch batch;
+	/* Transport-pressure observation cache (telemetry only — never gates
+	 * frame transmission).  Populated by star6e_output_observe_pressure
+	 * once per frame on the producer thread and read by the sidecar emit
+	 * path on the same thread (one query/frame instead of two) and by
+	 * the HTTP /api/v1/transport/status callback on a separate thread.
+	 *
+	 * Hysteresis flag enters at fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT
+	 * (75) and exits at fill_pct < LOW (50).  pressure_drops counts
+	 * frames observed in pressure — the wire trailer field name is
+	 * preserved for ABI stability across the v0.9.2 post-encode skip
+	 * rollback.  uint32_t fields are read with __atomic_load_n
+	 * RELAXED off-thread; naturally aligned on ARMv7 so single-load
+	 * atomic in practice.
+	 *
+	 * SHM-only fields (last_full_drops / last_writes / last_oversize_drops)
+	 * carry the lifetime ring counters cached at observation time so the
+	 * sidecar trailer can report transport_drops / packets_sent without a
+	 * second venc_ring_get_fill().  For socket transports those counters
+	 * are not yet tracked (left 0). */
+	int in_pressure;
+	uint32_t pressure_drops;
+	uint8_t last_fill_pct;
+	uint32_t last_full_drops;
+	uint32_t last_writes;
+	uint32_t last_oversize_drops;
 } Star6eOutput;
 
 typedef struct {
@@ -120,6 +146,18 @@ int star6e_output_is_rtp(const Star6eOutput *output);
 
 /** Check if active output uses shared memory mode. */
 int star6e_output_is_shm(const Star6eOutput *output);
+
+/** Observe transport pressure for telemetry. Updates the hysteresis
+ *  flag (`output->in_pressure`), the in-pressure counter
+ *  (`output->pressure_drops`), and caches the latest fill_pct + SHM
+ *  lifetime counters (`output->last_*`) for later sidecar emit / HTTP
+ *  status read with no extra query.  Never directs the caller to skip
+ *  — the caller MUST always emit the frame.  See
+ *  `venc_observe_pressure` in venc_ring.h for the rationale (skip-on-
+ *  pressure broke H.265 reference chains).  Should only be called when
+ *  there is a sidecar subscriber — the data has no other live consumer
+ *  on the producer hot path. */
+void star6e_output_observe_pressure(Star6eOutput *output);
 
 /** Begin accumulating RTP packets for a frame. When the transport is UDP
  *  and SHM is not in use, subsequent star6e_output_send_rtp_parts() calls

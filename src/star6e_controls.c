@@ -1,6 +1,7 @@
 #include "star6e_controls.h"
 
 #include "idr_rate_limit.h"
+#include "output_socket.h"
 #include "pipeline_common.h"
 #include "star6e_audio.h"
 #include "star6e_cus3a.h"
@@ -1026,6 +1027,105 @@ static int apply_mute(bool on)
 	return 0;
 }
 
+static const char *output_transport_name(const Star6eOutput *o)
+{
+	if (!o)
+		return "none";
+	if (o->ring)
+		return "shm";
+	switch (o->transport) {
+	case VENC_OUTPUT_URI_UDP:  return "udp";
+	case VENC_OUTPUT_URI_UNIX: return "unix";
+	case VENC_OUTPUT_URI_SHM:  return "shm";
+	default:                   return "none";
+	}
+}
+
+static char *query_transport_status(void)
+{
+	Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
+	char buf[640];
+	const char *transport;
+	int pos;
+	uint32_t pressure_drops;
+
+	if (!ps)
+		return NULL;
+	transport = output_transport_name(&ps->output);
+
+	/* `pressure_drops` accumulates while a sidecar probe is subscribed
+	 * (the only time observation runs).  Off-thread RELAXED load —
+	 * naturally aligned, no ordering needed for telemetry. */
+	pressure_drops = __atomic_load_n(&ps->output.pressure_drops,
+		__ATOMIC_RELAXED);
+
+	if (ps->output.ring) {
+		venc_ring_fill_t fill;
+		int in_pressure;
+		if (venc_ring_get_fill(ps->output.ring, &fill) != 0)
+			return NULL;
+		/* HTTP `inPressure` is a point-in-time snapshot derived
+		 * from the live fill_pct queried for this response — NOT
+		 * the cached hysteresis flag.  The cached flag only updates
+		 * while a sidecar probe is subscribed and would go stale
+		 * once the probe disconnected, leaving HTTP readers seeing
+		 * "true" against an empty ring.  The trailer keeps the
+		 * hysteresis flag for adaptive consumers; HTTP wants
+		 * "is the ring full right now?". */
+		in_pressure = fill.fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":true,"
+			"\"transport\":\"%s\","
+			"\"fillPct\":%u,"
+			"\"inPressure\":%s,"
+			"\"transportDrops\":%u,"
+			"\"pressureDrops\":%u,"
+			"\"packetsSent\":%llu,"
+			"\"oversizeDrops\":%llu,"
+			"\"slotCount\":%u,"
+			"\"usedSlots\":%u}}",
+			transport,
+			(unsigned)fill.fill_pct,
+			in_pressure ? "true" : "false",
+			(unsigned)fill.full_drops,
+			(unsigned)pressure_drops,
+			(unsigned long long)fill.writes,
+			(unsigned long long)fill.oversize_drops,
+			(unsigned)fill.slot_count,
+			(unsigned)fill.used_slots);
+	} else if ((ps->output.transport == VENC_OUTPUT_URI_UNIX ||
+	            ps->output.transport == VENC_OUTPUT_URI_UDP) &&
+	           ps->output.socket_handle >= 0) {
+		uint8_t fill_pct = 0;
+		int in_pressure;
+		if (output_socket_get_fill_pct(ps->output.socket_handle,
+		    ps->output.send_buf_capacity, &fill_pct) != 0)
+			fill_pct = 0;
+		in_pressure = fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":true,"
+			"\"transport\":\"%s\","
+			"\"fillPct\":%u,"
+			"\"inPressure\":%s,"
+			"\"pressureDrops\":%u}}",
+			transport,
+			(unsigned)fill_pct,
+			in_pressure ? "true" : "false",
+			(unsigned)pressure_drops);
+	} else {
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":false,"
+			"\"transport\":\"%s\"}}",
+			transport);
+	}
+	if (pos < 0 || pos >= (int)sizeof(buf))
+		return NULL;
+	return strdup(buf);
+}
+
 static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_bitrate = apply_bitrate,
 	.apply_fps = apply_fps,
@@ -1046,6 +1146,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.query_iq_info = star6e_iq_query,
 	.apply_iq_param = star6e_iq_set,
 	.apply_max_payload_size = apply_max_payload_size,
+	.query_transport_status = query_transport_status,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

@@ -3,6 +3,7 @@
 #include "test_helpers.h"
 
 #include <arpa/inet.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -313,6 +314,149 @@ static int test_star6e_video_sidecar_ext(void)
 	return failures;
 }
 
+/* Wire-layout test: rtp_sidecar_send_frame_transport with all four
+ * combinations of {enc_info, transport_info} = {NULL, set}.  Verifies:
+ *   - the transport trailer always lands at the right byte offset, in
+ *     particular that the "enc absent, transport present" case slides
+ *     the trailer up to offset 52 instead of 64,
+ *   - the TRANSPORT_INFO flag bit is set when (and only when) the
+ *     trailer is appended,
+ *   - old probes that read just the base frame (or frame+enc) and
+ *     ignore extra bytes get a valid prefix in every layout. */
+static int test_star6e_video_sidecar_transport_layouts(void)
+{
+	RtpSidecarSender sender;
+	RtpSidecarSubscribe sub = {0};
+	struct sockaddr_in sidecar_addr;
+	uint16_t sidecar_port = 0;
+	uint16_t probe_port = 0;
+	int probe_socket;
+	int failures = 0;
+	uint8_t buf[128];
+	ssize_t n;
+	int ret;
+
+	ret = reserve_udp_port(&sidecar_port);
+	CHECK("transport layout reserve port", ret == 0);
+	probe_socket = create_udp_receiver(&probe_port);
+	CHECK("transport layout probe socket", probe_socket >= 0);
+
+	ret = rtp_sidecar_sender_init(&sender, sidecar_port);
+	CHECK("transport layout sender init", ret == 0);
+
+	memset(&sidecar_addr, 0, sizeof(sidecar_addr));
+	sidecar_addr.sin_family = AF_INET;
+	sidecar_addr.sin_port = htons(sidecar_port);
+	sidecar_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	sub.magic = htonl(RTP_SIDECAR_MAGIC);
+	sub.version = RTP_SIDECAR_VERSION;
+	sub.msg_type = RTP_SIDECAR_MSG_SUBSCRIBE;
+	ret = (int)sendto(probe_socket, &sub, sizeof(sub), 0,
+		(struct sockaddr *)&sidecar_addr, sizeof(sidecar_addr));
+	CHECK("transport layout subscribe send", ret == (int)sizeof(sub));
+	rtp_sidecar_poll(&sender);
+
+	/* Case 1: no enc, no shm — 52 bytes, no flags. */
+	rtp_sidecar_send_frame_transport(&sender, 1, 100, 0, 1, 0, 0, NULL, NULL);
+	memset(buf, 0xCC, sizeof(buf));
+	n = recv(probe_socket, buf, sizeof(buf), 0);
+	CHECK("transport layout case1 size",
+		n == (ssize_t)sizeof(RtpSidecarFrame));
+	CHECK("transport layout case1 no flags",
+		((const RtpSidecarFrame *)buf)->flags == 0);
+
+	/* Case 2: enc only — 64 bytes, ENC_INFO flag set. */
+	{
+		RtpSidecarEncInfo enc = {0};
+		enc.frame_type = RTP_SIDECAR_FRAME_P;
+		enc.qp = 30;
+		rtp_sidecar_send_frame_transport(&sender, 1, 200, 1, 1, 0, 0, &enc, NULL);
+		memset(buf, 0xCC, sizeof(buf));
+		n = recv(probe_socket, buf, sizeof(buf), 0);
+		CHECK("transport layout case2 size",
+			n == (ssize_t)sizeof(RtpSidecarFrameExt));
+		CHECK("transport layout case2 enc flag",
+			(((const RtpSidecarFrame *)buf)->flags &
+			 RTP_SIDECAR_FLAG_ENC_INFO) != 0);
+		CHECK("transport layout case2 no transport flag",
+			(((const RtpSidecarFrame *)buf)->flags &
+			 RTP_SIDECAR_FLAG_TRANSPORT_INFO) == 0);
+	}
+
+	/* Case 3: shm only (no enc) — trailer slides up to offset 52,
+	 * total size = 52 + 16 = 68 bytes. */
+	{
+		RtpSidecarTransportInfo shm = {0};
+		const RtpSidecarTransportInfoWire *trailer;
+
+		shm.fill_pct = 80;
+		shm.in_pressure = 1;
+		shm.transport_drops = 0x11223344;
+		shm.pressure_drops = 0xAABBCCDD;
+		shm.packets_sent = 0x55667788;
+		rtp_sidecar_send_frame_transport(&sender, 1, 300, 2, 1, 0, 0, NULL, &shm);
+		memset(buf, 0xCC, sizeof(buf));
+		n = recv(probe_socket, buf, sizeof(buf), 0);
+		CHECK("transport layout case3 size",
+			n == (ssize_t)(sizeof(RtpSidecarFrame) +
+			               sizeof(RtpSidecarTransportInfoWire)));
+		CHECK("transport layout case3 transport flag",
+			(((const RtpSidecarFrame *)buf)->flags &
+			 RTP_SIDECAR_FLAG_TRANSPORT_INFO) != 0);
+		CHECK("transport layout case3 no enc flag",
+			(((const RtpSidecarFrame *)buf)->flags &
+			 RTP_SIDECAR_FLAG_ENC_INFO) == 0);
+		trailer = (const RtpSidecarTransportInfoWire *)
+			(buf + sizeof(RtpSidecarFrame));
+		CHECK("transport layout case3 fill_pct", trailer->fill_pct == 80);
+		CHECK("transport layout case3 in_pressure", trailer->in_pressure == 1);
+		CHECK("transport layout case3 transport_drops",
+			ntohl(trailer->transport_drops) == 0x11223344u);
+		CHECK("transport layout case3 pressure_drops",
+			ntohl(trailer->pressure_drops) == 0xAABBCCDDu);
+		CHECK("transport layout case3 packets_sent",
+			ntohl(trailer->packets_sent) == 0x55667788u);
+	}
+
+	/* Case 4: enc + shm — total size = 80 bytes, SHM at offset 64. */
+	{
+		RtpSidecarEncInfo enc = {0};
+		RtpSidecarTransportInfo shm = {0};
+		const RtpSidecarTransportInfoWire *trailer;
+
+		enc.frame_type = RTP_SIDECAR_FRAME_I;
+		enc.qp = 25;
+		shm.fill_pct = 50;
+		shm.in_pressure = 0;
+		shm.transport_drops = 7;
+		shm.pressure_drops = 11;
+		shm.packets_sent = 13;
+		rtp_sidecar_send_frame_transport(&sender, 1, 400, 3, 1, 0, 0, &enc, &shm);
+		memset(buf, 0xCC, sizeof(buf));
+		n = recv(probe_socket, buf, sizeof(buf), 0);
+		CHECK("transport layout case4 size",
+			n == (ssize_t)sizeof(RtpSidecarFrameExtTransport));
+		CHECK("transport layout case4 both flags",
+			(((const RtpSidecarFrame *)buf)->flags &
+			 (RTP_SIDECAR_FLAG_ENC_INFO | RTP_SIDECAR_FLAG_TRANSPORT_INFO))
+			 == (RTP_SIDECAR_FLAG_ENC_INFO | RTP_SIDECAR_FLAG_TRANSPORT_INFO));
+		trailer = (const RtpSidecarTransportInfoWire *)
+			(buf + offsetof(RtpSidecarFrameExtTransport, transport));
+		CHECK("transport layout case4 fill_pct", trailer->fill_pct == 50);
+		CHECK("transport layout case4 in_pressure", trailer->in_pressure == 0);
+		CHECK("transport layout case4 transport_drops",
+			ntohl(trailer->transport_drops) == 7u);
+		CHECK("transport layout case4 pressure_drops",
+			ntohl(trailer->pressure_drops) == 11u);
+		CHECK("transport layout case4 packets_sent",
+			ntohl(trailer->packets_sent) == 13u);
+	}
+
+	rtp_sidecar_sender_close(&sender);
+	close(probe_socket);
+	return failures;
+}
+
 int test_star6e_video(void)
 {
 	int failures = 0;
@@ -322,5 +466,6 @@ int test_star6e_video(void)
 	failures += test_star6e_video_send_frame_rtp();
 	failures += test_star6e_video_send_frame_disabled();
 	failures += test_star6e_video_sidecar_ext();
+	failures += test_star6e_video_sidecar_transport_layouts();
 	return failures;
 }

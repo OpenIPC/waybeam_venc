@@ -402,6 +402,12 @@ static void *dual_rec_thread_fn(void *arg)
 			 * to prevent VPE backpressure while pipeline tears down. */
 			if (g_running) {
 				if (d->is_dual_stream) {
+					/* Dual-stream ch1 has no sidecar of its own;
+					 * pressure observation is purely a sidecar-
+					 * trailer signal so skip it here.  The send
+					 * always runs — see HISTORY 0.9.2 for why
+					 * post-encode skip is the wrong adaptation
+					 * knob for inter-frame-coded video. */
 					(void)star6e_video_send_frame(&d->video,
 						&d->output, &stream, 1, 0, NULL);
 				} else if (d->ts_recorder) {
@@ -741,6 +747,14 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			star6e_scene_request_idr, &ps->venc_channel);
 		scene_fill_sidecar(&ctx->scene, &enc_info);
 
+		/* Observe pressure only when a sidecar probe is subscribed
+		 * — it is the only consumer of in_pressure / fill_pct / the
+		 * pressure_drops counter on the producer hot path.  When no
+		 * one is listening, skip the SIOCOUTQ ioctl / ring-fill load
+		 * entirely.  Always sending — a producer-side skip would
+		 * break the H.265 reference chain (see HISTORY 0.9.2). */
+		if (rtp_sidecar_is_subscribed(&ps->video.sidecar))
+			star6e_output_observe_pressure(&ps->output);
 		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
 			ps->output_enabled, vcfg->system.verbose, &enc_info);
 	}

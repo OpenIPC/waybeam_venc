@@ -2056,6 +2056,23 @@ static int handle_isp_metrics(int fd, const HttpRequest *req, void *ctx)
 	return ret;
 }
 
+static int handle_transport_status(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+	if (!g_cb || !g_cb->query_transport_status) {
+		return httpd_send_error(fd, 501, "not_implemented",
+			"transport status not available on this backend");
+	}
+	char *text = g_cb->query_transport_status();
+	if (!text) {
+		return httpd_send_error(fd, 500, "internal_error",
+			"transport status query failed");
+	}
+	int ret = httpd_send_json(fd, 200, text);
+	free(text);
+	return ret;
+}
+
 static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
 {
 	VencConfig snapshot;
@@ -2518,6 +2535,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/iq",           handle_iq, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/modes",        handle_modes, NULL);
 	r |= venc_httpd_route("GET", "/metrics/isp",         handle_isp_metrics, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/transport/status", handle_transport_status, NULL);
 	r |= venc_httpd_route("GET", "/request/idr",         handle_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/record/start",  handle_record_start, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/record/stop",   handle_record_stop, NULL);
