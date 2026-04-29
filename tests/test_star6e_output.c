@@ -1,8 +1,10 @@
 #include "star6e_output.h"
 
+#include "output_socket.h"
 #include "test_helpers.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -132,7 +134,7 @@ static int test_star6e_output_udp_init(void)
 	int ret;
 
 	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600",
-		"rtp", 1400, 0);
+		"rtp", 0);
 	CHECK("star6e output udp prepare", ret == 0);
 	CHECK("star6e output udp setup is rtp", star6e_output_setup_is_rtp(&setup));
 	ret = star6e_output_init(&output, &setup);
@@ -158,7 +160,7 @@ static int test_star6e_output_udp_invalid_host_rejected(void)
 	int ret;
 
 	ret = star6e_output_prepare(&setup, "udp://localhost:5600",
-		"rtp", 1400, 0);
+		"rtp", 0);
 	CHECK("star6e output invalid host prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output invalid host init rejected", ret == -1);
@@ -173,7 +175,7 @@ static int test_star6e_output_udp_apply_server(void)
 	int ret;
 
 	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600",
-		"rtp", 1400, 1);
+		"rtp", 1);
 	CHECK("star6e output udp apply prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output udp apply init", ret == 0);
@@ -201,7 +203,7 @@ static int test_star6e_output_udp_send_rtp(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e output udp rtp receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e output udp rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output udp rtp init", ret == 0);
@@ -238,7 +240,7 @@ static int test_star6e_output_shm_send_rtp(void)
 
 	snprintf(name, sizeof(name), "test_star6e_output_send_%ld", (long)getpid());
 	snprintf(uri, sizeof(uri), "shm://%s", name);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e output shm send prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output shm send init", ret == 0);
@@ -271,7 +273,7 @@ static int test_star6e_output_shm_init(void)
 	int ret;
 
 	snprintf(uri, sizeof(uri), "shm://test_star6e_output_%ld", (long)getpid());
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e output shm prepare", ret == 0);
 	CHECK("star6e output shm setup is rtp", star6e_output_setup_is_rtp(&setup));
 	ret = star6e_output_init(&output, &setup);
@@ -306,7 +308,7 @@ static int test_star6e_output_udp_send_compact(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e output compact receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("star6e output compact prepare", ret == 0);
 	CHECK("star6e output compact setup not rtp",
 		!star6e_output_setup_is_rtp(&setup));
@@ -344,7 +346,7 @@ static int test_star6e_output_unix_send_rtp(void)
 	recv_socket = create_unix_receiver(name);
 	CHECK("star6e unix rtp receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "unix://%s", name);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 1);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 1);
 	CHECK("star6e unix rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e unix rtp init", ret == 0);
@@ -385,7 +387,7 @@ static int test_star6e_output_unix_send_compact(void)
 	recv_socket = create_unix_receiver(name);
 	CHECK("star6e unix compact receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "unix://%s", name);
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("star6e unix compact prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e unix compact init", ret == 0);
@@ -414,7 +416,7 @@ static int test_star6e_output_send_frame_rtp_dispatch(void)
 
 	g_test_star6e_rtp_send_called = 0;
 	g_test_star6e_rtp_send_valid = 0;
-	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 0);
 	CHECK("star6e output send frame rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output send frame rtp init", ret == 0);
@@ -465,7 +467,7 @@ static int test_star6e_output_udp_send_compact_frame(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e output compact frame receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("star6e output compact frame prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output compact frame init", ret == 0);
@@ -517,7 +519,7 @@ static int test_star6e_output_send_frame_compact_dispatch(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e output send frame compact receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("star6e output send frame compact prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output send frame compact init", ret == 0);
@@ -547,7 +549,7 @@ static int test_star6e_output_shm_compact_rejected(void)
 	int ret;
 
 	snprintf(uri, sizeof(uri), "shm://test_star6e_output_bad_%ld", (long)getpid());
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("star6e output shm compact rejected", ret == -1);
 	return failures;
 }
@@ -561,7 +563,7 @@ static int test_star6e_output_shm_apply_server_rejected(void)
 	int ret;
 
 	snprintf(uri, sizeof(uri), "shm://test_star6e_output_apply_%ld", (long)getpid());
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e output shm apply prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e output shm apply init", ret == 0);
@@ -578,7 +580,7 @@ static int test_star6e_output_empty_server_prepare(void)
 	int failures = 0;
 	int ret;
 
-	ret = star6e_output_prepare(&setup, "", "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, "", "rtp", 0);
 	CHECK("star6e output empty prepare", ret == 0);
 	CHECK("star6e output empty prepare has no server", setup.has_server == 0);
 	ret = star6e_output_init(&output, &setup);
@@ -596,7 +598,7 @@ static int test_star6e_output_prepare_defaults_to_rtp(void)
 	int ret;
 
 	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600",
-		"unexpected", 1400, 0);
+		"unexpected", 0);
 	CHECK("star6e output default mode prepare", ret == 0);
 	CHECK("star6e output default mode is rtp",
 		star6e_output_setup_is_rtp(&setup));
@@ -633,7 +635,7 @@ static int test_star6e_audio_output_send_rtp(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e audio rtp receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e audio rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio rtp output init", ret == 0);
@@ -692,7 +694,7 @@ static int test_star6e_audio_output_shm_dedicated_local_udp(void)
 	int ret;
 
 	snprintf(uri, sizeof(uri), "shm://test_star6e_audio_shm_%ld", (long)getpid());
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e audio shm prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio shm output init", ret == 0);
@@ -740,7 +742,7 @@ static int test_star6e_audio_output_shared_apply_server(void)
 	snprintf(uri_a, sizeof(uri_a), "udp://127.0.0.1:%u", port_a);
 	snprintf(uri_b, sizeof(uri_b), "udp://127.0.0.1:%u", port_b);
 
-	ret = star6e_output_prepare(&setup, uri_a, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri_a, "compact", 0);
 	CHECK("star6e audio shared prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio shared output init", ret == 0);
@@ -802,7 +804,7 @@ static int test_star6e_audio_output_shared_switch_udp_to_unix(void)
 	snprintf(udp_uri, sizeof(udp_uri), "udp://127.0.0.1:%u", udp_port);
 	snprintf(unix_uri, sizeof(unix_uri), "unix://%s", unix_name);
 
-	ret = star6e_output_prepare(&setup, udp_uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, udp_uri, "compact", 0);
 	CHECK("star6e audio udp->unix prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio udp->unix output init", ret == 0);
@@ -863,7 +865,7 @@ static int test_star6e_audio_output_dedicated_port(void)
 	snprintf(video_uri_a, sizeof(video_uri_a), "udp://127.0.0.1:%u", video_port_a);
 	snprintf(video_uri_b, sizeof(video_uri_b), "udp://127.0.0.1:%u", video_port_b);
 
-	ret = star6e_output_prepare(&setup, video_uri_a, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, video_uri_a, "compact", 0);
 	CHECK("star6e audio dedicated prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio dedicated output init", ret == 0);
@@ -926,7 +928,7 @@ static int test_star6e_audio_output_unix_dedicated_local_udp(void)
 	snprintf(unix_uri_a, sizeof(unix_uri_a), "unix://%s", unix_name_a);
 	snprintf(unix_uri_b, sizeof(unix_uri_b), "unix://%s", unix_name_b);
 
-	ret = star6e_output_prepare(&setup, unix_uri_a, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, unix_uri_a, "compact", 0);
 	CHECK("star6e audio unix dedicated prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio unix dedicated output init", ret == 0);
@@ -977,7 +979,7 @@ static int test_star6e_audio_output_shared_teardown_keeps_video_socket(void)
 	recv_socket = create_udp_receiver(&port);
 	CHECK("star6e audio shared teardown receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
-	ret = star6e_output_prepare(&setup, uri, "rtp", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "rtp", 0);
 	CHECK("star6e audio shared teardown prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("star6e audio shared teardown output init", ret == 0);
@@ -1022,7 +1024,7 @@ static int test_audio_target_cache_gen_tracks_transport(void)
 	snprintf(uri_a, sizeof(uri_a), "udp://127.0.0.1:%u", port_a);
 	snprintf(uri_b, sizeof(uri_b), "udp://127.0.0.1:%u", port_b);
 
-	ret = star6e_output_prepare(&setup, uri_a, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri_a, "compact", 0);
 	CHECK("cache gen prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("cache gen output init", ret == 0);
@@ -1076,7 +1078,7 @@ static int test_audio_target_cache_hit_stable(void)
 	CHECK("cache hit receiver", recv_socket >= 0);
 	snprintf(uri, sizeof(uri), "udp://127.0.0.1:%u", port);
 
-	ret = star6e_output_prepare(&setup, uri, "compact", 1400, 0);
+	ret = star6e_output_prepare(&setup, uri, "compact", 0);
 	CHECK("cache hit prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
 	CHECK("cache hit output init", ret == 0);
@@ -1102,6 +1104,256 @@ static int test_audio_target_cache_hit_stable(void)
 	star6e_audio_output_teardown(&audio_output);
 	star6e_output_teardown(&output);
 	close(recv_socket);
+	return failures;
+}
+
+/* Drive a SHM ring to a target fill % by writing directly via the ring
+ * helper, then call star6e_output_observe_pressure and assert the
+ * hysteresis state machine.  Skip-on-pressure was rolled back (broke
+ * H.265 reference chains); the observation API is telemetry-only now. */
+static void fill_ring_to_pct(venc_ring_t *ring, uint8_t target_pct)
+{
+	uint64_t w = __atomic_load_n(&ring->hdr->write_idx, __ATOMIC_RELAXED);
+	uint64_t rd = __atomic_load_n(&ring->hdr->read_idx, __ATOMIC_RELAXED);
+	uint32_t want = (uint32_t)((uint64_t)ring->hdr->slot_count *
+		target_pct / 100u);
+	uint32_t cur_used = (uint32_t)(w - rd);
+	uint8_t pkt[16] = { 0 };
+
+	while (cur_used < want) {
+		if (venc_ring_write3(ring, pkt, sizeof(pkt), NULL, 0, NULL, 0) != 0)
+			break;
+		cur_used++;
+	}
+}
+
+static void drain_ring_to_pct(venc_ring_t *ring, uint8_t target_pct)
+{
+	uint64_t w = __atomic_load_n(&ring->hdr->write_idx, __ATOMIC_RELAXED);
+	uint64_t rd = __atomic_load_n(&ring->hdr->read_idx, __ATOMIC_RELAXED);
+	uint32_t want = (uint32_t)((uint64_t)ring->hdr->slot_count *
+		target_pct / 100u);
+	uint32_t cur_used = (uint32_t)(w - rd);
+
+	while (cur_used > want) {
+		__atomic_store_n(&ring->hdr->read_idx, rd + 1, __ATOMIC_RELEASE);
+		rd++;
+		cur_used--;
+	}
+}
+
+static int test_star6e_output_backpressure_hysteresis(void)
+{
+	char uri[64];
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	int failures = 0;
+	uint32_t base_drops;
+
+	snprintf(uri, sizeof(uri), "shm://test_star6e_bp_%ld", (long)getpid());
+	CHECK("bp prepare",
+		star6e_output_prepare(&setup, uri, "rtp", 0) == 0);
+	CHECK("bp init", star6e_output_init(&output, &setup) == 0);
+
+	/* Empty ring — must not enter pressure. */
+	star6e_output_observe_pressure(&output);
+	CHECK("bp empty in_pressure", output.in_pressure == 0);
+	CHECK("bp empty drops", output.pressure_drops == 0);
+	CHECK("bp empty cached fill", output.last_fill_pct == 0);
+
+	/* Fill below high water (74%) — still no pressure. */
+	fill_ring_to_pct(output.ring, 74);
+	star6e_output_observe_pressure(&output);
+	CHECK("bp 74pct in_pressure", output.in_pressure == 0);
+	CHECK("bp 74pct drops unchanged", output.pressure_drops == 0);
+
+	/* Fill at high water (75%) — enter pressure, drops counter ticks. */
+	fill_ring_to_pct(output.ring, 75);
+	star6e_output_observe_pressure(&output);
+	CHECK("bp 75pct in_pressure", output.in_pressure == 1);
+	base_drops = output.pressure_drops;
+	CHECK("bp 75pct drop counted", base_drops == 1);
+	CHECK("bp 75pct cached fill", output.last_fill_pct >= 75);
+
+	/* Drain to between low and high — must STAY in pressure (hysteresis). */
+	drain_ring_to_pct(output.ring, 60);
+	star6e_output_observe_pressure(&output);
+	CHECK("bp 60pct still in_pressure", output.in_pressure == 1);
+	CHECK("bp 60pct drop incremented", output.pressure_drops == base_drops + 1);
+
+	/* Drain at low water (50%) — must STAY in pressure (strict <). */
+	drain_ring_to_pct(output.ring, 50);
+	star6e_output_observe_pressure(&output);
+	CHECK("bp 50pct still in_pressure", output.in_pressure == 1);
+
+	/* Drain below low water (49%) — exit pressure. */
+	drain_ring_to_pct(output.ring, 49);
+	star6e_output_observe_pressure(&output);
+	CHECK("bp 49pct in_pressure cleared", output.in_pressure == 0);
+
+	/* Non-SHM output (UDP) — observation runs but stays at 0% fill (no
+	 * receiver to back the kernel send queue up). */
+	star6e_output_teardown(&output);
+	{
+		uint16_t port = 0;
+		int recv_fd = create_udp_receiver(&port);
+		Star6eOutput udp_out;
+		char udp_uri[64];
+
+		CHECK("bp udp recv socket", recv_fd >= 0);
+		snprintf(udp_uri, sizeof(udp_uri), "udp://127.0.0.1:%u", port);
+		CHECK("bp udp prepare",
+			star6e_output_prepare(&setup, udp_uri, "rtp", 0) == 0);
+		CHECK("bp udp init", star6e_output_init(&udp_out, &setup) == 0);
+		star6e_output_observe_pressure(&udp_out);
+		CHECK("bp udp in_pressure", udp_out.in_pressure == 0);
+		star6e_output_teardown(&udp_out);
+		if (recv_fd >= 0)
+			close(recv_fd);
+	}
+
+	return failures;
+}
+
+/* UNIX datagram backpressure: with a receiver bound but not reading, the
+ * sender's SIOCOUTQ rises until SO_SNDBUF caps it.  We send raw bytes
+ * directly through output->socket_handle so the test doesn't depend on
+ * the higher-level RTP send path; the hysteresis state machine itself
+ * is already covered by the SHM test.  This test specifically validates
+ * the UNIX-fill plumbing and the observe_pressure transport switch. */
+static int test_star6e_output_unix_backpressure(void)
+{
+	char abstract_name[64];
+	char uri[80];
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	int recv_fd = -1;
+	int failures = 0;
+
+	snprintf(abstract_name, sizeof(abstract_name),
+		"test_unix_bp_%ld", (long)getpid());
+	recv_fd = create_unix_receiver(abstract_name);
+	CHECK("unix bp recv socket", recv_fd >= 0);
+
+	snprintf(uri, sizeof(uri), "unix://%s", abstract_name);
+	CHECK("unix bp prepare",
+		star6e_output_prepare(&setup, uri, "rtp", 0) == 0);
+	CHECK("unix bp init", star6e_output_init(&output, &setup) == 0);
+	CHECK("unix bp transport",
+		output.transport == VENC_OUTPUT_URI_UNIX);
+
+	/* Empty queue — must not enter pressure. */
+	star6e_output_observe_pressure(&output);
+	CHECK("unix bp empty in_pressure", output.in_pressure == 0);
+
+	/* Stuff the queue.  No receiver read → bytes accumulate against the
+	 * sender's SO_SNDBUF accounting.  Stop on first short write or a
+	 * fixed cap so the test never hangs. */
+	{
+		char payload[1024];
+		int sent = 0;
+		int flags;
+
+		memset(payload, 'X', sizeof(payload));
+		flags = fcntl(output.socket_handle, F_GETFL, 0);
+		(void)fcntl(output.socket_handle, F_SETFL, flags | O_NONBLOCK);
+		for (int i = 0; i < 4096; i++) {
+			ssize_t n = sendto(output.socket_handle, payload,
+				sizeof(payload), 0,
+				(const struct sockaddr *)&output.dst,
+				output.dst_len);
+			if (n > 0) sent++;
+			else break;
+		}
+		CHECK("unix bp pumped some packets", sent > 0);
+		(void)fcntl(output.socket_handle, F_SETFL, flags);
+	}
+
+	/* Now SIOCOUTQ should report a non-trivial fill_pct.  Observe and
+	 * check the in_pressure / pressure_drops bookkeeping. */
+	{
+		uint8_t fill_pct = 0;
+		int got_fill = output_socket_get_fill_pct(
+			output.socket_handle,
+			output.send_buf_capacity, &fill_pct);
+		CHECK("unix bp fill_pct readable", got_fill == 0);
+		CHECK("unix bp fill_pct above lo", fill_pct >= 50);
+		CHECK("unix bp sndbuf capacity captured",
+			output.send_buf_capacity > 0);
+
+		star6e_output_observe_pressure(&output);
+		/* When fill_pct ≥ 75 (the hardcoded high-water mark in
+		 * venc_ring.h), observation must flip in_pressure on and
+		 * cache the value. */
+		if (fill_pct >= 75) {
+			CHECK("unix bp entered pressure",
+				output.in_pressure == 1);
+			CHECK("unix bp drop counted",
+				output.pressure_drops > 0);
+			CHECK("unix bp cached fill",
+				output.last_fill_pct >= 75);
+		}
+	}
+
+	star6e_output_teardown(&output);
+	if (recv_fd >= 0)
+		close(recv_fd);
+	return failures;
+}
+
+/* Regression guard for the v0.9.2 rollback: post-encode frame-skip
+ * was removed because it broke the H.264/H.265 reference chain.  This
+ * test fills a SHM ring above high_water, observes pressure to assert
+ * the flag flips, then writes a packet via star6e_output_send_rtp_parts
+ * and confirms the packet actually lands in the ring (i.e. the producer
+ * NEVER bails out on the basis of in_pressure).  If a future change
+ * re-introduces a skip-on-pressure shortcut anywhere in the send path,
+ * this assertion fails immediately. */
+static int test_star6e_output_always_sends_under_pressure(void)
+{
+	char uri[64];
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	int failures = 0;
+	uint64_t writes_before;
+	uint64_t writes_after;
+	const uint8_t hdr[12] = { 0x80, 0x97, 0x00, 0x00 };
+	const uint8_t pay[8] = { 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22 };
+
+	snprintf(uri, sizeof(uri), "shm://test_star6e_always_send_%ld",
+		(long)getpid());
+	CHECK("always-send prepare",
+		star6e_output_prepare(&setup, uri, "rtp", 0) == 0);
+	CHECK("always-send init", star6e_output_init(&output, &setup) == 0);
+
+	/* Drive the ring above high water so observe_pressure asserts. */
+	fill_ring_to_pct(output.ring, 80);
+	star6e_output_observe_pressure(&output);
+	CHECK("always-send pressure asserted",
+		output.in_pressure == 1);
+	CHECK("always-send drop counted",
+		output.pressure_drops > 0);
+
+	/* Drain enough room for one slot but stay above low_water so the
+	 * flag remains set when we send. */
+	drain_ring_to_pct(output.ring, 70);
+	CHECK("always-send still in pressure",
+		output.in_pressure == 1);
+
+	/* Snapshot ring writes counter, send a packet, confirm it landed.
+	 * If a regression made the producer skip while in pressure,
+	 * writes_after would equal writes_before. */
+	writes_before = output.ring->stats.writes;
+	CHECK("always-send rtp send rc",
+		star6e_output_send_rtp_parts(&output,
+			hdr, sizeof(hdr),
+			pay, sizeof(pay),
+			NULL, 0) == 0);
+	writes_after = output.ring->stats.writes;
+	CHECK("always-send ring write happened",
+		writes_after == writes_before + 1);
+
+	star6e_output_teardown(&output);
 	return failures;
 }
 
@@ -1136,5 +1388,8 @@ int test_star6e_output(void)
 	failures += test_star6e_audio_output_shared_teardown_keeps_video_socket();
 	failures += test_audio_target_cache_gen_tracks_transport();
 	failures += test_audio_target_cache_hit_stable();
+	failures += test_star6e_output_backpressure_hysteresis();
+	failures += test_star6e_output_unix_backpressure();
+	failures += test_star6e_output_always_sends_under_pressure();
 	return failures;
 }

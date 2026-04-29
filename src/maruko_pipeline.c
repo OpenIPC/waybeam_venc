@@ -5,8 +5,10 @@
 #include "isp_runtime.h"
 #include "maruko_bindings.h"
 #include "maruko_config.h"
+#include "maruko_controls.h"
 #include "maruko_output.h"
 #include "maruko_video.h"
+#include "output_socket.h"
 #include "pipeline_common.h"
 #include "rtp_sidecar.h"
 #include "sensor_select.h"
@@ -1169,8 +1171,8 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			fprintf(stderr, "ERROR: [maruko] shm:// requires RTP mode\n");
 			return -1;
 		}
-		if (maruko_output_init_shm(&ctx->output, ctx->cfg.output_uri.endpoint,
-		    ctx->cfg.rtp_payload_size) != 0)
+		if (maruko_output_init_shm(&ctx->output,
+		    ctx->cfg.output_uri.endpoint) != 0)
 			return -1;
 	} else {
 		if (maruko_output_init(&ctx->output, &ctx->cfg.output_uri,
@@ -1459,7 +1461,14 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 		size_t total_bytes = 0;
 		HevcRtpStats frame_pktzr = {0};
+		int sidecar_subscribed = rtp_sidecar_is_subscribed(&sidecar);
 		if (ctx->output_enabled) {
+			/* Observe pressure only when a sidecar probe is
+			 * subscribed — see star6e_runtime equivalent.  Always
+			 * sending: post-encode skip breaks the H.265 reference
+			 * chain (HISTORY 0.9.2). */
+			if (sidecar_subscribed)
+				maruko_output_observe_pressure(&ctx->output);
 			total_bytes = maruko_video_send_frame(&stream,
 				&ctx->output, &rtp_state, &param_sets,
 				&ctx->cfg,
@@ -1475,10 +1484,31 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		(void)maruko_mi_venc_release_stream(ctx->venc_device,
 			ctx->venc_channel, &stream);
 
-		rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
-			seq_before,
-			(uint16_t)(rtp_state.seq - seq_before),
-			capture_us, ready_us, &enc_info);
+		if (sidecar_subscribed) {
+			RtpSidecarTransportInfo tinfo;
+			const RtpSidecarTransportInfo *tinfo_ptr = NULL;
+
+			/* Producer already cached fill_pct + lifetime stats
+			 * inside maruko_output_observe_pressure() above —
+			 * read the cache instead of re-querying.  One
+			 * SIOCOUTQ ioctl / ring-fill load per frame, not two. */
+			if (ctx->output.ring ||
+			    ((ctx->output.transport == VENC_OUTPUT_URI_UNIX ||
+			      ctx->output.transport == VENC_OUTPUT_URI_UDP) &&
+			     ctx->output.socket_handle >= 0)) {
+				memset(&tinfo, 0, sizeof(tinfo));
+				tinfo.fill_pct = ctx->output.last_fill_pct;
+				tinfo.in_pressure = ctx->output.in_pressure ? 1 : 0;
+				tinfo.pressure_drops = ctx->output.pressure_drops;
+				tinfo.transport_drops = ctx->output.last_full_drops;
+				tinfo.packets_sent = ctx->output.last_writes;
+				tinfo_ptr = &tinfo;
+			}
+			rtp_sidecar_send_frame_transport(&sidecar, rtp_state.ssrc,
+				frame_rtp_ts, seq_before,
+				(uint16_t)(rtp_state.seq - seq_before),
+				capture_us, ready_us, &enc_info, tinfo_ptr);
+		}
 
 		if (ctx->cfg.verbose) {
 			StreamMetricsSample sample;

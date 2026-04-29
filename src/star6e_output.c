@@ -164,7 +164,7 @@ static Star6eStreamMode star6e_output_stream_mode_from_name(
 }
 
 int star6e_output_prepare(Star6eOutputSetup *setup, const char *server_uri,
-	const char *stream_mode_name, uint16_t max_frame_size, int connected_udp)
+	const char *stream_mode_name, int connected_udp)
 {
 	if (!setup)
 		return -1;
@@ -172,7 +172,6 @@ int star6e_output_prepare(Star6eOutputSetup *setup, const char *server_uri,
 	star6e_output_setup_reset(setup);
 	setup->stream_mode = star6e_output_stream_mode_from_name(stream_mode_name);
 	setup->requested_connected_udp = connected_udp ? 1 : 0;
-	setup->max_frame_size = max_frame_size;
 
 	if (!server_uri || !server_uri[0])
 		return 0;
@@ -213,7 +212,11 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 		return 0;
 
 	if (setup->uri.type == VENC_OUTPUT_URI_SHM) {
-		slot_data = (uint32_t)setup->max_frame_size + 12;
+		/* Slot fits the validated payload ceiling so any value in
+		 * [VENC_OUTPUT_PAYLOAD_MIN_BYTES,
+		 * VENC_OUTPUT_PAYLOAD_CEILING_BYTES] applies live without
+		 * restart, matching UDP/unix:// behavior. */
+		slot_data = (uint32_t)VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12;
 		output->ring = venc_ring_create(setup->uri.endpoint, 512, slot_data);
 		if (!output->ring) {
 			fprintf(stderr, "ERROR: venc_ring_create(%s) failed\n",
@@ -233,6 +236,9 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 	    &output->dst_len, &output->transport, &setup->uri,
 	    output->requested_connected_udp, &output->connected_udp) != 0)
 		return -1;
+	if (output_socket_capture_capacity(output->socket_handle,
+	    &output->send_buf_capacity) != 0)
+		output->send_buf_capacity = 0;
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
 }
@@ -245,6 +251,59 @@ int star6e_output_is_rtp(const Star6eOutput *output)
 int star6e_output_is_shm(const Star6eOutput *output)
 {
 	return output && output->transport == VENC_OUTPUT_URI_SHM;
+}
+
+void star6e_output_observe_pressure(Star6eOutput *output)
+{
+	uint8_t fill_pct = 0;
+	uint32_t full_drops = 0;
+	uint32_t writes = 0;
+	uint32_t oversize_drops = 0;
+	int have_fill = 0;
+
+	if (!output)
+		return;
+
+	/* Pick the fill source based on the active transport:
+	 *   shm://   ring fill (write_idx - read_idx) / slot_count
+	 *   unix://  SIOCOUTQ / SO_SNDBUF
+	 *   udp://   same.  link_controller / external schedulers consume
+	 *            the resulting in_pressure flag via the sidecar trailer
+	 *            and adapt with bitrate / fps writes upstream of encode. */
+	if (output->ring) {
+		venc_ring_fill_t fill;
+		if (venc_ring_get_fill(output->ring, &fill) == 0) {
+			fill_pct = fill.fill_pct;
+			full_drops = (uint32_t)fill.full_drops;
+			writes = (uint32_t)fill.writes;
+			oversize_drops = (uint32_t)fill.oversize_drops;
+			have_fill = 1;
+		}
+	} else if ((output->transport == VENC_OUTPUT_URI_UNIX ||
+	            output->transport == VENC_OUTPUT_URI_UDP) &&
+	           output->socket_handle >= 0) {
+		if (output_socket_get_fill_pct(output->socket_handle,
+		    output->send_buf_capacity, &fill_pct) == 0)
+			have_fill = 1;
+	}
+
+	if (!have_fill) {
+		/* No transport configured or query failed — clear flag so we
+		 * don't get stuck reporting pressure across teardown / a
+		 * transient ioctl error.  Cached fill_pct stays at its last
+		 * value; trailer readers will see in_pressure=0 either way. */
+		__atomic_store_n(&output->in_pressure, 0, __ATOMIC_RELAXED);
+		return;
+	}
+
+	venc_observe_pressure(fill_pct,
+		&output->in_pressure, &output->pressure_drops);
+
+	__atomic_store_n(&output->last_fill_pct, fill_pct, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->last_full_drops, full_drops, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->last_writes, writes, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->last_oversize_drops, oversize_drops,
+		__ATOMIC_RELAXED);
 }
 
 uint32_t star6e_output_drain_send_errors(Star6eOutput *output)
@@ -639,6 +698,9 @@ int star6e_output_apply_server(Star6eOutput *output, const char *uri)
 		__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* restore even */
 		return -1;
 	}
+	if (output_socket_capture_capacity(output->socket_handle,
+	    &output->send_buf_capacity) != 0)
+		output->send_buf_capacity = 0;
 	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* even = stable */
 	return 0;
 }

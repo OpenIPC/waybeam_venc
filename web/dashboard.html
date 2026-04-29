@@ -621,7 +621,7 @@ const TOOLTIPS = {
 
 'outgoing.streamMode':'Transport protocol: rtp (standard). Requires restart',
 
-'outgoing.maxPayloadSize':'Max RTP payload bytes. 1400 is safe for most networks. Requires restart',
+'outgoing.maxPayloadSize':'Max RTP/compact payload bytes (576..4000). 1400 is safe for most networks; raise for jumbo-frame links (e.g. 4000 for 3993-MTU Realtek). Applied live',
 
 'outgoing.connectedUdp':'Use connected UDP socket for lower kernel overhead. Default: on. Requires restart',
 

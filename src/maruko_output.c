@@ -24,6 +24,7 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	output->requested_connected_udp = requested_connected_udp ? 1 : 0;
 	output->connected_udp = 0;
 	output->send_errors = 0;
+	output->send_buf_capacity = 0;
 	memset(&output->batch, 0, sizeof(output->batch));
 	output->batch.socket_handle = -1;
 
@@ -31,12 +32,14 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	    &output->dst_len, &output->transport, uri,
 	    output->requested_connected_udp, &output->connected_udp) != 0)
 		return -1;
+	if (output_socket_capture_capacity(output->socket_handle,
+	    &output->send_buf_capacity) != 0)
+		output->send_buf_capacity = 0;
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
 }
 
-int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
-	uint16_t max_payload)
+int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 {
 	uint32_t slot_data;
 
@@ -51,10 +54,14 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
 	output->requested_connected_udp = 0;
 	output->connected_udp = 0;
 	output->send_errors = 0;
+	output->send_buf_capacity = 0;
 	memset(&output->batch, 0, sizeof(output->batch));
 	output->batch.socket_handle = -1;
 
-	slot_data = (uint32_t)max_payload + 12;
+	/* Slot fits the validated payload ceiling so any value in
+	 * [VENC_OUTPUT_PAYLOAD_MIN_BYTES, VENC_OUTPUT_PAYLOAD_CEILING_BYTES]
+	 * applies live without restart, matching UDP/unix:// behavior. */
+	slot_data = (uint32_t)VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12;
 	output->ring = venc_ring_create(shm_name, 512, slot_data);
 	if (!output->ring) {
 		fprintf(stderr, "ERROR: [maruko] venc_ring_create(%s) failed\n",
@@ -66,6 +73,49 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name,
 		slot_data);
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
+}
+
+void maruko_output_observe_pressure(MarukoOutput *output)
+{
+	uint8_t fill_pct = 0;
+	uint32_t full_drops = 0;
+	uint32_t writes = 0;
+	uint32_t oversize_drops = 0;
+	int have_fill = 0;
+
+	if (!output)
+		return;
+
+	if (output->ring) {
+		venc_ring_fill_t fill;
+		if (venc_ring_get_fill(output->ring, &fill) == 0) {
+			fill_pct = fill.fill_pct;
+			full_drops = (uint32_t)fill.full_drops;
+			writes = (uint32_t)fill.writes;
+			oversize_drops = (uint32_t)fill.oversize_drops;
+			have_fill = 1;
+		}
+	} else if ((output->transport == VENC_OUTPUT_URI_UNIX ||
+	            output->transport == VENC_OUTPUT_URI_UDP) &&
+	           output->socket_handle >= 0) {
+		if (output_socket_get_fill_pct(output->socket_handle,
+		    output->send_buf_capacity, &fill_pct) == 0)
+			have_fill = 1;
+	}
+
+	if (!have_fill) {
+		__atomic_store_n(&output->in_pressure, 0, __ATOMIC_RELAXED);
+		return;
+	}
+
+	venc_observe_pressure(fill_pct,
+		&output->in_pressure, &output->pressure_drops);
+
+	__atomic_store_n(&output->last_fill_pct, fill_pct, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->last_full_drops, full_drops, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->last_writes, writes, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->last_oversize_drops, oversize_drops,
+		__ATOMIC_RELAXED);
 }
 
 int maruko_output_apply_server(MarukoOutput *output, const char *uri)
@@ -95,6 +145,9 @@ int maruko_output_apply_server(MarukoOutput *output, const char *uri)
 		__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* restore even */
 		return -1;
 	}
+	if (output_socket_capture_capacity(output->socket_handle,
+	    &output->send_buf_capacity) != 0)
+		output->send_buf_capacity = 0;
 	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* even = stable */
 	return 0;
 }

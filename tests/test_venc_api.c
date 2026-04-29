@@ -43,6 +43,7 @@ typedef struct {
 	int apply_verbose_calls;
 	int apply_awb_mode_calls;
 	int apply_server_calls;
+	int apply_max_payload_calls;
 
 	uint32_t last_bitrate;
 	uint32_t last_fps;
@@ -52,12 +53,14 @@ typedef struct {
 	int last_awb_mode;
 	uint32_t last_awb_ct;
 	char last_server[128];
+	uint16_t last_max_payload;
 
 	int fail_bitrate;
 	int fail_verbose;
 	int fail_fps;
 	int fail_gop;
 	int fail_server;
+	int fail_max_payload;
 } ApiCallbackState;
 
 static ApiCallbackState g_api_cb_state;
@@ -283,6 +286,13 @@ static int test_apply_server(const char *uri)
 	snprintf(g_api_cb_state.last_server, sizeof(g_api_cb_state.last_server),
 		"%s", uri ? uri : "");
 	return g_api_cb_state.fail_server ? -1 : 0;
+}
+
+static int test_apply_max_payload(uint16_t size)
+{
+	g_api_cb_state.apply_max_payload_calls++;
+	g_api_cb_state.last_max_payload = size;
+	return g_api_cb_state.fail_max_payload ? -1 : 0;
 }
 
 /* Whitebox access to internal functions via extern declarations.
@@ -827,6 +837,94 @@ static int test_set_rejects_malformed_percent_escape(void)
 	return failures;
 }
 
+static int test_live_set_max_payload_size_bounds(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_max_payload_size = test_apply_max_payload;
+
+	/* Below min: 575 rejects, [576, 4000] message. */
+	CHECK("max_payload 575 reject rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.maxPayloadSize=575", &status, response,
+			sizeof(response)) == 0);
+	CHECK("max_payload 575 reject status", status == 409);
+	CHECK("max_payload 575 reject error",
+		strstr(response, "max_payload_size must be in range [576, 4000]") != NULL);
+	CHECK("max_payload 575 callback skipped",
+		g_api_cb_state.apply_max_payload_calls == 0);
+
+	/* Above max: 4001 rejects. */
+	CHECK("max_payload 4001 reject rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.maxPayloadSize=4001", &status, response,
+			sizeof(response)) == 0);
+	CHECK("max_payload 4001 reject status", status == 409);
+	CHECK("max_payload 4001 reject error",
+		strstr(response, "max_payload_size must be in range [576, 4000]") != NULL);
+	CHECK("max_payload 4001 callback skipped",
+		g_api_cb_state.apply_max_payload_calls == 0);
+
+	/* Lower bound 576 accepts; callback fires; cfg updated. */
+	CHECK("max_payload 576 accept rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.maxPayloadSize=576", &status, response,
+			sizeof(response)) == 0);
+	CHECK("max_payload 576 accept status", status == 200);
+	CHECK("max_payload 576 callback fired",
+		g_api_cb_state.apply_max_payload_calls == 1);
+	CHECK("max_payload 576 callback value",
+		g_api_cb_state.last_max_payload == 576);
+	CHECK("max_payload 576 cfg updated",
+		cfg.outgoing.max_payload_size == 576);
+
+	/* Upper bound 4000 accepts. */
+	CHECK("max_payload 4000 accept rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.maxPayloadSize=4000", &status, response,
+			sizeof(response)) == 0);
+	CHECK("max_payload 4000 accept status", status == 200);
+	CHECK("max_payload 4000 callback fired",
+		g_api_cb_state.apply_max_payload_calls == 2);
+	CHECK("max_payload 4000 callback value",
+		g_api_cb_state.last_max_payload == 4000);
+	CHECK("max_payload 4000 cfg updated",
+		cfg.outgoing.max_payload_size == 4000);
+
+	return failures;
+}
+
+static int test_live_set_max_payload_size_no_callback(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	/* Backend without apply_max_payload_size callback rejects the live
+	 * set during preflight rather than silently dropping the change. */
+	venc_config_defaults(&cfg);
+	memset(&cb, 0, sizeof(cb));
+
+	CHECK("max_payload no-cb rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.maxPayloadSize=2000", &status, response,
+			sizeof(response)) == 0);
+	CHECK("max_payload no-cb status", status == 501);
+	CHECK("max_payload no-cb cfg unchanged",
+		cfg.outgoing.max_payload_size == 1400);
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_api(void)
@@ -845,6 +943,8 @@ int test_venc_api(void)
 	failures += test_multi_set_rolls_back_on_apply_failure();
 	failures += test_single_set_runtime_apply_failure();
 	failures += test_live_set_rejects_out_of_range_roi_values();
+	failures += test_live_set_max_payload_size_bounds();
+	failures += test_live_set_max_payload_size_no_callback();
 	failures += test_restart_set_accepts_maruko_h264_config();
 	failures += test_restart_set_rejects_star6e_h264_rtp();
 	failures += test_restart_set_accepts_star6e_h264_compact();

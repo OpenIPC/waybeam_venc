@@ -1,5 +1,164 @@
 # History
 
+## [0.9.2] - 2026-04-28
+
+Transport-pressure observability (the prior "Level 2 — local FPS skip"
+plan was rolled back; see the post-encode-skip note at the end of this
+section).
+
+- **Universal fill source.** Producer-local backpressure now works
+  uniformly for every output transport with a queue model:
+    `shm://`   `(write_idx - read_idx) / slot_count`
+    `unix://`  `SIOCOUTQ / SO_SNDBUF`
+    `udp://`   `SIOCOUTQ / SO_SNDBUF`
+  For UDP-over-WiFi the kernel send queue rarely fills (NIC drains
+  fast) so the gate is a no-op in practice and the radio-link layer
+  (`waybeam_wfb_ng/link_controller`) does the actual adaptive control.
+  For local UDP and unix:// (e.g. gstreamer consumer) a slow consumer
+  fills the kernel queue and the gate trips correctly — empirically
+  validated on Linux 6.x by sending raw datagrams to a non-reading
+  receiver and watching SIOCOUTQ rise to SO_SNDBUF cap.
+- **Level 1 — observability.** New `GET /api/v1/transport/status`
+  endpoint returns the active output transport (`"shm"` / `"udp"` /
+  `"unix"` discriminator), queue fill, lifetime delivery counters
+  (SHM only — `packetsSent`, `transportDrops`, `oversizeDrops`),
+  live watermark config, current hysteresis state (`inPressure`),
+  and the producer-local `pressureDrops` counter (all transports).
+  Also new `query_transport_status` callback in `VencApplyCallbacks`
+  (Star6E + Maruko both implement).  For unix:// / udp:// the
+  socket-side lifetime counters are not yet tracked — `transportDrops`
+  and `packetsSent` are absent from the JSON for those transports;
+  the sidecar trailer carries 0s.  Future work: count
+  sendmsg(EAGAIN/ENOBUFS) and successful sends in `output_socket_send_parts`.
+- **Sidecar trailer.** `RTP_SIDECAR_FLAG_TRANSPORT_INFO` (0x04) +
+  `RtpSidecarTransportInfoWire` (16 bytes).  Appended after the
+  optional ENC_INFO trailer when any non-zero transport is active.
+  Forward-compat: probes that don't recognise the flag read just the
+  base frame (and ENC_INFO if present) and ignore the trailing bytes
+  — no protocol version bump.
+- **Hysteresis-driven pressure flag (telemetry only).**  Hardcoded
+  watermarks `VENC_PRESSURE_HIGH_WATER_PCT=75` /
+  `VENC_PRESSURE_LOW_WATER_PCT=50` in `venc_ring.h` — no live config
+  surface.  Enter pressure when fill_pct ≥ HIGH, exit when fill_pct
+  < LOW.  The flag flows out through the sidecar trailer
+  (`in_pressure`) and through `/api/v1/transport/status`.  The
+  `pressureDrops` counter increments while the flag is asserted and
+  serves as a "frames-spent-in-pressure" metric for adaptive
+  consumers.  **The producer never skips a frame on the basis of
+  this flag** — see the rollback note below.
+- **Auto-gated observation.** `*_observe_pressure` is only called
+  per-frame when a sidecar probe is subscribed
+  (`rtp_sidecar_is_subscribed`); when nobody is listening, the SIOCOUTQ
+  ioctl / ring-fill load is skipped entirely.  Observation caches its
+  fill_pct + lifetime stats into the output struct so the sidecar emit
+  in the same frame reads the cache instead of re-querying — one
+  query per frame on the producer hot path instead of two.  No live
+  config surface for backpressure: prior `outgoing.backpressure /
+  highWaterPct / lowWaterPct` knobs were dropped (the value never
+  affected anything outside the trailer once frame-skip was rolled
+  back, and exposing tuning knobs for a passive telemetry signal was
+  noise).
+- **Architecture note.** The hysteresis state machine sits on a
+  pre-computed `fill_pct` (`venc_observe_pressure` in `venc_ring.h`)
+  so each backend's `*_observe_pressure` is a transport-dispatch
+  helper: pick the fill source, hand it to the shared state machine,
+  cache the result.  Adding a new transport is one branch in
+  `observe_pressure` + one branch in `query_transport_status`.
+- **Internal/wire renames.**  Identifiers were scoped from "shm_*" to
+  "transport_*" / "backpressure_*" before any consumer shipped, on
+  the basis that the model is equally meaningful for any transport
+  with a queue.  No deprecated aliases retained — PR isn't merged
+  yet so churn cost is zero.
+- **Post-encode frame-skip rolled back.** The original PR also shipped
+  a producer-side skip path: when the hysteresis flag was asserted,
+  `star6e_runtime` and `maruko_pipeline` would bypass
+  `*_video_send_frame` entirely, advance the RTP timestamp, and emit
+  a sidecar message with `seq_count=0`.  Hardware testing showed the
+  approach was fundamentally broken for inter-frame-coded video:
+  H.264 / H.265 P-frames reference the previous frame in the GOP, so
+  dropping one P-frame leaves every following P-frame in that GOP
+  undecodable at the receiver.  With `gopSize=5` at 120 fps, a
+  pressure storm that "looked clean" on producer-side counters
+  (`packetsSent` and `transport_drops` matched `bp=ON` baseline)
+  produced unreconstructable garbage at the decoder.  The skip path
+  has been removed.  Adaptation under link saturation belongs
+  upstream of encode — either lowering `video0.bitrate` (which
+  link_controller already does from radio stats and the trailer
+  signal) or lowering encoder fps (sensor-side / `MI_SYS_BindChnPort2`
+  divider).  The trailer / status endpoint / hysteresis state machine
+  remain valuable as a fast pressure signal for adaptive consumers;
+  they just no longer pretend to act on it locally.
+- **Tests added / kept:**
+  - Star6E hysteresis state machine — telemetry assertions only
+    (`test_star6e_output_backpressure_hysteresis`)
+  - UNIX datagram pressure observation with a non-reading receiver
+    (`test_star6e_output_unix_backpressure`)
+  - Always-send invariant under pressure
+    (`test_star6e_output_always_sends_under_pressure`)
+  - Wire-layout for {enc, transport} combinations
+    (`test_star6e_video_sidecar_transport_layouts`)
+- **Stale-ring hardening.** `venc_ring_create()` now `shm_unlink()`s
+  the name before `O_EXCL`-creating a fresh inode, instead of
+  `O_CREAT|O_TRUNC` reusing the existing one. After a SIGKILL'd venc
+  is restarted while the old wfb_tx still has the ring mmapped, the
+  old consumer keeps reading the orphaned inode (no SIGBUS, no race
+  through magic=0/init_complete=0) until its watchdog detaches and
+  re-attaches by name to the new inode. Pairs with the consumer-side
+  per-iter epoch guard in `waybeam_wfb_ng/poc/shm-input.patch`. New
+  regression test: `test_producer_restart_orphans_old_inode`.
+
+## [0.9.1] - 2026-04-28
+
+Live `outgoing.max_payload_size` (`/api/v1/set?outgoing.maxPayloadSize=...`):
+
+- **Promoted from `MUT_RESTART` to `MUT_LIVE`.** The new size takes effect
+  on the next encoded frame; the in-flight frame finishes packetizing at
+  the old size, so a switch can never tear a single frame's FU/AP
+  fragmentation. Composes with other live fields in a single multi-set
+  request, e.g. `?video0.bitrate=8000&outgoing.maxPayloadSize=4000`.
+- **Range validated to `[576, 4000]`** in `validate_field_cfg()`. Same
+  validation now also gates boot via `venc_api_validate_loaded_config()`,
+  so a bad on-disk config refuses to start instead of crashing later.
+  4000 is sized for jumbo-frame links such as Realtek's 3993-byte MTU
+  (4000 + 12 RTP + 8 UDP + 20 IP = 4040, fits comfortably).
+- **Per-slot scratch bumped from 1616 → 4096 bytes** in both backends
+  (`STAR6E_OUTPUT_BATCH_SLOT_SCRATCH`, `MARUKO_OUTPUT_BATCH_SLOT_SCRATCH`).
+  Required so the sendmmsg() batch can hold an AP packet up to the new
+  4000-byte limit. ~159 KiB extra per backend (64 slots × 2.4 KiB delta).
+- **SHM parity with UDP/Unix.** SHM rings are sized at startup to fit
+  the validated ceiling (`VENC_OUTPUT_PAYLOAD_CEILING_BYTES + 12` =
+  4012 bytes per slot, 8-byte aligned), so `shm://` accepts the full
+  live range without a restart-to-grow caveat. Costs ~1.3 MiB extra SHM
+  per ring vs. the previous "size to configured starting value" scheme,
+  but this is paid only when SHM output is actually configured. UDP and
+  Unix datagram transports have no transport-level cap — only the
+  validated range and scratch ceiling apply.
+- **wfb_tx (or any SHM consumer) compatibility note.** The published
+  `slot_data_size` in the ring header changes from
+  `startup_max_payload + 12` (typically 1412) to a fixed 4012 after this
+  release. Well-behaved consumers using `venc_ring_attach()` already
+  read `slot_data_size` from the header and compute slot stride from
+  it, so they handle the change automatically. A consumer that hard-
+  codes a 1412-byte slot stride or uses a fixed-size read buffer below
+  4012 will need to be updated.
+- **Audio path tracks live updates too.** `Star6eAudioOutput.max_payload_size`
+  is now updated in the live apply alongside the video state, so audio
+  compact-mode chunking uses the new value on the next audio frame
+  (RTP audio doesn't fragment, so the field is unused there but kept in
+  sync for future-proofing).
+- New optional callback `VencApplyCallbacks.apply_max_payload_size`,
+  implemented in `star6e_controls.c` (covers dual-stream second channel)
+  and `maruko_controls.c`.
+- Cleanups while in the area:
+  - `Star6eOutputSetup.max_frame_size` field and the
+    `max_payload` parameter to `maruko_output_init_shm` were both
+    rendered dead by sizing SHM rings to the ceiling; removed along
+    with the now-redundant `*_output_max_payload_cap` helpers and
+    SHM cap checks (validation is the single gate).
+  - Removed a stale `outgoing.max_payload_size` paragraph in
+    `HTTP_API_CONTRACT.md` that described an "adaptive algorithm" no
+    longer in the codebase.
+
 ## [0.9.0] - 2026-04-26
 
 Two themes shipped together:
