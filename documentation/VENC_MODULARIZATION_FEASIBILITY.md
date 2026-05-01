@@ -874,8 +874,8 @@ int venc_start_sync(VencContext *ctx) {
 
 #### Step 3.4: WFB-NG compatibility consideration
 
-The frame callback interface must account for the wfb-ng TX integration
-(see `WFB_NG_INTEGRATION_FEASIBILITY.md`). The wfb-ng study proposes an
+The frame callback interface must account for the wfb-ng TX integration.
+The wfb-ng study proposes an
 **RTP passthrough** architecture: standard RTP packets (including H.265 FU
 fragmentation, VPS/SPS/PPS injection) are passed directly through wfb-ng's
 FEC + encryption pipeline. The wfb-ng RX peer delivers standard RTP to the
@@ -1285,7 +1285,7 @@ Verify it runs on target, receives frames, and shuts down cleanly.
 ## WFB-NG Integration Compatibility
 
 This modularization is designed to be fully compatible with the wfb-ng TX
-integration plan documented in `WFB_NG_INTEGRATION_FEASIBILITY.md`.
+integration plan owned by the `waybeam_wfb_ng` repository.
 
 ### Architecture: RTP Callback vs Direct Integration
 
