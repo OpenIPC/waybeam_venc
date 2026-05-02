@@ -1,5 +1,36 @@
 # History
 
+## [0.9.8] - 2026-05-02
+
+Frame-drop fix: relax the SDK FrameLost rate-control threshold from 120% to
+150% of target bitrate.  Affects both Star6E and Maruko (shared
+`pipeline_common_frame_lost_threshold`).
+
+On Maruko at 5 Mbps / 60 fps, hand-wave motion routinely caused the
+encoder's measured output to spike to ~6.0–6.4 Mbps — past the old 120%
+floor (6.144 Mbps).  `MI_VENC_SetFrameLostStrategy(NORMAL)` then dropped
+whole frames as a safety net, costing 5–10 fps under motion even though
+CBR rate control would have absorbed the overshoot in the next few frames
+via QP feedback.
+
+Confirmed via per-frame timing on device: user-space loop work stayed
+≤230 µs avg / ≤365 µs max (well under the 16.67 ms 60-fps budget) in both
+modes; the missing frames were skipped at the SDK encoder layer, not by
+FIFO eviction.  Disabling `frameLost` entirely on test eliminated the
+drop; raising the threshold to 150% restores the safety net for genuine
+sustained network overload (>50% over target) while letting motion bursts
+through.
+
+- **`pipeline_common.c::pipeline_common_frame_lost_threshold`**: change
+  margin from `bits / 5U` (20%) to `bits / 2U` (50%).  Floor of 524288
+  bits (~512 kbps headroom) preserved for low-bitrate streams.
+- No config-schema change.  `frameLost` default remains `true`.
+
+Verified on 192.168.2.12 (SSC378QE / IMX415 @1920x1080 / 60 fps,
+H.265 5 Mbps RTP): under continuous hand-wave motion, app-observed FPS
+stays at 59 (vs 54–55 before); on-device VENC frame-arrival jitter goes
+from 33.3 ms (one-frame skip) to a flat 16.7 ms.
+
 ## [0.9.7] - 2026-05-02
 
 May 2026 code-review follow-up bundle (PRs P1+P2+P3+P4+P5 squashed).
