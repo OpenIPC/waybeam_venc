@@ -14,6 +14,11 @@
 #define TS_RECORDER_DEFAULT_MAX_SECONDS  300
 #define TS_RECORDER_DEFAULT_MAX_BYTES    (500ULL * 1024 * 1024)
 
+/* Persistent scratch sizes — kept in struct (not on stack) so non-glibc
+ * toolchains and RT-priority threads with smaller stacks don't overflow. */
+#define STAR6E_TS_BUF_SIZE      (3000 * TS_PACKET_SIZE)   /* ~564 KB */
+#define STAR6E_TS_NAL_BUF_SIZE  (512 * 1024)              /* up to ~50 Mbps IDR */
+
 typedef struct {
 	int fd;
 	uint64_t bytes_written;
@@ -43,6 +48,10 @@ typedef struct {
 
 	/* IDR request callback for segment rotation (NULL if not wired) */
 	int (*request_idr)(void);
+
+	/* Persistent scratch buffers (see size macros above). */
+	uint8_t ts_buf[STAR6E_TS_BUF_SIZE];
+	uint8_t nal_buf[STAR6E_TS_NAL_BUF_SIZE];
 } Star6eTsRecorderState;
 
 /** Zero-initialize TS recorder state. */

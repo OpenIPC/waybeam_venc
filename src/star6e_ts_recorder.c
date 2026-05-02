@@ -227,23 +227,24 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	return 0;
 }
 
-/* TS packet buffer — sized for worst case:
- * PAT/PMT (2 × 188) + video (128KB → ~713 packets × 188) +
- * audio (~8 frames × 5 packets × 188) = ~142KB.
- * Round up to 800 packets for margin. */
-/* 512KB video = ~2783 TS packets + PAT/PMT + audio = ~2900 packets */
-#define TS_BUF_SIZE (3000 * TS_PACKET_SIZE)
+/* TS scratch buffer lives on Star6eTsRecorderState (STAR6E_TS_BUF_SIZE).
+ * 512 KB video = ~2783 TS packets + PAT/PMT + audio ≈ 2900 packets;
+ * 3000 × 188 covers worst case. */
 
 int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 	const uint8_t *video_data, size_t video_len,
 	uint64_t pts_90khz, int is_idr)
 {
-	uint8_t ts_buf[TS_BUF_SIZE];
+	uint8_t *ts_buf;
+	size_t ts_buf_size;
 	size_t ts_len = 0;
 	ssize_t written;
 
 	if (!state || state->fd < 0 || !video_data || video_len == 0)
 		return 0;
+
+	ts_buf = state->ts_buf;
+	ts_buf_size = sizeof(state->ts_buf);
 
 	if (check_disk_space(state) != 0)
 		return 0;
@@ -255,7 +256,7 @@ int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 	/* 1. Emit video TS packets first (ensures IDR is right after PAT/PMT
 	 *    at segment boundaries for fast random access) */
 	size_t vlen = ts_mux_write_video(&state->mux,
-		ts_buf + ts_len, sizeof(ts_buf) - ts_len,
+		ts_buf + ts_len, ts_buf_size - ts_len,
 		video_data, video_len, pts_90khz, is_idr);
 	ts_len += vlen;
 
@@ -265,13 +266,13 @@ int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 	 *    frames stay in the ring for the next video frame. */
 	if (state->audio_ring) {
 		AudioRingEntry ae;
-		while (sizeof(ts_buf) - ts_len >= 8 * TS_PACKET_SIZE &&
+		while (ts_buf_size - ts_len >= 8 * TS_PACKET_SIZE &&
 		       audio_ring_pop(state->audio_ring, &ae)) {
 			uint64_t audio_pts = ts_mux_timespec_to_pts(
 				(uint32_t)(ae.timestamp_us / 1000000ULL),
 				(uint32_t)((ae.timestamp_us % 1000000ULL) * 1000ULL));
 			size_t alen = ts_mux_write_audio(&state->mux,
-				ts_buf + ts_len, sizeof(ts_buf) - ts_len,
+				ts_buf + ts_len, ts_buf_size - ts_len,
 				ae.pcm, ae.length, audio_pts);
 			ts_len += alen;
 		}
@@ -323,7 +324,8 @@ int star6e_ts_recorder_is_active(const Star6eTsRecorderState *state)
 int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 	const MI_VENC_Stream_t *stream)
 {
-	uint8_t nal_buf[512 * 1024];  /* 512KB — supports up to ~50 Mbps IDR frames */
+	uint8_t *nal_buf;
+	size_t nal_buf_size;
 	size_t nal_len = 0;
 	int is_idr = 0;
 	struct timespec now;
@@ -331,6 +333,9 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 
 	if (!state || state->fd < 0 || !stream || !stream->packet)
 		return 0;
+
+	nal_buf = state->nal_buf;
+	nal_buf_size = sizeof(state->nal_buf);
 
 	/* Extract all NAL data from stream packs */
 	for (unsigned int i = 0; i < stream->count; ++i) {
@@ -360,12 +365,12 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 				if (nalu == 19 || nalu == 20)
 					is_idr = 1;
 
-				if (nal_len + len > sizeof(nal_buf)) {
+				if (nal_len + len > nal_buf_size) {
 					fprintf(stderr,
 						"[ts_recorder] frame too large "
-						"(%zu + %u > %zu), truncated\n",
-						nal_len, len, sizeof(nal_buf));
-					break;
+						"(%zu + %u > %zu), dropped\n",
+						nal_len, len, nal_buf_size);
+					goto truncated;
 				}
 				memcpy(nal_buf + nal_len,
 					pack->data + off, len);
@@ -375,12 +380,12 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 			if (pack->length <= pack->offset)
 				continue;
 			MI_U32 len = pack->length - pack->offset;
-			if (nal_len + len > sizeof(nal_buf)) {
+			if (nal_len + len > nal_buf_size) {
 				fprintf(stderr,
 					"[ts_recorder] frame too large "
-					"(%zu + %u > %zu), truncated\n",
-					nal_len, len, sizeof(nal_buf));
-				break;
+					"(%zu + %u > %zu), dropped\n",
+					nal_len, len, nal_buf_size);
+				goto truncated;
 			}
 			memcpy(nal_buf + nal_len,
 				pack->data + pack->offset, len);
@@ -397,6 +402,12 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 
 	return star6e_ts_recorder_write_video(state,
 		nal_buf, nal_len, pts, is_idr);
+
+truncated:
+	/* Drop the entire frame: emitting the partial NALs we already
+	 * copied would leave a gap that downstream muxers happily write
+	 * to disk as a broken bitstream. Decoders recover at the next IDR. */
+	return 0;
 }
 
 void star6e_ts_recorder_status(const Star6eTsRecorderState *state,
