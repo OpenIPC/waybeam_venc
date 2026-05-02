@@ -858,6 +858,55 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 		}
 	}
 
+	/* Phase 7 dual-VENC SDK probe (debug-only, env-gated).
+	 *
+	 * Set MARUKO_DUAL_VENC_PROBE=1 to attempt CreateChn(dev, 1, ...)
+	 * after channel 0 is fully started.  Reports a 3-stage signal:
+	 *   (a) CreateChn ret  — does SDK accept a 2nd channel on dev 0?
+	 *   (b) SetInputSourceConfig ret — RING_DMA path accepts ch1?
+	 *   (c) StartRecvPic ret — channel actually starts?
+	 *
+	 * Channel 1 is torn down immediately; this does NOT bind VPE -> ch1.
+	 * Use the result to decide whether to commit to a full Phase 7 port
+	 * (Gemini-style mirror or per-channel resolution) on Maruko.
+	 */
+	if (getenv("MARUKO_DUAL_VENC_PROBE")) {
+		MI_VENC_CHN probe_ch = 1;
+		i6c_venc_chn probe_attr = attr;  /* mirror chn 0 attrs */
+		MI_S32 probe_ret;
+
+		printf("> [maruko][probe] dual-VENC SDK probe BEGIN "
+			"(dev=%d, probe_chn=%d)\n",
+			(int)venc_dev, (int)probe_ch);
+
+		probe_ret = maruko_mi_venc_create_chn(venc_dev, probe_ch,
+			&probe_attr);
+		printf("> [maruko][probe] CreateChn(dev=%d, chn=%d) ret=%d\n",
+			(int)venc_dev, (int)probe_ch, (int)probe_ret);
+
+		if (probe_ret == 0) {
+			i6c_venc_src_conf src = I6C_VENC_SRC_CONF_RING_DMA;
+			MI_S32 src_ret = maruko_mi_venc_set_input_source(
+				venc_dev, probe_ch, &src);
+			printf("> [maruko][probe] SetInputSourceConfig(chn=%d,"
+				" RING_DMA) ret=%d\n",
+				(int)probe_ch, (int)src_ret);
+
+			MI_S32 start_ret = maruko_mi_venc_start_recv(venc_dev,
+				probe_ch);
+			printf("> [maruko][probe] StartRecvPic(chn=%d) ret=%d\n",
+				(int)probe_ch, (int)start_ret);
+			if (start_ret == 0)
+				(void)maruko_mi_venc_stop_recv(venc_dev, probe_ch);
+
+			(void)maruko_mi_venc_destroy_chn(venc_dev, probe_ch);
+			printf("> [maruko][probe] DestroyChn(chn=%d) — torn down\n",
+				(int)probe_ch);
+		}
+
+		printf("> [maruko][probe] dual-VENC SDK probe END\n");
+	}
+
 	return 0;
 }
 
