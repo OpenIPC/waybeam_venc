@@ -55,10 +55,6 @@ static int maruko_runner_init(void *opaque)
 			ctx->vcfg.video0.qp_delta);
 	}
 
-	if (ctx->vcfg.audio.enabled) {
-		fprintf(stderr, "WARNING: audio output is not supported on maruko backend\n");
-	}
-
 	return 0;
 }
 

@@ -69,6 +69,11 @@ typedef struct {
 	char ae_mode[16];       /* "native" (default) or "throttle" — see
 	                         * VencConfigIsp::ae_mode for semantics. */
 	VencConfigImu imu;
+	/* Audio capture mirror (Phase 5).  Init only runs when
+	 * audio.enabled is set and libmi_ai.so is loaded. */
+	VencConfigAudio audio;
+	uint16_t audio_port;            /* 0 → share video target */
+	uint16_t max_payload_size;      /* mirrors outgoing.max_payload_size */
 	MarukoBackendConfigRecord record;
 } MarukoBackendConfig;
 

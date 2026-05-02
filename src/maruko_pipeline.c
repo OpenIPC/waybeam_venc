@@ -1912,11 +1912,27 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	if (bind_maruko_pipeline(ctx) != 0)
 		return -1;
 
+	/* Phase 5: audio capture + RTP/UDP output.  Init AFTER bind_maruko
+	 * so ctx->output socket is up; init returns 0 even on failure (warns
+	 * and leaves ctx->audio.started=0). */
+	(void)maruko_audio_init(&ctx->audio, &ctx->cfg, &ctx->output);
+	if (ctx->audio.started) {
+		audio_ring_init(&ctx->audio_recorder_ring);
+		/* Aligned pointer write — encode thread picks this up on its
+		 * next loop iteration. */
+		ctx->audio.rec_ring = &ctx->audio_recorder_ring;
+	}
+
 	/* TS recorder state — initialised regardless of mode so the chn 1
 	 * drain thread can call maruko_ts_recorder_write_stream() safely
-	 * (no-op while fd<0).  Audio mux is left empty (rate=0,channels=0):
-	 * Maruko has no audio backend yet so PMT advertises video only. */
-	star6e_ts_recorder_init(&ctx->ts_recorder, 0, 0);
+	 * (no-op while fd<0).  Audio rate/channels reflect whether
+	 * maruko_audio_init succeeded — when active, the PMT advertises
+	 * audio and the recorder pops PCM frames off audio_recorder_ring. */
+	{
+		uint32_t rate = ctx->audio.started ? ctx->audio.sample_rate : 0;
+		uint32_t ch   = ctx->audio.started ? ctx->audio.channels    : 0;
+		star6e_ts_recorder_init(&ctx->ts_recorder, rate, ch);
+	}
 	if (ctx->cfg.record.max_seconds > 0)
 		ctx->ts_recorder.max_seconds = ctx->cfg.record.max_seconds;
 	if (ctx->cfg.record.max_mb > 0)
@@ -1961,9 +1977,11 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 				"supported (TS only) — recording disabled\n",
 				ctx->cfg.record.format);
 		} else if (star6e_ts_recorder_start(&ctx->ts_recorder,
-		    ctx->cfg.record.dir, NULL) == 0) {
-			printf("> [maruko] recording to %s (%s)\n",
-				ctx->cfg.record.dir, ctx->cfg.record.mode);
+		    ctx->cfg.record.dir,
+		    ctx->audio.started ? &ctx->audio_recorder_ring : NULL) == 0) {
+			printf("> [maruko] recording to %s (%s%s)\n",
+				ctx->cfg.record.dir, ctx->cfg.record.mode,
+				ctx->audio.started ? " + audio" : "");
 		}
 	}
 
@@ -2429,6 +2447,21 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 * has already exited and is no longer issuing writes, so close()
 	 * cannot race with a write().  In mirror mode no thread holds it. */
 	star6e_ts_recorder_stop(&ctx->ts_recorder);
+	/* Audio teardown after recorder stop: the recorder pops from
+	 * audio_recorder_ring, so the recorder must be quiet before we
+	 * can destroy the ring or join the encode thread that pushes
+	 * into it.  Audio still pushes into MarukoOutput, so this must
+	 * also precede maruko_output_teardown. */
+	{
+		int audio_was_started = ctx->audio.started;
+		ctx->audio.rec_ring = NULL;
+		maruko_audio_teardown(&ctx->audio);
+		if (audio_was_started) {
+			audio_ring_destroy(&ctx->audio_recorder_ring);
+			memset(&ctx->audio_recorder_ring, 0,
+				sizeof(ctx->audio_recorder_ring));
+		}
+	}
 	/* IMU stop+destroy next — push callback is a stub so order vs
 	 * other teardown steps doesn't matter, but keeping the
 	 * stop-then-destroy split lets a future telemetry consumer slot

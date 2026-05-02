@@ -1,9 +1,11 @@
 #include "maruko_controls.h"
 
 #include "idr_rate_limit.h"
+#include "maruko_audio.h"
 #include "maruko_bindings.h"
 #include "maruko_iq.h"
 #include "maruko_output.h"
+#include "maruko_pipeline.h"
 #include "output_socket.h"
 #include "pipeline_common.h"
 #include "venc_config.h"
@@ -779,6 +781,15 @@ static int maruko_apply_gain_max(uint32_t gain)
 	return ret;
 }
 
+/* ── Audio mute callback (Phase 5) ───────────────────────────────────── */
+
+static int maruko_apply_mute(bool muted)
+{
+	if (!g_ctx.backend)
+		return -1;
+	return maruko_audio_apply_mute(&g_ctx.backend->audio, muted ? 1 : 0);
+}
+
 /* ── ROI horizontal bands ────────────────────────────────────────────── */
 
 static int compute_horizontal_roi(uint32_t width, uint32_t height,
@@ -1048,7 +1059,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_output_enabled = maruko_apply_output_enabled,
 	.apply_server = maruko_apply_server,
 	.apply_gain_max = maruko_apply_gain_max,
-	.apply_mute = NULL,
+	.apply_mute = maruko_apply_mute,
 	.request_idr = maruko_request_idr,
 	.query_live_fps = maruko_query_live_fps,
 	.query_ae_info = maruko_query_ae_info,

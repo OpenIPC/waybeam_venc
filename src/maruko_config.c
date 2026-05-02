@@ -42,6 +42,9 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->isp_gain_max = 0;
 	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s", "native");
 	memset(&cfg->imu, 0, sizeof(cfg->imu));
+	memset(&cfg->audio, 0, sizeof(cfg->audio));
+	cfg->audio_port = 5601;
+	cfg->max_payload_size = RTP_DEFAULT_PAYLOAD;
 	memset(&cfg->record, 0, sizeof(cfg->record));
 	snprintf(cfg->record.mode, sizeof(cfg->record.mode), "%s", "off");
 	snprintf(cfg->record.format, sizeof(cfg->record.format), "%s", "ts");
@@ -113,6 +116,9 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s",
 		vcfg->isp.ae_mode[0] ? vcfg->isp.ae_mode : "native");
 	cfg->imu = vcfg->imu;
+	cfg->audio = vcfg->audio;
+	cfg->audio_port = vcfg->outgoing.audio_port;
+	cfg->max_payload_size = vcfg->outgoing.max_payload_size;
 
 	cfg->record.enabled = vcfg->record.enabled ? 1 : 0;
 	snprintf(cfg->record.mode, sizeof(cfg->record.mode), "%s",
