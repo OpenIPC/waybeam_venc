@@ -1241,6 +1241,16 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	return 0;
 }
 
+/* IMU push callback: stub.  Drained samples are discarded for now —
+ * the callback exists so a future telemetry / sidecar consumer can
+ * slot in without rewiring imu_init.  Mirrors star6e_pipeline.c's
+ * star6e_pipeline_imu_push. */
+static void maruko_pipeline_imu_push(void *ctx, const ImuSample *sample)
+{
+	(void)ctx;
+	(void)sample;
+}
+
 int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 {
 
@@ -1294,6 +1304,43 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 			fprintf(stderr,
 				"WARNING: [maruko] debug OSD init failed — "
 				"continuing without overlay\n");
+	}
+
+	/* IMU: opt-in BMI270 reader, FIFO mode (frame-synced via imu_drain
+	 * in the per-frame loop).  The push callback is a stub right now —
+	 * samples are read and discarded; future telemetry/sidecar export
+	 * can replace the stub without touching the lifecycle.
+	 *
+	 * Init MUST run BEFORE bind_maruko_pipeline() because that path
+	 * calls MI_VENC_StartRecvPic, and the IMU's auto-bias calibration
+	 * is a blocking ~2 s loop (400 samples @ 200 Hz default).  On
+	 * Maruko, blocking the main thread for 2 s after StartRecvPic
+	 * leaves the VENC fd in a state where poll() never returns
+	 * POLLIN and the stream loop never progresses (verified empirically
+	 * on 192.168.2.12: drops to 0 fps with 2 s cal, recovers cleanly
+	 * with 250 ms cal — the issue is the blocking duration vs the
+	 * VENC's internal queue, not the IMU code itself).  Star6E does
+	 * not exhibit this; pre-init only on Maruko. */
+	if (ctx->cfg.imu.enabled && !ctx->imu) {
+		ImuConfig imu_cfg = {
+			.i2c_device = ctx->cfg.imu.i2c_device,
+			.i2c_addr = ctx->cfg.imu.i2c_addr,
+			.sample_rate_hz = ctx->cfg.imu.sample_rate_hz,
+			.gyro_range_dps = ctx->cfg.imu.gyro_range_dps,
+			.cal_file = ctx->cfg.imu.cal_file,
+			.cal_samples = ctx->cfg.imu.cal_samples,
+			.push_fn = maruko_pipeline_imu_push,
+			.push_ctx = ctx,
+			.use_thread = 0,
+		};
+		ctx->imu = imu_init(&imu_cfg);
+		if (ctx->imu) {
+			imu_start(ctx->imu);
+		} else {
+			fprintf(stderr,
+				"WARNING: [maruko] IMU init failed, "
+				"continuing without IMU\n");
+		}
 	}
 
 	if (bind_maruko_pipeline(ctx) != 0)
@@ -1556,6 +1603,13 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	}
 	stream.packet = rt->cached_packs;
 
+	/* Drain IMU FIFO BEFORE GetStream so any future telemetry/sidecar
+	 * consumer sees fresh samples for the frame currently being
+	 * captured.  Cheap when imu.enabled=false (state pointer is NULL).
+	 * Mirrors star6e_runtime.c:727-728. */
+	if (ctx->imu)
+		imu_drain(ctx->imu);
+
 	MI_S32 ret = maruko_mi_venc_get_stream(ctx->venc_device,
 		ctx->venc_channel, &stream, 10);
 	if (ret != 0) {
@@ -1738,6 +1792,15 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		return;
 
 	venc_api_clear_active_precrop();
+	/* IMU stop+destroy first — push callback is a stub so order vs
+	 * other teardown steps doesn't matter, but keeping the
+	 * stop-then-destroy split lets a future telemetry consumer slot
+	 * in without rework (Star6E parity). */
+	if (ctx->imu) {
+		imu_stop(ctx->imu);
+		imu_destroy(ctx->imu);
+		ctx->imu = NULL;
+	}
 	if (ctx->debug_osd) {
 		debug_osd_destroy(ctx->debug_osd);
 		ctx->debug_osd = NULL;

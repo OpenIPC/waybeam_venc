@@ -41,6 +41,7 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->ae_fps = 15;
 	cfg->isp_gain_max = 0;
 	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s", "native");
+	memset(&cfg->imu, 0, sizeof(cfg->imu));
 }
 
 int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
@@ -106,6 +107,7 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->isp_gain_max = vcfg->isp.gain_max;
 	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s",
 		vcfg->isp.ae_mode[0] ? vcfg->isp.ae_mode : "native");
+	cfg->imu = vcfg->imu;
 
 	return 0;
 }

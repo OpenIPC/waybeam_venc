@@ -1,6 +1,7 @@
 #ifndef MARUKO_PIPELINE_H
 #define MARUKO_PIPELINE_H
 
+#include "imu_bmi270.h"
 #include "maruko_bindings.h"
 #include "maruko_config.h"
 #include "maruko_output.h"
@@ -35,6 +36,7 @@ typedef struct {
   MarukoBackendConfig cfg;
   SceneDetector scene;
   struct DebugOsdState *debug_osd;  /* NULL if debug OSD disabled */
+  ImuState *imu;                    /* NULL if IMU disabled or init failed */
 } MarukoBackendContext;
 
 /** Initialize Maruko pipeline state and load SDK libraries. */
