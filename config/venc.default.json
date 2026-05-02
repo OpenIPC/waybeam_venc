@@ -16,6 +16,7 @@
   "isp": {
     "sensorBin": "",
     "legacyAe": true,
+    "aeMode": "native",
     "aeFps": 15,
     "gainMax": 0,
     "awbMode": "auto",

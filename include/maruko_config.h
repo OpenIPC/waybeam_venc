@@ -45,6 +45,10 @@ typedef struct {
 	int connected_udp;
 	int keep_aspect;
 	int show_osd;
+	uint32_t ae_fps;        /* supervisory 3A rate (Hz); 0 disables */
+	uint32_t isp_gain_max;  /* sensor gain cap; 0 = use ISP bin default */
+	char ae_mode[16];       /* "native" (default) or "throttle" — see
+	                         * VencConfigIsp::ae_mode for semantics. */
 } MarukoBackendConfig;
 
 /** Fill config with compiled-in defaults for Maruko backend. */

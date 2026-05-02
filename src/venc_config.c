@@ -84,6 +84,7 @@ void venc_config_defaults(VencConfig *cfg)
 	/* isp */
 	cfg->isp.sensor_bin[0] = '\0';
 	cfg->isp.legacy_ae = true;
+	safe_strcpy(cfg->isp.ae_mode, sizeof(cfg->isp.ae_mode), "native");
 	cfg->isp.ae_fps = 15;
 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
 	cfg->isp.awb_ct = 5500;
@@ -221,6 +222,8 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 	safe_strcpy(s->sensor_bin, sizeof(s->sensor_bin),
 		json_get_string(obj, "sensorBin", s->sensor_bin));
 	s->legacy_ae = json_get_bool(obj, "legacyAe", s->legacy_ae);
+	safe_strcpy(s->ae_mode, sizeof(s->ae_mode),
+		json_get_string(obj, "aeMode", s->ae_mode));
 	s->ae_fps = (uint32_t)json_get_int(obj, "aeFps", (int)s->ae_fps);
 	s->gain_max = (uint32_t)json_get_int(obj, "gainMax", (int)s->gain_max);
 	safe_strcpy(s->awb_mode, sizeof(s->awb_mode),
@@ -803,6 +806,7 @@ static void render_isp(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_section_open(p, 1, "isp");
 	pp_field_string(p, 2, "sensorBin",  cfg->isp.sensor_bin,  0);
 	pp_field_bool(p,   2, "legacyAe",   cfg->isp.legacy_ae,   0);
+	pp_field_string(p, 2, "aeMode",     cfg->isp.ae_mode,     0);
 	pp_field_uint(p,   2, "aeFps",      cfg->isp.ae_fps,      0);
 	pp_field_uint(p,   2, "gainMax",    cfg->isp.gain_max,    0);
 	pp_field_string(p, 2, "awbMode",    cfg->isp.awb_mode,    0);
@@ -979,6 +983,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	if (isp) {
 		cJSON_AddStringToObject(isp, "sensorBin", cfg->isp.sensor_bin);
 		cJSON_AddBoolToObject(isp, "legacyAe", cfg->isp.legacy_ae);
+		cJSON_AddStringToObject(isp, "aeMode", cfg->isp.ae_mode);
 		cJSON_AddNumberToObject(isp, "aeFps", cfg->isp.ae_fps);
 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);
 		cJSON_AddStringToObject(isp, "awbMode", cfg->isp.awb_mode);
