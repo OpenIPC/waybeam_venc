@@ -39,7 +39,17 @@ static int g_api_routes_registered = 0;
  * serializes field reads/writes to prevent torn values on ARM.  It also
  * guards g_config_path and the g_last_saved cache below (the httpd is
  * single-threaded so no handler-vs-handler race, but the main thread
- * calls venc_api_set_config_path at startup). */
+ * calls venc_api_set_config_path at startup).
+ *
+ * Hold-time policy: keep this mutex hot — backends register their own
+ * VencConfig pointer as g_cfg (e.g. &ctx->vcfg), and apply_*
+ * callbacks may read additional vcfg fields beyond the value they were
+ * passed (apply_bitrate reads vcfg->video0.frame_lost, etc.).  So
+ * apply_live_group_for_cfg() commits the staged value to g_cfg before
+ * each callback, and the mutex must remain held across the whole
+ * apply sequence to keep that commit + read pair coherent.  The
+ * pre-apply validation/preflight phase is run outside the mutex
+ * because it only reads write-once globals and a local cfg copy. */
 static pthread_mutex_t g_cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Last config snapshot that was successfully persisted, used to skip
@@ -1555,24 +1565,35 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	if (rc != 0)
 		return rc > 0 ? 0 : rc;
 
+	/* Snapshot g_cfg under the mutex, then drop it for the
+	 * validation/preflight pass.  field_from_string_cfg(),
+	 * validate_field_cfg(), validate_backend_config(), and
+	 * live_group_supported_for_cfg() all operate on the local copy and
+	 * only read write-once globals (g_backend, g_cb function table) —
+	 * no shared mutable state, so they're safe outside the mutex.
+	 *
+	 * Safety of the unlock/relock split: the httpd is single-threaded
+	 * (one accept loop, one in-flight handler), so no other writer can
+	 * mutate g_cfg in this window.  Any future move to a multi-threaded
+	 * httpd would need to revisit this. */
 	pthread_mutex_lock(&g_cfg_mutex);
 	old_cfg = *g_cfg;
+	pthread_mutex_unlock(&g_cfg_mutex);
+
 	new_cfg = old_cfg;
 	actual_cfg = old_cfg;
 
 	rc = stage_params_into_cfg(&new_cfg, params, param_count, status_code,
 		response_json);
-	if (rc != 0) {
-		pthread_mutex_unlock(&g_cfg_mutex);
+	if (rc != 0)
 		return rc > 0 ? 0 : rc;
-	}
 
 	rc = preflight_live_group_callbacks(&new_cfg, group_order, group_count,
 		&touched, param_count, status_code, response_json);
-	if (rc != 0) {
-		pthread_mutex_unlock(&g_cfg_mutex);
+	if (rc != 0)
 		return rc > 0 ? 0 : rc;
-	}
+
+	pthread_mutex_lock(&g_cfg_mutex);
 
 	rc = apply_live_group_sequence_locked(group_order, group_count, &touched,
 		&old_cfg, &new_cfg, &actual_cfg, status_code, response_json);

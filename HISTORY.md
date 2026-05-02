@@ -1,5 +1,83 @@
 # History
 
+## [0.9.7] - 2026-05-02
+
+May 2026 code-review follow-up bundle (PRs P1+P2+P3+P4+P5 squashed).
+
+- **P2 — `httpd`: Content-Length parser anchored.**  The HTTP request
+  parser previously located `Content-Length:` via an unanchored
+  case-insensitive substring search across the entire header block,
+  which would latch onto the literal substring inside an arbitrary
+  header value (e.g. `X-Forwarded: content-length:99`).  Fix walks
+  the header block line by line and only matches at the start of a
+  line.  Eliminates a request-smuggling vector against the live
+  config / set endpoints; also drops the now-unused
+  `httpd_strcasestr` helper.  (`src/venc_httpd.c`)
+
+- **P4 — Move orphaned `snr_*` harnesses to `tools/`.**
+  `snr_sequence_probe.c` and `snr_toggle_test.c` were never wired
+  into the build (orphaned since 0.6.2).  Relocated under `tools/`
+  to match the rest of the standalone diagnostic harnesses; updated
+  the path reference in `documentation/REFACTORING_PLAN.md`.  No
+  Makefile changes required.
+
+- **P3 — `main`: pidfile + flock single-instance gate.**  The legacy
+  guard scanned `/proc/*/comm` for a process named `venc`, which is
+  inherently racy: two near-simultaneous launches each see no peer
+  and both proceed to grab the SHM ring.  New `acquire_pidfile_lock()`
+  takes an exclusive non-blocking `flock(LOCK_EX | LOCK_NB)` on
+  `/var/run/venc.pid` (falling back to `/tmp/venc.pid`) before the
+  legacy `/proc` scan; `EWOULDBLOCK` exits cleanly with rc=1.  The
+  fd is held with `O_CLOEXEC` and intentionally leaked so the kernel
+  releases the lock at process exit even on SIGKILL.  Old `/proc`
+  fallback retained as defence-in-depth for the case where pidfile
+  lock acquisition itself fails (e.g. read-only fs).  Updated comment
+  in `src/venc_ring.c` to reference the new mechanism.
+  (`src/main.c`, `src/venc_ring.c`)
+
+- **P1 — `venc_api`: shrink `g_cfg_mutex` hold time.**  The live-set
+  apply path held `g_cfg_mutex` across `stage_params_into_cfg` and
+  `preflight_live_group_callbacks` even though both operate purely
+  on stack-local config copies and do not read or mutate the shared
+  `g_cfg` pointer.  Moved both calls outside the mutex region; the
+  mutex is now only held during `apply_live_group_sequence_locked`,
+  which is the irreducible window where backend `apply_*` callbacks
+  read additional vcfg fields beyond their parameters via the
+  registered `&ctx->vcfg`.  No behavior change; reduces serialization
+  in the rapid-fire `/api/v1/set` path used by the link_controller.
+  Documented the irreducible hold-time contract in the mutex
+  declaration's doc comment.  (`src/venc_api.c`)
+
+  Note on scope: the original CR claim of "torn-string reads at
+  120 fps" did not match any reachable code path — backend reads
+  of `vcfg->...` strings happen only at init/teardown or inside
+  the `apply_*` callbacks (under the mutex).  The deeper deferred
+  work-queue rework deferred until the apply-callback contract is
+  changed.
+
+- **P5 — `maruko_pipeline_run()` split.**  Reduced from 301 lines
+  to ~50 by extracting `maruko_pipeline_init_streaming`,
+  `maruko_pipeline_cleanup_streaming`,
+  `maruko_pipeline_check_idle_abort`,
+  `maruko_pipeline_await_frame`,
+  `maruko_pipeline_process_stream`, and
+  `maruko_pipeline_log_verbose_frame` into `MarukoStreamRuntime`
+  helpers.  Outer loop now mirrors the Star6E shape
+  (`star6e_runner_run` + `star6e_runtime_process_stream`).
+  Behavior preserved: idle-abort timer (`MARUKO_IDLE_ABORT_US`),
+  idle-warn timer (`MARUKO_IDLE_WARN_US`), FPS-kick, pressure-gating,
+  verbose-cadence (`MARUKO_PKTZR_VERBOSE_ACTIVE`), cached pack
+  reuse, POLLERR fallback.  (`src/maruko_pipeline.c`)
+
+- **Tests.**  `tests/test_venc_httpd.c` gains coverage of the new
+  Content-Length walker (anchored match, case-insensitive,
+  multi-header, header-value-confused-with-body, missing/oversized,
+  negative).  `scripts/test_pidfile_lock.sh` exercises the flock
+  gate by launching two short-lived test processes and asserting
+  the second exits with `EWOULDBLOCK`.  Existing `test_multi_set_*`
+  cases continue to cover the now-mutex-free stage/preflight path
+  in `apply_live_set_query`.
+
 ## [0.9.2] - 2026-04-28
 
 Transport-pressure observability (the prior "Level 2 — local FPS skip"

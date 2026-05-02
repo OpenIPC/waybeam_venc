@@ -19,17 +19,28 @@
 #define MSG_NOSIGNAL 0
 #endif
 
-/* Case-insensitive substring search (portable, no _GNU_SOURCE needed). */
-static char *httpd_strcasestr(const char *haystack, const char *needle)
+/* ── Header parsing helpers ──────────────────────────────────────────── */
+
+int httpd_parse_content_length(const char *headers_start,
+	const char *headers_end)
 {
-	size_t nlen = strlen(needle);
-	if (nlen == 0) return (char *)haystack;
-	for (; *haystack; haystack++) {
-		if (tolower((unsigned char)*haystack) == tolower((unsigned char)*needle) &&
-		    strncasecmp(haystack, needle, nlen) == 0)
-			return (char *)haystack;
+	int content_len = 0;
+	const char *p = headers_start;
+	while (p && p < headers_end) {
+		if (strncasecmp(p, "content-length:", 15) == 0) {
+			const char *v = p + 15;
+			while (*v == ' ' || *v == '\t') v++;
+			content_len = atoi(v);
+			if (content_len < 0) content_len = 0;
+			if (content_len >= HTTPD_MAX_BODY)
+				content_len = HTTPD_MAX_BODY - 1;
+			return content_len;
+		}
+		const char *next = strstr(p, "\r\n");
+		if (!next) break;
+		p = next + 2;
 	}
-	return NULL;
+	return 0;
 }
 
 /* ── Route table ─────────────────────────────────────────────────────── */
@@ -360,14 +371,8 @@ static int parse_request(int fd, HttpRequest *req)
 	char *body_start = strstr(headers_start, "\r\n\r\n");
 	if (body_start) {
 		body_start += 4;
-		/* Find Content-Length */
-		char *cl = httpd_strcasestr(headers_start, "content-length:");
-		int content_len = 0;
-		if (cl) {
-			content_len = atoi(cl + 15);
-			if (content_len < 0) content_len = 0;
-			if (content_len >= HTTPD_MAX_BODY) content_len = HTTPD_MAX_BODY - 1;
-		}
+		int content_len =
+			httpd_parse_content_length(headers_start, body_start - 2);
 
 		/* Copy what we already have */
 		int already = total - (int)(body_start - raw);
