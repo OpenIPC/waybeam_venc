@@ -1033,6 +1033,138 @@ Response `200`:
 
 Error `404` — dual VENC not active.
 
+### `GET /api/v1/idr/stats`
+
+Return per-channel IDR-rate-limit counters.  The encoder enforces a minimum
+spacing between honored IDRs to keep bitrate predictable when many sources
+(scene detector, HTTP `/request/idr` and `/api/v1/dual/idr`, recorder
+segment rotation) ask for keyframes simultaneously.  This endpoint reports
+how many requests were honored vs. coalesced (dropped) per channel.
+
+```bash
+curl http://<device-ip>/api/v1/idr/stats
+```
+
+Response `200`:
+```json
+{
+  "ok": true,
+  "data": {
+    "min_spacing_us": 250000,
+    "channels": [
+      {"idx": 0, "honored": 47, "dropped": 3},
+      {"idx": 1, "honored": 12, "dropped": 0}
+    ]
+  }
+}
+```
+
+`min_spacing_us` is the compile-time minimum spacing in microseconds.
+Channels with both counters at zero are omitted.  Available on both
+backends; always returns a valid response (even when no IDR has been
+requested yet — `channels` is then an empty array).
+
+### `GET /api/v1/transport/status`
+
+Return live observability for the active video transport (UDP / Unix /
+SHM).  Used by the WebUI status bar and by external link controllers
+that need to detect output backpressure.
+
+```bash
+curl http://<device-ip>/api/v1/transport/status
+```
+
+Response `200` (SHM ring transport, common for `outgoing.server=shm://...`):
+```json
+{
+  "ok": true,
+  "data": {
+    "active": true,
+    "transport": "shm",
+    "fillPct": 12,
+    "inPressure": false,
+    "transportDrops": 0,
+    "pressureDrops": 0,
+    "packetsSent": 184523,
+    "oversizeDrops": 0,
+    "slotCount": 1024,
+    "usedSlots": 122
+  }
+}
+```
+
+Response `200` (UDP/Unix kernel-buffer fill_pct):
+```json
+{
+  "ok": true,
+  "data": {
+    "active": true,
+    "transport": "udp",
+    "fillPct": 4,
+    "inPressure": false,
+    "pressureDrops": 0
+  }
+}
+```
+
+Response `200` (output disabled or no socket open):
+```json
+{"ok":true,"data":{"active":false,"transport":"none"}}
+```
+
+Field reference:
+
+| Field | Meaning |
+|---|---|
+| `transport` | `"shm"`, `"udp"`, `"unix"`, or `"none"` |
+| `fillPct` | Current fill ratio `0..100`.  For SHM, ring fill; for UDP/Unix, kernel send-buffer fill |
+| `inPressure` | True when `fillPct >= 70` (high-water threshold) |
+| `transportDrops` | (SHM only) Lifetime ring-full drops |
+| `pressureDrops` | Frames dropped by the in-process backpressure path while a sidecar probe was subscribed |
+| `packetsSent` | (SHM only) Lifetime writes accepted by the ring |
+| `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
+| `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
+
+Error `501` — backend has no transport observability hook.
+
+### `GET /api/v1/modes`
+
+Return the table of sensor pads and resolution modes the underlying SDK
+reports for the currently-loaded sensor driver.  Used to populate the
+WebUI sensor-mode dropdown and to validate `sensor.mode` writes.
+
+```bash
+curl http://<device-ip>/api/v1/modes
+```
+
+Response `200`:
+```json
+{
+  "ok": true,
+  "data": {
+    "selected_pad": 0,
+    "selected_mode": 1,
+    "pads": [
+      {
+        "pad": 0,
+        "modes": [
+          {"index": 0, "width": 1920, "height": 1080, "min_fps": 1, "max_fps": 60,  "desc": "1080p60",  "selected": false},
+          {"index": 1, "width": 1920, "height": 1080, "min_fps": 1, "max_fps": 90,  "desc": "1080p90",  "selected": true},
+          {"index": 2, "width": 1472, "height": 816,  "min_fps": 1, "max_fps": 120, "desc": "1472x816@120", "selected": false}
+        ]
+      }
+    ]
+  }
+}
+```
+
+`selected_pad` / `selected_mode` reflect the currently-active pipeline
+selection.  The full `pads[].modes[]` list always shows every mode the
+driver enumerates so callers can show an "available modes" UI.
+
+Error `500 modes_failed` — `MI_SNR_QueryResCount` failed (e.g. sensor
+driver not loaded yet during a brief startup window).
+
 ## SIGHUP Pipeline Reinit
 
 In addition to the `/api/v1/restart` endpoint, the pipeline can be reinited by sending
@@ -1076,6 +1208,27 @@ Behavior:
 - Maruko may return `not_implemented` for specific apply paths until parity work is complete.
 - `GET` endpoints must remain consistent across backends.
 
+### Backend Support Matrix
+
+Endpoints that behave the same on both backends are omitted.  Only feature
+divergence is listed.  As of `contract_version: 0.8.3`:
+
+| Feature / Endpoint | Star6E | Maruko | Notes |
+|---|---|---|---|
+| `/api/v1/record/{start,stop}` | yes | **501** | Maruko has no runtime poll loop yet (Phase 6.5).  Config-driven recording (`record.enabled=true` + `record.mode="mirror"\|"dual"`) works. |
+| `/api/v1/record/status` | live counters | zero-fill | Same gap as above; Maruko returns `active:false` even when config-driven recording is active. |
+| `/api/v1/recordings*` | yes | yes | File listing/download/delete works against `record.dir` regardless of which backend wrote the file. |
+| `/api/v1/audio/status` | yes | yes | Both backends register `query_audio_status`. |
+| `/api/v1/dual/*` | yes | yes | Phase 7 closed Maruko's dual-VENC port (`feature/maruko-dual-venc-port`, v0.9.x).  Returns 404 on either backend when dual is not active. |
+| `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Both backends use the same IQ table schema. |
+| `/api/v1/awb` | live | live | Both backends register `query_awb_info`. |
+| `/api/v1/ae` | live + `runtime.active_precrop` | live | Maruko AE response omits `runtime.active_precrop` on this branch; the Phase 1 precrop is exposed through `/api/v1/config` instead. |
+| `/api/v1/transport/status` | yes | yes | SHM-ring fields are shown when `outgoing.server=shm://`; otherwise the UDP/Unix subset. |
+| `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
+| `video0.codec=h264` | rejected with 409 | accepted | Star6E RTP mode is HEVC-only on this build. |
+| `video0.scene_threshold` / `scene_holdoff` | live | rejected with 501 | `/api/v1/capabilities` reports `supported:false` on Maruko. |
+| `isp.aeMode` ("native" / "throttle") | accepted but no-op | applied | Maruko-only opt-in; switching modes mid-run requires a process restart.  Default `"native"` on both backends. |
+
 ## Change Log (Contract)
 - `0.8.3`:
   - Added `GET /api/v1/audio/status` — live observability for the audio
@@ -1086,10 +1239,17 @@ Behavior:
     `501 not_implemented` on backends without a runtime record poll
     (currently only Maruko).  Previously the requests appeared to succeed
     with `{"ok":true}` but did nothing.  Star6E behaviour is unchanged.
+  - Documented three pre-existing routes that had landed in code without
+    contract entries: `GET /api/v1/modes` (sensor pad/mode introspection),
+    `GET /api/v1/transport/status` (output transport observability), and
+    `GET /api/v1/idr/stats` (per-channel IDR rate-limit counters).  No
+    behavioural change.
+  - Added a Backend Support Matrix table covering Star6E vs Maruko
+    divergence post-Phase-5 (audio), Phase-6 (recording), Phase-7 (dual
+    VENC), and Phase-9 (`isp.aeMode`).
   - In-binary `/api/v1/version` now reports `contract_version=0.8.3`
     (previously the constant was stuck at `0.3.0` while the doc moved
-    forward to `0.8.2`).  Future doc/code drift is being addressed in a
-    follow-up sweep.
+    forward to `0.8.2`).
 - `0.8.2`:
   - `outgoing.max_payload_size` is now `MUT_LIVE` (was `MUT_RESTART`) and
     can be batched with other live fields in a single `/api/v1/set` call,
