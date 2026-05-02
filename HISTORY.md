@@ -1,5 +1,110 @@
 # History
 
+## [0.9.11] - 2026-05-02
+
+Maruko parity Phase 2b — debug OSD now functional (kernel-oops cured).
+
+Verified on 192.168.2.12 (OpenIPC SSC378QE, kernel 5.10.61): with
+`debug.showOsd=true`, RGN init/create/attach/getcanvas all succeed,
+encode loop runs at ~117 fps, no kernel taint, OSD canvas mapped at
+1472x816 stride 736.
+
+- **Root cause was a build-time conditional bug, not a kernel/lib
+  mismatch.**  The Maruko build defines BOTH `-DPLATFORM_STAR6E` and
+  `-DPLATFORM_MARUKO` (the Star6E backend's MI shim headers are reused
+  for type compatibility; see `Makefile:39`).  In Phase 2,
+  `src/debug_osd.c` started with `#ifdef PLATFORM_STAR6E`, so the
+  Star6E branch was compiled into the Maruko binary too — and the
+  Star6E ABI (1-arg `MI_RGN_Init(palette*)`, mod_id 0 = VPE, 3-arg
+  `AttachToChn`) ran against the Maruko kernel/lib pair.  That
+  ABI mismatch produced the `MI_DEVICE_Ioctl → kfree → compound_head`
+  oops with a userspace-shaped pointer (`r0=0x0f9c0900`) reaching
+  kfree.  Fixed by changing the first conditional to
+  `#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)` so
+  Maruko binaries enter the proper Maruko branch.
+- **`debug_osd`: Maruko ABI branch (now active).**  Targets the
+  OpenIPC libmi_rgn.so v3 API as documented in
+  `Maruko_work_dir/SourceCode/project/release/include/mi_rgn.h` and
+  used by the official IPC demo at
+  `Maruko_work_dir/ipc_demo/maruko/common/osd/osd.cpp`:
+  `MI_RGN_Init(soc_id, palette*)` (palette as direct arg, not wrapped),
+  3-arg `MI_RGN_Create(soc_id, handle, attr*)`, 4-arg
+  `MI_RGN_AttachToChn(soc_id, handle, chnport*, param*)`, 64-bit
+  `MI_PHY` / pointer-width `MI_VIRT` in `MI_RGN_CanvasInfo_t`,
+  module ID 34 (`E_MI_MODULE_ID_SCL` — RGN is attached to SCL/0/0/0).
+- **`maruko_mi`: pre-load `libmi_rgn.so`.**  Added to the existing
+  RTLD_GLOBAL dep chain in `maruko_mi_init()` (alongside
+  `libcam_os_wrapper`, `libmi_common`, `libispalgo`, `libcus3a`) so the
+  later `dlopen` from `debug_osd.c` finds the dependency graph fully
+  resolved.  (`src/maruko_mi.c`)
+- **`maruko_pipeline`: init-before-kthread ordering.**  Moved
+  `debug_osd_create()` ahead of `bind_maruko_pipeline()` so it runs
+  after the SCL channel exists (`maruko_start_vpe`) but BEFORE
+  `MI_VENC_StartRecvPic` spawns the encoder kthread.  The v5.10
+  OpenIPC kernel mi_rgn driver requires the singlethread workqueue
+  to be created from the main task.  Dropped the Phase 2 safety-gate
+  WARN-and-skip — the runtime is now real.  (`src/maruko_pipeline.c`)
+
+Recipe cross-referenced with `waybeam-hub/src/rgn_backend_maruko.c`,
+which had already verified the dep preload + module-ID-34 pattern
+against the same kernel/lib pair (different `MI_RGN_OsdChnPortParam_t`
+trailing field — the Maruko SDK header in
+`Maruko_work_dir/SourceCode/project/release/include/mi_rgn_datatype.h`
+omits `stColorInvertAttr` that the hub's older vendored header
+includes; both work because the kernel reads only the union prefix).
+
+## [0.9.10] - 2026-05-02
+
+Maruko parity Phase 2 — debug OSD overlay wired to both backends.
+
+- **`maruko_pipeline`: debug OSD plumbed.**  Mirrors Star6E
+  (`star6e_runtime.c:825-849`):
+  `debug_osd_create()` runs at the end of
+  `maruko_pipeline_configure_graph()` after VENC bind+start (gated on
+  the new `cfg.show_osd`, sourced from `debug.showOsd`),
+  `debug_osd_begin_frame / sample_cpu / text / end_frame` runs
+  per frame inside `maruko_pipeline_process_stream()` showing fps + cpu,
+  and `debug_osd_destroy()` runs at the top of
+  `maruko_pipeline_teardown_graph()` before any unbind/stop.  Both
+  backends now share `src/debug_osd.c` + `src/debug_osd_draw.c`
+  (moved from `STAR6E_ONLY_SRC` to `HELPER_SRC`).  When
+  `debug.showOsd=false` (default) no OSD code runs on either backend.
+- **Maruko runtime path safety-gated.**  On the test target
+  (192.168.2.12, OpenIPC SSC378QE), invoking `MI_RGN_Init` triggers a
+  kernel Oops in `MI_DEVICE_Ioctl` (kfree path) and wedges the encode
+  loop — the same lib/kernel SDK vintage mismatch documented in
+  `memory/maruko_osd_render_bringup.md`.  Until Phase 2b ships the cure
+  (RTLD_GLOBAL dep preload, `MI_MODULE_ID_SCL`=34, init-before-worker-
+  thread; tracked in `documentation/MARUKO_PARITY_PLAN.md`),
+  `debug.showOsd=true` on Maruko emits a one-time warning and skips the
+  attach so a stale config never hangs venc.  Star6E behaviour is
+  unchanged.  (`src/maruko_pipeline.c`, `src/maruko_config.c`,
+  `include/maruko_config.h`, `include/maruko_pipeline.h`, `Makefile`)
+
+## [0.9.9] - 2026-05-02
+
+Maruko parity Phase 1 — aspect-ratio precrop on the SCL stage.
+
+- **`maruko_pipeline`: SCL precrop wired up.**  `configure_maruko_scl()`
+  now writes a centered crop rect into `scl_port.crop` instead of zero
+  when `isp.keepAspect=true` and the encode aspect ratio differs from the
+  sensor's effective output.  The rect is computed via the existing
+  `pipeline_common_compute_precrop()` helper (Star6E parity) against the
+  post-binning effective input (`sensor.plane.capt` clamped by
+  `mode.output`), so it always matches the surface that actually feeds
+  the SCL stage.  Falls back to zero crop (full source area, downstream
+  stretch) when `isp.keepAspect=false`.  `venc_api_set_active_precrop()`
+  is called on success for `/api/v1/config` visibility, and
+  `venc_api_clear_active_precrop()` runs in
+  `maruko_pipeline_teardown_graph()` for symmetry with Star6E.  Verified
+  on bench (192.168.2.12, IMX415): 960x720 (4:3) on 1920x1080 sensor
+  mode → `Precrop: 1920x1080 -> 1440x1080 (offset 240,0)`, encoding
+  89 fps @ 25 Mbps without stretching; 1280x720 (16:9) and
+  `keepAspect=false` paths both produce the legacy zero-crop output.
+  (`src/maruko_pipeline.c`, `src/maruko_config.c`,
+  `include/maruko_config.h`, `include/venc_config.h`,
+  `documentation/PRECROP_ASPECT_RATIO.md`)
+
 ## [0.9.8] - 2026-05-02
 
 Frame-drop fix: relax the SDK FrameLost rate-control threshold from 120% to
