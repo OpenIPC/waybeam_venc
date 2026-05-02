@@ -28,13 +28,13 @@ several places (see "Surprises vs docs" below).
 |---|---|---|---|
 | ~~Aspect-ratio precrop~~ | ~~`star6e_pipeline.c:338-386`~~ | **Closed in v0.9.9** — `configure_maruko_scl()` writes a centered rect via `pipeline_common_compute_precrop()` (Star6E parity); `venc_config.h:51-54` comment updated. | — |
 | ~~Debug OSD overlay~~ | ~~`star6e_runtime.c:825-835`, `star6e_pipeline.c:1106-1108`~~ | **Closed in v0.9.10 (code) + v0.9.11 (runtime)** — full Star6E parity, runtime verified live on 192.168.2.12. | — |
-| ~~IMU / BMI270~~ | ~~`star6e_pipeline.c:1084-1102` + `star6e_runtime.c:827,848,857`~~ | **No-op on this hardware** — `i2cdetect` on 192.168.2.12 shows no device at 0x68/0x69 (only 0x1a on i2c-1, audio codec). Skipped per Phase 3 Step 0. Re-probe if a BMI270-equipped Maruko board appears. | — |
+| ~~IMU / BMI270~~ | ~~`star6e_pipeline.c:1084-1102` + `star6e_runtime.c:827,848,857`~~ | **Closed in v0.9.13 (PR #84)** — BMI270 detected at 0x68 / `i2c-1` after sensor swap, port verified live: 1963 samples drained over 9 s @ 118 fps, 0 errors. Maruko-specific ordering caveat: `imu_init` must precede `bind_maruko_pipeline` / `MI_VENC_StartRecvPic` (Star6E pattern stalls the encoder fd's `poll()`). | — |
 | Live AR-change reinit | Star6E SIGHUP rebuilds VIF/VPE for AR change | `maruko_runtime.c:99-107` forces sensor mode lock to avoid ISP hang | Medium-arch |
 | `apply_mute` | `star6e_controls.c:1139` | NULL (`maruko_controls.c:1051`) — gated by audio absence | Trivial after audio lands |
 | Audio capture (MI_AI) | `star6e_audio.c` 738 lines | Inert; runtime emits "audio output is not supported" warning (`maruko_runtime.c:58-60`) | High |
 | SD card recording (HEVC + TS mux) | `star6e_recorder.c` 294 + `star6e_ts_recorder.c` 421 | No record callbacks; no `record.*` hooks in maruko runtime | High |
 | Dual VENC (Gemini mode) | `star6e_pipeline.c:1335-1426`, `star6e_runtime.c:528-555` | None | High — needs SDK probe |
-| 3A perf throttle | n/a (Star6E has cus3a; Maruko's NATIVE 3A_Proc_0 spends ~60% CPU at 120 fps) | **Implemented on `feature/maruko-cus3a-throttle`** (no-op AE adaptor + 15 Hz manual `SetAeParam`, opt-in `isp.aeMode=throttle`). PR pending after #81 lands. | Done locally |
+| 3A perf throttle | n/a (Star6E has cus3a; Maruko's NATIVE 3A_Proc_0 spends ~60% CPU at 120 fps) | **Closed in v0.9.12 (PR #83)** — opt-in `isp.aeMode="throttle"` swaps SDK NATIVE AE for a no-op AE adaptor + 15 Hz manual `SetAeParam`; saves ~24% sys CPU at 120 fps. Default `"native"` preserves existing behaviour. | — |
 
 ### N/A on Maruko (SDK-limited)
 
@@ -141,13 +141,51 @@ expected dep-preload + module-ID-34 + init-before-kthread changes:
 Recipe cross-referenced with `waybeam-hub/src/rgn_backend_maruko.c`,
 which had already verified the same pattern against the same kernel/lib.
 
-### Phase 3 — IMU / BMI270 wiring (CLOSED — no hardware)
+### Phase 3 — IMU / BMI270 wiring (DONE, v0.9.13 — Maruko ordering caveat)
 
-**Probe result on 192.168.2.12 (2026-05-02):** `i2cdetect` found no
-device at 0x68 / 0x69 across `i2c-0`/`-1`/`-2`. Only `0x1a` is present
-on `i2c-1` (audio codec). `/sys/class/input` does not exist on the
-target either.  Phase skipped; reopen if a BMI270-equipped Maruko
-board surfaces.
+**Re-probe outcome (2026-05-02, after sensor module swap on
+192.168.2.12):** BMI270 detected at `0x68` on `/dev/i2c-1` (chip ID
+`0x24`). Earlier "no IMU on this board" result was a missing/loose
+sensor pack, not a hardware-class limitation.
+
+**What shipped (PR #84, branch `feature/maruko-imu-bmi270`):**
+
+- [x] `src/imu_bmi270.c` moved from `STAR6E_ONLY_SRC` to `HELPER_SRC`
+  in the Makefile so both backends pull it in.
+- [x] `MarukoBackendConfig.imu` mirrors `VencConfig.imu`; defaulted in
+  `maruko_config_defaults`, copied through in `maruko_config_from_venc`.
+- [x] `MarukoBackendContext.imu` lifecycle wired in
+  `maruko_pipeline.{configure_graph,process_stream,teardown_graph}`:
+  `imu_init` + `imu_start` at graph configure time, `imu_drain` per
+  iteration before `MI_VENC_GetStream`, `imu_stop`/`destroy` in teardown.
+- [x] Push callback is a no-op stub (`maruko_pipeline_imu_push`) for
+  this phase — sample sink is reserved for follow-up consumers
+  (sidecar, recording, etc.).
+
+**Maruko-specific ordering caveat (worth carrying forward to any
+new "thread starts a long bring-up before VENC starts" feature):**
+
+- On Star6E, IMU init is fine *after* `bind_maruko_pipeline` /
+  `MI_VENC_StartRecvPic`.
+- On Maruko (this hardware, OpenIPC libmi_venc), running the
+  ~2 s BMI270 auto-bias loop **after** `MI_VENC_StartRecvPic` leaves the
+  VENC fd in a state where `poll(POLLIN)` never wakes — the stream loop
+  prints "waiting for encoder data..." indefinitely (observed 12 s +).
+- Cure: call `imu_init` *before* `bind_maruko_pipeline` in
+  `maruko_pipeline_configure_graph`. With `calSamples=400` the encoder
+  recovers cleanly: live test showed 1963 IMU samples drained over 9 s
+  at 118 fps with 0 errors and clean teardown.
+- A short calibration window (`calSamples=50`, ~250 ms) also worked,
+  but the ordering fix is the proper cure rather than rationing the
+  sample count.
+- Inline comment in `maruko_pipeline.c:configure_graph` documents the
+  constraint so a future cleanup that "unifies" the lifecycle order
+  doesn't silently re-introduce the stall.
+
+**Verified on 192.168.2.12** (OpenIPC SSC378QE / IMX415, BMI270):
+`json_cli -s 'imu.enabled=true'` followed by `venc -c /etc/venc.json`,
+9 s capture, 1963 IMU samples, 0 errors, encoder steady at 118 fps,
+no warnings during teardown.
 
 ### Phase 4 — Sensor-mode unlock on reinit (medium-architectural, plan ahead)
 
@@ -216,24 +254,22 @@ Mode/fps mapping, direct ISP-bin load stability, >30fps verification. The
 `CURRENT_STATUS` says "deferred until newer driver." Keep deferred, but
 probe at the start of each phase to see if a newer driver landed.
 
-### Phase 9 — CPU perf: opt-in 3A throttle (READY ON BRANCH, separate PR)
+### Phase 9 — CPU perf: opt-in 3A throttle (DONE, v0.9.12 — PR #83)
 
-Lives on `feature/maruko-cus3a-throttle` (4 commits, v0.9.11/v0.9.12 on
-the original branch — needs rebase onto post-#81 master).  Replaces the
-SDK `3A_Proc_0` thread (NATIVE algorithm running at sensor frame rate)
-with a no-op AE adaptor registered via `CUS3A_RegInterfaceEX(ADAPTOR_1)`
-and a 15 Hz supervisory thread that drives AE manually via
-`MI_ISP_CUS3A_SetAeParam`.  AWB stays on the SDK NATIVE path.  Saves
-~24% sys CPU at 120 fps on Cortex-A7 (60% → 36% sys); IQ knobs still
-respond instantly because `MI_ISP_EnableUserspace3A` keeps the IQ→HW
-pump alive.
+Shipped as PR #83 (`feature/maruko-cus3a-throttle`, stacked on PR #81).
+Replaces the SDK `3A_Proc_0` thread (NATIVE algorithm running at sensor
+frame rate) with a no-op AE adaptor registered via
+`CUS3A_RegInterfaceEX(ADAPTOR_1)` and a 15 Hz supervisory thread that
+drives AE manually via `MI_ISP_CUS3A_SetAeParam`. AWB stays on the SDK
+NATIVE path. Saves ~24% sys CPU at 120 fps on Cortex-A7 (60% → 36% sys);
+IQ knobs still respond instantly because `MI_ISP_EnableUserspace3A`
+keeps the IQ→HW pump alive.
 
-- Opt-in via new config field `isp.aeMode = "throttle"`; default
+- Opt-in via config field `isp.aeMode = "throttle"`; default
   `"native"` preserves existing behaviour and gives a safety hatch if a
   different sensor / firmware breaks the no-op adaptor.
-- Standalone PR target.  Should ship **after** PR #81 merges so the
-  rebase is small (no source-file overlap with Phases 1/2/2b; only
-  HISTORY/VERSION renumber).
+- Verified on 192.168.2.12: `native` ~50% CPU, `throttle` ~36% CPU at
+  120 fps.
 
 ---
 
@@ -250,29 +286,33 @@ Revisit and rewrite this plan if any of these happen:
 3. New Maruko driver lands during the work → reorder Phase 8 sensor-depth
    ahead of audio if it unblocks higher-FPS streaming (more user-visible
    than audio).
-4. A BMI270-equipped Maruko board appears → reopen Phase 3.
+4. A BMI270-equipped Maruko board appears → reopen Phase 3. **(Done —
+   board appeared 2026-05-02, Phase 3 closed in v0.9.13.)**
 
 ## Open work / next decision point
 
-After Phases 1, 2, 2b, and 3 settle (Phase 3 closed without code),
-the next agenda items in priority order are:
+Phases 1, 2, 2b, 3, and 9 are closed. Live PRs: #81 (Phases 1/2/2b),
+#83 (Phase 9), #84 (Phase 3). Next agenda in priority order:
 
-1. **Phase 0 housekeeping** — `CURRENT_STATUS_AND_NEXT_STEPS.md` and
-   `DUAL_BACKEND_SPLIT_PLAN.md` cleanup.  Mechanical, ~30 min.
-2. **Phase 9 PR (cus3a throttle)** — already implemented on
-   `feature/maruko-cus3a-throttle`; needs rebase + dedicated PR.  Low
-   risk, opt-in, easy review.
-3. **Choose architectural follow-up.**  Phase 4 (live AR-change
-   reinit, medium-arch) unblocks per-channel resolution and is a
-   prerequisite for clean Phase 6 recording.  Phase 5 (audio) is the
-   biggest standalone gap but is independent of Phase 4/6/7.  Phase 7
-   (dual-VENC probe) is cheap to *probe* and tells us whether to
-   commit to Phase 6's "record at any resolution" goal.
+1. **Phase 7 dual-VENC SDK probe** — cheap (1 day spike) but its
+   outcome fans out to Phase 6's recording architecture (record-only
+   single-VENC vs concurrent stream+record). Stand up
+   `MI_VENC_CreateChn(1, ...)` after channel 0 is running on
+   `192.168.2.12` and report success / `-1`. No production wiring
+   needed for the probe; if green, Phase 7 port follows.
+2. **Phase 4 (live AR-change reinit)** — medium-arch, unblocks
+   per-channel resolution and is a prerequisite for clean Phase 6
+   recording. Step 0 (reproduce + capture dmesg + venc.log) is the
+   cheap part; the sysfs-clock trick from Star6E may or may not
+   transplant. Re-evaluation gate kicks in if investigation > 3 days.
+3. **Phase 5 (audio)** — biggest standalone gap (Opus/G.711 + MI_AI
+   shim). Independent of Phase 4/6/7, so can run in parallel with the
+   Phase 7 probe if hardware bandwidth allows.
 
-Recommendation: do Phase 0 + Phase 9 PR first (cheap), then probe
-Phase 7 (1 day spike — `MI_VENC_CreateChn(1, ...)` after channel 0 is
-running) before committing to Phase 4/5/6, because the probe outcome
-fans out to Phase 6's architecture.
+Recommendation: probe Phase 7 next (it gates Phase 6's architecture),
+then pick Phase 4 or Phase 5 based on user-visible priority. Phase 5
+is more visible to end users; Phase 4 unblocks more downstream
+features.
 
 ## Architectural notes worth carrying
 
