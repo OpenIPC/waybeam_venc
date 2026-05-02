@@ -30,8 +30,8 @@ several places (see "Surprises vs docs" below).
 | ~~Debug OSD overlay~~ | ~~`star6e_runtime.c:825-835`, `star6e_pipeline.c:1106-1108`~~ | **Closed in v0.9.10 (code) + v0.9.11 (runtime)** — full Star6E parity, runtime verified live on 192.168.2.12. | — |
 | ~~IMU / BMI270~~ | ~~`star6e_pipeline.c:1084-1102` + `star6e_runtime.c:827,848,857`~~ | **Closed in v0.9.13 (PR #84)** — BMI270 detected at 0x68 / `i2c-1` after sensor swap, port verified live: 1963 samples drained over 9 s @ 118 fps, 0 errors. Maruko-specific ordering caveat: `imu_init` must precede `bind_maruko_pipeline` / `MI_VENC_StartRecvPic` (Star6E pattern stalls the encoder fd's `poll()`). | — |
 | Live AR-change reinit | Star6E SIGHUP rebuilds VIF/VPE for AR change | `maruko_runtime.c:99-107` forces sensor mode lock to avoid ISP hang | Medium-arch |
-| `apply_mute` | `star6e_controls.c:1139` | NULL (`maruko_controls.c:1051`) — gated by audio absence | Trivial after audio lands |
-| Audio capture (MI_AI) | `star6e_audio.c` 738 lines | Inert; runtime emits "audio output is not supported" warning (`maruko_runtime.c:58-60`) | High |
+| ~~`apply_mute`~~ | ~~`star6e_controls.c:1139`~~ | **Closed in v0.9.15** — `apply_mute = maruko_audio_apply_mute` (`maruko_controls.c`). | — |
+| ~~Audio capture (MI_AI)~~ | ~~`star6e_audio.c` 738 lines~~ | **Closed in v0.9.15** — full Phase 5 port: vendor `libmi_ai.so` / `libmi_ao.so`, new `maruko_ai_impl` shim, new `src/maruko_audio.c` against the i6c `Open/AttachIf/EnableChnGroup/Read/ReleaseData` API.  Shared `audio_codec.{c,h}` helper hosts Opus / G.711 / stdout-filter for both backends.  Maruko TS files automatically gain audio PMT when capture is active. | — |
 | ~~TS recording (mirror + dual)~~ | ~~`star6e_ts_recorder.c` 421 + `ts_mux.c` 430~~ | **Closed in v0.9.14** — promoted recorder sources to shared `RECORDER_SRC`, added `src/maruko_ts_recorder.c` adapter for `i6c_venc_strm`, wired `mode="mirror"` (chn 0) and `mode="dual"` (chn 1). Raw `.hevc` mode + HTTP record start/stop deferred to Phase 6.5. | — |
 | Dual VENC (Gemini mode) | `star6e_pipeline.c:1335-1426`, `star6e_runtime.c:528-555` | None | High — needs SDK probe |
 | 3A perf throttle | n/a (Star6E has cus3a; Maruko's NATIVE 3A_Proc_0 spends ~60% CPU at 120 fps) | **Closed in v0.9.12 (PR #83)** — opt-in `isp.aeMode="throttle"` swaps SDK NATIVE AE for a no-op AE adaptor + 15 Hz manual `SetAeParam`; saves ~24% sys CPU at 120 fps. Default `"native"` preserves existing behaviour. | — |
@@ -205,21 +205,54 @@ into a corner.
   skip it and proceed to Phase 5 — Maruko users keep restart-required mode
   switching. Document the decision in `HISTORY.md`.
 
-### Phase 5 — MI_AI shim + audio capture port (≈3-4 days)
+### Phase 5 — MI_AI shim + audio capture port (DONE, v0.9.15)
 
-**Architectural prep:** Maruko's MI shim layer (`maruko_mi.c`) currently
-dlopens `MI_VENC`, `MI_VIF`, `MI_VPE`, `MI_ISP`, `MI_SCL`, `MI_SYS`.
-Audio adds `MI_AI` + `MI_AO`.
+The i6c MI_AI ABI turned out NOT to be a renamed Star6E API: it uses
+`(devId, chnGrpIdx, channel-array)` with `MI_AI_Open`/`AttachIf`/
+`Read`/`ReleaseData`, totally different from Star6E's `MI_AI_Enable`/
+`SetPubAttr`/`EnableChn`/`GetFrame`.  Capture state machine is
+Maruko-specific (`src/maruko_audio.c`); only the encode/output side
+(Opus + G.711 + stdout filter) was lifted into a new shared helper
+(`src/audio_codec.{c,h}`).
 
-- [ ] Extend `maruko_mi.{c,h}` with `MI_AI` symbol table (mirror
-  `star6e_mi.c`).
-- [ ] Vendor `libmi_ai.so` / `libmi_ao.so` (i6c) under `libs/maruko/`.
-- [ ] Port `star6e_audio.c` ↔ `maruko_audio.c`. Most of the file is
-  SDK-agnostic ring buffer + Opus / G.711 encoding; only
-  `MI_AI_GetFrame`/`SetFrame` calls change shape.
-- [ ] Bind `apply_mute` callback in `maruko_controls.c:1051`.
-- [ ] Add audio_ring → output_socket plumbing.
-- **Verify:** Opus + PCM both reach `192.168.2.2` audio_port on bench.
+What shipped:
+- [x] `maruko_ai_impl` added to `include/maruko_mi.h` /
+  `src/maruko_mi.c`.  Loads `libmi_ai.so` with `RTLD_LAZY|RTLD_GLOBAL`
+  and tolerates absence (audio disables, rest of pipeline keeps running).
+- [x] Vendored `vendor-libs/maruko/libmi_ai.so` (110 KB) +
+  `libmi_ao.so` (85 KB) from the SDK uClibc bundle.  Bench's
+  monolithic `mi.ko` (2.1 MB) already exposes `/dev/mi_ai` and
+  `/proc/mi_modules/mi_ai`, so no kmod insmod is needed.
+- [x] `include/maruko_ai_types.h` — small set of MI_AI types copied
+  verbatim from SDK headers (Attr / Data / Format / SoundMode / If).
+- [x] `src/maruko_audio.c` (~510 LOC) — capture thread on `SCHED_FIFO`,
+  encode thread reusing shared codec helpers, RTP / compact UDP send
+  via a thin `MarukoAudioOutput` (port_override → dedicated socket;
+  port=0 → share video target).
+- [x] `MarukoBackendConfig` mirrors `vcfg->audio` + `audio_port` +
+  `max_payload_size` so the pipeline doesn't see `VencConfig`.
+- [x] `MarukoBackendContext` gets `audio` (state) +
+  `audio_recorder_ring` (encoder→TS bridge).  Init after
+  `bind_maruko_pipeline`, teardown after `stop_dual` and
+  `ts_recorder_stop` so no consumer races the ring destroy.
+- [x] `maruko_controls.c` binds `apply_mute = maruko_apply_mute` →
+  `maruko_audio_apply_mute` → `MI_AI_SetMute(0, 0, [bool], 1)`.
+- [x] `star6e_audio.c` migrated to the shared `audio_codec.{c,h}`
+  helpers — `Star6eAudioState.opus_lib` / `opus_enc` replaced by
+  `AudioCodecOpus opus`, no behavioural change on Star6E.
+- [x] Phase 6 TS recorder picks up audio automatically: `ts_recorder_init`
+  is called with `(audio.sample_rate, audio.channels)` when capture
+  is active, and `ts_recorder_start` is given
+  `&ctx->audio_recorder_ring` so PMT advertises an audio PID and the
+  existing `ts_mux_write_audio` path interleaves PCM frames.
+
+Caveats:
+- SSC378QE bench's analog mic wiring is unverified.  Init succeeds and
+  `MI_AI_Read` returns frames; whether they contain real audio depends
+  on the board's codec/mic hookup.  The pipeline path itself is fully
+  exercised regardless.
+- `libmi_ao.so` is vendored alongside but no playback path is wired —
+  reserved for a future Phase 5b.
 
 ### Phase 6 — TS recording (DONE for `mirror` + `dual`, v0.9.14)
 

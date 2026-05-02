@@ -1,5 +1,69 @@
 # History
 
+## [0.9.15] - 2026-05-02
+
+Maruko parity Phase 5 — audio capture (Opus / G.711 / raw PCM).
+
+Closes the last big standalone parity gap: Maruko now captures PCM via the
+i6c MI_AI ABI, encodes via the shared codec helpers, and ships the result
+as RTP (or compact UDP) on `outgoing.audioPort`.  The Phase 6 TS recorder
+automatically picks up audio when capture is active — PMT advertises an
+audio PID and PCM frames are interleaved by the existing `ts_mux_write_audio`
+path that Star6E was already wired to.
+
+What ships:
+- `vendor-libs/maruko/libmi_ai.so` (110 KB) and `libmi_ao.so` (85 KB),
+  pulled from the SDK uClibc bundle.  AO is reserved for a future Phase 5b
+  playback path.  MD5SUMS + README updated.
+- New `include/maruko_ai_types.h` carrying the small set of MI_AI types
+  used at runtime (Attr / Data / Format / SoundMode / SampleRate / If),
+  copied verbatim from the SDK headers so the build stays SDK-header-free.
+- New `maruko_ai_impl` shim in `include/maruko_mi.h` + `src/maruko_mi.c`.
+  Symbol set: `MI_AI_InitDev` / `DeInitDev` / `Open` / `Close` /
+  `AttachIf` / `EnableChnGroup` / `DisableChnGroup` / `Read` /
+  `ReleaseData` / `SetMute` / `SetGain` / `SetIfGain`.  Loaded with
+  `RTLD_LAZY|RTLD_GLOBAL` and tolerates absence — no `libmi_ai.so` →
+  audio disabled but the rest of the pipeline runs unchanged.
+- New `src/maruko_audio.c` (~510 LOC) — full capture state machine:
+  `Open(dev=0)` + `AttachIf(ADC_AB)` + `SetGain` + `SetMute` +
+  `SetChnOutputPortDepth` + `EnableChnGroup`; capture thread on
+  `SCHED_FIFO` doing `MI_AI_Read(0, 0, &mic, &echo, 50)` → push
+  PCM into the shared `audio_ring`; encode thread does Opus / G.711 /
+  L16 byte-swap and ships via RTP packetizer or compact UDP.
+- New shared helper `src/audio_codec.{c,h}` — extracted Opus / G.711
+  encoders + stdout filter (singleton, refcounted) from
+  `src/star6e_audio.c`, ~250 LOC moved.  Star6E side switched to the
+  shared helpers; `Star6eAudioState.opus_lib` / `opus_enc` replaced
+  by the new `AudioCodecOpus opus`.  No behavioural change on Star6E.
+- `MarukoBackendConfig` mirrors `vcfg->audio` + `vcfg->outgoing.audio_port`
+  + `outgoing.max_payload_size` so the pipeline can call
+  `maruko_audio_init` without taking a `VencConfig` dependency.
+- `MarukoBackendContext` gains `audio` (state) + `audio_recorder_ring`
+  (bridge from audio encode thread to TS recorder).  Init in
+  `maruko_pipeline_configure_graph` after `bind_maruko_pipeline`,
+  teardown in `maruko_pipeline_teardown_graph` after `stop_dual` and
+  `ts_recorder_stop` so no consumer can race the ring teardown.
+- `apply_mute = maruko_audio_apply_mute` in `maruko_controls.c`,
+  closing the trivial-after-audio-lands gap from the parity matrix.
+- Replaced the `maruko_runtime.c:58-60` "audio output is not supported"
+  warning with the live init call.
+
+Verify gate:
+- `make verify` passes both backends.
+- Bench (192.168.2.12, IMX415): `audio.enabled=true`,
+  `audio.codec=opus|g711a|pcm` → `[audio] Initialized` + RTP arrives on
+  the configured destination port.  Mute toggle via
+  `/api/v1/set?audio.mute=true` cuts audio cleanly.
+
+Caveats:
+- The SSC378QE bench's analog mic wiring is unverified.  `MI_AI_Open`
+  succeeds and `MI_AI_Read` returns frames, but the actual codec on this
+  board may not be wired to a microphone — capture may yield silence.
+  The init path still completes successfully so the userspace pipeline
+  itself is exercised; an analog mic is a separate hardware fix-up.
+- AO (playback) is intentionally not exposed yet — reserved for a
+  future Phase 5b once a use case appears.
+
 ## [0.9.14] - 2026-05-02
 
 Maruko parity Phase 6 — TS recording (`record.mode="mirror"` / `"dual"`).

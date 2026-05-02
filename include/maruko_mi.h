@@ -123,6 +123,32 @@ typedef struct {
 	int (*fnGetFrameLostStrategy)(int dev, int chn, void *strategy);
 } maruko_venc_impl;
 
+/* MI_AI (audio input) — i6c surface differs from Star6E:
+ * (devId, chnGrpIdx, channel-array) instead of (device, channel).  See
+ * `include/maruko_ai_types.h` for the data structures.  The lib is loaded
+ * lazily (RTLD_LAZY) — it pulls in __assert / fopen / getenv etc. that the
+ * other vendor libs also reference unconditionally, and which only need to
+ * resolve if the library actually invokes them. */
+typedef struct {
+	void *handle;
+	int (*fnInitDev)(void *init_param);
+	int (*fnDeInitDev)(void);
+	int (*fnOpen)(int devId, const void *attr);
+	int (*fnClose)(int devId);
+	int (*fnAttachIf)(int devId, const int *ifaces, uint8_t count);
+	int (*fnEnableChnGroup)(int devId, uint8_t grpIdx);
+	int (*fnDisableChnGroup)(int devId, uint8_t grpIdx);
+	int (*fnRead)(int devId, uint8_t grpIdx, void *mic_data,
+		void *echo_data, int timeout_ms);
+	int (*fnReleaseData)(int devId, uint8_t grpIdx, void *mic_data,
+		void *echo_data);
+	int (*fnSetMute)(int devId, uint8_t grpIdx, const int *mutes,
+		uint8_t count);
+	int (*fnSetGain)(int devId, uint8_t grpIdx, const int8_t *gains,
+		uint8_t count);
+	int (*fnSetIfGain)(int iface, int8_t leftDb, int8_t rightDb);
+} maruko_ai_impl;
+
 /* Global instances — defined in maruko_mi.c */
 extern maruko_sys_impl  g_mi_sys;
 extern maruko_vif_impl  g_mi_vif;
@@ -130,6 +156,7 @@ extern maruko_snr_impl  g_mi_snr;
 extern maruko_venc_impl g_mi_venc;
 extern maruko_isp_impl  g_mi_isp;
 extern maruko_scl_impl  g_mi_scl;
+extern maruko_ai_impl   g_mi_ai;
 
 /* Load all MI libraries. Returns 0 on success, -1 on failure.
  * Must be called before any MI_* macro is used. */

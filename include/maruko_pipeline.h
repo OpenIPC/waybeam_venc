@@ -2,6 +2,7 @@
 #define MARUKO_PIPELINE_H
 
 #include "imu_bmi270.h"
+#include "maruko_audio.h"
 #include "maruko_bindings.h"
 #include "maruko_config.h"
 #include "maruko_output.h"
@@ -46,6 +47,13 @@ typedef struct {
    * mirror mode the chn 0 frame loop drives it; in dual mode the chn 1
    * drain thread does. */
   Star6eTsRecorderState ts_recorder;
+  /* Audio capture + RTP/UDP output (Phase 5).  Inactive when
+   * audio.enabled=false or libmi_ai.so is missing. */
+  MarukoAudioState audio;
+  /* Bridge from audio encode thread to TS recorder.  Owned here, not
+   * inside the audio state, so init/teardown can be sequenced
+   * independently of audio init failures. */
+  AudioRing audio_recorder_ring;
 } MarukoBackendContext;
 
 /** Initialize Maruko pipeline state and load SDK libraries. */
