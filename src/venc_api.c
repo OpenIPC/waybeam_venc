@@ -1784,7 +1784,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.3.0\","
+		"\"contract_version\":\"0.8.3\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2094,6 +2094,23 @@ static int handle_transport_status(int fd, const HttpRequest *req, void *ctx)
 	return ret;
 }
 
+static int handle_audio_status(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+	if (!g_cb || !g_cb->query_audio_status) {
+		return httpd_send_error(fd, 501, "not_implemented",
+			"audio status not available on this backend");
+	}
+	char *text = g_cb->query_audio_status();
+	if (!text) {
+		return httpd_send_error(fd, 500, "internal_error",
+			"audio status query failed");
+	}
+	int ret = httpd_send_json(fd, 200, text);
+	free(text);
+	return ret;
+}
+
 static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
 {
 	VencConfig snapshot;
@@ -2155,11 +2172,25 @@ static int handle_idr(int fd, const HttpRequest *req, void *ctx)
 
 /* ── Record control endpoints ────────────────────────────────────────── */
 
+/* Star6E registers `g_record_status_fn` during runtime init; Maruko does
+ * not yet (Phase 6.5 backlog).  Treat the callback's presence as the
+ * proxy for "this backend has runtime polling for HTTP record control,"
+ * so /record/start|stop don't lie with `{"ok":true}` on backends that
+ * silently drop the request. */
+static int record_http_supported(void)
+{
+	return g_record_status_fn != NULL;
+}
+
 static int handle_record_start(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)ctx;
 	char dir[256] = {0};
 	char dummy[4];
+
+	if (!record_http_supported())
+		return httpd_send_error(fd, 501, "not_implemented",
+			"HTTP record control not available on this backend");
 
 	/* Optional ?dir=/path query parameter */
 	if (req->query[0]) {
@@ -2197,6 +2228,9 @@ static int handle_record_start(int fd, const HttpRequest *req, void *ctx)
 static int handle_record_stop(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
+	if (!record_http_supported())
+		return httpd_send_error(fd, 501, "not_implemented",
+			"HTTP record control not available on this backend");
 	venc_api_request_record_stop();
 	return httpd_send_ok(fd, "{\"action\":\"stop\"}");
 }
@@ -2557,6 +2591,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/modes",        handle_modes, NULL);
 	r |= venc_httpd_route("GET", "/metrics/isp",         handle_isp_metrics, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/transport/status", handle_transport_status, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/audio/status", handle_audio_status, NULL);
 	r |= venc_httpd_route("GET", "/request/idr",         handle_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/record/start",  handle_record_start, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/record/stop",   handle_record_stop, NULL);

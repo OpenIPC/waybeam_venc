@@ -1126,6 +1126,14 @@ static char *query_transport_status(void)
 	return strdup(buf);
 }
 
+static char *query_audio_status(void)
+{
+	Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
+	if (!ps)
+		return NULL;
+	return star6e_audio_query_status(&ps->audio);
+}
+
 static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_bitrate = apply_bitrate,
 	.apply_fps = apply_fps,
@@ -1147,6 +1155,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_iq_param = star6e_iq_set,
 	.apply_max_payload_size = apply_max_payload_size,
 	.query_transport_status = query_transport_status,
+	.query_audio_status = query_audio_status,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)
