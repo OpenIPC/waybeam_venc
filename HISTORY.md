@@ -1,5 +1,52 @@
 # History
 
+## [0.9.14] - 2026-05-02
+
+Maruko parity Phase 6 — TS recording (`record.mode="mirror"` / `"dual"`).
+
+Lights up on-device TS-mux recording on Maruko by reusing the Star6E
+TS recorder state machine.  Two modes wired:
+
+- **mirror**: chn 0 frames are written to the .ts file alongside the
+  RTP stream.  Single encoder, simplest case.
+- **dual**: chn 1 (created via Phase 7's `start_dual()`) drains into
+  the .ts file while chn 0 keeps streaming RTP to the configured
+  destination.  The chn 1 drain thread feeds the recorder; the chn 0
+  loop is guarded so it never co-writes.
+
+Audio is video-only for now (no audio backend on Maruko — Phase 5).
+Raw `.hevc` format is rejected with a warning; only `format="ts"` is
+implemented.
+
+Implementation notes:
+- Promoted `src/star6e_recorder.c`, `src/star6e_ts_recorder.c`,
+  `src/ts_mux.c` from `STAR6E_ONLY_SRC` to a new `RECORDER_SRC` list
+  built by both backends.  No `#ifdef PLATFORM_*` was needed — the
+  files only depend on type names from `star6e.h`, which Maruko
+  already pulls in for `MI_SYS_ChnPort_t`.
+- Added a small adapter `src/maruko_ts_recorder.c` that pulls NAL
+  units out of `i6c_venc_strm` (Maruko) and feeds the shared
+  `star6e_ts_recorder_write_video()` primitive.  Mirrors
+  `star6e_ts_recorder_write_stream()` 1:1.
+- `MarukoBackendConfigRecord` extended with `dir`, `format`,
+  `max_seconds`, `max_mb` (already present on the generic
+  `VencConfigRecord`).
+- New `Star6eTsRecorderState ts_recorder` field on
+  `MarukoBackendContext`; opened in `configure_graph` after
+  `start_dual` so the drain thread sees it ready.  Closed in
+  `teardown_graph` after `stop_dual` (no race window).
+
+Verified on 192.168.2.12 (OpenIPC SSC378QE / IMX415, no SD card —
+written to `/tmp` tmpfs).  Live test pending in the next session.
+
+Out of scope for this PR (deferred):
+- Raw `.hevc` recorder on Maruko (the `_write_frame` adapter still
+  takes Star6E's `MI_VENC_Stream_t`; will land alongside Phase 5
+  audio if anyone wants it).
+- HTTP `/api/v1/record/start|stop` for Maruko (daemon-config-driven
+  only for now).
+- Audio mux into the TS container (Phase 5).
+
 ## [0.9.13] - 2026-05-02
 
 Maruko parity Phase 3 — BMI270 IMU port (opt-in via `imu.enabled`).

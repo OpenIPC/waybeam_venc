@@ -13,17 +13,22 @@ typedef enum {
 	MARUKO_STREAM_RTP = 1,
 } MarukoStreamMode;
 
-/* Subset of VencConfigRecord that the Maruko backend currently honours.
- * dual-stream (chn 1 → UDP) is the only mode wired today; the on-device
- * recording variants ("mirror", "dual" with TS/HEVC mux) are Phase 6
- * territory and live in VencConfigRecord on the generic side. */
+/* Subset of VencConfigRecord honoured by the Maruko backend.
+ * Phase 6 lights up "mirror" (chn 0 → TS) and "dual" (chn 1 → TS) on top
+ * of the existing "dual-stream" (chn 1 → UDP) and "off" modes.  Audio mux
+ * and raw .hevc format are still Phase 5/6.5 territory — TS-only on
+ * Maruko for now. */
 typedef struct {
 	int enabled;
-	char mode[16];          /* "off", "dual-stream" (others: pass-through-ignored) */
-	char server[128];       /* dual-stream destination URI */
+	char mode[16];          /* "off", "mirror", "dual", "dual-stream" */
+	char dir[256];          /* output directory for TS recordings */
+	char format[16];        /* "ts" (only TS supported on Maruko today) */
+	char server[256];       /* dual-stream destination URI */
 	uint32_t bitrate;       /* chn 1 bitrate kbps, 0 = match chn 0 */
 	uint32_t fps;           /* chn 1 fps, 0 = match sensor */
 	double gop_size;        /* chn 1 GOP in seconds, 0 = match chn 0 */
+	uint32_t max_seconds;   /* segment rotation, 0 = no time limit */
+	uint32_t max_mb;        /* segment rotation, 0 = no size limit */
 	int frame_lost;         /* mirror video0.frame_lost on chn 1 */
 } MarukoBackendConfigRecord;
 

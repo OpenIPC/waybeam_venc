@@ -44,6 +44,9 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	memset(&cfg->imu, 0, sizeof(cfg->imu));
 	memset(&cfg->record, 0, sizeof(cfg->record));
 	snprintf(cfg->record.mode, sizeof(cfg->record.mode), "%s", "off");
+	snprintf(cfg->record.format, sizeof(cfg->record.format), "%s", "ts");
+	cfg->record.max_seconds = 300;
+	cfg->record.max_mb = 500;
 }
 
 int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
@@ -114,11 +117,17 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->record.enabled = vcfg->record.enabled ? 1 : 0;
 	snprintf(cfg->record.mode, sizeof(cfg->record.mode), "%s",
 		vcfg->record.mode);
+	snprintf(cfg->record.dir, sizeof(cfg->record.dir), "%s",
+		vcfg->record.dir);
+	snprintf(cfg->record.format, sizeof(cfg->record.format), "%s",
+		vcfg->record.format[0] ? vcfg->record.format : "ts");
 	snprintf(cfg->record.server, sizeof(cfg->record.server), "%s",
 		vcfg->record.server);
 	cfg->record.bitrate = vcfg->record.bitrate;
 	cfg->record.fps = vcfg->record.fps;
 	cfg->record.gop_size = vcfg->record.gop_size;
+	cfg->record.max_seconds = vcfg->record.max_seconds;
+	cfg->record.max_mb = vcfg->record.max_mb;
 	cfg->record.frame_lost = vcfg->video0.frame_lost ? 1 : 0;
 
 	return 0;

@@ -9,6 +9,7 @@
 #include "maruko_controls.h"
 #include "maruko_cus3a.h"
 #include "maruko_output.h"
+#include "maruko_ts_recorder.h"
 #include "maruko_video.h"
 #include "output_socket.h"
 #include "pipeline_common.h"
@@ -1338,6 +1339,9 @@ struct MarukoDualVenc {
 	char server[128];
 	int frame_lost;
 	int is_dual_stream;
+	/* Non-NULL when mode == "dual": chn 1 frames are written here
+	 * (TS file).  Owned by MarukoBackendContext, weak ptr here. */
+	Star6eTsRecorderState *ts_recorder;
 	pthread_t thread;
 	volatile sig_atomic_t running;
 	int started_thread;
@@ -1476,9 +1480,18 @@ static void *maruko_dual_stream_thread(void *arg)
 			continue;
 		}
 
-		if (g_maruko_running && d->is_dual_stream) {
-			(void)maruko_video_send_frame(&stream, &d->output,
-				&d->rtp_state, &d->params, &ctx->cfg, NULL);
+		if (g_maruko_running) {
+			if (d->is_dual_stream) {
+				(void)maruko_video_send_frame(&stream,
+					&d->output, &d->rtp_state, &d->params,
+					&ctx->cfg, NULL);
+			} else if (d->ts_recorder) {
+				/* Skip slow SD writes during shutdown — keep
+				 * draining to prevent VPE backpressure while
+				 * pipeline tears down. */
+				(void)maruko_ts_recorder_write_stream(
+					d->ts_recorder, &stream);
+			}
 		}
 
 		(void)maruko_mi_venc_release_stream(ctx->venc_device,
@@ -1590,6 +1603,7 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	d->gop = gop_frames;
 	d->frame_lost = frame_lost;
 	d->is_dual_stream = (strcmp(mode, "dual-stream") == 0);
+	d->ts_recorder = d->is_dual_stream ? NULL : &ctx->ts_recorder;
 	snprintf(d->mode, sizeof(d->mode), "%s", mode);
 	if (server)
 		snprintf(d->server, sizeof(d->server), "%s", server);
@@ -1898,13 +1912,27 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	if (bind_maruko_pipeline(ctx) != 0)
 		return -1;
 
-	/* Phase 7: dual VENC chn 1.  Currently only "dual-stream" is wired
-	 * (chn 1 → UDP).  Started AFTER bind_maruko_pipeline succeeds — the
-	 * Phase 7 SDK probe confirmed CreateChn(dev,1,...) needs chn 0
-	 * fully bound first.  Failure is non-fatal: ctx->dual stays NULL
-	 * and the daemon continues with chn 0 only. */
+	/* TS recorder state — initialised regardless of mode so the chn 1
+	 * drain thread can call maruko_ts_recorder_write_stream() safely
+	 * (no-op while fd<0).  Audio mux is left empty (rate=0,channels=0):
+	 * Maruko has no audio backend yet so PMT advertises video only. */
+	star6e_ts_recorder_init(&ctx->ts_recorder, 0, 0);
+	if (ctx->cfg.record.max_seconds > 0)
+		ctx->ts_recorder.max_seconds = ctx->cfg.record.max_seconds;
+	if (ctx->cfg.record.max_mb > 0)
+		ctx->ts_recorder.max_bytes =
+			(uint64_t)ctx->cfg.record.max_mb * 1024 * 1024;
+
+	/* Phase 7: dual VENC chn 1.  Started AFTER bind_maruko_pipeline
+	 * succeeds — the Phase 7 SDK probe confirmed CreateChn(dev,1,...)
+	 * needs chn 0 fully bound first.  Failure is non-fatal: ctx->dual
+	 * stays NULL and the daemon continues with chn 0 only.
+	 *
+	 * Phase 6: also recognises "dual" (chn 1 → TS file) in addition to
+	 * the existing "dual-stream" (chn 1 → UDP). */
 	if (ctx->cfg.record.enabled &&
-	    strcmp(ctx->cfg.record.mode, "dual-stream") == 0 &&
+	    (strcmp(ctx->cfg.record.mode, "dual-stream") == 0 ||
+	     strcmp(ctx->cfg.record.mode, "dual") == 0) &&
 	    !ctx->dual) {
 		(void)maruko_pipeline_start_dual(ctx,
 			ctx->cfg.record.bitrate,
@@ -1913,6 +1941,30 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 			ctx->cfg.record.mode,
 			ctx->cfg.record.server,
 			ctx->cfg.record.frame_lost);
+	}
+
+	/* Phase 6: open TS file for "mirror" (chn 0 → TS) and "dual" (chn 1
+	 * → TS) modes.  Must run AFTER start_dual so that, in dual mode,
+	 * the drain thread sees ts_recorder.fd >= 0 by the time it pulls
+	 * the first chn 1 frame.  Started here so that a follow-up SIGHUP
+	 * reload that flips mode also re-opens the file.
+	 *
+	 * Format note: only "ts" is implemented on Maruko; "hevc" requires
+	 * the raw HEVC recorder which depends on the Star6E adapter — log
+	 * and decline rather than silently producing nothing. */
+	if (ctx->cfg.record.enabled && ctx->cfg.record.dir[0] &&
+	    (strcmp(ctx->cfg.record.mode, "mirror") == 0 ||
+	     strcmp(ctx->cfg.record.mode, "dual") == 0)) {
+		if (strcmp(ctx->cfg.record.format, "ts") != 0) {
+			fprintf(stderr,
+				"WARNING: [maruko] record.format '%s' not "
+				"supported (TS only) — recording disabled\n",
+				ctx->cfg.record.format);
+		} else if (star6e_ts_recorder_start(&ctx->ts_recorder,
+		    ctx->cfg.record.dir, NULL) == 0) {
+			printf("> [maruko] recording to %s (%s)\n",
+				ctx->cfg.record.dir, ctx->cfg.record.mode);
+		}
 	}
 
 	ctx->output_enabled = 1;
@@ -2262,6 +2314,14 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			MARUKO_PKTZR_VERBOSE_ACTIVE(ctx) ? &frame_pktzr : NULL);
 	}
 
+	/* Mirror mode: write chn 0 frames to the TS recorder before the
+	 * stream is released.  In dual mode the chn 1 drain thread feeds
+	 * the recorder, so chn 0 must NOT also write — concurrent writes
+	 * would interleave NAL units from two encoders into one TS file. */
+	if (!ctx->dual)
+		(void)maruko_ts_recorder_write_stream(&ctx->ts_recorder,
+			&stream);
+
 	/* Release the encoder stream immediately after the last consumer
 	 * of stream payload (maruko_video_send_frame) so the sidecar emit
 	 * and verbose printf below don't hold the VENC output slot.
@@ -2365,6 +2425,10 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 * the binding shares the VPE port with chn 0.  Tearing down chn 0
 	 * before unbinding chn 1 wedges the SDK on the next reinit. */
 	maruko_pipeline_stop_dual(ctx);
+	/* TS recorder runs after stop_dual: in dual mode the drain thread
+	 * has already exited and is no longer issuing writes, so close()
+	 * cannot race with a write().  In mirror mode no thread holds it. */
+	star6e_ts_recorder_stop(&ctx->ts_recorder);
 	/* IMU stop+destroy next — push callback is a stub so order vs
 	 * other teardown steps doesn't matter, but keeping the
 	 * stop-then-destroy split lets a future telemetry consumer slot
