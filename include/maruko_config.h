@@ -13,6 +13,20 @@ typedef enum {
 	MARUKO_STREAM_RTP = 1,
 } MarukoStreamMode;
 
+/* Subset of VencConfigRecord that the Maruko backend currently honours.
+ * dual-stream (chn 1 → UDP) is the only mode wired today; the on-device
+ * recording variants ("mirror", "dual" with TS/HEVC mux) are Phase 6
+ * territory and live in VencConfigRecord on the generic side. */
+typedef struct {
+	int enabled;
+	char mode[16];          /* "off", "dual-stream" (others: pass-through-ignored) */
+	char server[128];       /* dual-stream destination URI */
+	uint32_t bitrate;       /* chn 1 bitrate kbps, 0 = match chn 0 */
+	uint32_t fps;           /* chn 1 fps, 0 = match sensor */
+	double gop_size;        /* chn 1 GOP in seconds, 0 = match chn 0 */
+	int frame_lost;         /* mirror video0.frame_lost on chn 1 */
+} MarukoBackendConfigRecord;
+
 typedef struct {
 	uint32_t sensor_width;
 	uint32_t sensor_height;
@@ -50,6 +64,7 @@ typedef struct {
 	char ae_mode[16];       /* "native" (default) or "throttle" — see
 	                         * VencConfigIsp::ae_mode for semantics. */
 	VencConfigImu imu;
+	MarukoBackendConfigRecord record;
 } MarukoBackendConfig;
 
 /** Fill config with compiled-in defaults for Maruko backend. */

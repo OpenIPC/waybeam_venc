@@ -42,6 +42,8 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->isp_gain_max = 0;
 	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s", "native");
 	memset(&cfg->imu, 0, sizeof(cfg->imu));
+	memset(&cfg->record, 0, sizeof(cfg->record));
+	snprintf(cfg->record.mode, sizeof(cfg->record.mode), "%s", "off");
 }
 
 int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
@@ -108,6 +110,16 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s",
 		vcfg->isp.ae_mode[0] ? vcfg->isp.ae_mode : "native");
 	cfg->imu = vcfg->imu;
+
+	cfg->record.enabled = vcfg->record.enabled ? 1 : 0;
+	snprintf(cfg->record.mode, sizeof(cfg->record.mode), "%s",
+		vcfg->record.mode);
+	snprintf(cfg->record.server, sizeof(cfg->record.server), "%s",
+		vcfg->record.server);
+	cfg->record.bitrate = vcfg->record.bitrate;
+	cfg->record.fps = vcfg->record.fps;
+	cfg->record.gop_size = vcfg->record.gop_size;
+	cfg->record.frame_lost = vcfg->video0.frame_lost ? 1 : 0;
 
 	return 0;
 }
