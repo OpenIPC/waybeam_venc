@@ -23,7 +23,7 @@ typedef struct {
 	char mode[16];          /* "off", "mirror", "dual", "dual-stream" */
 	char dir[256];          /* output directory for TS recordings */
 	char format[16];        /* "ts" (only TS supported on Maruko today) */
-	char server[128];       /* dual-stream destination URI */
+	char server[256];       /* dual-stream destination URI */
 	uint32_t bitrate;       /* chn 1 bitrate kbps, 0 = match chn 0 */
 	uint32_t fps;           /* chn 1 fps, 0 = match sensor */
 	double gop_size;        /* chn 1 GOP in seconds, 0 = match chn 0 */
