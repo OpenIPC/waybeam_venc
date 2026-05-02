@@ -32,7 +32,7 @@ several places (see "Surprises vs docs" below).
 | Live AR-change reinit | Star6E SIGHUP rebuilds VIF/VPE for AR change | `maruko_runtime.c:99-107` forces sensor mode lock to avoid ISP hang | Medium-arch |
 | `apply_mute` | `star6e_controls.c:1139` | NULL (`maruko_controls.c:1051`) — gated by audio absence | Trivial after audio lands |
 | Audio capture (MI_AI) | `star6e_audio.c` 738 lines | Inert; runtime emits "audio output is not supported" warning (`maruko_runtime.c:58-60`) | High |
-| SD card recording (HEVC + TS mux) | `star6e_recorder.c` 294 + `star6e_ts_recorder.c` 421 | No record callbacks; no `record.*` hooks in maruko runtime | High |
+| ~~TS recording (mirror + dual)~~ | ~~`star6e_ts_recorder.c` 421 + `ts_mux.c` 430~~ | **Closed in v0.9.14** — promoted recorder sources to shared `RECORDER_SRC`, added `src/maruko_ts_recorder.c` adapter for `i6c_venc_strm`, wired `mode="mirror"` (chn 0) and `mode="dual"` (chn 1). Raw `.hevc` mode + HTTP record start/stop deferred to Phase 6.5. | — |
 | Dual VENC (Gemini mode) | `star6e_pipeline.c:1335-1426`, `star6e_runtime.c:528-555` | None | High — needs SDK probe |
 | 3A perf throttle | n/a (Star6E has cus3a; Maruko's NATIVE 3A_Proc_0 spends ~60% CPU at 120 fps) | **Closed in v0.9.12 (PR #83)** — opt-in `isp.aeMode="throttle"` swaps SDK NATIVE AE for a no-op AE adaptor + 15 Hz manual `SetAeParam`; saves ~24% sys CPU at 120 fps. Default `"native"` preserves existing behaviour. | — |
 
@@ -221,19 +221,46 @@ Audio adds `MI_AI` + `MI_AO`.
 - [ ] Add audio_ring → output_socket plumbing.
 - **Verify:** Opus + PCM both reach `192.168.2.2` audio_port on bench.
 
-### Phase 6 — SD card recording (≈2-3 days, depends on Phase 4-or-not)
+### Phase 6 — TS recording (DONE for `mirror` + `dual`, v0.9.14)
 
-**Architectural choice:** record-only single-VENC first; concurrent
-stream+record only after Phase 7 dual-VENC probe.
+Branch `feature/maruko-recording`, stacked on
+`feature/maruko-dual-venc-port`.  Reused the Star6E recorder state
+machine + TS mux verbatim; only the per-backend NAL extraction differs.
 
-- TS mux engine (`src/ts_mux.c`) is already platform-agnostic. Reuse it
-  directly.
-- Add `maruko_recorder.c` that mirrors `star6e_recorder.c` lifecycle but
-  binds to the single existing VENC channel (`record.mode="mirror"` only,
-  initially).
-- Wire `record_status_callback` and `/api/v1/record/*` HTTP endpoints
-  (already shared via `venc_api.c`).
-- **Verify:** TS file rotates by time + size on bench.
+- [x] Promoted `src/star6e_recorder.c`, `src/star6e_ts_recorder.c`,
+  `src/ts_mux.c` from `STAR6E_ONLY_SRC` to a shared `RECORDER_SRC`
+  list.  No `#ifdef PLATFORM_*` was needed — the files already only
+  reference type names from `star6e.h`, which Maruko's build pulls in
+  for `MI_SYS_ChnPort_t`.
+- [x] Added small adapter `src/maruko_ts_recorder.c` that pulls NAL
+  units out of `i6c_venc_strm` and feeds the shared
+  `star6e_ts_recorder_write_video()` primitive.  Mirrors
+  `star6e_ts_recorder_write_stream()` 1:1.
+- [x] `MarukoBackendConfigRecord` extended with `dir`, `format`,
+  `max_seconds`, `max_mb` (already present on the generic
+  `VencConfigRecord`).
+- [x] **mirror** mode: chn 0 frames are written to the .ts file before
+  release, alongside RTP send.  Guarded by `!ctx->dual` so dual mode
+  never co-writes.
+- [x] **dual** mode: chn 1's drain thread feeds the recorder while
+  chn 0 keeps streaming RTP.  Discriminated via `d->is_dual_stream`.
+- [x] TS recorder is initialised regardless of mode and started
+  AFTER `start_dual` so the drain thread sees a non-negative `fd` by
+  the time it pulls the first frame.  Stopped in `teardown_graph`
+  AFTER `stop_dual` (no race window).
+
+**Out of scope (deferred to follow-up PRs):**
+- Raw `.hevc` recorder on Maruko (the `_write_frame` adapter still
+  takes Star6E's `MI_VENC_Stream_t`; will land alongside Phase 5
+  audio).  TS is the only supported `format` on Maruko today.
+- HTTP `/api/v1/record/start|stop` for Maruko (daemon-config-driven
+  only for now — the Star6E HTTP path uses `record_status_callback`
+  and a `recordings_*` table that still has Star6E-specific assumptions).
+- Audio mux into the TS container (Phase 5 — Maruko has no audio
+  backend yet).
+- SD card mount on test unit 192.168.2.12 — slot's CD switch never
+  asserts (PAD6 stuck HIGH).  Verification target is `/tmp` tmpfs
+  for now.
 
 ### Phase 7 — Dual VENC probe + port (DONE; dual-stream live, dual-record awaits Phase 6)
 
@@ -325,28 +352,32 @@ Revisit and rewrite this plan if any of these happen:
 
 ## Open work / next decision point
 
-Phases 1, 2, 2b, 3, 7 (probe + port), and 9 are closed. Live
-branches/PRs: #81 (Phases 1/2/2b), #83 (Phase 9), #84 (Phase 3),
-#85 (Phase 7 probe), `feature/maruko-dual-venc-port` (Phase 7 port,
-PR pending).  Next agenda:
+Phases 1, 2, 2b, 3, 6 (`mirror` + `dual`), 7 (probe + port), and 9
+are closed. Live branches/PRs: #81 (Phases 1/2/2b), #83 (Phase 9),
+#84 (Phase 3), #85 (Phase 7 probe), `feature/maruko-dual-venc-port`
+(Phase 7 port, PR #86), `feature/maruko-recording` (Phase 6, PR
+pending).  Next agenda:
 
-1. **Phase 5 (audio)** — biggest standalone gap (Opus/G.711 + MI_AI
-   shim).  Independent of Phase 4/6, so can land any time.  Cost:
-   ~3-4 days.
-2. **Phase 6 (recording)** — TS mux + SD card writer.  With Phase 7
-   dual-VENC working, `mode="dual"` (separate record channel) is
-   directly enabled.  `mode="mirror"` (record from chn 0) is also
-   trivially supported.  Cost: ~2-3 days.  Mostly platform-agnostic
-   (`src/ts_mux.c`).
+1. **Phase 5 (audio)** — biggest remaining standalone gap (Opus/G.711
+   + MI_AI shim).  Independent of Phase 4, so can land any time.
+   Once landed, it also unlocks audio mux into the Phase 6 TS file
+   (`audio_ring → ts_mux_write_audio`) — Star6E already wires this
+   so the Maruko side is mostly the AI capture + audio_ring push.
+   Cost: ~3-4 days.
+2. **Phase 6.5 (recording follow-ups)** — small, on demand:
+   - Raw `.hevc` recorder for Maruko (mirror Star6E adapter).
+   - HTTP `/api/v1/record/start|stop` for Maruko (port the
+     `record_status_callback` + `recordings_*` paths).
+   - Adaptive bitrate while SD-bound (the dual thread already has
+     it — only matters once a real SD card is in play).
 3. **Phase 4 (live AR-change reinit)** — medium-arch, unblocks
    per-channel resolution.  Lower priority now that Phase 7
    provides a separate channel for recording at a different
    resolution.
 
-Recommendation: Phase 6 (recording) is the natural next item — it
-plugs straight into the dual-VENC plumbing just landed.  Phase 5
-(audio) is the alternative if the user wants the bigger user-visible
-feature first.
+Recommendation: Phase 5 (audio) is the natural next item — it is the
+last big user-visible parity gap and it also retroactively completes
+the Phase 6 TS file (audio PMT + interleaved PCM packets).
 
 ## Architectural notes worth carrying
 

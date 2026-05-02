@@ -7,6 +7,7 @@
 #include "maruko_output.h"
 #include "scene_detector.h"
 #include "sensor_select.h"
+#include "star6e_ts_recorder.h"
 
 #include <signal.h>
 
@@ -40,6 +41,11 @@ typedef struct {
   ImuState *imu;                    /* NULL if IMU disabled or init failed */
   /* Dual VENC (gemini-style) — heap-allocated, NULL when inactive. */
   struct MarukoDualVenc *dual;
+  /* TS recorder state.  Active when ts_recorder.fd >= 0; that is the
+   * single source of truth (see star6e_ts_recorder_is_active()).  In
+   * mirror mode the chn 0 frame loop drives it; in dual mode the chn 1
+   * drain thread does. */
+  Star6eTsRecorderState ts_recorder;
 } MarukoBackendContext;
 
 /** Initialize Maruko pipeline state and load SDK libraries. */
@@ -62,9 +68,11 @@ void maruko_pipeline_teardown(MarukoBackendContext *ctx);
 void maruko_pipeline_install_signal_handlers(void);
 
 /** Create the secondary VENC channel (chn 1) and start a thread that
- *  drains its frames onto a UDP destination.  Mirrors
- *  star6e_pipeline_start_dual() but currently only supports the
- *  "dual-stream" variant (no on-device recording — Phase 6 territory).
+ *  drains its frames.  The drain destination depends on `mode`:
+ *
+ *    - "dual-stream": send each frame as RTP to `server`.
+ *    - "dual"       : feed each frame to ctx->ts_recorder (TS file
+ *                     opened by maruko_pipeline_start_recording()).
  *
  *  Must be called AFTER bind_maruko_pipeline() has finished setting up
  *  channel 0 (the SDK probe in Phase 7 confirmed CreateChn(dev,1,...)
