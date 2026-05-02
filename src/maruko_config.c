@@ -37,6 +37,7 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->verbose = 0;
 	cfg->connected_udp = 1;  /* match VencConfig default */
 	cfg->keep_aspect = 1;    /* match VencConfig default (true) */
+	cfg->show_osd = 0;
 }
 
 int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
@@ -97,6 +98,7 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->verbose = vcfg->system.verbose ? 1 : 0;
 	cfg->connected_udp = vcfg->outgoing.connected_udp ? 1 : 0;
 	cfg->keep_aspect = vcfg->isp.keep_aspect ? 1 : 0;
+	cfg->show_osd = vcfg->debug.show_osd ? 1 : 0;
 
 	return 0;
 }

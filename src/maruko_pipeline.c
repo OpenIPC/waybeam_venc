@@ -1,5 +1,6 @@
 #include "maruko_pipeline.h"
 
+#include "debug_osd.h"
 #include "hevc_rtp.h"
 #include "idr_rate_limit.h"
 #include "isp_runtime.h"
@@ -1256,6 +1257,23 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 			ctx->cfg.image_width, ctx->cfg.image_height);
 	}
 	printf("  - 3DNR  : level %d\n", ctx->cfg.vpe_level_3dnr);
+
+	/* Debug OSD: code parity with Star6E is in place (linked + wired),
+	 * but the Maruko runtime path is blocked on this device firmware —
+	 * MI_RGN_Init triggers a kernel Oops in MI_DEVICE_Ioctl due to a
+	 * lib/kernel SDK vintage mismatch (see MARUKO_PARITY_PLAN.md
+	 * Phase 2b for the cure: RTLD_GLOBAL dep preload, MI_MODULE_ID_SCL
+	 * module ID, and OSD init before any MI worker thread).  Until that
+	 * recipe lands, opt-in is converted to a one-time warning so a stale
+	 * `debug.showOsd=true` never wedges the encode loop. */
+	if (ctx->cfg.show_osd) {
+		fprintf(stderr,
+			"WARNING: [maruko] debug.showOsd=true ignored — Maruko OSD "
+			"runtime is blocked by SDK kernel/lib vintage mismatch "
+			"(MARUKO_PARITY_PLAN.md Phase 2b).  Set showOsd=false to "
+			"silence this warning.\n");
+	}
+
 	return 0;
 }
 
@@ -1523,6 +1541,33 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			ctx->sensor.pad_id, ctx->sensor.fps, rt->frame_counter);
 	}
 
+	/* Debug OSD overlay — Star6E parity (star6e_runtime.c:825-849). */
+	if (ctx->debug_osd) {
+		static unsigned int osd_prev_frame;
+		static struct timespec osd_prev_ts;
+		static unsigned int osd_fps;
+		struct timespec osd_now;
+
+		debug_osd_begin_frame(ctx->debug_osd);
+		debug_osd_sample_cpu(ctx->debug_osd);
+
+		clock_gettime(CLOCK_MONOTONIC, &osd_now);
+		long osd_ms = (osd_now.tv_sec - osd_prev_ts.tv_sec) * 1000 +
+			(osd_now.tv_nsec - osd_prev_ts.tv_nsec) / 1000000;
+		if (osd_ms >= 1000) {
+			unsigned int df = rt->frame_counter - osd_prev_frame;
+			osd_fps = (unsigned int)(df * 1000 / (unsigned long)osd_ms);
+			osd_prev_frame = rt->frame_counter;
+			osd_prev_ts = osd_now;
+		}
+
+		debug_osd_text(ctx->debug_osd, 0, "fps", "%u", osd_fps);
+		debug_osd_text(ctx->debug_osd, 1, "cpu", "%d%%",
+			debug_osd_get_cpu(ctx->debug_osd));
+
+		debug_osd_end_frame(ctx->debug_osd);
+	}
+
 	rtp_sidecar_poll(&rt->sidecar);
 
 	uint32_t frame_rtp_ts = rt->rtp_state.timestamp;
@@ -1652,6 +1697,10 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		return;
 
 	venc_api_clear_active_precrop();
+	if (ctx->debug_osd) {
+		debug_osd_destroy(ctx->debug_osd);
+		ctx->debug_osd = NULL;
+	}
 	maruko_output_teardown(&ctx->output);
 	if (ctx->bound_vpe_venc) {
 		(void)MI_SYS_UnBindChnPort(&ctx->vpe_port, &ctx->venc_port);

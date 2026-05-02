@@ -27,7 +27,7 @@ several places (see "Surprises vs docs" below).
 | Gap | Star6E location | Maruko status | Effort |
 |---|---|---|---|
 | ~~Aspect-ratio precrop~~ | ~~`star6e_pipeline.c:338-386`~~ | **Closed in v0.9.8** — `configure_maruko_scl()` writes a centered rect via `pipeline_common_compute_precrop()` (Star6E parity); `venc_config.h:51-54` comment updated. | — |
-| Debug OSD overlay | `star6e_runtime.c:825-835`, `star6e_pipeline.c:1106-1108` | No `debug_osd` include in any maruko_*.c | **Quick win** |
+| ~~Debug OSD overlay~~ | ~~`star6e_runtime.c:825-835`, `star6e_pipeline.c:1106-1108`~~ | **Code wired in v0.9.9** (default-off); Maruko runtime path blocked by SDK kernel/lib vintage mismatch — see Phase 2b. | — |
 | IMU / BMI270 | `star6e_pipeline.c:1084-1102` + `star6e_runtime.c:827,848,857` | No `imu_bmi270` references in maruko sources | Easy if board has BMI270 |
 | Live AR-change reinit | Star6E SIGHUP rebuilds VIF/VPE for AR change | `maruko_runtime.c:99-107` forces sensor mode lock to avoid ISP hang | Medium-arch |
 | `apply_mute` | `star6e_controls.c:1139` | NULL (`maruko_controls.c:1051`) — gated by audio absence | Trivial after audio lands |
@@ -90,17 +90,53 @@ immediately fixes geometry on every non-16:9 encode.
   - 1280x720 (16:9) on 1920x1080 → no precrop, full source.
   - 4:3 with `keepAspect=false` → no precrop (legacy stretch path).
 
-### Phase 2 — Debug OSD overlay (≤½ day, quick win)
+### Phase 2 — Debug OSD overlay (CODE LANDED v0.9.9; runtime blocked)
 
-**Why now:** trivial diagnostic visibility win; pattern is copy-paste from
-Star6E.
+**Status:** code parity with Star6E is in place and Maruko `make verify`
+passes.  The opt-in flag `debug.showOsd=true` is honored end-to-end:
+`debug_osd_create()` after VENC start in
+`maruko_pipeline_configure_graph()`, per-frame
+`begin/sample_cpu/text/end_frame` in `maruko_pipeline_process_stream()`,
+`debug_osd_destroy()` at the top of `maruko_pipeline_teardown_graph()`.
+`debug_osd.c` + `debug_osd_draw.c` are now in `HELPER_SRC`.  Default-off
+behaviour leaves both backends untouched.
 
-- Add `debug_osd_create()` call in `maruko_pipeline_init()` after VENC
-  start.
-- Wire `debug_osd_begin_frame/sample_cpu/render` into `maruko_pipeline_run()`
-  per frame (mirror `star6e_runtime.c:825-835`).
-- Tear down in `maruko_pipeline_teardown()`.
-- **Verify:** OSD overlay visible in stream when `debug.osd_enabled=true`.
+**Runtime blocker (192.168.2.12 / SSC378QE OpenIPC):** invoking
+`MI_RGN_Init` triggers a kernel Oops in `MI_DEVICE_Ioctl` (kfree path)
+and wedges the venc encode loop — the **same** lib/kernel vintage
+mismatch documented in `memory/maruko_osd_render_bringup.md`.  Until
+Phase 2b ships the cure, the runtime path on Maruko is
+**safety-gated**: `debug.showOsd=true` logs a one-time warning at
+`maruko_pipeline_configure_graph()` and skips the attach so a stale
+config never hangs venc.  Replace the gate with the actual
+`debug_osd_create()` call once Phase 2b lands.
+
+### Phase 2b — Maruko OSD runtime fix (1-2 days, blocked on dep ordering work)
+
+The waybeam-hub team got Maruko OSD render working on the same hardware.
+Lift their recipe into venc:
+
+- [ ] **Pre-load deps in order** with `RTLD_NOW | RTLD_GLOBAL`:
+  `libcam_os_wrapper.so` → `libmi_common.so` → `libmi_sys.so` →
+  `libmi_rgn.so`.  None declare NEEDED entries, so lazy resolution loses
+  exported stubs from the executable.
+- [ ] **Module ID for OSD attach on Maruko is `MI_MODULE_ID_SCL` = 34**,
+  NOT `E_MI_RGN_MODID_VPE = 0` that `debug_osd.c:231` currently
+  hardcodes.  Add a build-time `#ifdef PLATFORM_MARUKO` (or pass through
+  `vpe_port` parameter properly) so the module ID matches the SCL
+  channel that Maruko binds.
+- [ ] **OpenIPC struct layout drift.**  `MI_RGN_OsdChnPortParam_t` may
+  include a trailing `stColorInvertAttr` field on Maruko.  Cross-check
+  against the OpenIPC msposd-vintage headers (vendored in
+  `waybeam-hub/vendor/sigmastar/maruko/include/`).
+- [ ] **OSD init must run before any worker thread is spawned in the
+  process.**  `MI_VENC_StartRecvPic` creates `[venc0_P0_MAIN]`
+  internally, so on Maruko `debug_osd_create()` must move ahead of
+  `maruko_start_venc()`'s recv-pic call (or VENC start).  Reorder
+  carefully and verify Star6E still works.
+- [ ] **Re-verify:** `showOsd=true` boots clean, OSD shows fps/cpu in
+  the stream, no `dmesg` Oops.  Soak 30s+ with concurrent IQ and
+  recording load.
 
 ### Phase 3 — IMU / BMI270 wiring (1 day, gated on hardware)
 

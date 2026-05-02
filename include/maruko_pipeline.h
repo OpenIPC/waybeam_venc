@@ -9,6 +9,8 @@
 
 #include <signal.h>
 
+struct DebugOsdState; /* forward declaration — see debug_osd.h */
+
 typedef struct {
   int system_initialized;
   int sensor_enabled;
@@ -32,6 +34,7 @@ typedef struct {
   SensorSelectResult sensor;
   MarukoBackendConfig cfg;
   SceneDetector scene;
+  struct DebugOsdState *debug_osd;  /* NULL if debug OSD disabled */
 } MarukoBackendContext;
 
 /** Initialize Maruko pipeline state and load SDK libraries. */

@@ -44,6 +44,7 @@ typedef struct {
 	int verbose;
 	int connected_udp;
 	int keep_aspect;
+	int show_osd;
 } MarukoBackendConfig;
 
 /** Fill config with compiled-in defaults for Maruko backend. */

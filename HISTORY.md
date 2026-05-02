@@ -1,5 +1,33 @@
 # History
 
+## [0.9.10] - 2026-05-02
+
+Maruko parity Phase 2 — debug OSD overlay wired to both backends.
+
+- **`maruko_pipeline`: debug OSD plumbed.**  Mirrors Star6E
+  (`star6e_runtime.c:825-849`):
+  `debug_osd_create()` runs at the end of
+  `maruko_pipeline_configure_graph()` after VENC bind+start (gated on
+  the new `cfg.show_osd`, sourced from `debug.showOsd`),
+  `debug_osd_begin_frame / sample_cpu / text / end_frame` runs
+  per frame inside `maruko_pipeline_process_stream()` showing fps + cpu,
+  and `debug_osd_destroy()` runs at the top of
+  `maruko_pipeline_teardown_graph()` before any unbind/stop.  Both
+  backends now share `src/debug_osd.c` + `src/debug_osd_draw.c`
+  (moved from `STAR6E_ONLY_SRC` to `HELPER_SRC`).  When
+  `debug.showOsd=false` (default) no OSD code runs on either backend.
+- **Maruko runtime path safety-gated.**  On the test target
+  (192.168.2.12, OpenIPC SSC378QE), invoking `MI_RGN_Init` triggers a
+  kernel Oops in `MI_DEVICE_Ioctl` (kfree path) and wedges the encode
+  loop — the same lib/kernel SDK vintage mismatch documented in
+  `memory/maruko_osd_render_bringup.md`.  Until Phase 2b ships the cure
+  (RTLD_GLOBAL dep preload, `MI_MODULE_ID_SCL`=34, init-before-worker-
+  thread; tracked in `documentation/MARUKO_PARITY_PLAN.md`),
+  `debug.showOsd=true` on Maruko emits a one-time warning and skips the
+  attach so a stale config never hangs venc.  Star6E behaviour is
+  unchanged.  (`src/maruko_pipeline.c`, `src/maruko_config.c`,
+  `include/maruko_config.h`, `include/maruko_pipeline.h`, `Makefile`)
+
 ## [0.9.9] - 2026-05-02
 
 Maruko parity Phase 1 — aspect-ratio precrop on the SCL stage.
