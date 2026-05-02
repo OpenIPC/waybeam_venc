@@ -235,18 +235,31 @@ stream+record only after Phase 7 dual-VENC probe.
   (already shared via `venc_api.c`).
 - **Verify:** TS file rotates by time + size on bench.
 
-### Phase 7 — Dual VENC probe + Gemini mode (≈2 days probe + ≈2 days port if green)
+### Phase 7 — Dual VENC probe + Gemini mode (PROBE PASSED 2026-05-02; port pending)
 
 **SDK probe first, port second.**
 
-- [ ] Probe: stand up a minimal test that calls
-  `MI_VENC_CreateChn(1, ...)` after channel 0 is running on Maruko. If
-  SDK rejects (returns -1) we stop.
-- [ ] If green: port `star6e_pipeline_start_dual()`
+- [x] **Probe passed on 192.168.2.12** (OpenIPC SSC378QE / IMX415,
+  branch `feature/maruko-dual-venc-probe`, env-gated via
+  `MARUKO_DUAL_VENC_PROBE=1`).  All three SDK stages returned 0 after
+  channel 0 was running:
+  - `MI_VENC_CreateChn(dev=0, chn=1, &attr)` → `ret=0`
+  - `MI_VENC_SetInputSourceConfig(chn=1, RING_DMA)` → `ret=0`
+  - `MI_VENC_StartRecvPic(chn=1)` → `ret=0`
+  Channel 0 continued streaming at 118 fps after channel 1 was torn
+  down — probe is non-disruptive.  Probe code is small (~50 lines,
+  env-gated, no production impact) and lives in
+  `maruko_start_venc()` so a future SDK refresh can be re-checked
+  with one env var.
+- [ ] Port `star6e_pipeline_start_dual()`
   (`star6e_pipeline.c:1335-1426`) + adaptive bitrate throttler
-  (`star6e_runtime.c:322-420`).
-- [ ] Re-evaluate: if dual VENC works, revisit Phase 6 to enable
-  `record.mode="dual"`/`"dual-stream"`.
+  (`star6e_runtime.c:322-420`).  Open question for the port: the
+  Maruko VPE → VENC binding goes via `maruko_mi_sys_bind_chn_port2`
+  (different ABI from Star6E `MI_SYS_BindChnPort2`); needs the same
+  `src_fps` / `dst_fps` semantics as Star6E so per-channel FPS skip
+  works.
+- [ ] Re-evaluate: with dual VENC viable, revisit Phase 6 to enable
+  `record.mode="dual"` / `"dual-stream"`.
 
 ### Phase 8 — Maruko sensor depth (deferred, driver-gated)
 
@@ -291,28 +304,30 @@ Revisit and rewrite this plan if any of these happen:
 
 ## Open work / next decision point
 
-Phases 1, 2, 2b, 3, and 9 are closed. Live PRs: #81 (Phases 1/2/2b),
-#83 (Phase 9), #84 (Phase 3). Next agenda in priority order:
+Phases 1, 2, 2b, 3, 7-probe, and 9 are closed. Live branches/PRs:
+#81 (Phases 1/2/2b), #83 (Phase 9), #84 (Phase 3),
+`feature/maruko-dual-venc-probe` (Phase 7 probe, PR pending).
+Next agenda in priority order:
 
-1. **Phase 7 dual-VENC SDK probe** — cheap (1 day spike) but its
-   outcome fans out to Phase 6's recording architecture (record-only
-   single-VENC vs concurrent stream+record). Stand up
-   `MI_VENC_CreateChn(1, ...)` after channel 0 is running on
-   `192.168.2.12` and report success / `-1`. No production wiring
-   needed for the probe; if green, Phase 7 port follows.
-2. **Phase 4 (live AR-change reinit)** — medium-arch, unblocks
-   per-channel resolution and is a prerequisite for clean Phase 6
-   recording. Step 0 (reproduce + capture dmesg + venc.log) is the
-   cheap part; the sysfs-clock trick from Star6E may or may not
-   transplant. Re-evaluation gate kicks in if investigation > 3 days.
-3. **Phase 5 (audio)** — biggest standalone gap (Opus/G.711 + MI_AI
-   shim). Independent of Phase 4/6/7, so can run in parallel with the
-   Phase 7 probe if hardware bandwidth allows.
+1. **Phase 7 dual-VENC port** — probe passed; full port now.  Mirrors
+   Star6E `start_dual()` + bind via Maruko VPE port + adaptive
+   bitrate throttler + `record.mode="dual"` config plumbing.  Cost:
+   ~2 days.  Needs to land alongside or before Phase 6 because the
+   recording mode selector picks between "mirror chn 0" and
+   "dedicated record chn 1".
+2. **Phase 5 (audio)** — biggest standalone gap (Opus/G.711 + MI_AI
+   shim).  Independent of Phase 4/6/7, so can run in parallel with
+   Phase 7 port if hardware bandwidth allows.
+3. **Phase 4 (live AR-change reinit)** — medium-arch, unblocks
+   per-channel resolution.  Prerequisite for clean Phase 6 recording
+   only if record/stream want different resolutions; with dual VENC
+   working that pressure is reduced.  Step 0 (reproduce ISP hang +
+   capture dmesg + venc.log) is the cheap part.
 
-Recommendation: probe Phase 7 next (it gates Phase 6's architecture),
-then pick Phase 4 or Phase 5 based on user-visible priority. Phase 5
-is more visible to end users; Phase 4 unblocks more downstream
-features.
+Recommendation: pick Phase 5 (audio) next.  Phase 7 port is now de-
+risked but still ~2 days of careful binding work; audio is bigger
+but independent and more user-visible.  Order is genuinely a user
+priority call now that the probe outcome is known.
 
 ## Architectural notes worth carrying
 
