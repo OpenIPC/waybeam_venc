@@ -78,6 +78,18 @@ int httpd_query_param(const HttpRequest *req, const char *key,
 int httpd_send_file(int client_fd, const char *path,
 	const char *content_type, const char *download_name);
 
+/* Parse Content-Length anchored at the start of a header line.  An
+ * unanchored substring search would also match values like
+ *   X-Foo: content-length: 9999
+ * which is a request-smuggling vector.  headers_start points to the
+ * first byte of the first header line.  headers_end points to the
+ * byte just past the last header line's terminator (i.e. the first
+ * byte of the trailing empty CRLF that delimits the body).  Returns
+ * the parsed value, clamped to [0, HTTPD_MAX_BODY-1]; returns 0 if
+ * no Content-Length header is present.  Exposed for unit testing. */
+int httpd_parse_content_length(const char *headers_start,
+	const char *headers_end);
+
 #ifdef __cplusplus
 }
 #endif
