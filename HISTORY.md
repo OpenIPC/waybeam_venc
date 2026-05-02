@@ -1,5 +1,57 @@
 # History
 
+## [0.9.12] - 2026-05-02
+
+Maruko parity Phase 9 — opt-in 3A CPU throttle (`isp.aeMode`).
+
+The 1080p120 H.265 25 Mbps profile burned ~62% of a single Cortex-A7
+core on Maruko (SSC378QE).  Per-thread sampling pinned ~17.5% to
+libcus3a.so's `3A_Proc_0` worker (spawned by `MI_ISP_EnableUserspace3A`,
+runs at sensor frame sync) plus matching kernel ISP/VENC kthread time.
+The host pipeline was already lean (~3% main thread) so the ceiling
+was the per-frame 3A loop — not anything we packetize or send.
+
+The cut: keep `MI_ISP_EnableUserspace3A` so the IQ→HW pump (the same
+`3A_Proc_0` thread) keeps writing saturation/sharpness/brightness to
+silicon, but swap the SDK's NATIVE AE algorithm for a no-op stub via
+`MI_ISP_CUS3A_RegInterfaceEX(ADAPTOR_1)`.  AWB stays NATIVE so white
+balance still tracks the scene (the 4096/1024/1024 R/G/B gains in the
+SDK demo turned out to be smoke-test values, not calibrated daylight
+gains — letting the bin drive AWB gives a usable picture).  AE is
+then driven by a 15 Hz supervisory thread (`src/maruko_cus3a.c`) that
+reads the 128x90 luminance grid via `MI_ISP_AE_GetAeHwAvgStats` and
+applies a three-stage cascade (shutter → sensor gain → ISP digital
+gain) via `MI_ISP_CUS3A_SetAeParam`.
+
+- New config field **`isp.aeMode`** (`"native"` default,
+  `"throttle"` opt-in).  Default preserves existing behaviour and
+  gives a safety hatch if a different sensor / firmware breaks the
+  no-op adaptor.  Live mode change requires restart (the adaptor swap
+  and `CUS3A_Enable` flags are init-only); SIGHUP at runtime is a
+  documented limitation.
+- New module **`src/maruko_cus3a.c` + `include/maruko_cus3a.h`**
+  (≈700 lines).  `_install_noop_adaptor()` registers the AE stub;
+  `_start()` launches the 15 Hz controller thread; `_stop()` joins
+  on teardown.  `MarukoCus3aConfig.throttle_mode` gates the
+  AE-control law — when 0 the thread still runs cap-enforcement +
+  stats reads (Star6E-equivalent behaviour).
+- **Pipeline integration** (`src/maruko_pipeline.c`): adaptor install
+  is gated on `cfg.ae_mode == "throttle"` after `MI_SNR_SetFps`;
+  thread starts when `ae_fps > 0` regardless of mode.  Default-on bin
+  gain ceiling switched to `bin_max_sensor_gain` (8192 on IMX415)
+  when user sets `gainMax=0`, fixing the previous over-bright bias
+  (the old default capped at a 32× synthetic ceiling).
+- **Config / fixture**: `config/venc.default.json` adds
+  `"aeMode": "native"` so the round-trip layout test passes.
+
+Verified on 192.168.2.12 (SSC378QE / IMX415 1472x816@120fps,
+H.265 25 Mbps RTP):
+- `aeMode=native` (default): unchanged behaviour, ~50% sys CPU.
+- `aeMode=throttle`: ~36% sys CPU (≈24 percentage-point drop on a
+  single-core SoC), `3A_Proc_0` ticks 89→36 per 3 s sample, AE
+  responds visibly to scene changes at 15 Hz, IQ knobs
+  (saturation / sharpness / brightness) still hot-apply.
+
 ## [0.9.11] - 2026-05-02
 
 Maruko parity Phase 2b — debug OSD now functional (kernel-oops cured).

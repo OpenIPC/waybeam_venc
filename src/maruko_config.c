@@ -38,6 +38,9 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->connected_udp = 1;  /* match VencConfig default */
 	cfg->keep_aspect = 1;    /* match VencConfig default (true) */
 	cfg->show_osd = 0;
+	cfg->ae_fps = 15;
+	cfg->isp_gain_max = 0;
+	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s", "native");
 }
 
 int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
@@ -99,6 +102,10 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->connected_udp = vcfg->outgoing.connected_udp ? 1 : 0;
 	cfg->keep_aspect = vcfg->isp.keep_aspect ? 1 : 0;
 	cfg->show_osd = vcfg->debug.show_osd ? 1 : 0;
+	cfg->ae_fps = vcfg->isp.ae_fps;
+	cfg->isp_gain_max = vcfg->isp.gain_max;
+	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s",
+		vcfg->isp.ae_mode[0] ? vcfg->isp.ae_mode : "native");
 
 	return 0;
 }

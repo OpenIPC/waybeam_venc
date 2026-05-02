@@ -7,6 +7,7 @@
 #include "maruko_bindings.h"
 #include "maruko_config.h"
 #include "maruko_controls.h"
+#include "maruko_cus3a.h"
 #include "maruko_output.h"
 #include "maruko_video.h"
 #include "output_socket.h"
@@ -88,48 +89,53 @@ static int maruko_config_dev_ring_pool(i6c_sys_mod module, MI_U32 device,
 	return ret;
 }
 
-/* Enable CUS3A framework once using the progressive sequence that
- * majestic/SDK uses during ISP init: 100 -> 110 -> 111.
- * The ISP pipeline requires CUS3A active for frame processing —
- * without it the ISP FIFO stalls at >=60fps. */
+/* Enable CUS3A framework — required for ISP frame processing (without it
+ * the ISP FIFO stalls at >=60fps).
+ *
+ * Always calls:
+ *   - MI_ISP_CUS3A_Enable({1,1,0})  — bring up AE+AWB algos in the engine.
+ *   - MI_ISP_EnableUserspace3A      — spawns the SDK's 3A_Proc_0 thread,
+ *                                     which is what pumps IQ buffer writes
+ *                                     (saturation/sharpness/brightness) into
+ *                                     ISP HW.  Without this the IQ knobs
+ *                                     accept writes but never reach the
+ *                                     pipeline.
+ *
+ * The actual algorithm-throttle decision is made later in pipeline init
+ * based on isp.aeMode: in "throttle" mode we additionally install a no-op
+ * AE adaptor (see maruko_cus3a_install_noop_adaptor) so 3A_Proc_0's
+ * algorithm step becomes free, and the supervisory thread drives AE via
+ * SetAeParam at ae_fps Hz.  See HISTORY 0.9.12. */
 static void maruko_enable_cus3a(void)
 {
-	/* ISP lib already loaded by maruko_mi_init(); use its handle. */
 	void *h = g_mi_isp.handle;
 	if (!h)
 		return;
-	typedef int (*fn_t)(MI_U32 dev_id, MI_U32 channel, void *params);
-	fn_t fn = (fn_t)dlsym(h, "MI_ISP_CUS3A_Enable");
-	if (fn) {
-		/* Enable CUS3A AE+AWB only — AF is not needed for fixed-focus
-		 * cameras (IMX415).  Enabling AF causes motor init errors:
-		 * "AF_InitParameters: Error!! Initial motor parameters..." */
-		MI_BOOL p100[3] = {1, 0, 0};
-		MI_BOOL p110[3] = {1, 1, 0};
-		fn(0, 0, p100);
-		MI_S32 ret = fn(0, 0, p110);
-		printf("> [maruko] CUS3A_Enable(1,1,0) ret=%d\n", ret);
-	}
 
-	/* Enable Userspace3A — creates the 3A_Proc thread that processes
-	 * AE/AWB and applies IQ parameters. */
-	typedef int (*us3a_fn_t)(MI_U32, MI_U32);
-	us3a_fn_t fn_us3a = (us3a_fn_t)dlsym(h,
+	/* Step 1: enable AE+AWB algos (AF disabled for fixed-focus IMX415).
+	 * Engine must be ENABLED so MI_ISP_CUS3A_SetAeParam is honored. */
+	typedef int (*cus3a_enable_fn)(MI_U32 dev, MI_U32 chn, void *params);
+	cus3a_enable_fn fn_enable = (cus3a_enable_fn)dlsym(h,
+		"MI_ISP_CUS3A_Enable");
+	if (!fn_enable)
+		return;
+	MI_BOOL p100[3] = {1, 0, 0};
+	MI_BOOL p110[3] = {1, 1, 0};
+	fn_enable(0, 0, p100);
+	MI_S32 ret = fn_enable(0, 0, p110);
+	printf("> [maruko] CUS3A_Enable(1,1,0) ret=%d\n", ret);
+
+	/* Step 2: spawn 3A_Proc_0 thread (drives IQ→HW pump). */
+	typedef int (*enable_us3a_fn)(MI_U32 dev, MI_U32 chn);
+	enable_us3a_fn fn_enable_us3a = (enable_us3a_fn)dlsym(h,
 		"MI_ISP_EnableUserspace3A");
-	if (fn_us3a) {
-		int r = fn_us3a(0, 0);
-		printf("> [maruko] EnableUserspace3A ret=%d\n", r);
-	} else {
-		printf("> [maruko] WARNING: EnableUserspace3A not found\n");
+	if (fn_enable_us3a) {
+		int us3a_ret = fn_enable_us3a(0, 0);
+		printf("> [maruko] EnableUserspace3A ret=%d\n", us3a_ret);
 	}
 
-	/* EnableUserspace3A internally re-enables AF via CUS3A_Enable(1,1,1).
-	 * Override back to AE+AWB only to suppress motor init errors. */
-	if (fn) {
-		MI_BOOL p110[3] = {1, 1, 0};
-		fn(0, 0, p110);
-		printf("> [maruko] CUS3A AF disabled after EnableUserspace3A\n");
-	}
+	/* Step 3 (no-op AE adaptor) is conditional on isp.aeMode and runs
+	 * later from pipeline init — see the throttle branch there. */
 }
 
 static int maruko_disable_userspace3a(const IspRuntimeLib *lib, void *ctx)
@@ -1127,10 +1133,10 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	 * deadlock; the exposure cap and `MI_SNR_SetFps` kick are documented
 	 * cold-boot fixups, not reinit operations. */
 	if (!g_mi_isp_initialized) {
-		/* CUS3A enable + EnableUserspace3A: the 100->110->111 sequence
-		 * initializes the CUS3A framework, then EnableUserspace3A
-		 * creates the 3A_Proc_0 thread that drives AE/AWB and
-		 * applies IQ parameter changes to ISP hardware. */
+		/* Initialize CUS3A framework + enable userspace 3A (keeps
+		 * IQ→HW pump alive).  The optional no-op AE adaptor for
+		 * throttle mode is installed below, after the cold-boot
+		 * exposure cap and SetFps kick. */
 		maruko_enable_cus3a();
 
 		typedef struct {
@@ -1176,6 +1182,43 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 				"pad %d fps %u\n",
 				(int)ctx->sensor.pad_id,
 				ctx->sensor.fps);
+		}
+
+		/* AE-mode dispatch.
+		 *   native    — SDK's NATIVE AE+AWB run inside 3A_Proc_0 at
+		 *               sensor rate (default; matches Star6E).
+		 *   throttle  — no-op AE adaptor replaces NATIVE AE algo;
+		 *               supervisory thread drives AE via SetAeParam
+		 *               at ae_fps Hz.  Saves ~24% of one core. */
+		int throttle = ctx->cfg.ae_mode[0] &&
+			strcmp(ctx->cfg.ae_mode, "throttle") == 0;
+
+		/* Start supervisory thread FIRST so it captures the bin's
+		 * calibrated AE limits while the SDK's NATIVE algo is still
+		 * live.  Installing the no-op adaptor clears AE init state
+		 * (state goes to -1, GetExposureLimit returns zeros), so any
+		 * baseline we want must be read before the swap. */
+		if (ctx->cfg.ae_fps > 0) {
+			MarukoCus3aConfig ae_cfg;
+			maruko_cus3a_config_defaults(&ae_cfg);
+			ae_cfg.sensor_fps    = ctx->sensor.fps;
+			ae_cfg.ae_fps        = ctx->cfg.ae_fps;
+			ae_cfg.gain_max      = ctx->cfg.isp_gain_max;
+			ae_cfg.verbose       = ctx->cfg.verbose;
+			ae_cfg.throttle_mode = throttle;
+			(void)maruko_cus3a_start(&ae_cfg);
+		} else if (ctx->cfg.verbose) {
+			printf("> [maruko] supervisory 3A disabled "
+				"(isp.aeFps=0)\n");
+		}
+
+		if (throttle) {
+			maruko_cus3a_install_noop_adaptor();
+			printf("> [maruko] AE mode: throttle "
+				"(no-op AE adaptor + manual SetAeParam)\n");
+		} else {
+			printf("> [maruko] AE mode: native "
+				"(SDK AE/AWB at sensor rate)\n");
 		}
 
 		g_mi_isp_initialized = 1;
@@ -1735,6 +1778,7 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 void maruko_pipeline_teardown(MarukoBackendContext *ctx)
 {
 	venc_httpd_stop();
+	maruko_cus3a_stop();
 	maruko_pipeline_teardown_graph(ctx);
 	if (ctx && ctx->system_initialized) {
 		(void)MI_SYS_Exit();
