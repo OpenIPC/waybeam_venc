@@ -235,31 +235,52 @@ stream+record only after Phase 7 dual-VENC probe.
   (already shared via `venc_api.c`).
 - **Verify:** TS file rotates by time + size on bench.
 
-### Phase 7 — Dual VENC probe + Gemini mode (PROBE PASSED 2026-05-02; port pending)
+### Phase 7 — Dual VENC probe + port (DONE; dual-stream live, dual-record awaits Phase 6)
 
-**SDK probe first, port second.**
+**Probe (PR #85, env-gated, kept long-term):**
+- [x] All three SDK stages returned 0 (`CreateChn` / `SetInputSourceConfig` /
+  `StartRecvPic`) for chn 1 on dev 0 after chn 0 was bound.  Probe code
+  in `maruko_start_venc()` lives behind `MARUKO_DUAL_VENC_PROBE=1` so
+  a future SDK refresh can be re-checked with one env var.
 
-- [x] **Probe passed on 192.168.2.12** (OpenIPC SSC378QE / IMX415,
-  branch `feature/maruko-dual-venc-probe`, env-gated via
-  `MARUKO_DUAL_VENC_PROBE=1`).  All three SDK stages returned 0 after
-  channel 0 was running:
-  - `MI_VENC_CreateChn(dev=0, chn=1, &attr)` → `ret=0`
-  - `MI_VENC_SetInputSourceConfig(chn=1, RING_DMA)` → `ret=0`
-  - `MI_VENC_StartRecvPic(chn=1)` → `ret=0`
-  Channel 0 continued streaming at 118 fps after channel 1 was torn
-  down — probe is non-disruptive.  Probe code is small (~50 lines,
-  env-gated, no production impact) and lives in
-  `maruko_start_venc()` so a future SDK refresh can be re-checked
-  with one env var.
-- [ ] Port `star6e_pipeline_start_dual()`
-  (`star6e_pipeline.c:1335-1426`) + adaptive bitrate throttler
-  (`star6e_runtime.c:322-420`).  Open question for the port: the
-  Maruko VPE → VENC binding goes via `maruko_mi_sys_bind_chn_port2`
-  (different ABI from Star6E `MI_SYS_BindChnPort2`); needs the same
-  `src_fps` / `dst_fps` semantics as Star6E so per-channel FPS skip
-  works.
-- [ ] Re-evaluate: with dual VENC viable, revisit Phase 6 to enable
-  `record.mode="dual"` / `"dual-stream"`.
+**Port (branch `feature/maruko-dual-venc-port`):**
+- [x] `MarukoDualVenc` lifecycle (alloc / create chn 1 / bind / drain
+  thread / output / teardown) wired in `maruko_pipeline.c`.
+- [x] `record.{enabled,mode,server,bitrate,fps,gopSize,frameLost}`
+  honoured for `mode="dual-stream"`; default `"off"` keeps existing
+  single-channel behaviour.
+- [x] Maruko-specific topology discoveries documented inline:
+  - **Bind source is VENC chn 0's output port, NOT the SCL port.**
+    SCL/0/0 already holds chn 0 in RING mode and rejects a second
+    consumer with `0xA0092012` (SYS busy).  The Maruko SDK exposes
+    a chn 0 → chn 1 HW_RING fan-out for dual-VENC instead.
+  - **Both VENC channels must exist before SCL → chn 0 is bound.**
+    Adding chn 1 after the SCL bind drops chn 0 from 25 Mbps to
+    ~5 Mbps (encoder enters degraded mode).  `start_dual` unbinds
+    SCL → chn 0, creates chn 1, then re-binds SCL → chn 0 — safe
+    because the call site is `configure_graph` which runs before
+    the encoder loop, so no in-flight frames are lost.
+  - **Sub-channel uses the default `NORMAL_FRMBASE` input mode**, not
+    `RING_UNIFIED_DMA`.  The SDK sample omits `SetInputSourceConfig`
+    on chn 1 entirely; explicitly setting `RING_DMA` starves the
+    sub-channel (no frames ever arrive).
+- [x] Adaptive bitrate throttler (10 % step-down on sustained
+  backpressure) ported from Star6E `dual_rec_reduce_bitrate`.
+- [x] Drain thread mirrors `star6e_runtime.c:dual_rec_thread_fn` —
+  poll(`MI_VENC_GetFd`) → `Query` → `GetStream` → `maruko_video_send_frame`
+  → `ReleaseStream`.
+- [x] **Verified on 192.168.2.12** (OpenIPC SSC378QE / IMX415
+  1472x816@120):
+  - chn 0: 117–118 fps @ 23–25 Mbps (= configured 25 Mbps, no
+    regression vs single-channel baseline).
+  - chn 1: 30 fps @ 3.6 Mbps measured over 10 s (configured CBR
+    8 Mbps; H.265 backs off on low-motion test scene — expected
+    CBR behaviour).
+  - 4.5 MB received on chn 1's UDP destination port over 10 s.
+- [ ] Re-evaluate Phase 6 (recording): dual-record (`mode="dual"`)
+  uses chn 1's frames + TS mux + SD card writer; lands when the
+  Phase 6 recording stack is wired (independent — TS engine in
+  `src/ts_mux.c` is already platform-agnostic).
 
 ### Phase 8 — Maruko sensor depth (deferred, driver-gated)
 
@@ -304,30 +325,28 @@ Revisit and rewrite this plan if any of these happen:
 
 ## Open work / next decision point
 
-Phases 1, 2, 2b, 3, 7-probe, and 9 are closed. Live branches/PRs:
-#81 (Phases 1/2/2b), #83 (Phase 9), #84 (Phase 3),
-`feature/maruko-dual-venc-probe` (Phase 7 probe, PR pending).
-Next agenda in priority order:
+Phases 1, 2, 2b, 3, 7 (probe + port), and 9 are closed. Live
+branches/PRs: #81 (Phases 1/2/2b), #83 (Phase 9), #84 (Phase 3),
+#85 (Phase 7 probe), `feature/maruko-dual-venc-port` (Phase 7 port,
+PR pending).  Next agenda:
 
-1. **Phase 7 dual-VENC port** — probe passed; full port now.  Mirrors
-   Star6E `start_dual()` + bind via Maruko VPE port + adaptive
-   bitrate throttler + `record.mode="dual"` config plumbing.  Cost:
-   ~2 days.  Needs to land alongside or before Phase 6 because the
-   recording mode selector picks between "mirror chn 0" and
-   "dedicated record chn 1".
-2. **Phase 5 (audio)** — biggest standalone gap (Opus/G.711 + MI_AI
-   shim).  Independent of Phase 4/6/7, so can run in parallel with
-   Phase 7 port if hardware bandwidth allows.
+1. **Phase 5 (audio)** — biggest standalone gap (Opus/G.711 + MI_AI
+   shim).  Independent of Phase 4/6, so can land any time.  Cost:
+   ~3-4 days.
+2. **Phase 6 (recording)** — TS mux + SD card writer.  With Phase 7
+   dual-VENC working, `mode="dual"` (separate record channel) is
+   directly enabled.  `mode="mirror"` (record from chn 0) is also
+   trivially supported.  Cost: ~2-3 days.  Mostly platform-agnostic
+   (`src/ts_mux.c`).
 3. **Phase 4 (live AR-change reinit)** — medium-arch, unblocks
-   per-channel resolution.  Prerequisite for clean Phase 6 recording
-   only if record/stream want different resolutions; with dual VENC
-   working that pressure is reduced.  Step 0 (reproduce ISP hang +
-   capture dmesg + venc.log) is the cheap part.
+   per-channel resolution.  Lower priority now that Phase 7
+   provides a separate channel for recording at a different
+   resolution.
 
-Recommendation: pick Phase 5 (audio) next.  Phase 7 port is now de-
-risked but still ~2 days of careful binding work; audio is bigger
-but independent and more user-visible.  Order is genuinely a user
-priority call now that the probe outcome is known.
+Recommendation: Phase 6 (recording) is the natural next item — it
+plugs straight into the dual-VENC plumbing just landed.  Phase 5
+(audio) is the alternative if the user wants the bigger user-visible
+feature first.
 
 ## Architectural notes worth carrying
 

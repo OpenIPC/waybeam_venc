@@ -11,6 +11,7 @@
 #include <signal.h>
 
 struct DebugOsdState; /* forward declaration — see debug_osd.h */
+struct MarukoDualVenc; /* forward declaration — see maruko_pipeline.c */
 
 typedef struct {
   int system_initialized;
@@ -37,6 +38,8 @@ typedef struct {
   SceneDetector scene;
   struct DebugOsdState *debug_osd;  /* NULL if debug OSD disabled */
   ImuState *imu;                    /* NULL if IMU disabled or init failed */
+  /* Dual VENC (gemini-style) — heap-allocated, NULL when inactive. */
+  struct MarukoDualVenc *dual;
 } MarukoBackendContext;
 
 /** Initialize Maruko pipeline state and load SDK libraries. */
@@ -57,6 +60,26 @@ void maruko_pipeline_teardown(MarukoBackendContext *ctx);
 
 /** Install SIGINT/SIGTERM/SIGHUP handlers for graceful shutdown/reinit. */
 void maruko_pipeline_install_signal_handlers(void);
+
+/** Create the secondary VENC channel (chn 1) and start a thread that
+ *  drains its frames onto a UDP destination.  Mirrors
+ *  star6e_pipeline_start_dual() but currently only supports the
+ *  "dual-stream" variant (no on-device recording — Phase 6 territory).
+ *
+ *  Must be called AFTER bind_maruko_pipeline() has finished setting up
+ *  channel 0 (the SDK probe in Phase 7 confirmed CreateChn(dev,1,...)
+ *  is rejected before chn 0 is fully bound).
+ *
+ *  Returns 0 on success (ctx->dual is allocated and active).  On
+ *  failure ctx->dual is NULL and the caller continues with chn 0
+ *  only — non-fatal degradation. */
+int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
+  uint32_t bitrate, uint32_t fps, double gop_sec,
+  const char *mode, const char *server, int frame_lost);
+
+/** Tear down the secondary VENC channel if active.  Safe to call when
+ *  ctx->dual is NULL (no-op). */
+void maruko_pipeline_stop_dual(MarukoBackendContext *ctx);
 
 extern volatile sig_atomic_t g_maruko_running;
 

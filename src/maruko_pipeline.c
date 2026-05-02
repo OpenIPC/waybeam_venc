@@ -28,11 +28,15 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "h26x_param_sets.h"
+#include "maruko_video.h"
+#include "rtp_session.h"
 #include "timing.h"
 
 static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
@@ -1300,6 +1304,505 @@ static void maruko_pipeline_imu_push(void *ctx, const ImuSample *sample)
 	(void)sample;
 }
 
+/* ── Dual VENC (Phase 7) ─────────────────────────────────────────────────
+ *
+ * Mirrors src/star6e_pipeline.c's Star6eDualVenc lifecycle and
+ * src/star6e_runtime.c's dual_rec_thread_fn frame-drain.  Currently
+ * only the "dual-stream" mode is wired (chn 1 → UDP); the "dual" /
+ * TS-record variant lives behind Phase 6 (no MI_AI / TS mux on
+ * Maruko yet).
+ *
+ * The chn 1 stream is sourced from the same VPE port as chn 0 — both
+ * channels see identical pre-encoder frames.  Bitrate / FPS / GOP can
+ * differ per channel via the cfg.record.* knobs.
+ */
+
+struct MarukoDualVenc {
+	MarukoBackendContext *ctx;          /* back-pointer for cfg lookup in thread */
+	MI_VENC_CHN channel;
+	MI_SYS_ChnPort_t port;              /* dst port for chn 1 (VENC/dev/1/0) */
+	MI_SYS_ChnPort_t bind_src;          /* src port used at bind time
+	                                     * (VENC chn 0 output) — captured so
+	                                     * UnBind can pair with the same args
+	                                     * even if the source port shape ever
+	                                     * changes upstream. */
+	int bound;
+	int started;                        /* StartRecvPic succeeded */
+	MarukoOutput output;
+	MarukoRtpState rtp_state;
+	H26xParamSets params;
+	char mode[16];
+	uint32_t bitrate;
+	uint32_t fps;
+	uint32_t gop;
+	char server[128];
+	int frame_lost;
+	int is_dual_stream;
+	pthread_t thread;
+	volatile sig_atomic_t running;
+	int started_thread;
+	/* Pre-allocated stream packs to avoid alloc-per-frame in the drain
+	 * loop.  Grown on demand by dual_ensure_packs() if a frame exceeds
+	 * the cached cap. */
+	i6c_venc_pack *stream_packs;
+	uint32_t stream_packs_cap;
+};
+
+static i6c_venc_pack *dual_ensure_packs(i6c_venc_pack **packs,
+	uint32_t *cap, uint32_t need)
+{
+	if (need > *cap) {
+		i6c_venc_pack *p = realloc(*packs, need * sizeof(*p));
+		if (!p)
+			return NULL;
+		*packs = p;
+		*cap = need;
+	}
+	return *packs;
+}
+
+/* Reduce chn 1 bitrate by 10% on sustained pressure.  Mirrors
+ * star6e_runtime.c:dual_rec_reduce_bitrate(). */
+static int dual_reduce_bitrate(MI_VENC_DEV venc_dev, MI_VENC_CHN chn,
+	uint32_t *current_kbps, uint32_t min_kbps)
+{
+	i6c_venc_chn attr = {0};
+	uint32_t new_kbps;
+	MI_U32 bits;
+
+	if (maruko_mi_venc_get_chn_attr(venc_dev, chn, &attr) != 0)
+		return -1;
+
+	new_kbps = *current_kbps * 9 / 10;
+	if (new_kbps < min_kbps)
+		new_kbps = min_kbps;
+	if (new_kbps == *current_kbps)
+		return 0;
+
+	bits = new_kbps * 1024;
+	switch (attr.rate.mode) {
+	case MARUKO_VENC_RC_H265_CBR:
+		attr.rate.h265Cbr.bitrate = bits;
+		break;
+	case MARUKO_VENC_RC_H264_CBR:
+		attr.rate.h264Cbr.bitrate = bits;
+		break;
+	case MARUKO_VENC_RC_H265_VBR:
+		attr.rate.h265Vbr.maxBitrate = bits;
+		break;
+	case MARUKO_VENC_RC_H264_VBR:
+		attr.rate.h264Vbr.maxBitrate = bits;
+		break;
+	case MARUKO_VENC_RC_H265_AVBR:
+		attr.rate.h265Avbr.maxBitrate = bits;
+		break;
+	case MARUKO_VENC_RC_H264_AVBR:
+		attr.rate.h264Avbr.maxBitrate = bits;
+		break;
+	default:
+		return -1;
+	}
+
+	if (maruko_mi_venc_set_chn_attr(venc_dev, chn, &attr) != 0)
+		return -1;
+
+	printf("[maruko][dual] backpressure: bitrate %u -> %u kbps\n",
+		*current_kbps, new_kbps);
+	*current_kbps = new_kbps;
+	return 0;
+}
+
+/* Drain frames from chn 1 and forward them via UDP.  Mirrors the
+ * Star6E dual_rec_thread_fn but with the SD-card writer replaced by
+ * maruko_video_send_frame (UDP only — dual-stream variant). */
+static void *maruko_dual_stream_thread(void *arg)
+{
+	struct MarukoDualVenc *d = arg;
+	MarukoBackendContext *ctx = d->ctx;
+	uint32_t current_kbps = d->bitrate;
+	uint32_t min_kbps = d->bitrate / 4;
+	struct timespec interval_start;
+	unsigned int behind_count = 0;
+	unsigned int total_count = 0;
+	unsigned int pressure_seconds = 0;
+
+	if (min_kbps < 1000)
+		min_kbps = 1000;
+
+	clock_gettime(CLOCK_MONOTONIC, &interval_start);
+
+	int venc_fd = maruko_mi_venc_get_fd(ctx->venc_device, d->channel);
+	if (ctx->cfg.verbose)
+		printf("> [maruko][dual] drain thread up (fd=%d)\n", venc_fd);
+
+	while (d->running) {
+		i6c_venc_stat stat = {0};
+		i6c_venc_strm stream = {0};
+		int ret;
+
+		if (venc_fd >= 0) {
+			struct pollfd pfd = { .fd = venc_fd, .events = POLLIN };
+			(void)poll(&pfd, 1, 1000);
+			if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				maruko_mi_venc_close_fd(ctx->venc_device,
+					d->channel);
+				venc_fd = -1;
+				usleep(1000);
+				continue;
+			}
+			if (!(pfd.revents & POLLIN))
+				continue;
+		}
+
+		ret = maruko_mi_venc_query(ctx->venc_device, d->channel, &stat);
+		if (ret != 0 || stat.curPacks == 0) {
+			usleep(venc_fd >= 0 ? 100 : 1000);
+			continue;
+		}
+
+		stream.count = stat.curPacks;
+		stream.packet = dual_ensure_packs(&d->stream_packs,
+			&d->stream_packs_cap, stat.curPacks);
+		if (!stream.packet) {
+			usleep(1000);
+			continue;
+		}
+
+		ret = maruko_mi_venc_get_stream(ctx->venc_device, d->channel,
+			&stream, g_maruko_running ? 40 : 0);
+		if (ret != 0) {
+			if (ret == -EAGAIN || ret == EAGAIN)
+				usleep(1000);
+			continue;
+		}
+
+		if (g_maruko_running && d->is_dual_stream) {
+			(void)maruko_video_send_frame(&stream, &d->output,
+				&d->rtp_state, &d->params, &ctx->cfg, NULL);
+		}
+
+		(void)maruko_mi_venc_release_stream(ctx->venc_device,
+			d->channel, &stream);
+
+		total_count++;
+		if (stat.curPacks >= 2)
+			behind_count++;
+
+		{
+			struct timespec now;
+			long long elapsed_ms;
+
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			elapsed_ms = (long long)(now.tv_sec -
+				interval_start.tv_sec) * 1000LL +
+				(long long)(now.tv_nsec -
+				interval_start.tv_nsec) / 1000000LL;
+
+			if (elapsed_ms >= 1000) {
+				if (total_count > 0 &&
+				    behind_count > total_count * 4 / 5) {
+					pressure_seconds++;
+					if (pressure_seconds >= 3) {
+						dual_reduce_bitrate(
+							ctx->venc_device,
+							d->channel,
+							&current_kbps,
+							min_kbps);
+						pressure_seconds = 0;
+					}
+				} else {
+					pressure_seconds = 0;
+				}
+				behind_count = 0;
+				total_count = 0;
+				interval_start = now;
+			}
+		}
+	}
+
+	if (venc_fd >= 0)
+		maruko_mi_venc_close_fd(ctx->venc_device, d->channel);
+
+	return NULL;
+}
+
+/* Compose the chn 1 attribute block.  Mirrors the chn 0 path in
+ * maruko_start_venc (codec branch + fill helper) but lets the caller
+ * override bitrate / fps / gop independently. */
+static void dual_fill_attr(i6c_venc_chn *attr,
+	const MarukoBackendConfig *base_cfg,
+	uint32_t width, uint32_t height,
+	uint32_t bitrate_kbps, uint32_t framerate, uint32_t gop)
+{
+	MarukoBackendConfig dual_cfg = *base_cfg;
+	dual_cfg.venc_max_rate = bitrate_kbps;
+	dual_cfg.venc_gop_size = gop;
+
+	if (base_cfg->rc_codec == PT_H265) {
+		attr->attrib.codec = I6C_VENC_CODEC_H265;
+		maruko_fill_h26x_attr(&attr->attrib.h265, width, height);
+	} else {
+		attr->attrib.codec = I6C_VENC_CODEC_H264;
+		maruko_fill_h26x_attr(&attr->attrib.h264, width, height);
+	}
+
+	uint32_t safe_gop = gop ? gop : 1;
+	MI_U32 bit_rate_bits = bitrate_kbps * 1024;
+	fill_maruko_rc_attr(attr, &dual_cfg, safe_gop, bit_rate_bits, framerate);
+}
+
+int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
+	uint32_t bitrate, uint32_t fps, double gop_sec,
+	const char *mode, const char *server, int frame_lost)
+{
+	struct MarukoDualVenc *d;
+	MI_VENC_DEV dev = ctx->venc_device;
+	MI_VENC_CHN chn = 1;
+	uint32_t sensor_fps = ctx->sensor.fps;
+	uint32_t gop_frames;
+	int ret;
+
+	if (!mode)
+		return -1;
+
+	if (sensor_fps == 0)
+		sensor_fps = 30;
+	if (fps == 0)
+		fps = sensor_fps;
+	if (fps > sensor_fps)
+		fps = sensor_fps;
+	if (bitrate == 0)
+		bitrate = ctx->cfg.venc_max_rate;
+	if (bitrate == 0)
+		bitrate = 8000;
+	gop_frames = (uint32_t)(gop_sec * fps + 0.5);
+	if (gop_frames < 1)
+		gop_frames = fps;
+
+	d = calloc(1, sizeof(*d));
+	if (!d)
+		return -1;
+
+	d->ctx = ctx;
+	d->channel = chn;
+	d->bitrate = bitrate;
+	d->fps = fps;
+	d->gop = gop_frames;
+	d->frame_lost = frame_lost;
+	d->is_dual_stream = (strcmp(mode, "dual-stream") == 0);
+	snprintf(d->mode, sizeof(d->mode), "%s", mode);
+	if (server)
+		snprintf(d->server, sizeof(d->server), "%s", server);
+	d->output.socket_handle = -1;
+
+	/* SDK pattern: both VENC channels must exist before SCL -> chn 0
+	 * fan-out is established.  bind_maruko_pipeline already bound
+	 * SCL -> chn 0 (RING) — temporarily unbind so chn 1 can be
+	 * created, then re-bind.  Skipping this leaves chn 0's encoder
+	 * in a degraded ~5 Mbps mode (verified empirically: 25 Mbps ->
+	 * 5 Mbps when chn 1 is added without rebind).  Safe here because
+	 * configure_graph runs before the encoder loop, so no in-flight
+	 * frames are lost during the unbind window. */
+	int rebind_main = 0;
+	if (ctx->bound_vpe_venc) {
+		(void)MI_SYS_UnBindChnPort(&ctx->vpe_port, &ctx->venc_port);
+		ctx->bound_vpe_venc = 0;
+		rebind_main = 1;
+	}
+
+	/* CreateChn(dev, 1, &attr) — Phase 7 probe confirmed this works
+	 * after chn 0 is fully started.  Ring pool is per-dev and was
+	 * already provisioned for chn 0 in maruko_start_venc; no
+	 * second pool reservation is required for chn 1. */
+	i6c_venc_chn attr = {0};
+	dual_fill_attr(&attr, &ctx->cfg, ctx->cfg.image_width,
+		ctx->cfg.image_height, bitrate, fps, gop_frames);
+	ret = maruko_mi_venc_create_chn(dev, chn, &attr);
+	if (ret != 0) {
+		fprintf(stderr,
+			"WARNING: [maruko][dual] CreateChn(dev=%d, chn=%d)"
+			" failed %d\n", (int)dev, (int)chn, ret);
+		if (rebind_main) {
+			(void)MI_SYS_BindChnPort2(&ctx->vpe_port, &ctx->venc_port,
+				ctx->sensor.fps, ctx->sensor.fps,
+				I6_SYS_LINK_RING, 0);
+			ctx->bound_vpe_venc = 1;
+		}
+		free(d);
+		return -1;
+	}
+
+	/* Maruko dual-VENC topology (per Maruko SDK sample_venc.c):
+	 * chn 1 is sourced from chn 0's VENC output port (NOT from SCL).
+	 * The VENC hardware exposes a chn 0 -> chn 1 HW_RING fan-out so
+	 * the second encoder sees the same input frames.  Confirmed
+	 * empirically: binding SCL/0/0/0 -> VENC/0/1/0 directly returns
+	 * 0xA0092012 (SYS busy) because chn 0 already holds the SCL
+	 * output port in RING mode, and the SCL port cannot multi-consume.
+	 *
+	 * The SDK sample does NOT call SetInputSourceConfig on chn 1 —
+	 * sub-channels default to NORMAL_FRMBASE (handshake by ~3-buffer
+	 * frame mode) which is what chn 0 -> chn 1 HW_RING expects on
+	 * the destination side.  Setting RING_UNIFIED_DMA on chn 1
+	 * starves chn 1 (the encoder waits for ring DMA frames that
+	 * never arrive). */
+
+	ret = maruko_mi_venc_start_recv(dev, chn);
+	if (ret != 0) {
+		fprintf(stderr,
+			"WARNING: [maruko][dual] StartRecvPic(chn=%d)"
+			" failed %d\n", (int)chn, ret);
+		(void)maruko_mi_venc_destroy_chn(dev, chn);
+		if (rebind_main) {
+			(void)MI_SYS_BindChnPort2(&ctx->vpe_port, &ctx->venc_port,
+				ctx->sensor.fps, ctx->sensor.fps,
+				I6_SYS_LINK_RING, 0);
+			ctx->bound_vpe_venc = 1;
+		}
+		free(d);
+		return -1;
+	}
+	d->started = 1;
+
+	/* Re-establish SCL -> VENC chn 0.  Both channels now exist, so
+	 * the encoder enters dual-channel mode correctly. */
+	if (rebind_main) {
+		ret = MI_SYS_BindChnPort2(&ctx->vpe_port, &ctx->venc_port,
+			ctx->sensor.fps, ctx->sensor.fps,
+			I6_SYS_LINK_RING, 0);
+		if (ret != 0) {
+			fprintf(stderr,
+				"WARNING: [maruko][dual] re-bind SCL->chn0"
+				" failed %d\n", ret);
+			(void)maruko_mi_venc_stop_recv(dev, chn);
+			(void)maruko_mi_venc_destroy_chn(dev, chn);
+			free(d);
+			return -1;
+		}
+		ctx->bound_vpe_venc = 1;
+	}
+
+	if (frame_lost) {
+		MI_VENC_ParamFrameLost_t lost = {0};
+		lost.bFrmLostOpen = 1;
+		lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
+		lost.u32FrmLostBpsThr =
+			pipeline_common_frame_lost_threshold(bitrate);
+		lost.u32EncFrmGaps = 0;
+		(void)maruko_mi_venc_set_frame_lost(dev, chn, &lost);
+	}
+
+	/* Source: chn 0's VENC output port.  Dst: chn 1 input.
+	 * Maruko SDK sample_venc.c:
+	 *   src = VENC/dev/MainChn/0  (chn 0 output)
+	 *   dst = VENC/dev/SubChn/0   (chn 1)
+	 *   bind type = HW_RING
+	 */
+	MI_SYS_ChnPort_t src_port = {
+		.module = I6_SYS_MOD_VENC, .device = (MI_U32)dev,
+		.channel = ctx->venc_channel, .port = 0,
+	};
+	d->port = (MI_SYS_ChnPort_t){
+		.module = I6_SYS_MOD_VENC, .device = (MI_U32)dev,
+		.channel = chn, .port = 0,
+	};
+
+	ret = MI_SYS_BindChnPort2(&src_port, &d->port,
+		sensor_fps, fps, I6_SYS_LINK_RING, 0);
+	if (ret != 0) {
+		fprintf(stderr,
+			"WARNING: [maruko][dual] bind VENC chn0->chn%d"
+			" failed %d\n", (int)chn, ret);
+		(void)maruko_mi_venc_stop_recv(dev, chn);
+		(void)maruko_mi_venc_destroy_chn(dev, chn);
+		free(d);
+		return -1;
+	}
+	d->bound = 1;
+	d->bind_src = src_port;  /* remember for unbind */
+
+	(void)MI_SYS_SetChnOutputPortDepth(&d->port, 1, 3);
+
+	if (d->is_dual_stream && d->server[0]) {
+		VencOutputUri uri;
+		if (venc_config_parse_output_uri(d->server, &uri) == 0) {
+			if (maruko_output_init(&d->output, &uri,
+				ctx->cfg.connected_udp) == 0) {
+				maruko_video_init_rtp_state(&d->rtp_state,
+					ctx->cfg.rc_codec, sensor_fps);
+				printf("> [maruko][dual] dual-stream chn=%d ->"
+					" %s (%u kbps, %u fps, gop=%u)\n",
+					(int)chn, d->server, bitrate, fps,
+					gop_frames);
+			} else {
+				fprintf(stderr,
+					"WARNING: [maruko][dual] output_init"
+					" failed for %s\n", d->server);
+			}
+		} else {
+			fprintf(stderr,
+				"WARNING: [maruko][dual] cannot parse"
+				" record.server '%s'\n", d->server);
+		}
+	}
+
+	d->running = 1;
+	if (pthread_create(&d->thread, NULL, maruko_dual_stream_thread, d)
+	    != 0) {
+		/* Spawn failure: tear down everything we just allocated,
+		 * leaving ctx->dual NULL so the caller continues with
+		 * chn 0 only. */
+		fprintf(stderr,
+			"ERROR: [maruko][dual] pthread_create failed\n");
+		d->running = 0;
+		if (d->bound) {
+			(void)MI_SYS_UnBindChnPort(&d->bind_src, &d->port);
+			d->bound = 0;
+		}
+		if (d->started)
+			(void)maruko_mi_venc_stop_recv(dev, chn);
+		(void)maruko_mi_venc_destroy_chn(dev, chn);
+		maruko_output_teardown(&d->output);
+		free(d->stream_packs);
+		free(d);
+		return -1;
+	}
+	d->started_thread = 1;
+
+	ctx->dual = d;
+	return 0;
+}
+
+void maruko_pipeline_stop_dual(MarukoBackendContext *ctx)
+{
+	if (!ctx || !ctx->dual)
+		return;
+
+	struct MarukoDualVenc *d = ctx->dual;
+	MI_VENC_DEV dev = ctx->venc_device;
+
+	if (d->started_thread) {
+		d->running = 0;
+		pthread_join(d->thread, NULL);
+		d->started_thread = 0;
+	}
+
+	if (d->started) {
+		(void)maruko_mi_venc_stop_recv(dev, d->channel);
+		d->started = 0;
+	}
+	if (d->bound) {
+		(void)MI_SYS_UnBindChnPort(&d->bind_src, &d->port);
+		d->bound = 0;
+	}
+	(void)maruko_mi_venc_destroy_chn(dev, d->channel);
+
+	maruko_output_teardown(&d->output);
+	free(d->stream_packs);
+	free(d);
+	ctx->dual = NULL;
+}
+
 int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 {
 
@@ -1394,6 +1897,23 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 
 	if (bind_maruko_pipeline(ctx) != 0)
 		return -1;
+
+	/* Phase 7: dual VENC chn 1.  Currently only "dual-stream" is wired
+	 * (chn 1 → UDP).  Started AFTER bind_maruko_pipeline succeeds — the
+	 * Phase 7 SDK probe confirmed CreateChn(dev,1,...) needs chn 0
+	 * fully bound first.  Failure is non-fatal: ctx->dual stays NULL
+	 * and the daemon continues with chn 0 only. */
+	if (ctx->cfg.record.enabled &&
+	    strcmp(ctx->cfg.record.mode, "dual-stream") == 0 &&
+	    !ctx->dual) {
+		(void)maruko_pipeline_start_dual(ctx,
+			ctx->cfg.record.bitrate,
+			ctx->cfg.record.fps,
+			ctx->cfg.record.gop_size,
+			ctx->cfg.record.mode,
+			ctx->cfg.record.server,
+			ctx->cfg.record.frame_lost);
+	}
 
 	ctx->output_enabled = 1;
 	printf("> [maruko] pipeline configured\n");
@@ -1841,7 +2361,11 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		return;
 
 	venc_api_clear_active_precrop();
-	/* IMU stop+destroy first — push callback is a stub so order vs
+	/* Stop dual VENC FIRST — its thread reads from chn 1's fd and
+	 * the binding shares the VPE port with chn 0.  Tearing down chn 0
+	 * before unbinding chn 1 wedges the SDK on the next reinit. */
+	maruko_pipeline_stop_dual(ctx);
+	/* IMU stop+destroy next — push callback is a stub so order vs
 	 * other teardown steps doesn't matter, but keeping the
 	 * stop-then-destroy split lets a future telemetry consumer slot
 	 * in without rework (Star6E parity). */
