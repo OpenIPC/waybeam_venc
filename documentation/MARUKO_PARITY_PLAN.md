@@ -26,14 +26,15 @@ several places (see "Surprises vs docs" below).
 
 | Gap | Star6E location | Maruko status | Effort |
 |---|---|---|---|
-| ~~Aspect-ratio precrop~~ | ~~`star6e_pipeline.c:338-386`~~ | **Closed in v0.9.8** — `configure_maruko_scl()` writes a centered rect via `pipeline_common_compute_precrop()` (Star6E parity); `venc_config.h:51-54` comment updated. | — |
-| ~~Debug OSD overlay~~ | ~~`star6e_runtime.c:825-835`, `star6e_pipeline.c:1106-1108`~~ | **Code wired in v0.9.9** (default-off); Maruko runtime path blocked by SDK kernel/lib vintage mismatch — see Phase 2b. | — |
-| IMU / BMI270 | `star6e_pipeline.c:1084-1102` + `star6e_runtime.c:827,848,857` | No `imu_bmi270` references in maruko sources | Easy if board has BMI270 |
+| ~~Aspect-ratio precrop~~ | ~~`star6e_pipeline.c:338-386`~~ | **Closed in v0.9.9** — `configure_maruko_scl()` writes a centered rect via `pipeline_common_compute_precrop()` (Star6E parity); `venc_config.h:51-54` comment updated. | — |
+| ~~Debug OSD overlay~~ | ~~`star6e_runtime.c:825-835`, `star6e_pipeline.c:1106-1108`~~ | **Closed in v0.9.10 (code) + v0.9.11 (runtime)** — full Star6E parity, runtime verified live on 192.168.2.12. | — |
+| ~~IMU / BMI270~~ | ~~`star6e_pipeline.c:1084-1102` + `star6e_runtime.c:827,848,857`~~ | **No-op on this hardware** — `i2cdetect` on 192.168.2.12 shows no device at 0x68/0x69 (only 0x1a on i2c-1, audio codec). Skipped per Phase 3 Step 0. Re-probe if a BMI270-equipped Maruko board appears. | — |
 | Live AR-change reinit | Star6E SIGHUP rebuilds VIF/VPE for AR change | `maruko_runtime.c:99-107` forces sensor mode lock to avoid ISP hang | Medium-arch |
 | `apply_mute` | `star6e_controls.c:1139` | NULL (`maruko_controls.c:1051`) — gated by audio absence | Trivial after audio lands |
 | Audio capture (MI_AI) | `star6e_audio.c` 738 lines | Inert; runtime emits "audio output is not supported" warning (`maruko_runtime.c:58-60`) | High |
 | SD card recording (HEVC + TS mux) | `star6e_recorder.c` 294 + `star6e_ts_recorder.c` 421 | No record callbacks; no `record.*` hooks in maruko runtime | High |
 | Dual VENC (Gemini mode) | `star6e_pipeline.c:1335-1426`, `star6e_runtime.c:528-555` | None | High — needs SDK probe |
+| 3A perf throttle | n/a (Star6E has cus3a; Maruko's NATIVE 3A_Proc_0 spends ~60% CPU at 120 fps) | **Implemented on `feature/maruko-cus3a-throttle`** (no-op AE adaptor + 15 Hz manual `SetAeParam`, opt-in `isp.aeMode=throttle`). PR pending after #81 lands. | Done locally |
 
 ### N/A on Maruko (SDK-limited)
 
@@ -67,9 +68,9 @@ Update stale docs so the plan starts from a true baseline.
 - [ ] Mark cold-boot unlock + frame-lost protection as "ported" in
   `CURRENT_STATUS_AND_NEXT_STEPS.md`.
 - [x] Replace the "until SCL crop port lands" comment in
-  `venc_config.h:51-54` (done with Phase 1 in v0.9.8).
+  `venc_config.h:51-54` (done with Phase 1 in v0.9.9).
 
-### Phase 1 — Aspect-ratio SCL precrop (DONE, v0.9.8)
+### Phase 1 — Aspect-ratio SCL precrop (DONE, v0.9.9)
 
 **Why first:** documented gap, narrow blast radius, no SDK probing needed,
 immediately fixes geometry on every non-16:9 encode.
@@ -90,65 +91,63 @@ immediately fixes geometry on every non-16:9 encode.
   - 1280x720 (16:9) on 1920x1080 → no precrop, full source.
   - 4:3 with `keepAspect=false` → no precrop (legacy stretch path).
 
-### Phase 2 — Debug OSD overlay (CODE LANDED v0.9.9; runtime blocked)
+### Phase 2 — Debug OSD overlay code parity (DONE, v0.9.10)
 
-**Status:** code parity with Star6E is in place and Maruko `make verify`
-passes.  The opt-in flag `debug.showOsd=true` is honored end-to-end:
+Code parity with Star6E in place and the opt-in flag `debug.showOsd=true`
+honored end-to-end on both backends:
 `debug_osd_create()` after VENC start in
 `maruko_pipeline_configure_graph()`, per-frame
 `begin/sample_cpu/text/end_frame` in `maruko_pipeline_process_stream()`,
 `debug_osd_destroy()` at the top of `maruko_pipeline_teardown_graph()`.
-`debug_osd.c` + `debug_osd_draw.c` are now in `HELPER_SRC`.  Default-off
-behaviour leaves both backends untouched.
+`debug_osd.c` + `debug_osd_draw.c` are in `HELPER_SRC`.  Default-off
+leaves both backends untouched.  v0.9.10 shipped a temporary safety gate
+(WARN-and-skip) on Maruko while Phase 2b investigated the runtime
+crash; that gate was removed in Phase 2b.
 
-**Runtime blocker (192.168.2.12 / SSC378QE OpenIPC):** invoking
-`MI_RGN_Init` triggers a kernel Oops in `MI_DEVICE_Ioctl` (kfree path)
-and wedges the venc encode loop — the **same** lib/kernel vintage
-mismatch documented in `memory/maruko_osd_render_bringup.md`.  Until
-Phase 2b ships the cure, the runtime path on Maruko is
-**safety-gated**: `debug.showOsd=true` logs a one-time warning at
-`maruko_pipeline_configure_graph()` and skips the attach so a stale
-config never hangs venc.  Replace the gate with the actual
-`debug_osd_create()` call once Phase 2b lands.
+### Phase 2b — Maruko OSD runtime fix (DONE, v0.9.11)
 
-### Phase 2b — Maruko OSD runtime fix (1-2 days, blocked on dep ordering work)
+Root cause turned out NOT to be the lib/kernel vintage mismatch
+originally suspected — it was a build-time conditional bug in
+`src/debug_osd.c`.  The Maruko build defines BOTH `-DPLATFORM_STAR6E`
+and `-DPLATFORM_MARUKO` (Star6E shim headers reused for type compat;
+see `Makefile:39`).  `debug_osd.c` started with `#ifdef PLATFORM_STAR6E`,
+so the Star6E ABI branch (1-arg `MI_RGN_Init`, mod_id 0 = VPE, 3-arg
+`AttachToChn`) was compiled into the Maruko binary too — and the Star6E
+ABI ran against the Maruko kernel/lib pair, producing the
+`MI_DEVICE_Ioctl → kfree → compound_head` oops with a userspace-shaped
+pointer reaching kfree.  Cure was a one-line conditional fix plus the
+expected dep-preload + module-ID-34 + init-before-kthread changes:
 
-The waybeam-hub team got Maruko OSD render working on the same hardware.
-Lift their recipe into venc:
+- [x] **Build-time conditional fix.**  `src/debug_osd.c` first
+  conditional now reads `#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)`,
+  so Maruko binaries enter the Maruko ABI branch as intended.
+- [x] **Maruko ABI branch active.**  Targets the OpenIPC libmi_rgn.so
+  v3 API (`MI_RGN_Init(soc_id, palette*)`, 3-arg `MI_RGN_Create`, 4-arg
+  `MI_RGN_AttachToChn`, 64-bit `MI_PHY` / pointer-width `MI_VIRT` in
+  `CanvasInfo_t`, module ID 34 = `E_MI_MODULE_ID_SCL`).
+- [x] **Pre-load `libmi_rgn.so`.**  Added to the existing
+  RTLD_GLOBAL dep chain in `maruko_mi_init()` alongside
+  `libcam_os_wrapper`, `libmi_common`, `libispalgo`, `libcus3a`.
+- [x] **Init-before-kthread ordering.**  `debug_osd_create()` now
+  runs ahead of `bind_maruko_pipeline()` and any
+  `MI_VENC_StartRecvPic` so the v5.10 OpenIPC `mi_rgn` driver's
+  singlethread workqueue is created from the main task.
+- [x] **Phase 2 safety gate dropped.**
+- [x] **Verified on 192.168.2.12** (OpenIPC SSC378QE / IMX415
+  1472x816@120, kernel 5.10.61): RGN init/create/attach/getcanvas
+  all succeed, encode loop runs at ~117 fps, no kernel taint, OSD
+  canvas mapped at 1472x816 stride 736.
 
-- [ ] **Pre-load deps in order** with `RTLD_NOW | RTLD_GLOBAL`:
-  `libcam_os_wrapper.so` → `libmi_common.so` → `libmi_sys.so` →
-  `libmi_rgn.so`.  None declare NEEDED entries, so lazy resolution loses
-  exported stubs from the executable.
-- [ ] **Module ID for OSD attach on Maruko is `MI_MODULE_ID_SCL` = 34**,
-  NOT `E_MI_RGN_MODID_VPE = 0` that `debug_osd.c:231` currently
-  hardcodes.  Add a build-time `#ifdef PLATFORM_MARUKO` (or pass through
-  `vpe_port` parameter properly) so the module ID matches the SCL
-  channel that Maruko binds.
-- [ ] **OpenIPC struct layout drift.**  `MI_RGN_OsdChnPortParam_t` may
-  include a trailing `stColorInvertAttr` field on Maruko.  Cross-check
-  against the OpenIPC msposd-vintage headers (vendored in
-  `waybeam-hub/vendor/sigmastar/maruko/include/`).
-- [ ] **OSD init must run before any worker thread is spawned in the
-  process.**  `MI_VENC_StartRecvPic` creates `[venc0_P0_MAIN]`
-  internally, so on Maruko `debug_osd_create()` must move ahead of
-  `maruko_start_venc()`'s recv-pic call (or VENC start).  Reorder
-  carefully and verify Star6E still works.
-- [ ] **Re-verify:** `showOsd=true` boots clean, OSD shows fps/cpu in
-  the stream, no `dmesg` Oops.  Soak 30s+ with concurrent IQ and
-  recording load.
+Recipe cross-referenced with `waybeam-hub/src/rgn_backend_maruko.c`,
+which had already verified the same pattern against the same kernel/lib.
 
-### Phase 3 — IMU / BMI270 wiring (1 day, gated on hardware)
+### Phase 3 — IMU / BMI270 wiring (CLOSED — no hardware)
 
-**Why now:** small code change, but only if `192.168.2.12` actually has a
-BMI270 wired.
-
-- **Step 0 (probe):** SSH to `192.168.2.12`, check `/sys/bus/i2c/devices/`
-  and `/dev/i2c-*` for BMI270 presence. Skip phase if absent.
-- If present: copy `imu_init` callsite into `maruko_pipeline.c` after VENC,
-  plus `imu_bmi270_push` into the run loop. Pattern:
-  `star6e_pipeline.c:1084-1102` + `star6e_runtime.c:827`.
-- **Verify:** sidecar telemetry includes IMU samples.
+**Probe result on 192.168.2.12 (2026-05-02):** `i2cdetect` found no
+device at 0x68 / 0x69 across `i2c-0`/`-1`/`-2`. Only `0x1a` is present
+on `i2c-1` (audio codec). `/sys/class/input` does not exist on the
+target either.  Phase skipped; reopen if a BMI270-equipped Maruko
+board surfaces.
 
 ### Phase 4 — Sensor-mode unlock on reinit (medium-architectural, plan ahead)
 
@@ -217,6 +216,25 @@ Mode/fps mapping, direct ISP-bin load stability, >30fps verification. The
 `CURRENT_STATUS` says "deferred until newer driver." Keep deferred, but
 probe at the start of each phase to see if a newer driver landed.
 
+### Phase 9 — CPU perf: opt-in 3A throttle (READY ON BRANCH, separate PR)
+
+Lives on `feature/maruko-cus3a-throttle` (4 commits, v0.9.11/v0.9.12 on
+the original branch — needs rebase onto post-#81 master).  Replaces the
+SDK `3A_Proc_0` thread (NATIVE algorithm running at sensor frame rate)
+with a no-op AE adaptor registered via `CUS3A_RegInterfaceEX(ADAPTOR_1)`
+and a 15 Hz supervisory thread that drives AE manually via
+`MI_ISP_CUS3A_SetAeParam`.  AWB stays on the SDK NATIVE path.  Saves
+~24% sys CPU at 120 fps on Cortex-A7 (60% → 36% sys); IQ knobs still
+respond instantly because `MI_ISP_EnableUserspace3A` keeps the IQ→HW
+pump alive.
+
+- Opt-in via new config field `isp.aeMode = "throttle"`; default
+  `"native"` preserves existing behaviour and gives a safety hatch if a
+  different sensor / firmware breaks the no-op adaptor.
+- Standalone PR target.  Should ship **after** PR #81 merges so the
+  rebase is small (no source-file overlap with Phases 1/2/2b; only
+  HISTORY/VERSION renumber).
+
 ---
 
 ## Re-evaluation triggers
@@ -232,6 +250,29 @@ Revisit and rewrite this plan if any of these happen:
 3. New Maruko driver lands during the work → reorder Phase 8 sensor-depth
    ahead of audio if it unblocks higher-FPS streaming (more user-visible
    than audio).
+4. A BMI270-equipped Maruko board appears → reopen Phase 3.
+
+## Open work / next decision point
+
+After Phases 1, 2, 2b, and 3 settle (Phase 3 closed without code),
+the next agenda items in priority order are:
+
+1. **Phase 0 housekeeping** — `CURRENT_STATUS_AND_NEXT_STEPS.md` and
+   `DUAL_BACKEND_SPLIT_PLAN.md` cleanup.  Mechanical, ~30 min.
+2. **Phase 9 PR (cus3a throttle)** — already implemented on
+   `feature/maruko-cus3a-throttle`; needs rebase + dedicated PR.  Low
+   risk, opt-in, easy review.
+3. **Choose architectural follow-up.**  Phase 4 (live AR-change
+   reinit, medium-arch) unblocks per-channel resolution and is a
+   prerequisite for clean Phase 6 recording.  Phase 5 (audio) is the
+   biggest standalone gap but is independent of Phase 4/6/7.  Phase 7
+   (dual-VENC probe) is cheap to *probe* and tells us whether to
+   commit to Phase 6's "record at any resolution" goal.
+
+Recommendation: do Phase 0 + Phase 9 PR first (cheap), then probe
+Phase 7 (1 day spike — `MI_VENC_CreateChn(1, ...)` after channel 0 is
+running) before committing to Phase 4/5/6, because the probe outcome
+fans out to Phase 6's architecture.
 
 ## Architectural notes worth carrying
 
