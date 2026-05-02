@@ -50,8 +50,9 @@ typedef struct {
 	uint32_t awb_ct;       /* color temperature in Kelvin (for ct_manual) */
 	bool keep_aspect;      /* true = center-crop sensor to encode aspect ratio
 	                        * (preserves geometry); false = pass full sensor
-	                        * to VIF and stretch in VPE. Star6E only — Maruko
-	                        * ignores until SCL crop port lands. */
+	                        * downstream and stretch.  Star6E applies the
+	                        * crop at VIF; Maruko applies it at the SCL
+	                        * port.crop. */
 } VencConfigIsp;
 
 typedef struct {

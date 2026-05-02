@@ -26,7 +26,7 @@ several places (see "Surprises vs docs" below).
 
 | Gap | Star6E location | Maruko status | Effort |
 |---|---|---|---|
-| Aspect-ratio precrop | `star6e_pipeline.c:338-386` (VIF center-crop) | `isp.keep_aspect` config field commented "Maruko ignores until SCL crop port lands" (`venc_config.h:51-54`); `configure_maruko_scl()` writes `scl_port.crop = {0}` (`maruko_pipeline.c:534-545`) | **Quick win** |
+| ~~Aspect-ratio precrop~~ | ~~`star6e_pipeline.c:338-386`~~ | **Closed in v0.9.8** — `configure_maruko_scl()` writes a centered rect via `pipeline_common_compute_precrop()` (Star6E parity); `venc_config.h:51-54` comment updated. | — |
 | Debug OSD overlay | `star6e_runtime.c:825-835`, `star6e_pipeline.c:1106-1108` | No `debug_osd` include in any maruko_*.c | **Quick win** |
 | IMU / BMI270 | `star6e_pipeline.c:1084-1102` + `star6e_runtime.c:827,848,857` | No `imu_bmi270` references in maruko sources | Easy if board has BMI270 |
 | Live AR-change reinit | Star6E SIGHUP rebuilds VIF/VPE for AR change | `maruko_runtime.c:99-107` forces sensor mode lock to avoid ISP hang | Medium-arch |
@@ -66,22 +66,29 @@ Update stale docs so the plan starts from a true baseline.
   verified gaps above.
 - [ ] Mark cold-boot unlock + frame-lost protection as "ported" in
   `CURRENT_STATUS_AND_NEXT_STEPS.md`.
-- [ ] Replace the "until SCL crop port lands" comment in
-  `venc_config.h:51-54` once Phase 1 ships.
+- [x] Replace the "until SCL crop port lands" comment in
+  `venc_config.h:51-54` (done with Phase 1 in v0.9.8).
 
-### Phase 1 — Aspect-ratio SCL precrop (1 day, highest gain/effort ratio)
+### Phase 1 — Aspect-ratio SCL precrop (DONE, v0.9.8)
 
 **Why first:** documented gap, narrow blast radius, no SDK probing needed,
 immediately fixes geometry on every non-16:9 encode.
 
-- Compute center-crop rect when `cfg->image_width / image_height` AR ≠
-  sensor mode AR.
-- Wire it into `configure_maruko_scl()`'s `scl_port.crop` (currently `{0}`).
-- Keep `isp.keep_aspect=true` default; respect `false` to fall back to
-  current stretch behavior.
-- Reference: `documentation/PRECROP_ASPECT_RATIO.md` already has the math.
-- **Verify:** push to `192.168.2.12` with `imx415` mode 0 +
-  `video0.size=1280x720`, confirm no stretching.
+- [x] Compute center-crop rect when encode AR ≠ sensor mode AR
+  (re-using `pipeline_common_compute_precrop()`; computed against the
+  post-binning effective input so it matches what actually reaches the
+  SCL stage).
+- [x] Wire into `configure_maruko_scl()`'s `scl_port.crop`.
+- [x] Default `isp.keepAspect=true`; `false` falls back to zero-crop
+  (full sensor → downstream stretch).
+- [x] Hooked into `venc_api_set_active_precrop()` /
+  `clear_active_precrop()` for `/api/v1/config` parity with Star6E.
+- [x] **Verified on `192.168.2.12` (IMX415):**
+  - 960x720 (4:3) on 1920x1080 sensor mode → `Precrop: 1920x1080 ->
+    1440x1080 (offset 240,0)`, encoding 89 fps @ 25 Mbps cleanly,
+    visually correct on screen.
+  - 1280x720 (16:9) on 1920x1080 → no precrop, full source.
+  - 4:3 with `keepAspect=false` → no precrop (legacy stretch path).
 
 ### Phase 2 — Debug OSD overlay (≤½ day, quick win)
 

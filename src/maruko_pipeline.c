@@ -477,12 +477,13 @@ fail:
 }
 
 static int configure_maruko_scl(const SensorSelectResult *sensor,
-	uint32_t out_width, uint32_t out_height)
+	uint32_t out_width, uint32_t out_height,
+	const PipelinePrecropRect *precrop)
 {
 	MI_S32 ret = 0;
 	int dev = 0, chn = 0, started = 0, port = 0;
 
-
+	(void)sensor;
 
 	if (!g_mi_scl_dev_created) {
 		/* Match majestic: enable all 4 HW scaler ports (bits 0-3). */
@@ -528,11 +529,20 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	}
 	started = 1;
 
-	/* Match majestic: SCL port crop = zero (driver fills from input),
-	 * output = target dimensions. SCL handles scaling internally.
-	 * IFC compress required for HW_RING binding to VENC. */
+	/* SCL port crop: when keep_aspect=true and source AR != encode AR,
+	 * pipeline_common_compute_precrop() returns a centered rect that
+	 * matches the encode aspect ratio (zero offsets + full source dims
+	 * otherwise).  Writing it into scl_port.crop avoids non-uniform
+	 * scaling in the SCL stage.  Output = target dimensions; IFC
+	 * compress required for HW_RING binding to VENC. */
 	i6c_scl_port scl_port;
 	memset(&scl_port, 0, sizeof(scl_port));
+	if (precrop) {
+		scl_port.crop.x = precrop->x;
+		scl_port.crop.y = precrop->y;
+		scl_port.crop.width = precrop->w;
+		scl_port.crop.height = precrop->h;
+	}
 	scl_port.output.width = (unsigned short)out_width;
 	scl_port.output.height = (unsigned short)out_height;
 	scl_port.pixFmt = I6_PIXFMT_YUV420SP;
@@ -560,6 +570,9 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	}
 	port = 1;
 
+	if (precrop)
+		venc_api_set_active_precrop(precrop->x, precrop->y,
+			precrop->w, precrop->h);
 	return 0;
 
 fail:
@@ -575,7 +588,8 @@ fail:
 }
 
 static int maruko_start_vpe(const SensorSelectResult *sensor,
-	uint32_t out_width, uint32_t out_height, int vpe_level_3dnr)
+	uint32_t out_width, uint32_t out_height, int vpe_level_3dnr,
+	const PipelinePrecropRect *precrop)
 {
 	int isp_started = 0;
 
@@ -583,7 +597,7 @@ static int maruko_start_vpe(const SensorSelectResult *sensor,
 		return -1;
 	isp_started = 1;
 
-	if (configure_maruko_scl(sensor, out_width, out_height) != 0)
+	if (configure_maruko_scl(sensor, out_width, out_height, precrop) != 0)
 		goto fail_scl;
 
 	return 0;
@@ -1192,12 +1206,35 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	uint32_t out_w = ctx->cfg.image_width;
 	uint32_t out_h = ctx->cfg.image_height;
 
+	/* Effective SCL input dims: sensor capt after overscan clamp, then
+	 * sensor binning (mode.output < capt).  Mirrors the effective-dim
+	 * derivation in setup_maruko_graph_dimensions() — re-derived here
+	 * so the precrop rect is computed against the same surface that
+	 * actually feeds the SCL stage. */
+	uint32_t scl_in_w = ctx->sensor.plane.capt.width;
+	uint32_t scl_in_h = ctx->sensor.plane.capt.height;
+	if (ctx->sensor.mode.output.width > 0 &&
+	    ctx->sensor.mode.output.width < scl_in_w) {
+		scl_in_w = ctx->sensor.mode.output.width;
+		scl_in_h = ctx->sensor.mode.output.height;
+	}
+	PipelinePrecropRect precrop = pipeline_common_compute_precrop(
+		scl_in_w, scl_in_h, out_w, out_h, ctx->cfg.keep_aspect ? true : false);
+	if (ctx->cfg.verbose) {
+		if (precrop.x || precrop.y ||
+		    precrop.w != scl_in_w || precrop.h != scl_in_h) {
+			printf("  - Precrop: %ux%u -> %ux%u (offset %u,%u)\n",
+				scl_in_w, scl_in_h, precrop.w, precrop.h,
+				precrop.x, precrop.y);
+		}
+	}
+
 	if (maruko_start_vif(&ctx->sensor) != 0)
 		return -1;
 	ctx->vif_started = 1;
 
 	if (maruko_start_vpe(&ctx->sensor, out_w, out_h,
-	    ctx->cfg.vpe_level_3dnr) != 0)
+	    ctx->cfg.vpe_level_3dnr, &precrop) != 0)
 		return -1;
 	ctx->vpe_started = 1;
 
@@ -1614,6 +1651,7 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	if (!ctx)
 		return;
 
+	venc_api_clear_active_precrop();
 	maruko_output_teardown(&ctx->output);
 	if (ctx->bound_vpe_venc) {
 		(void)MI_SYS_UnBindChnPort(&ctx->vpe_port, &ctx->venc_port);

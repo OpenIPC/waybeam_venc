@@ -1,5 +1,29 @@
 # History
 
+## [0.9.9] - 2026-05-02
+
+Maruko parity Phase 1 — aspect-ratio precrop on the SCL stage.
+
+- **`maruko_pipeline`: SCL precrop wired up.**  `configure_maruko_scl()`
+  now writes a centered crop rect into `scl_port.crop` instead of zero
+  when `isp.keepAspect=true` and the encode aspect ratio differs from the
+  sensor's effective output.  The rect is computed via the existing
+  `pipeline_common_compute_precrop()` helper (Star6E parity) against the
+  post-binning effective input (`sensor.plane.capt` clamped by
+  `mode.output`), so it always matches the surface that actually feeds
+  the SCL stage.  Falls back to zero crop (full source area, downstream
+  stretch) when `isp.keepAspect=false`.  `venc_api_set_active_precrop()`
+  is called on success for `/api/v1/config` visibility, and
+  `venc_api_clear_active_precrop()` runs in
+  `maruko_pipeline_teardown_graph()` for symmetry with Star6E.  Verified
+  on bench (192.168.2.12, IMX415): 960x720 (4:3) on 1920x1080 sensor
+  mode → `Precrop: 1920x1080 -> 1440x1080 (offset 240,0)`, encoding
+  89 fps @ 25 Mbps without stretching; 1280x720 (16:9) and
+  `keepAspect=false` paths both produce the legacy zero-crop output.
+  (`src/maruko_pipeline.c`, `src/maruko_config.c`,
+  `include/maruko_config.h`, `include/venc_config.h`,
+  `documentation/PRECROP_ASPECT_RATIO.md`)
+
 ## [0.9.8] - 2026-05-02
 
 Frame-drop fix: relax the SDK FrameLost rate-control threshold from 120% to

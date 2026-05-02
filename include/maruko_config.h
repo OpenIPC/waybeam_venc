@@ -43,6 +43,7 @@ typedef struct {
 	uint8_t frame_lost;
 	int verbose;
 	int connected_udp;
+	int keep_aspect;
 } MarukoBackendConfig;
 
 /** Fill config with compiled-in defaults for Maruko backend. */
