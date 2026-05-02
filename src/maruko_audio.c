@@ -571,3 +571,55 @@ int maruko_audio_apply_mute(MarukoAudioState *state, int muted)
 	}
 	return 0;
 }
+
+static const char *maruko_audio_codec_name(int codec_type)
+{
+	switch (codec_type) {
+	case AUDIO_CODEC_TYPE_G711A: return "g711a";
+	case AUDIO_CODEC_TYPE_G711U: return "g711u";
+	case AUDIO_CODEC_TYPE_OPUS:  return "opus";
+	case AUDIO_CODEC_TYPE_RAW:   return "pcm";
+	default:                     return "unknown";
+	}
+}
+
+char *maruko_audio_query_status(const MarukoAudioState *state)
+{
+	char buf[384];
+	int pos;
+
+	if (!state) {
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"enabled\":false,"
+			"\"backend\":\"maruko\""
+			"}}");
+	} else {
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"enabled\":%s,"
+			"\"backend\":\"maruko\","
+			"\"lib_loaded\":%s,"
+			"\"device_opened\":%s,"
+			"\"group_enabled\":%s,"
+			"\"running\":%s,"
+			"\"codec\":\"%s\","
+			"\"sample_rate\":%u,"
+			"\"channels\":%u,"
+			"\"opus_loaded\":%s"
+			"}}",
+			state->started ? "true" : "false",
+			state->lib_loaded ? "true" : "false",
+			state->device_opened ? "true" : "false",
+			state->group_enabled ? "true" : "false",
+			state->running ? "true" : "false",
+			maruko_audio_codec_name(state->codec_type),
+			(unsigned)state->sample_rate,
+			(unsigned)state->channels,
+			(state->codec_type == AUDIO_CODEC_TYPE_OPUS &&
+			 state->opus.encoder != NULL) ? "true" : "false");
+	}
+	if (pos < 0 || pos >= (int)sizeof(buf))
+		return NULL;
+	return strdup(buf);
+}

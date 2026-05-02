@@ -553,3 +553,55 @@ int star6e_audio_apply_mute(Star6eAudioState *state, int muted)
 
 	return 0;
 }
+
+static const char *audio_codec_name(int codec_type)
+{
+	switch (codec_type) {
+	case AUDIO_CODEC_TYPE_G711A: return "g711a";
+	case AUDIO_CODEC_TYPE_G711U: return "g711u";
+	case AUDIO_CODEC_TYPE_OPUS:  return "opus";
+	case AUDIO_CODEC_TYPE_RAW:   return "pcm";
+	default:                     return "unknown";
+	}
+}
+
+char *star6e_audio_query_status(const Star6eAudioState *state)
+{
+	char buf[384];
+	int pos;
+
+	if (!state) {
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"enabled\":false,"
+			"\"backend\":\"star6e\""
+			"}}");
+	} else {
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"enabled\":%s,"
+			"\"backend\":\"star6e\","
+			"\"lib_loaded\":%s,"
+			"\"device_enabled\":%s,"
+			"\"channel_enabled\":%s,"
+			"\"running\":%s,"
+			"\"codec\":\"%s\","
+			"\"sample_rate\":%u,"
+			"\"channels\":%u,"
+			"\"opus_loaded\":%s"
+			"}}",
+			state->started ? "true" : "false",
+			state->lib_loaded ? "true" : "false",
+			state->device_enabled ? "true" : "false",
+			state->channel_enabled ? "true" : "false",
+			state->running ? "true" : "false",
+			audio_codec_name(state->codec_type),
+			(unsigned)state->sample_rate,
+			(unsigned)state->channels,
+			(state->codec_type == AUDIO_CODEC_TYPE_OPUS &&
+			 state->opus.encoder != NULL) ? "true" : "false");
+	}
+	if (pos < 0 || pos >= (int)sizeof(buf))
+		return NULL;
+	return strdup(buf);
+}

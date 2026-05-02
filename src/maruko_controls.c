@@ -1049,6 +1049,14 @@ static char *maruko_query_transport_status(void)
 
 /* ── Callback table ──────────────────────────────────────────────────── */
 
+static char *maruko_query_audio_status(void)
+{
+	MarukoBackendContext *backend = g_ctx.backend;
+	if (!backend)
+		return NULL;
+	return maruko_audio_query_status(&backend->audio);
+}
+
 static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_bitrate = maruko_apply_bitrate,
 	.apply_fps = maruko_apply_fps,
@@ -1070,6 +1078,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_iq_param = maruko_iq_set,
 	.apply_max_payload_size = maruko_apply_max_payload_size,
 	.query_transport_status = maruko_query_transport_status,
+	.query_audio_status = maruko_query_audio_status,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)

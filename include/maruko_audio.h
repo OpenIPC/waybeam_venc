@@ -73,4 +73,10 @@ void maruko_audio_teardown(MarukoAudioState *state);
 /** Apply mute / unmute via MI_AI_SetMute. */
 int maruko_audio_apply_mute(MarukoAudioState *state, int muted);
 
+/** Build a JSON status snapshot describing whether the audio lib loaded,
+ *  whether capture is running, the codec/rate/channels, and whether Opus
+ *  was successfully initialized.  Returns a malloc'd NUL-terminated string
+ *  the caller must free, or NULL on allocation failure. */
+char *maruko_audio_query_status(const MarukoAudioState *state);
+
 #endif /* MARUKO_AUDIO_H */

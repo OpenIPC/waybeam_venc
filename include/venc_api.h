@@ -50,6 +50,12 @@ typedef struct {
 	 * consumers don't have to guess.  Returns NULL only if the
 	 * backend has no observability hook at all. */
 	char *(*query_transport_status)(void);
+	/* Audio capture/encode observability snapshot.  Returns malloc'd
+	 * JSON string (caller frees) describing whether the audio backend
+	 * library loaded, whether capture is running, the configured codec,
+	 * and Opus encoder availability.  Returns NULL when audio is
+	 * compiled out or the backend has no observability hook. */
+	char *(*query_audio_status)(void);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

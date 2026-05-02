@@ -59,6 +59,12 @@ void star6e_audio_teardown(Star6eAudioState *state);
 /** Apply mute/unmute to audio encoder channel. */
 int star6e_audio_apply_mute(Star6eAudioState *state, int muted);
 
+/** Build a JSON status snapshot describing whether the audio lib loaded,
+ *  whether capture is running, the codec/rate/channels, and whether Opus
+ *  was successfully initialized.  Returns a malloc'd NUL-terminated string
+ *  the caller must free, or NULL on allocation failure. */
+char *star6e_audio_query_status(const Star6eAudioState *state);
+
 /** Return the real (unfiltered) stdout fd.
  *  When the stdout pipe filter is active, returns the saved fd that bypasses
  *  the pipe.  Use with dprintf() so venc output never stalls on the filter. */

@@ -15,7 +15,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.6.3`
+- `contract_version`: `0.8.3`
 - `status`: `active`
 
 ## Governance Rules
@@ -714,6 +714,79 @@ decompress the gzip response automatically.
 - 3 offset mismatches: `nr_despike`, `pfc`, `hdr` (set succeeds but readback differs — struct padding)
 - 2 ISP-rejected: `nr3d_p1`, `fpn` (set succeeds but ISP ignores on this sensor)
 
+### `GET /api/v1/audio/status`
+
+Return live observability for the audio capture/encode pipeline.  Useful for
+diagnosing silent audio failures (missing `libmi_ai.so` on Maruko, missing
+`libopus.so`, capture thread not running, codec mismatch).
+
+```bash
+curl http://<device-ip>/api/v1/audio/status
+```
+
+Response `200` (Star6E with audio enabled):
+```json
+{
+  "ok": true,
+  "data": {
+    "enabled": true,
+    "backend": "star6e",
+    "lib_loaded": true,
+    "device_enabled": true,
+    "channel_enabled": true,
+    "running": true,
+    "codec": "opus",
+    "sample_rate": 48000,
+    "channels": 1,
+    "opus_loaded": true
+  }
+}
+```
+
+Response `200` (Maruko with audio enabled):
+```json
+{
+  "ok": true,
+  "data": {
+    "enabled": true,
+    "backend": "maruko",
+    "lib_loaded": true,
+    "device_opened": true,
+    "group_enabled": true,
+    "running": true,
+    "codec": "opus",
+    "sample_rate": 48000,
+    "channels": 1,
+    "opus_loaded": true
+  }
+}
+```
+
+Response `200` when `audio.enabled=false`:
+```json
+{"ok":true,"data":{"enabled":false,"backend":"maruko"}}
+```
+
+Field reference:
+
+| Field | Meaning |
+|---|---|
+| `enabled` | `audio.enabled=true` and `*_audio_init` reached the run state |
+| `lib_loaded` | The MI audio shared library (`libmi_audio.so` Star6E / `libmi_ai.so` Maruko) was found and dlopened |
+| `device_enabled` / `device_opened` | The capture device handle is open |
+| `channel_enabled` / `group_enabled` | The capture channel / group is enabled |
+| `running` | Capture and encode threads are alive |
+| `codec` | `"g711a"`, `"g711u"`, `"opus"`, `"pcm"`, or `"unknown"` |
+| `sample_rate` | Configured audio sample rate (Hz) |
+| `channels` | 1 (mono) or 2 (stereo) |
+| `opus_loaded` | When `codec="opus"`, the Opus encoder was successfully initialized.  `false` here while `codec="opus"` means audio falls back to raw PCM with a startup warning. |
+
+Error `501` — backend has no audio observability hook (`query_audio_status`
+not registered):
+```json
+{"ok":false,"error":{"code":"not_implemented","message":"audio status not available on this backend"}}
+```
+
 ### `GET /metrics/isp`
 
 Return a compact Prometheus-style ISP metrics snapshot.
@@ -757,6 +830,19 @@ Recording format is determined by `record.format` config: `"ts"` (default, MPEG-
 with audio) or `"hevc"` (raw HEVC NAL stream). File rotation is controlled by
 `record.maxSeconds` and `record.maxMB` config fields.
 
+Backend gating: only the Star6E backend currently runs the runtime poll that
+honors HTTP-driven start/stop.  On Maruko, recording is config-driven only
+(set `record.enabled=true` + `record.mode="mirror"|"dual"` in `/etc/venc.json`)
+and `/api/v1/record/start` returns:
+
+```json
+{"ok":false,"error":{"code":"not_implemented","message":"HTTP record control not available on this backend"}}
+```
+
+with HTTP `501`.  This avoids the prior behaviour where the request returned
+`{"ok":true}` but no recording started.  Tracked as Phase 6.5 in
+`MARUKO_PARITY_PLAN.md`.
+
 ### `GET /api/v1/record/stop`
 
 Stop SD card recording.
@@ -769,6 +855,8 @@ Response `200`:
 ```json
 {"ok":true,"data":{"action":"stop"}}
 ```
+
+Same backend gating applies — Maruko returns `501 not_implemented`.
 
 ### `GET /api/v1/record/status`
 
@@ -989,6 +1077,19 @@ Behavior:
 - `GET` endpoints must remain consistent across backends.
 
 ## Change Log (Contract)
+- `0.8.3`:
+  - Added `GET /api/v1/audio/status` — live observability for the audio
+    capture/encode pipeline (lib loaded, capture running, codec, rate,
+    channels, Opus encoder available).  Available on both backends; returns
+    `501` when the backend has no audio observability hook.
+  - `GET /api/v1/record/start` and `GET /api/v1/record/stop` now return
+    `501 not_implemented` on backends without a runtime record poll
+    (currently only Maruko).  Previously the requests appeared to succeed
+    with `{"ok":true}` but did nothing.  Star6E behaviour is unchanged.
+  - In-binary `/api/v1/version` now reports `contract_version=0.8.3`
+    (previously the constant was stuck at `0.3.0` while the doc moved
+    forward to `0.8.2`).  Future doc/code drift is being addressed in a
+    follow-up sweep.
 - `0.8.2`:
   - `outgoing.max_payload_size` is now `MUT_LIVE` (was `MUT_RESTART`) and
     can be batched with other live fields in a single `/api/v1/set` call,
