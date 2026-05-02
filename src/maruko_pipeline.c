@@ -1239,6 +1239,20 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 		return -1;
 	ctx->vpe_started = 1;
 
+	/* Debug OSD must initialise on the main thread BEFORE the VENC
+	 * kthread spawns: the kernel mi_rgn driver creates a singlethread
+	 * workqueue inside MI_RGN_InitDev, and the v5.10 OpenIPC kernel
+	 * rejects that allocation when invoked from a non-main thread.
+	 * SCL device/channel exist by this point (maruko_start_vpe), so
+	 * AttachToChn can resolve to SCL/0/0/0 immediately. */
+	if (ctx->cfg.show_osd && !ctx->debug_osd) {
+		ctx->debug_osd = debug_osd_create(out_w, out_h, NULL);
+		if (!ctx->debug_osd)
+			fprintf(stderr,
+				"WARNING: [maruko] debug OSD init failed — "
+				"continuing without overlay\n");
+	}
+
 	if (bind_maruko_pipeline(ctx) != 0)
 		return -1;
 
@@ -1257,22 +1271,6 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 			ctx->cfg.image_width, ctx->cfg.image_height);
 	}
 	printf("  - 3DNR  : level %d\n", ctx->cfg.vpe_level_3dnr);
-
-	/* Debug OSD: code parity with Star6E is in place (linked + wired),
-	 * but the Maruko runtime path is blocked on this device firmware —
-	 * MI_RGN_Init triggers a kernel Oops in MI_DEVICE_Ioctl due to a
-	 * lib/kernel SDK vintage mismatch (see MARUKO_PARITY_PLAN.md
-	 * Phase 2b for the cure: RTLD_GLOBAL dep preload, MI_MODULE_ID_SCL
-	 * module ID, and OSD init before any MI worker thread).  Until that
-	 * recipe lands, opt-in is converted to a one-time warning so a stale
-	 * `debug.showOsd=true` never wedges the encode loop. */
-	if (ctx->cfg.show_osd) {
-		fprintf(stderr,
-			"WARNING: [maruko] debug.showOsd=true ignored — Maruko OSD "
-			"runtime is blocked by SDK kernel/lib vintage mismatch "
-			"(MARUKO_PARITY_PLAN.md Phase 2b).  Set showOsd=false to "
-			"silence this warning.\n");
-	}
 
 	return 0;
 }

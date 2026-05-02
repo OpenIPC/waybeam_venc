@@ -25,6 +25,7 @@ static void *h_cam_os;
 static void *h_mi_common;
 static void *h_ispalgo;
 static void *h_cus3a;
+static void *h_mi_rgn;
 
 void *maruko_load_symbol(void *handle, const char *lib_name,
 	const char *sym_name)
@@ -407,6 +408,15 @@ int maruko_mi_init(void)
 		fprintf(stderr, "WARNING: [maruko] dlopen(libcus3a.so): %s\n",
 			dlerror());
 
+	/* libmi_rgn.so is opened here (RTLD_GLOBAL) so debug_osd.c's later
+	 * dlopen sees the dependency chain already resolved.  Preload is
+	 * non-fatal: if libmi_rgn is missing, debug_osd_create() will fail
+	 * cleanly and the rest of the pipeline still runs. */
+	h_mi_rgn = dlopen("libmi_rgn.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!h_mi_rgn)
+		fprintf(stderr, "WARNING: [maruko] dlopen(libmi_rgn.so): %s\n",
+			dlerror());
+
 	/* Load modules in dependency order. On failure, maruko_mi_deinit()
 	 * safely unloads any already-loaded modules (handles NULL gracefully). */
 	if (i6c_sys_load(&g_mi_sys) != 0) {
@@ -450,6 +460,7 @@ void maruko_mi_deinit(void)
 	i6c_vif_unload(&g_mi_vif);
 	i6c_sys_unload(&g_mi_sys);
 
+	if (h_mi_rgn)   { dlclose(h_mi_rgn);   h_mi_rgn = NULL; }
 	if (h_cus3a)    { dlclose(h_cus3a);    h_cus3a = NULL; }
 	if (h_ispalgo)  { dlclose(h_ispalgo);  h_ispalgo = NULL; }
 	if (h_mi_common){ dlclose(h_mi_common);h_mi_common = NULL; }

@@ -1,5 +1,58 @@
 # History
 
+## [0.9.11] - 2026-05-02
+
+Maruko parity Phase 2b — debug OSD now functional (kernel-oops cured).
+
+Verified on 192.168.2.12 (OpenIPC SSC378QE, kernel 5.10.61): with
+`debug.showOsd=true`, RGN init/create/attach/getcanvas all succeed,
+encode loop runs at ~117 fps, no kernel taint, OSD canvas mapped at
+1472x816 stride 736.
+
+- **Root cause was a build-time conditional bug, not a kernel/lib
+  mismatch.**  The Maruko build defines BOTH `-DPLATFORM_STAR6E` and
+  `-DPLATFORM_MARUKO` (the Star6E backend's MI shim headers are reused
+  for type compatibility; see `Makefile:39`).  In Phase 2,
+  `src/debug_osd.c` started with `#ifdef PLATFORM_STAR6E`, so the
+  Star6E branch was compiled into the Maruko binary too — and the
+  Star6E ABI (1-arg `MI_RGN_Init(palette*)`, mod_id 0 = VPE, 3-arg
+  `AttachToChn`) ran against the Maruko kernel/lib pair.  That
+  ABI mismatch produced the `MI_DEVICE_Ioctl → kfree → compound_head`
+  oops with a userspace-shaped pointer (`r0=0x0f9c0900`) reaching
+  kfree.  Fixed by changing the first conditional to
+  `#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)` so
+  Maruko binaries enter the proper Maruko branch.
+- **`debug_osd`: Maruko ABI branch (now active).**  Targets the
+  OpenIPC libmi_rgn.so v3 API as documented in
+  `Maruko_work_dir/SourceCode/project/release/include/mi_rgn.h` and
+  used by the official IPC demo at
+  `Maruko_work_dir/ipc_demo/maruko/common/osd/osd.cpp`:
+  `MI_RGN_Init(soc_id, palette*)` (palette as direct arg, not wrapped),
+  3-arg `MI_RGN_Create(soc_id, handle, attr*)`, 4-arg
+  `MI_RGN_AttachToChn(soc_id, handle, chnport*, param*)`, 64-bit
+  `MI_PHY` / pointer-width `MI_VIRT` in `MI_RGN_CanvasInfo_t`,
+  module ID 34 (`E_MI_MODULE_ID_SCL` — RGN is attached to SCL/0/0/0).
+- **`maruko_mi`: pre-load `libmi_rgn.so`.**  Added to the existing
+  RTLD_GLOBAL dep chain in `maruko_mi_init()` (alongside
+  `libcam_os_wrapper`, `libmi_common`, `libispalgo`, `libcus3a`) so the
+  later `dlopen` from `debug_osd.c` finds the dependency graph fully
+  resolved.  (`src/maruko_mi.c`)
+- **`maruko_pipeline`: init-before-kthread ordering.**  Moved
+  `debug_osd_create()` ahead of `bind_maruko_pipeline()` so it runs
+  after the SCL channel exists (`maruko_start_vpe`) but BEFORE
+  `MI_VENC_StartRecvPic` spawns the encoder kthread.  The v5.10
+  OpenIPC kernel mi_rgn driver requires the singlethread workqueue
+  to be created from the main task.  Dropped the Phase 2 safety-gate
+  WARN-and-skip — the runtime is now real.  (`src/maruko_pipeline.c`)
+
+Recipe cross-referenced with `waybeam-hub/src/rgn_backend_maruko.c`,
+which had already verified the dep preload + module-ID-34 pattern
+against the same kernel/lib pair (different `MI_RGN_OsdChnPortParam_t`
+trailing field — the Maruko SDK header in
+`Maruko_work_dir/SourceCode/project/release/include/mi_rgn_datatype.h`
+omits `stColorInvertAttr` that the hub's older vendored header
+includes; both work because the kernel reads only the union prefix).
+
 ## [0.9.10] - 2026-05-02
 
 Maruko parity Phase 2 — debug OSD overlay wired to both backends.
