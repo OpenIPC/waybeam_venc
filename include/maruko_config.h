@@ -49,6 +49,7 @@ typedef struct {
 	uint32_t isp_gain_max;  /* sensor gain cap; 0 = use ISP bin default */
 	char ae_mode[16];       /* "native" (default) or "throttle" — see
 	                         * VencConfigIsp::ae_mode for semantics. */
+	VencConfigImu imu;
 } MarukoBackendConfig;
 
 /** Fill config with compiled-in defaults for Maruko backend. */

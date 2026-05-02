@@ -1,5 +1,50 @@
 # History
 
+## [0.9.13] - 2026-05-02
+
+Maruko parity Phase 3 — BMI270 IMU port (opt-in via `imu.enabled`).
+
+Wires the existing platform-agnostic `src/imu_bmi270.c` into the
+Maruko pipeline so `imu.enabled=true` reads gyro + accel from a
+BMI270 over I2C (frame-synced FIFO mode, 200 Hz default ODR).  The
+push callback is currently a stub — samples are read and discarded —
+so this lands the lifecycle but no consumer yet.  Future telemetry /
+sidecar export plugs into the existing callback slot without touching
+init/teardown.
+
+Verified on 192.168.2.12 (OpenIPC SSC378QE / IMX415 1472x816@120,
+H.265 25 Mbps RTP):
+- BMI270 detected at `0x68` on `/dev/i2c-1` (chip_id=`0x24`).
+- 400-sample auto-bias (~2 s) completes cleanly; gyro bias ≈
+  (0.005, -0.006, -0.001) rad/s on bench.
+- 200 Hz FIFO drain runs every video frame; 1963 samples / 9 s of
+  streaming at 118 fps, 0 read errors.
+
+- **Maruko-specific ordering constraint.**  IMU init must run BEFORE
+  `MI_VENC_StartRecvPic` (i.e. before `bind_maruko_pipeline()`)
+  because the auto-bias loop blocks the main thread for ~2 s
+  (400 samples @ 200 Hz).  Empirically on Maruko, blocking the main
+  thread for 2 s after StartRecvPic leaves the VENC fd in a state
+  where `poll()` never returns POLLIN and the stream loop never
+  progresses.  Star6E does not exhibit this — IMU init can stay
+  post-VENC there.  The constraint is captured inline in
+  `maruko_pipeline_configure_graph()` so future re-orders don't
+  regress.
+- `src/imu_bmi270.c` moved from `STAR6E_ONLY_SRC` to `HELPER_SRC`
+  (already platform-agnostic; no `#ifdef PLATFORM_*` in the file).
+- New `imu` field on `MarukoBackendContext` (`ImuState *`, NULL when
+  disabled).  `MarukoBackendConfig` carries `VencConfigImu imu`
+  embedded from `vcfg->imu` so the pipeline does not reach into
+  `VencConfig` directly (consistent with the `show_osd` /
+  `keep_aspect` bridge fields).
+- Per-frame `imu_drain()` runs in `maruko_pipeline_process_stream()`
+  before `MI_VENC_GetStream` (Star6E parity at
+  `star6e_runtime.c:727`).  No-op when `ctx->imu == NULL`.
+- Stop/destroy in `maruko_pipeline_teardown_graph()` ahead of any
+  unbind/stop, mirroring Star6E.
+- No config-schema change.  `imu.enabled` default remains `false`,
+  so existing setups are untouched.
+
 ## [0.9.12] - 2026-05-02
 
 Maruko parity Phase 9 — opt-in 3A CPU throttle (`isp.aeMode`).
