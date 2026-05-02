@@ -836,6 +836,16 @@ Run the API test suite against a live device after `venc` is already running:
 ./scripts/api_test_suite.sh 192.168.1.13 80
 ```
 
+Verify the single-instance pidfile + flock gate by trying to launch a second
+`venc` while one is already running on the device:
+
+```sh
+./scripts/test_pidfile_lock.sh root@192.168.1.13
+```
+
+The second launch must exit with rc=1 and the "venc already running" banner;
+the first instance must remain alive.
+
 Scene-change IDR control is configured through `video0.scene_threshold` in
 `/etc/venc.json`. Leave `video0.scene_threshold=0` for baseline behavior.
 
