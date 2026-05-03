@@ -197,7 +197,7 @@ static VencRecordStatusFn g_record_status_fn;
  * that *do* consume those flags (currently Star6E only) call
  * venc_api_set_record_http_control_supported(1) so /api/v1/record/start
  * and /stop stop returning 501. */
-static int g_record_http_control_supported;
+static bool g_record_http_control_supported;
 
 void venc_api_request_reinit(void)
 {
@@ -261,9 +261,9 @@ void venc_api_set_record_status_fn(VencRecordStatusFn fn)
 	g_record_status_fn = fn;
 }
 
-void venc_api_set_record_http_control_supported(int supported)
+void venc_api_set_record_http_control_supported(bool supported)
 {
-	g_record_http_control_supported = supported ? 1 : 0;
+	g_record_http_control_supported = supported;
 }
 
 void venc_api_get_record_dir(char *buf, size_t buf_size)
@@ -1810,7 +1810,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.8.3\","
+		"\"contract_version\":\"0.8.4\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2208,7 +2208,7 @@ static int handle_idr(int fd, const HttpRequest *req, void *ctx)
  * request. */
 static int record_http_supported(void)
 {
-	return g_record_http_control_supported != 0;
+	return g_record_http_control_supported ? 1 : 0;
 }
 
 static int handle_record_start(int fd, const HttpRequest *req, void *ctx)

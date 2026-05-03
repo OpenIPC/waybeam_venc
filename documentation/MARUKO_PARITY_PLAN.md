@@ -399,8 +399,12 @@ pending).  Next agenda:
    Cost: ~3-4 days.
 2. **Phase 6.5 (recording follow-ups)** — small, on demand:
    - Raw `.hevc` recorder for Maruko (mirror Star6E adapter).
-   - HTTP `/api/v1/record/start|stop` for Maruko (port the
-     `record_status_callback` + `recordings_*` paths).
+   - HTTP `/api/v1/record/start|stop` for Maruko — still TODO; needs
+     a Maruko consumer of `venc_api_get_record_start/stop` flags in
+     the main loop.  (The `record_status_callback` half landed in
+     contract `0.8.4`; Maruko now reports live recorder state but
+     `/start|stop` still return 501 because the request flags have
+     no consumer.)
    - Adaptive bitrate while SD-bound (the dual thread already has
      it — only matters once a real SD card is in play).
 3. **Phase 4 (live AR-change reinit)** — medium-arch, unblocks

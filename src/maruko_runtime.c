@@ -199,8 +199,6 @@ static void maruko_runner_teardown(void *opaque)
 {
 	MarukoRunnerContext *ctx = opaque;
 
-	venc_api_set_record_status_fn(NULL);
-	g_maruko_runner_ctx = NULL;
 	maruko_pipeline_teardown(&ctx->backend);
 }
 

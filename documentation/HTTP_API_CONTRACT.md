@@ -15,7 +15,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.8.3`
+- `contract_version`: `0.8.4`
 - `status`: `active`
 
 ## Governance Rules
@@ -530,9 +530,9 @@ Response `200`:
 }
 ```
 
-`runtime.active_precrop` is included on Star6E whenever the pipeline has
-been started; it is omitted before the first start, after a stop, and on
-Maruko (no precrop support yet).
+`runtime.active_precrop` is included on both backends whenever the
+pipeline has been started; it is omitted before the first start and
+after a stop.
 
 Error `501`:
 ```json
@@ -1216,13 +1216,13 @@ divergence is listed.  As of `contract_version: 0.8.3`:
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
 | `/api/v1/record/{start,stop}` | yes | **501** | Maruko has no runtime poll loop yet (Phase 6.5).  Config-driven recording (`record.enabled=true` + `record.mode="mirror"\|"dual"`) works. |
-| `/api/v1/record/status` | live counters | zero-fill | Same gap as above; Maruko returns `active:false` even when config-driven recording is active. |
+| `/api/v1/record/status` | live counters | live counters | Both backends register a status callback against the live `Star6eTsRecorderState`; Maruko reflects daemon-config-driven recording (mirror/dual). |
 | `/api/v1/recordings*` | yes | yes | File listing/download/delete works against `record.dir` regardless of which backend wrote the file. |
 | `/api/v1/audio/status` | yes | yes | Both backends register `query_audio_status`. |
 | `/api/v1/dual/*` | yes | yes | Phase 7 closed Maruko's dual-VENC port (`feature/maruko-dual-venc-port`, v0.9.x).  Returns 404 on either backend when dual is not active. |
 | `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Both backends use the same IQ table schema. |
 | `/api/v1/awb` | live | live | Both backends register `query_awb_info`. |
-| `/api/v1/ae` | live + `runtime.active_precrop` | live | Maruko AE response omits `runtime.active_precrop` on this branch; the Phase 1 precrop is exposed through `/api/v1/config` instead. |
+| `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
 | `/api/v1/transport/status` | yes | yes | SHM-ring fields are shown when `outgoing.server=shm://`; otherwise the UDP/Unix subset. |
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
 | `video0.codec=h264` | rejected with 409 | accepted | Star6E RTP mode is HEVC-only on this build. |
@@ -1230,6 +1230,21 @@ divergence is listed.  As of `contract_version: 0.8.3`:
 | `isp.aeMode` ("native" / "throttle") | accepted but no-op | applied | Maruko-only opt-in; switching modes mid-run requires a process restart.  Default `"native"` on both backends. |
 
 ## Change Log (Contract)
+- `0.8.4`:
+  - `GET /api/v1/record/status` now reflects daemon-config-driven recording
+    on Maruko (mirror/dual): previously the response was zero-fill
+    (`active:false`, all counters 0) even when a TS file was being written.
+    The Maruko runtime now registers a status callback against the same
+    `Star6eTsRecorderState` the recorder uses.  No schema change.
+  - `GET /api/v1/ae` on Maruko now includes `runtime.active_precrop`,
+    matching Star6E.  The precrop was already being reported via
+    `/api/v1/config`; only the AE response was missing it.
+  - **Internal** (no API surface change): the `/api/v1/record/start|stop`
+    501 gate now keys off an explicit
+    `venc_api_set_record_http_control_supported(true)` opt-in instead of
+    the status-callback presence.  This decoupling is what allowed Maruko
+    to add status visibility without accidentally re-enabling the
+    HTTP-driven control endpoints (which it still doesn't consume).
 - `0.8.3`:
   - Added `GET /api/v1/audio/status` — live observability for the audio
     capture/encode pipeline (lib loaded, capture running, codec, rate,
@@ -1283,7 +1298,7 @@ divergence is listed.  As of `contract_version: 0.8.3`:
   - `GET /api/v1/config` response gains a `runtime` block with
     `active_precrop` ({x,y,w,h}) — the VIF crop currently programmed
     (includes any sensor overscan offsets).  Omitted when the pipeline
-    has not started, after stop, or on Maruko.
+    has not started or after stop.  Available on both backends.
   - `GET /api/v1/ae` Star6E response includes `runtime.active_precrop`
     with the same rectangle.
 - `0.5.0`:

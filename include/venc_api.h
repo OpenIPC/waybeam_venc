@@ -141,7 +141,7 @@ void venc_api_set_record_status_fn(VencRecordStatusFn fn);
 /* Opt in to HTTP-driven record control (gates /api/v1/record/start|stop).
  * Set independently of the status callback so a backend can report state
  * without claiming it consumes the start/stop request flags. */
-void venc_api_set_record_http_control_supported(int supported);
+void venc_api_set_record_http_control_supported(bool supported);
 
 /* Fill the supplied struct with live record status via the registered
  * callback.  When no callback is set, zeroes the struct. */

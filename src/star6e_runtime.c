@@ -491,7 +491,7 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	venc_api_register(vcfg, "star6e", star6e_controls_callbacks());
 	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
 	venc_api_set_record_status_fn(record_status_callback);
-	venc_api_set_record_http_control_supported(1);
+	venc_api_set_record_http_control_supported(true);
 
 	scene_init(&ctx->scene, ctx->vcfg.video0.scene_threshold,
 		ctx->vcfg.video0.scene_holdoff);
