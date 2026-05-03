@@ -107,6 +107,9 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->scene_threshold = vcfg->video0.scene_threshold;
 	cfg->scene_holdoff = vcfg->video0.scene_holdoff;
 	cfg->frame_lost = vcfg->video0.frame_lost ? 1 : 0;
+	cfg->intra_refresh = vcfg->video0.intra_refresh ? 1 : 0;
+	cfg->intra_refresh_lines = vcfg->video0.intra_refresh_lines;
+	cfg->intra_refresh_qp = vcfg->video0.intra_refresh_qp;
 	cfg->verbose = vcfg->system.verbose ? 1 : 0;
 	cfg->connected_udp = vcfg->outgoing.connected_udp ? 1 : 0;
 	cfg->keep_aspect = vcfg->isp.keep_aspect ? 1 : 0;

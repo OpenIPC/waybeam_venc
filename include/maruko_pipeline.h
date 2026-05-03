@@ -99,4 +99,18 @@ void maruko_pipeline_stop_dual(MarukoBackendContext *ctx);
 
 extern volatile sig_atomic_t g_maruko_running;
 
+/** Snapshot of the IntraRefresh configuration applied to ch0 at the most
+ *  recent pipeline start.  Mirrors Star6eIntraRefreshStatus exactly so the
+ *  /api/v1/intra/status handler can serialize either backend uniformly. */
+typedef struct {
+	int enabled;                    /* config requested */
+	int mi_supported;               /* libmi_venc.so exports SetIntraRefresh */
+	int apply_ok;                   /* SetIntraRefresh succeeded */
+	uint32_t requested_lines;       /* config value (0 = auto) */
+	uint32_t effective_lines_per_p; /* what was actually programmed */
+	uint32_t requested_qp;
+} MarukoIntraRefreshStatus;
+
+void maruko_pipeline_intra_refresh_status(MarukoIntraRefreshStatus *out);
+
 #endif /* MARUKO_PIPELINE_H */

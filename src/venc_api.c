@@ -1,6 +1,12 @@
 #include "venc_api.h"
 #include "idr_rate_limit.h"
 #include "pipeline_common.h"
+#if HAVE_BACKEND_STAR6E
+#include "star6e_pipeline.h"
+#endif
+#if HAVE_BACKEND_MARUKO
+#include "maruko_pipeline.h"
+#endif
 #include "rtp_packetizer.h"
 #include "sensor_select.h"
 #include "star6e_recorder.h"
@@ -2518,6 +2524,57 @@ static int handle_idr_stats(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_json(fd, 200, buf);
 }
 
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
+static int handle_intra_status(int fd, const HttpRequest *req, void *ctx)
+{
+	struct {
+		int enabled, mi_supported, apply_ok;
+		uint32_t requested_lines, effective_lines_per_p, requested_qp;
+	} s = {0};
+	char buf[256];
+
+	(void)req; (void)ctx;
+#if HAVE_BACKEND_STAR6E
+	{
+		Star6eIntraRefreshStatus star6e;
+		star6e_pipeline_intra_refresh_status(&star6e);
+		s.enabled = star6e.enabled;
+		s.mi_supported = star6e.mi_supported;
+		s.apply_ok = star6e.apply_ok;
+		s.requested_lines = star6e.requested_lines;
+		s.effective_lines_per_p = star6e.effective_lines_per_p;
+		s.requested_qp = star6e.requested_qp;
+	}
+#elif HAVE_BACKEND_MARUKO
+	{
+		MarukoIntraRefreshStatus mar;
+		maruko_pipeline_intra_refresh_status(&mar);
+		s.enabled = mar.enabled;
+		s.mi_supported = mar.mi_supported;
+		s.apply_ok = mar.apply_ok;
+		s.requested_lines = mar.requested_lines;
+		s.effective_lines_per_p = mar.effective_lines_per_p;
+		s.requested_qp = mar.requested_qp;
+	}
+#endif
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{"
+		"\"enabled\":%s,"
+		"\"mi_supported\":%s,"
+		"\"apply_ok\":%s,"
+		"\"requested_lines\":%u,"
+		"\"effective_lines_per_p\":%u,"
+		"\"requested_qp\":%u}}",
+		s.enabled ? "true" : "false",
+		s.mi_supported ? "true" : "false",
+		s.apply_ok ? "true" : "false",
+		s.requested_lines,
+		s.effective_lines_per_p,
+		s.requested_qp);
+	return httpd_send_json(fd, 200, buf);
+}
+#endif
+
 static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 {
 	MI_VENC_CHN ch;
@@ -2608,6 +2665,9 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/set",    handle_dual_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
+	r |= venc_httpd_route("GET", "/api/v1/intra/status", handle_intra_status, NULL);
+#endif
 	r |= venc_webui_register();
 	if (r != 0) {
 		pthread_mutex_lock(&g_cfg_mutex);
