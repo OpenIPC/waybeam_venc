@@ -1,0 +1,3 @@
+# Per-PR result artifacts — only the baseline run is committed.
+results/*
+!results/baseline/

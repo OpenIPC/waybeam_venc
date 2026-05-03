@@ -1,9 +1,11 @@
 #include "maruko_controls.h"
 
 #include "idr_rate_limit.h"
+#include "maruko_audio.h"
 #include "maruko_bindings.h"
 #include "maruko_iq.h"
 #include "maruko_output.h"
+#include "maruko_pipeline.h"
 #include "output_socket.h"
 #include "pipeline_common.h"
 #include "venc_config.h"
@@ -459,12 +461,22 @@ static char *maruko_query_ae_info(void)
 {
 	MarukoAeDiagSnapshot s;
 	char buf[2048];
+	char precrop_field[96];
 	uint32_t exposure_us, sensor_gain, isp_gain;
+	uint16_t px = 0, py = 0, pw = 0, ph = 0;
 
 	ae_diag_collect(&s);
 	exposure_us = ae_diag_exposure_us(&s);
 	sensor_gain = ae_diag_sensor_gain(&s);
 	isp_gain = ae_diag_isp_gain(&s);
+
+	if (venc_api_get_active_precrop(&px, &py, &pw, &ph)) {
+		snprintf(precrop_field, sizeof(precrop_field),
+			",\"active_precrop\":{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u}",
+			px, py, pw, ph);
+	} else {
+		precrop_field[0] = '\0';
+	}
 
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
@@ -481,7 +493,7 @@ static char *maruko_query_ae_info(void)
 		"\"expo_mode\":{\"ret\":%d,\"raw\":%d,\"name\":\"%s\"},"
 		"\"metrics\":{\"exposure_us\":%u,\"sensor_gain_x1024\":%u,"
 		"\"isp_gain_x1024\":%u,\"fps\":%u},"
-		"\"runtime\":{\"sensor_fps\":%u}}}",
+		"\"runtime\":{\"sensor_fps\":%u%s}}}",
 		s.plane_ret, s.pad_id, s.plane.shutter,
 		s.plane.sensGain, s.plane.compGain,
 		s.limit_ret, s.limit.minShutterUs, s.limit.maxShutterUs,
@@ -498,7 +510,7 @@ static char *maruko_query_ae_info(void)
 		s.state_ret, s.ae_state, ae_state_name(s.ae_state),
 		s.mode_ret, s.ae_mode_raw, ae_expo_mode_name(s.ae_mode_raw),
 		exposure_us, sensor_gain, isp_gain, ae_diag_sensor_fps(),
-		ae_diag_sensor_fps());
+		ae_diag_sensor_fps(), precrop_field);
 	return strdup(buf);
 }
 
@@ -779,6 +791,15 @@ static int maruko_apply_gain_max(uint32_t gain)
 	return ret;
 }
 
+/* ── Audio mute callback (Phase 5) ───────────────────────────────────── */
+
+static int maruko_apply_mute(bool muted)
+{
+	if (!g_ctx.backend)
+		return -1;
+	return maruko_audio_apply_mute(&g_ctx.backend->audio, muted ? 1 : 0);
+}
+
 /* ── ROI horizontal bands ────────────────────────────────────────────── */
 
 static int compute_horizontal_roi(uint32_t width, uint32_t height,
@@ -1038,6 +1059,26 @@ static char *maruko_query_transport_status(void)
 
 /* ── Callback table ──────────────────────────────────────────────────── */
 
+static char *maruko_query_audio_status(void)
+{
+	MarukoBackendContext *backend = g_ctx.backend;
+	if (!backend)
+		return NULL;
+	return maruko_audio_query_status(&backend->audio);
+}
+
+static int maruko_apply_zoom(double pct, double x, double y)
+{
+	MarukoBackendContext *backend = g_ctx.backend;
+	if (!backend)
+		return -1;
+	/* Don't mirror into ctx->cfg — venc_api owns the canonical config and
+	 * the next maruko_config_from_venc() (SIGHUP / reinit) reads from
+	 * VencConfig directly.  Avoiding the cfg write also avoids a torn
+	 * 8-byte double race with the runner thread on 32-bit ARM. */
+	return maruko_pipeline_apply_zoom(backend, pct, x, y);
+}
+
 static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_bitrate = maruko_apply_bitrate,
 	.apply_fps = maruko_apply_fps,
@@ -1048,7 +1089,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_output_enabled = maruko_apply_output_enabled,
 	.apply_server = maruko_apply_server,
 	.apply_gain_max = maruko_apply_gain_max,
-	.apply_mute = NULL,
+	.apply_mute = maruko_apply_mute,
 	.request_idr = maruko_request_idr,
 	.query_live_fps = maruko_query_live_fps,
 	.query_ae_info = maruko_query_ae_info,
@@ -1059,6 +1100,8 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_iq_param = maruko_iq_set,
 	.apply_max_payload_size = maruko_apply_max_payload_size,
 	.query_transport_status = maruko_query_transport_status,
+	.query_audio_status = maruko_query_audio_status,
+	.apply_zoom = maruko_apply_zoom,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)

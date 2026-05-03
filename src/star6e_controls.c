@@ -286,6 +286,14 @@ static int apply_gop(uint32_t gop_size)
 	return apply_encoder_gop(gop_size);
 }
 
+static int apply_zoom(double pct, double x, double y)
+{
+	if (!g_star6e_control_ctx.pipeline)
+		return -1;
+	return star6e_pipeline_apply_zoom(g_star6e_control_ctx.pipeline,
+		pct, x, y);
+}
+
 static int apply_qp_delta(int delta)
 {
 	MI_VENC_ChnAttr_t attr = {0};
@@ -1126,6 +1134,14 @@ static char *query_transport_status(void)
 	return strdup(buf);
 }
 
+static char *query_audio_status(void)
+{
+	Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
+	if (!ps)
+		return NULL;
+	return star6e_audio_query_status(&ps->audio);
+}
+
 static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_bitrate = apply_bitrate,
 	.apply_fps = apply_fps,
@@ -1147,6 +1163,8 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_iq_param = star6e_iq_set,
 	.apply_max_payload_size = apply_max_payload_size,
 	.query_transport_status = query_transport_status,
+	.query_audio_status = query_audio_status,
+	.apply_zoom = apply_zoom,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

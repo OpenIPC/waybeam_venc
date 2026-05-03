@@ -34,6 +34,7 @@ extern int test_star6e_ts_recorder(void);
 extern int test_idr_rate_limit(void);
 extern int test_backend(void);
 extern int test_debug_osd(void);
+extern int test_intra_refresh(void);
 
 int main(void)
 {
@@ -124,6 +125,9 @@ int main(void)
 
 	printf("\n--- test_debug_osd ---\n");
 	failures += test_debug_osd();
+
+	printf("\n--- test_intra_refresh ---\n");
+	failures += test_intra_refresh();
 
 	printf("\n=== Results: %d passed, %d failed ===\n",
 		g_test_pass_count, g_test_fail_count);

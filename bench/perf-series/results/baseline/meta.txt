@@ -1,0 +1,6 @@
+label=baseline
+commit=40b8435
+branch=perf-series-baseline
+hub_state=stopped
+duration=60
+runs=3

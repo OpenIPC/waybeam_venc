@@ -1,0 +1,58 @@
+[probe] RTP :5600  sidecar local :55248 → 192.168.2.12:5602  sub-TTL 5 s
+[sync] offset=-22584811783 µs  rtt=2066 µs
+[sync] offset=-22584811783 µs  rtt=16807 µs
+[sync] offset=-22584811783 µs  rtt=16739 µs
+[sync] offset=-22584811783 µs  rtt=17092 µs
+[sync] offset=-22584811783 µs  rtt=16775 µs
+[sync] offset=-22584811783 µs  rtt=16558 µs
+[sync] offset=-22584811783 µs  rtt=17036 µs
+[sync] offset=-22584811783 µs  rtt=16474 µs
+[sync] offset=-22584804669 µs  rtt=16920 µs
+[sync] offset=-22584805390 µs  rtt=16461 µs
+[sync] offset=-22584805390 µs  rtt=16759 µs
+[sync] offset=-22584805390 µs  rtt=16700 µs
+[sync] offset=-22584805390 µs  rtt=16847 µs
+[sync] offset=-22584807095 µs  rtt=15799 µs
+
+=== Timing Probe Summary ===
+
+Duration:             62.0 s
+Frames:               3660 (59.0 fps)
+RTP packets:          144329 (39.4 avg/frame)
+RTP gaps:             0
+
+--- Sidecar overhead ---
+  venc->probe:        3674 pkts (3660 frame + 14 sync)
+  probe->venc:        45 pkts (31 subscribe + 14 sync)
+  Bandwidth:          3.7 KB/s rx, 0.0 KB/s tx (30.3 kbps total)
+  Packet rate:        59 pps rx, 0.7 pps tx
+
+--- Frame intervals (sender clock) ---
+  Mean:    67900 us  (14.7 fps)
+  Min:     15170 us
+  Max:     711227 us
+  Stddev:  74320 us
+
+--- Frame intervals (probe clock) ---
+  Mean:    16943 us  (59.0 fps)
+  Stddev:  724 us
+
+--- Send spread (frame_ready -> last_pkt_send) ---
+  Mean:    1014 us
+  Min:     653 us
+  P50:     988 us
+  P95:     1210 us
+  P99:     1287 us
+  Max:     1487 us
+
+--- Encode duration (capture -> frame_ready) ---
+  Mean:    4507 us
+  Min:     3552 us
+  Max:     5804 us
+
+--- Clock sync ---
+  Samples:  8
+  Offset:   -22584807095 us
+  Best RTT: 15799 us
+
+[probe] exiting — venc subscription expires in 5 s

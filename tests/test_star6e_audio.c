@@ -95,8 +95,8 @@ static int test_star6e_audio_opus_fields_zero_init(void)
 	int failures = 0;
 
 	memset(&state, 0, sizeof(state));
-	CHECK("opus_lib zero init", state.opus_lib == NULL);
-	CHECK("opus_enc zero init", state.opus_enc == NULL);
+	CHECK("opus_lib zero init", state.opus.lib == NULL);
+	CHECK("opus_enc zero init", state.opus.encoder == NULL);
 	return failures;
 }
 

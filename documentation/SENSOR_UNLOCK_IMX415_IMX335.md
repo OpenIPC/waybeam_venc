@@ -94,6 +94,13 @@ Important:
 
 ### 1) Probe-level verification
 
+> Note: `snr_sequence_probe` is a historical research harness. Its source
+> lives in `tools/snr_sequence_probe.c` (moved from `src/` in the May 2026
+> code-review bundle) and is **not** built by the default `make` rule.
+> Build it manually with the cross toolchain before running the snippets
+> below, or use `--run-bin venc -- --list-sensor-modes` against the live
+> binary for the modern equivalent.
+
 Success path (`120fps`):
 
 ```bash

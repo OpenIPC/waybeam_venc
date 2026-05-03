@@ -161,6 +161,102 @@ static int test_query_param(void)
 	return failures;
 }
 
+/* ── Content-Length parser tests ─────────────────────────────────────── */
+
+/* Helper: set up the (headers_start, headers_end) pair the way
+ * parse_request() would, given a header block ending with the empty
+ * terminator CRLF.  The block must include the trailing "\r\n\r\n". */
+static int parse_cl(const char *headers_with_terminator)
+{
+	const char *body_start = strstr(headers_with_terminator, "\r\n\r\n");
+	if (!body_start)
+		return -999;
+	body_start += 4;
+	return httpd_parse_content_length(headers_with_terminator,
+		body_start - 2);
+}
+
+static int test_content_length_parse(void)
+{
+	int failures = 0;
+
+	CHECK("cl_basic",
+		parse_cl("Content-Length: 42\r\n\r\n") == 42);
+
+	CHECK("cl_lowercase",
+		parse_cl("content-length: 7\r\n\r\n") == 7);
+
+	CHECK("cl_mixed_case",
+		parse_cl("CoNtEnT-LeNgTh: 13\r\n\r\n") == 13);
+
+	CHECK("cl_no_space",
+		parse_cl("Content-Length:99\r\n\r\n") == 99);
+
+	CHECK("cl_multi_whitespace",
+		parse_cl("Content-Length:   123\r\n\r\n") == 123);
+
+	CHECK("cl_tab_whitespace",
+		parse_cl("Content-Length:\t456\r\n\r\n") == 456);
+
+	CHECK("cl_missing_returns_zero",
+		parse_cl("Host: example.com\r\nUser-Agent: test\r\n\r\n") == 0);
+
+	CHECK("cl_negative_clamped_to_zero",
+		parse_cl("Content-Length: -5\r\n\r\n") == 0);
+
+	CHECK("cl_oversized_clamped",
+		parse_cl("Content-Length: 99999999\r\n\r\n") ==
+			HTTPD_MAX_BODY - 1);
+
+	CHECK("cl_at_max_minus_one",
+		parse_cl("Content-Length: 8191\r\n\r\n") == HTTPD_MAX_BODY - 1);
+
+	CHECK("cl_at_max_clamped",
+		parse_cl("Content-Length: 8192\r\n\r\n") == HTTPD_MAX_BODY - 1);
+
+	/* Smuggling: header value contains the literal "content-length:".
+	 * The pre-fix parser would latch onto the substring inside the value
+	 * and forge a body length from "9999". */
+	CHECK("cl_smuggling_header_value_ignored",
+		parse_cl("Host: example.com\r\n"
+		         "X-Forwarded-By: content-length: 9999\r\n\r\n") == 0);
+
+	/* Smuggling variant: the literal sits in the request URI part of
+	 * the buffer (mimicking attacker-controlled body bytes appearing
+	 * before the real headers).  We still expect zero. */
+	CHECK("cl_smuggling_value_with_real_header_first",
+		parse_cl("X-Note: see content-length: 100 below\r\n"
+		         "Accept: */*\r\n\r\n") == 0);
+
+	/* Real C-L wins when both substring-trap and a valid header exist. */
+	CHECK("cl_real_header_after_value_trap",
+		parse_cl("X-Note: content-length: 9999\r\n"
+		         "Content-Length: 17\r\n\r\n") == 17);
+
+	/* Multiple headers preceding the C-L line. */
+	CHECK("cl_after_other_headers",
+		parse_cl("Host: example.com\r\n"
+		         "User-Agent: test\r\n"
+		         "Accept: */*\r\n"
+		         "Content-Length: 33\r\n\r\n") == 33);
+
+	/* First-and-only header. */
+	CHECK("cl_first_line",
+		parse_cl("Content-Length: 1\r\n\r\n") == 1);
+
+	/* Zero value is preserved (a real client can send C-L: 0). */
+	CHECK("cl_zero_value",
+		parse_cl("Content-Length: 0\r\n\r\n") == 0);
+
+	/* Empty header block (request line + immediate body terminator).
+	 * Real callers won't reach this branch because parse_request only
+	 * invokes the parser after spotting "\r\n\r\n", but defensively
+	 * the helper must return 0 instead of UB. */
+	CHECK("cl_empty_block", parse_cl("\r\n\r\n") == 0);
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_httpd(void)
@@ -170,5 +266,6 @@ int test_venc_httpd(void)
 	failures += test_route_overflow();
 	failures += test_request_struct_sizes();
 	failures += test_query_param();
+	failures += test_content_length_parse();
 	return failures;
 }

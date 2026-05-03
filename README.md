@@ -19,12 +19,17 @@ via HTTP API.
 - ISP control: exposure, AWB mode, color temperature
 - ROI-based QP gradient for FPV center-priority encoding
 - Sensor FPS unlock for IMX415/IMX335 (up to 120fps)
-- Optional audio capture with G.711/PCM encoding
-- SD card recording: MPEG-TS mux (HEVC + PCM audio), power-loss safe
+- Optional audio capture (Opus / G.711a / G.711µ / raw PCM) on both
+  backends, RTP or compact UDP output, mute via live API
+- SD card recording: MPEG-TS mux (HEVC + audio in TS, PCM/A-law/µ-law/Opus
+  alongside video), power-loss safe; raw `.hevc` available on Star6E
 - Gemini mode: dual VENC for concurrent stream + high-quality record
+  (both backends; Maruko via Phase 7 port, Star6E reference)
 - Adaptive recording bitrate: auto-reduces if SD card can't keep up
 - Dual-backend: Star6E and Maruko from shared codebase (dlopen for all MI libs)
-- BMI270 IMU driver with frame-synced FIFO (Star6E only) — module
+- Maruko-specific opt-in 3A throttle (`isp.aeMode="throttle"`) — saves
+  ~24% sys CPU at 120 fps with no visible AE quality loss
+- BMI270 IMU driver with frame-synced FIFO (both backends) — module
   compiled in but disabled by default; ready for telemetry/sidecar
   consumers
 
@@ -97,9 +102,12 @@ template is provided at `config/venc.default.json`.
     "unlockReg": 12298, "unlockValue": 128, "unlockDir": 0
   },
   "isp": {
-    "sensorBin": "", "exposure": 0,
+    "sensorBin": "",
     "legacyAe": true, "aeFps": 15,
-    "awbMode": "auto", "awbCt": 5500
+    "aeMode": "native",
+    "gainMax": 0,
+    "awbMode": "auto", "awbCt": 5500,
+    "keepAspect": true
   },
   "image": { "mirror": false, "flip": false, "rotate": 0 },
   "video0": {
@@ -122,7 +130,7 @@ template is provided at `config/venc.default.json`.
   },
   "imu": {
     "enabled": false, "i2cDevice": "/dev/i2c-1", "i2cAddr": "0x68",
-    "sampleRate": 200, "gyroRange": 1000,
+    "sampleRateHz": 200, "gyroRangeDps": 1000,
     "calFile": "/etc/imu.cal", "calSamples": 400
   },
   "record": {
@@ -306,6 +314,46 @@ Request an IDR keyframe on the secondary VENC channel.
 curl "http://<device-ip>:<port>/api/v1/dual/idr"
 ```
 
+#### GET /api/v1/audio/status
+
+Live snapshot of the audio capture/encode pipeline (lib loaded, capture
+running, codec, rate, channels, Opus initialization).  Both backends.
+See [HTTP_API_CONTRACT.md](documentation/HTTP_API_CONTRACT.md) for full
+field reference.
+
+```sh
+curl http://<device-ip>:<port>/api/v1/audio/status
+```
+
+#### GET /api/v1/transport/status
+
+Live observability for the active video transport (UDP / Unix /
+SHM): fill percentage, backpressure flag, lifetime drop counters.
+Used by the WebUI status bar and external link controllers.
+
+```sh
+curl http://<device-ip>:<port>/api/v1/transport/status
+```
+
+#### GET /api/v1/idr/stats
+
+Per-channel IDR-rate-limit counters: how many requests were honored vs.
+coalesced.
+
+```sh
+curl http://<device-ip>:<port>/api/v1/idr/stats
+```
+
+#### GET /api/v1/modes
+
+Sensor pad and resolution mode introspection — populates the WebUI
+sensor-mode dropdown.  Reports the currently-active selection plus every
+mode the SDK enumerates.
+
+```sh
+curl http://<device-ip>:<port>/api/v1/modes
+```
+
 ### Field Reference
 
 Fields marked **live** can be changed at runtime without interrupting
@@ -336,11 +384,13 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `isp.sensor_bin` | string | restart | ISP tuning binary path |
-| `isp.exposure` | uint | live | Exposure time in ms (0 = auto) |
-| `isp.legacy_ae` | bool | restart | Use ISP internal AE instead of custom 3A |
+| `isp.legacy_ae` | bool | restart | Use ISP internal AE instead of custom 3A (Star6E) |
 | `isp.ae_fps` | uint | restart | Custom 3A processing rate in Hz (default 15) |
+| `isp.ae_mode` | string | restart | Maruko-only: `"native"` (default, SDK runs AE/AWB at sensor rate) or `"throttle"` (no-op AE adaptor + 15 Hz manual AE; saves ~24% sys CPU at 120 fps).  Alias: `isp.aeMode`. |
+| `isp.gain_max` | uint | live | AE max ISP gain ceiling (0 = use ISP bin default) |
 | `isp.awb_mode` | string | live | `"auto"` or `"ct_manual"` |
 | `isp.awb_ct` | uint | live | Color temperature in K (for ct_manual) |
+| `isp.keep_aspect` | bool | restart | When `true` (default), VIF/SCL crop preserves sensor AR; `false` lets downstream stretch.  Star6E + Maruko (Phase 1, v0.9.9). |
 
 #### Image
 
@@ -362,8 +412,50 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |
 | `video0.frame_lost` | bool | restart | Enable frame-lost safety net |
+| `video0.zoom_pct` | double | restart | Digital zoom crop fraction (`0.0` = off, `0.25..1.0` = crop fraction) |
+| `video0.zoom_x` | double | live | Zoom crop center X (`0.0` left to `1.0` right) |
+| `video0.zoom_y` | double | live | Zoom crop center Y (`0.0` top to `1.0` bottom) |
 
-#### Adaptive Encoder Control (Star6E only)
+#### Digital Zoom (Star6E + Maruko)
+
+Approach-C digital zoom shrinks both the crop window and encoded output
+resolution. The SCL path reads the crop at 1:1 and emits it unchanged, so
+there is no upscale pass and no extra bandwidth pressure. Receivers see the
+smaller resolution in SPS/PPS.
+
+| Field | Type | Mutability | Description |
+|-------|------|------------|-------------|
+| `video0.zoom_pct` | double | restart | `0.0` = off/full frame; `0.25..1.0` = crop fraction (smaller = deeper zoom) |
+| `video0.zoom_x` | double | live | Crop center X, `0.0` = left, `1.0` = right |
+| `video0.zoom_y` | double | live | Crop center Y, `0.0` = top, `1.0` = bottom |
+
+CamelCase aliases: `video0.zoomPct`, `video0.zoomX`, `video0.zoomY`.
+
+Examples:
+
+```bash
+# Restart-required: enable a 2x crop.
+curl "http://<device>/api/v1/set?video0.zoomPct=0.5"
+
+# Live pan inside the current crop size.
+curl "http://<device>/api/v1/set?video0.zoomX=0.25&video0.zoomY=0.75"
+
+# Disable zoom on the next reinit.
+curl "http://<device>/api/v1/set?video0.zoomPct=0.0"
+```
+
+When `debug.showOsd=true` and zoom is active, the overlay adds rows after
+existing OSD stats:
+
+```
+zoom  2.00x 960x540
+crop  960x540+480+270
+```
+
+`zoom` shows magnification and encoded resolution. `crop` shows the source
+crop size and placement within the sensor/precrop surface.
+
+#### Adaptive Encoder Control (Star6E + Maruko)
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
@@ -406,6 +498,155 @@ Tuning notes:
 Codec note:
 - Star6E with `outgoing.stream_mode="rtp"` requires `video0.codec="h265"`.
 - Maruko accepts both `h264` and `h265`.
+
+#### Intra Refresh (Star6E + Maruko)
+
+GDR-style rolling stripe: a configurable number of MB/LCU rows in each P-frame
+are intra-coded so a decoder that joins mid-stream — or recovers from a packet
+loss burst — can resync without waiting for the next IDR. Layered over normal
+GOP-based IDRs (Majestic-style belt-and-suspenders).
+
+Single mode knob picks intent (self-heal target window); GOP, lines, and QP
+all derive from the mode. Per-field overrides remain available for power
+users — non-zero overrides win.
+
+| Field | Type | Mutability | Description |
+|-------|------|------------|-------------|
+| `video0.intra_refresh_mode` | string | restart | `off` \| `fast` \| `balanced` \| `robust` (default `off`) |
+| `video0.intra_refresh_lines` | uint16 | restart | LCU/MB rows refreshed per P-frame (`0` = mode auto) |
+| `video0.intra_refresh_qp` | uint8 | restart | QP for the intra-refreshed rows (`0` = codec default: 48 H.265 / 45 H.264) |
+
+CamelCase aliases: `video0.intraRefreshMode`, `video0.intraRefreshLines`,
+`video0.intraRefreshQp`.
+
+Mode targets (self-heal window from packet loss to fully-refreshed picture):
+
+| Mode | target | Use case |
+|------|--------|----------|
+| `off` | — | feature disabled |
+| `fast` | 150 ms | FPV racing, low-latency, clean link |
+| `balanced` | 500 ms | general FPV (recommended starting point) |
+| `robust` | 1000 ms | lossy long-range, high packet loss |
+
+Stripe QP defaults (codec-aware, lower = better quality + more bitrate cost):
+
+| Mode | H.265 QP | H.264 QP |
+|------|----------|----------|
+| `fast` | 36 | 33 |
+| `balanced` | 32 | 29 |
+| `robust` | 28 | 25 |
+
+Robust runs the lowest QP because lossy links want the cleanest possible
+recovery anchor; fast runs the highest because clean links can absorb minor
+stripe banding without artifacts. Override with `intraRefreshQp` (1–51).
+
+When a mode is active the encoder computes:
+
+```
+total_rows     = ceil(height / lcu_h)            // lcu_h: 32 H.265, 16 H.264
+refresh_frames = round(fps * target_ms / 1000)
+auto_lines     = ceil(total_rows / refresh_frames)
+auto_gop       = ceil(total_rows / effective_lines)   // one IDR per GDR pass
+```
+
+Auto-GOP overrides `gop_size` so each IDR aligns with one full GDR pass —
+no half-cycles, no cycle without a hard recovery anchor. Setting an explicit
+`gopSize > 0` suppresses auto-GOP and keeps the user value (logged at boot).
+
+#### Precomputed values @ 60 fps H.265
+
+For other framerates: `gop_sec` scales as `60 / fps`. Lines stays the same
+unless `refresh_frames` rounds differently — at 30 fps `fast` doubles its
+window, at 120 fps it halves.
+
+| Resolution | total_rows | mode | lines | gop frames | gop sec | qp |
+|---|---:|---|---:|---:|---:|---:|
+| 1280×720 | 23 | fast | 3 | 8 | 0.133 | 36 |
+| 1280×720 | 23 | balanced | 1 | 23 | 0.383 | 32 |
+| 1280×720 | 23 | robust | 1 | 23 | 0.383 ⚠ | 28 |
+| 1456×816 | 26 | fast | 3 | 9 | 0.150 | 36 |
+| 1456×816 | 26 | balanced | 1 | 26 | 0.433 | 32 |
+| 1456×816 | 26 | robust | 1 | 26 | 0.433 ⚠ | 28 |
+| 1920×1080 | 34 | fast | 4 | 9 | 0.150 | 36 |
+| 1920×1080 | 34 | balanced | 2 | 17 | 0.283 | 32 |
+| 1920×1080 | 34 | robust | 1 | 34 | 0.567 | 28 |
+| 2560×1440 | 45 | fast | 5 | 9 | 0.150 | 36 |
+| 2560×1440 | 45 | balanced | 2 | 23 | 0.383 | 32 |
+| 2560×1440 | 45 | robust | 1 | 45 | 0.750 | 28 |
+| 3840×2160 | 68 | fast | 8 | 9 | 0.150 | 36 |
+| 3840×2160 | 68 | balanced | 3 | 23 | 0.383 | 32 |
+| 3840×2160 | 68 | robust | 2 | 34 | 0.567 | 28 |
+
+⚠ At 720p and below, `robust` and `balanced` collapse to identical numbers
+because `total_rows` is small enough that even balanced refreshes in 1
+line per P-frame. The mode label still ships through (recorded in status
+endpoint) but the encoder behavior is identical.
+
+H.264 doubles `total_rows` (lcu_h = 16 → 720p has 45 rows, 1080p has 68
+rows) so lines and gop scale up roughly 2×, but the gop seconds match the
+H.265 column closely.
+
+Quick start — one HTTP call:
+
+```bash
+curl -X POST 'http://<device>/api/v1/intra/mode?mode=balanced'
+```
+
+This sets the mode, clears any per-field overrides, persists, and reinits
+the encoder. Equivalent to editing the config JSON and triggering reload.
+
+Notes:
+- Budget +20–30 % bitrate when enabling refresh; intra-coded rows compress
+  worse than inter-coded ones.
+- Refresh is applied to ch0 only. The dual-VENC recorder (ch1) is
+  intentionally skipped — TS containers expect IDRs at GOP boundaries.
+- Explicit `intraRefreshLines` greater than the picture's LCU-row count
+  are clamped (with a `[venc] WARNING`) to avoid SDK underflow.
+- Both backends use the identical `MI_VENC_IntraRefresh_t` layout
+  (`bEnable`, `u32RefreshLineNum`, `u32ReqIQp`); the Maruko symbol takes
+  `(MI_VENC_DEV, MI_VENC_CHN, *cfg)` while Star6E takes `(MI_VENC_CHN, *cfg)`.
+- Maruko: `MI_VENC_SetIntraRefresh` is treated as an optional symbol — the
+  loader logs a warning if `dlsym` misses on older firmware drops, and the
+  pipeline falls back to plain GOP-based IDRs (`mi_supported=false`).
+
+Status endpoint:
+
+```bash
+curl http://<device>/api/v1/intra/status
+# { "ok":true, "data":{
+#     "mode": "balanced",
+#     "active": true,
+#     "mi_supported": true,
+#     "apply_ok": true,
+#     "target_ms": 500,
+#     "total_rows": 34,
+#     "lines": { "requested": 0,    "effective": 2,    "clamped": false },
+#     "qp":    { "requested": 0,    "effective": 32 },
+#     "gop":   { "explicit_sec": 0.0, "effective_sec": 0.283, "auto": true }
+# }}
+```
+
+Boot log (from stderr):
+
+```
+[venc] intraRefresh: mode=balanced lines/P=2 qp=32 gop=0.28s (auto)
+```
+
+When `debug.showOsd=true` and a mode is active, two extra OSD rows render
+the live values. If zoom is also active, zoom rows are appended below them
+instead of replacing the intra rows:
+
+```
+intra balanced L2 q32
+gop   0.28s auto
+zoom  2.00x 960x540
+crop  960x540+480+270
+```
+
+`intra` shows mode, effective stripe lines per P-frame, and effective QP.
+`gop` shows the IDR period in seconds and whether it came from auto or an
+explicit `gopSize` override. `zoom` shows magnification and encoded
+resolution; `crop` shows source placement.
 
 #### Outgoing (Streaming)
 
@@ -479,20 +720,32 @@ gst-launch-1.0 udpsrc port=5601 \
   ! rtpopusdepay ! opusdec ! audioconvert ! autoaudiosink
 ```
 
-#### Recording (Star6E only)
+#### Recording
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `record.enabled` | bool | restart | Start recording on launch |
 | `record.mode` | string | restart | `"off"`, `"mirror"`, `"dual"`, `"dual-stream"` |
 | `record.dir` | string | restart | Output directory (must be mounted) |
-| `record.format` | string | restart | `"ts"` (MPEG-TS + audio) or `"hevc"` (raw) |
+| `record.format` | string | restart | `"ts"` (MPEG-TS + audio) or `"hevc"` (raw); on Maruko only `"ts"` is implemented |
 | `record.max_seconds` | uint | restart | Rotate file after N seconds (0 = off) |
 | `record.max_mb` | uint | restart | Rotate file after N MB (0 = off) |
 | `record.bitrate` | uint | restart | Dual mode: ch1 bitrate in kbps (0 = same as video0) |
 | `record.fps` | uint | restart | Dual mode: ch1 fps (0 = sensor max) |
 | `record.gop_size` | double | restart | Dual mode: ch1 GOP in seconds (0 = same as video0) |
 | `record.server` | string | restart | Dual-stream: second RTP destination URI |
+
+Backend support:
+- **Star6E** — full feature set: `mirror`/`dual`/`dual-stream` modes, both
+  `ts` and `hevc` formats, HTTP-driven start/stop via
+  `/api/v1/record/start|stop`, adaptive bitrate while SD-bound.
+- **Maruko (Phase 6, v0.9.14)** — `mirror` and `dual` modes wired,
+  `ts` format only, **config-driven only**:  set `record.enabled=true`
+  + `record.mode=...` in `/etc/venc.json` and reload.  HTTP
+  `/api/v1/record/start|stop` returns `501 not_implemented` on Maruko
+  (Phase 6.5 backlog: wire the runtime poll loop and
+  `record_status_callback`).  Audio is interleaved into the TS file
+  whenever Phase 5 audio capture is active (`audio.enabled=true`).
 
 Recording can also be controlled at runtime via the HTTP API. In dual/dual-stream
 modes, the secondary channel parameters can be adjusted live via `/api/v1/dual/set`.
@@ -522,17 +775,24 @@ File rotation (`record.max_seconds`, `record.max_mb`) applies equally to
 config-started and HTTP-started recordings — both use the same `ts_recorder`
 / `recorder` object.
 
-#### IMU (Star6E only, POC)
+#### IMU (both backends, POC consumer)
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `imu.enabled` | bool | restart | Enable BMI270 IMU driver |
 | `imu.i2c_device` | string | restart | I2C device path |
-| `imu.i2c_addr` | string | restart | I2C address (hex, e.g. `"0x68"`) |
-| `imu.sample_rate` | int | restart | ODR in Hz (25-1600) |
-| `imu.gyro_range` | int | restart | Gyro range in ±dps |
+| `imu.i2c_addr` | uint8 | restart | I2C address (decimal or hex string, e.g. `104` or `"0x68"`) |
+| `imu.sample_rate_hz` | int | restart | ODR in Hz (25-1600).  Alias: `imu.sampleRateHz`. |
+| `imu.gyro_range_dps` | int | restart | Gyro range in ±dps.  Alias: `imu.gyroRangeDps`. |
 | `imu.cal_file` | string | restart | Calibration file path |
 | `imu.cal_samples` | int | restart | Auto-bias samples at startup |
+
+Phase 3 (PR #84, v0.9.13) ported the IMU driver to Maruko with one
+caveat: on Maruko, init must run **before** `MI_VENC_StartRecvPic`
+because the 2 s auto-bias loop blocking the main thread post-VENC
+leaves the encoder fd in a state where `poll()` never returns POLLIN.
+This ordering constraint is captured in `maruko_pipeline.c`; do not
+re-order without re-running the bench check on `192.168.2.12`.
 
 ### Usage Examples
 
@@ -836,6 +1096,16 @@ Run the API test suite against a live device after `venc` is already running:
 ./scripts/api_test_suite.sh 192.168.1.13 80
 ```
 
+Verify the single-instance pidfile + flock gate by trying to launch a second
+`venc` while one is already running on the device:
+
+```sh
+./scripts/test_pidfile_lock.sh root@192.168.1.13
+```
+
+The second launch must exit with rc=1 and the "venc already running" banner;
+the first instance must remain alive.
+
 Scene-change IDR control is configured through `video0.scene_threshold` in
 `/etc/venc.json`. Leave `video0.scene_threshold=0` for baseline behavior.
 
@@ -921,18 +1191,26 @@ download the full configuration as JSON.
 
 ## IMU (BMI270 gyro module)
 
-The BMI270 driver is compiled into the binary but disabled by default
-(`imu.enabled = false`). When enabled, it samples gyro+accel via the
-hardware FIFO at 200 Hz, drains per video frame, and hands samples to a
-caller-supplied push callback.
+The BMI270 driver is compiled into the binary on both backends but
+disabled by default (`imu.enabled = false`).  When enabled, it samples
+gyro+accel via the hardware FIFO at 200 Hz, drains per video frame, and
+hands samples to a caller-supplied push callback.
 
 The previous EIS consumer (`gyroglide` crop-based stabilization) was
 removed in 0.8.0 — see `HISTORY.md` for the rationale and
 `documentation/EIS_INTEGRATION_PLAN.md` for what a future replacement
-(LDC-warp Phase C) would look like. The push callback in
-`star6e_pipeline.c` is currently a stub that discards samples; a future
-telemetry export, sidecar gcsv logging, or an HTTP `/api/v1/imu` peek
-would slot in there.
+(LDC-warp Phase C) would look like.  The push callback in both
+`star6e_pipeline.c` and `maruko_pipeline.c` is currently a stub that
+discards samples; a future telemetry export, sidecar gcsv logging, or
+an HTTP `/api/v1/imu` peek would slot in there.
+
+**Maruko ordering caveat.**  On Maruko, IMU init must run **before**
+`MI_VENC_StartRecvPic` (i.e. before `bind_maruko_pipeline()`) because
+the auto-bias loop blocks the main thread for ~2 s.  Empirically,
+blocking the main thread for 2 s after `StartRecvPic` leaves the VENC
+fd in a state where `poll()` never returns POLLIN and the stream loop
+never progresses.  Star6E does not exhibit this — IMU init can stay
+post-VENC there.
 
 To enable the IMU for development:
 
@@ -950,8 +1228,8 @@ To enable the IMU for development:
 }
 ```
 
-Restart venc. The 2-second auto-calibration runs at startup — hold the
-board still during it. With no consumer wired up, samples are discarded
-after the per-frame drain (~negligible CPU).
+Restart venc.  The 2-second auto-calibration runs at startup — hold the
+board still during it.  With no consumer wired up, samples are
+discarded after the per-frame drain (~negligible CPU).
 
 [logo]: https://openipc.org/assets/openipc-logo-black.svg

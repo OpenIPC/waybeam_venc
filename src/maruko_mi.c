@@ -19,12 +19,14 @@ maruko_snr_impl  g_mi_snr;
 maruko_venc_impl g_mi_venc;
 maruko_isp_impl  g_mi_isp;
 maruko_scl_impl  g_mi_scl;
+maruko_ai_impl   g_mi_ai;
 
 /* Dependency handles — kept open for the process lifetime */
 static void *h_cam_os;
 static void *h_mi_common;
 static void *h_ispalgo;
 static void *h_cus3a;
+static void *h_mi_rgn;
 
 void *maruko_load_symbol(void *handle, const char *lib_name,
 	const char *sym_name)
@@ -40,6 +42,13 @@ void *maruko_load_symbol(void *handle, const char *lib_name,
 
 #define LOAD_SYM(impl, lib_str, field, cast, sym_str) \
 	(impl)->field = (cast)maruko_load_symbol((impl)->handle, lib_str, sym_str)
+
+/* Optional symbol — quiet on miss (used for SDK features that may not
+ * exist on older firmware).  The caller must NULL-check before invoking. */
+#define LOAD_SYM_OPTIONAL(impl, lib_str, field, cast, sym_str) \
+	do { (void)dlerror(); \
+	     (impl)->field = (cast)dlsym((impl)->handle, sym_str); \
+	     (void)dlerror(); } while (0)
 
 /* --- SYS ---------------------------------------------------------------- */
 
@@ -252,6 +261,12 @@ static int i6c_venc_load(maruko_venc_impl *venc)
 		int (*)(int, int, void *), "MI_VENC_SetFrameLostStrategy");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetFrameLostStrategy,
 		int (*)(int, int, void *), "MI_VENC_GetFrameLostStrategy");
+	/* IntraRefresh is optional — older Maruko drops may lack the symbol.
+	 * Loader does not fail if dlsym misses; callers must NULL-check. */
+	LOAD_SYM(venc, "libmi_venc.so", fnSetIntraRefresh,
+		int (*)(int, int, void *), "MI_VENC_SetIntraRefresh");
+	LOAD_SYM(venc, "libmi_venc.so", fnGetIntraRefresh,
+		int (*)(int, int, void *), "MI_VENC_GetIntraRefresh");
 
 	if (!venc->fnCreateDev || !venc->fnDestroyDev ||
 	    !venc->fnCreateChn || !venc->fnDestroyChn ||
@@ -309,6 +324,18 @@ static int i6c_isp_load(maruko_isp_impl *isp)
 		int (*)(int, int, int), "MI_ISP_EnableOutputPort");
 	LOAD_SYM(isp, "libmi_isp.so", fnSetPortConfig,
 		int (*)(int, int, int, void *), "MI_ISP_SetOutputPortParam");
+
+	/* Zoom APIs are optional — older SDK builds may not export them.
+	 * Symbols are looked up but missing entries don't fail the load;
+	 * apply_zoom checks for NULL at call time. */
+	LOAD_SYM_OPTIONAL(isp, "libmi_isp.so", fnLoadPortZoomTable,
+		int (*)(int, int, void *), "MI_ISP_LoadPortZoomTable");
+	LOAD_SYM_OPTIONAL(isp, "libmi_isp.so", fnStartPortZoom,
+		int (*)(int, int, void *), "MI_ISP_StartPortZoom");
+	LOAD_SYM_OPTIONAL(isp, "libmi_isp.so", fnStopPortZoom,
+		int (*)(int, int), "MI_ISP_StopPortZoom");
+	LOAD_SYM_OPTIONAL(isp, "libmi_isp.so", fnGetPortCurZoomAttr,
+		int (*)(int, int, void *), "MI_ISP_GetPortCurZoomAttr");
 
 	if (!isp->fnCreateDevice || !isp->fnDestroyDevice ||
 	    !isp->fnCreateChannel || !isp->fnDestroyChannel ||
@@ -381,6 +408,71 @@ static void i6c_scl_unload(maruko_scl_impl *scl)
 	memset(scl, 0, sizeof(*scl));
 }
 
+/* --- AI (audio input, optional) ----------------------------------------- */
+
+/* AI loader is non-fatal: when libmi_ai.so is absent (stock OpenIPC firmware
+ * without the audio bundle) the audio backend stays inert and the rest of
+ * venc runs unchanged.  Audio code paths must check g_mi_ai.handle before
+ * dispatching. */
+static int i6c_ai_load(maruko_ai_impl *ai)
+{
+	memset(ai, 0, sizeof(*ai));
+	/* RTLD_LAZY mirrors the pattern used for libmi_sys et al — libmi_ai.so
+	 * has unresolved __assert / fopen / getenv references that only matter
+	 * if the library actually fails internally. */
+	ai->handle = dlopen("libmi_ai.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!ai->handle) {
+		fprintf(stderr,
+			"WARNING: [maruko] dlopen(libmi_ai.so): %s — audio capture disabled\n",
+			dlerror());
+		return 0;
+	}
+
+	LOAD_SYM(ai, "libmi_ai.so", fnInitDev,
+		int (*)(void *), "MI_AI_InitDev");
+	LOAD_SYM(ai, "libmi_ai.so", fnDeInitDev,
+		int (*)(void), "MI_AI_DeInitDev");
+	LOAD_SYM(ai, "libmi_ai.so", fnOpen,
+		int (*)(int, const void *), "MI_AI_Open");
+	LOAD_SYM(ai, "libmi_ai.so", fnClose,
+		int (*)(int), "MI_AI_Close");
+	LOAD_SYM(ai, "libmi_ai.so", fnAttachIf,
+		int (*)(int, const int *, uint8_t), "MI_AI_AttachIf");
+	LOAD_SYM(ai, "libmi_ai.so", fnEnableChnGroup,
+		int (*)(int, uint8_t), "MI_AI_EnableChnGroup");
+	LOAD_SYM(ai, "libmi_ai.so", fnDisableChnGroup,
+		int (*)(int, uint8_t), "MI_AI_DisableChnGroup");
+	LOAD_SYM(ai, "libmi_ai.so", fnRead,
+		int (*)(int, uint8_t, void *, void *, int), "MI_AI_Read");
+	LOAD_SYM(ai, "libmi_ai.so", fnReleaseData,
+		int (*)(int, uint8_t, void *, void *), "MI_AI_ReleaseData");
+	LOAD_SYM(ai, "libmi_ai.so", fnSetMute,
+		int (*)(int, uint8_t, const int *, uint8_t), "MI_AI_SetMute");
+	LOAD_SYM(ai, "libmi_ai.so", fnSetGain,
+		int (*)(int, uint8_t, const int8_t *, uint8_t), "MI_AI_SetGain");
+	LOAD_SYM(ai, "libmi_ai.so", fnSetIfGain,
+		int (*)(int, int8_t, int8_t), "MI_AI_SetIfGain");
+
+	if (!ai->fnOpen || !ai->fnClose || !ai->fnAttachIf ||
+	    !ai->fnEnableChnGroup || !ai->fnDisableChnGroup ||
+	    !ai->fnRead || !ai->fnReleaseData || !ai->fnSetMute) {
+		fprintf(stderr,
+			"WARNING: [maruko] libmi_ai.so missing required symbols — "
+			"audio capture disabled\n");
+		dlclose(ai->handle);
+		memset(ai, 0, sizeof(*ai));
+		return 0;
+	}
+	return 0;
+}
+
+static void i6c_ai_unload(maruko_ai_impl *ai)
+{
+	if (ai->handle)
+		dlclose(ai->handle);
+	memset(ai, 0, sizeof(*ai));
+}
+
 /* --- Init / Deinit ------------------------------------------------------ */
 
 int maruko_mi_init(void)
@@ -405,6 +497,15 @@ int maruko_mi_init(void)
 	h_cus3a = dlopen("libcus3a.so", RTLD_LAZY | RTLD_GLOBAL);
 	if (!h_cus3a)
 		fprintf(stderr, "WARNING: [maruko] dlopen(libcus3a.so): %s\n",
+			dlerror());
+
+	/* libmi_rgn.so is opened here (RTLD_GLOBAL) so debug_osd.c's later
+	 * dlopen sees the dependency chain already resolved.  Preload is
+	 * non-fatal: if libmi_rgn is missing, debug_osd_create() will fail
+	 * cleanly and the rest of the pipeline still runs. */
+	h_mi_rgn = dlopen("libmi_rgn.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!h_mi_rgn)
+		fprintf(stderr, "WARNING: [maruko] dlopen(libmi_rgn.so): %s\n",
 			dlerror());
 
 	/* Load modules in dependency order. On failure, maruko_mi_deinit()
@@ -434,6 +535,10 @@ int maruko_mi_init(void)
 		goto fail;
 	}
 
+	/* Optional: missing libmi_ai.so disables audio capture but keeps
+	 * the rest of the pipeline alive. */
+	(void)i6c_ai_load(&g_mi_ai);
+
 	return 0;
 
 fail:
@@ -443,6 +548,7 @@ fail:
 
 void maruko_mi_deinit(void)
 {
+	i6c_ai_unload(&g_mi_ai);
 	i6c_scl_unload(&g_mi_scl);
 	i6c_isp_unload(&g_mi_isp);
 	i6c_venc_unload(&g_mi_venc);
@@ -450,6 +556,7 @@ void maruko_mi_deinit(void)
 	i6c_vif_unload(&g_mi_vif);
 	i6c_sys_unload(&g_mi_sys);
 
+	if (h_mi_rgn)   { dlclose(h_mi_rgn);   h_mi_rgn = NULL; }
 	if (h_cus3a)    { dlclose(h_cus3a);    h_cus3a = NULL; }
 	if (h_ispalgo)  { dlclose(h_ispalgo);  h_ispalgo = NULL; }
 	if (h_mi_common){ dlclose(h_mi_common);h_mi_common = NULL; }

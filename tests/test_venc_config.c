@@ -57,6 +57,9 @@ static int test_defaults(void)
 	CHECK("defaults_gop_size", cfg.video0.gop_size == 1.0);
 	CHECK("defaults_qp_delta", cfg.video0.qp_delta == -4);
 	CHECK("defaults_frame_lost", cfg.video0.frame_lost == true);
+	CHECK("defaults_zoom_off", cfg.video0.zoom_pct == 0.0);
+	CHECK("defaults_zoom_x", cfg.video0.zoom_x == 0.5);
+	CHECK("defaults_zoom_y", cfg.video0.zoom_y == 0.5);
 	CHECK("defaults_enabled", cfg.outgoing.enabled == false);
 	CHECK("defaults_server", cfg.outgoing.server[0] == '\0');
 	CHECK("defaults_stream_mode", strcmp(cfg.outgoing.stream_mode, "rtp") == 0);
@@ -91,7 +94,7 @@ static int test_load_full_json(void)
 		"  \"image\": { \"mirror\": true, \"flip\": true },"
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
-		"    \"frameLost\": false },"
+		"    \"frameLost\": false, \"zoomPct\": 0.5, \"zoomX\": 0.25, \"zoomY\": 0.75 },"
 		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false },"
 		"  \"fpv\": { \"roiEnabled\": true, \"roiQp\": -18, \"roiSteps\": 2, \"noiseLevel\": 5 }"
 		"}";
@@ -125,6 +128,9 @@ static int test_load_full_json(void)
 	CHECK("load_gop", cfg.video0.gop_size == 1);
 	CHECK("load_qp_delta", cfg.video0.qp_delta == -7);
 	CHECK("load_frame_lost_off", cfg.video0.frame_lost == false);
+	CHECK("load_zoom_pct", cfg.video0.zoom_pct == 0.5);
+	CHECK("load_zoom_x", cfg.video0.zoom_x == 0.25);
+	CHECK("load_zoom_y", cfg.video0.zoom_y == 0.75);
 	CHECK("load_enabled", cfg.outgoing.enabled == true);
 	CHECK("load_server", strcmp(cfg.outgoing.server, "udp://10.0.0.1:6000") == 0);
 	CHECK("load_stream_mode", strcmp(cfg.outgoing.stream_mode, "compact") == 0);
@@ -261,6 +267,9 @@ static int test_roundtrip(void)
 	cfg.video0.qp_delta = 6;
 	cfg.system.verbose = true;
 	cfg.video0.scene_threshold = 150;
+	cfg.video0.zoom_pct = 0.5;
+	cfg.video0.zoom_x = 0.25;
+	cfg.video0.zoom_y = 0.75;
 
 	char *json = venc_config_to_json_string(&cfg);
 	CHECK("serialize_ok", json != NULL);
@@ -284,6 +293,9 @@ static int test_roundtrip(void)
 	CHECK("roundtrip_qp_delta", cfg2.video0.qp_delta == 6);
 	CHECK("roundtrip_verbose", cfg2.system.verbose == true);
 	CHECK("roundtrip_scene_threshold", cfg2.video0.scene_threshold == 150);
+	CHECK("roundtrip_zoom_pct", cfg2.video0.zoom_pct == 0.5);
+	CHECK("roundtrip_zoom_x", cfg2.video0.zoom_x == 0.25);
+	CHECK("roundtrip_zoom_y", cfg2.video0.zoom_y == 0.75);
 	/* Unchanged fields preserved */
 	CHECK("roundtrip_codec", strcmp(cfg2.video0.codec, "h265") == 0);
 	CHECK("roundtrip_gop", cfg2.video0.gop_size == 1.0);
@@ -324,6 +336,48 @@ static int test_noise_level_clamping(void)
 	free(path);
 
 	CHECK("noise_clamped_to_7", cfg.fpv.noise_level == 7);
+	return failures;
+}
+
+static int test_zoom_clamping(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	char *path;
+
+	path = write_temp_json("{ \"video0\": { \"zoomPct\": 0.1, "
+		"\"zoomX\": -1, \"zoomY\": 2 } }");
+	CHECK("zoom clamp tmpfile", path != NULL);
+	if (!path) return failures;
+
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("zoom pct clamped floor", cfg.video0.zoom_pct == 0.25);
+	CHECK("zoom x clamped low", cfg.video0.zoom_x == 0.0);
+	CHECK("zoom y clamped high", cfg.video0.zoom_y == 1.0);
+
+	path = write_temp_json("{ \"video0\": { \"zoomPct\": -0.5 } }");
+	CHECK("zoom negative tmpfile", path != NULL);
+	if (!path) return failures;
+
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("zoom pct negative off", cfg.video0.zoom_pct == 0.0);
+
+	path = write_temp_json("{ \"video0\": { \"zoomPct\": 2.0 } }");
+	CHECK("zoom high tmpfile", path != NULL);
+	if (!path) return failures;
+
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("zoom pct clamped high", cfg.video0.zoom_pct == 1.0);
+
 	return failures;
 }
 
@@ -721,6 +775,7 @@ int test_venc_config(void)
 	failures += test_roundtrip();
 	failures += test_overclock_clamping();
 	failures += test_noise_level_clamping();
+	failures += test_zoom_clamping();
 	failures += test_resolution_aliases();
 	failures += test_rotate_180();
 	failures += test_sample_config_file();

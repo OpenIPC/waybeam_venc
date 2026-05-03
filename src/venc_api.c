@@ -1,6 +1,13 @@
 #include "venc_api.h"
 #include "idr_rate_limit.h"
+#include "intra_refresh.h"
 #include "pipeline_common.h"
+#if HAVE_BACKEND_STAR6E
+#include "star6e_pipeline.h"
+#endif
+#if HAVE_BACKEND_MARUKO
+#include "maruko_pipeline.h"
+#endif
 #include "rtp_packetizer.h"
 #include "sensor_select.h"
 #include "star6e_recorder.h"
@@ -8,6 +15,7 @@
 #include "venc_webui.h"
 #include "cJSON.h"
 
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -39,7 +47,17 @@ static int g_api_routes_registered = 0;
  * serializes field reads/writes to prevent torn values on ARM.  It also
  * guards g_config_path and the g_last_saved cache below (the httpd is
  * single-threaded so no handler-vs-handler race, but the main thread
- * calls venc_api_set_config_path at startup). */
+ * calls venc_api_set_config_path at startup).
+ *
+ * Hold-time policy: keep this mutex hot — backends register their own
+ * VencConfig pointer as g_cfg (e.g. &ctx->vcfg), and apply_*
+ * callbacks may read additional vcfg fields beyond the value they were
+ * passed (apply_bitrate reads vcfg->video0.frame_lost, etc.).  So
+ * apply_live_group_for_cfg() commits the staged value to g_cfg before
+ * each callback, and the mutex must remain held across the whole
+ * apply sequence to keep that commit + read pair coherent.  The
+ * pre-apply validation/preflight phase is run outside the mutex
+ * because it only reads write-once globals and a local cfg copy. */
 static pthread_mutex_t g_cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Last config snapshot that was successfully persisted, used to skip
@@ -175,6 +193,13 @@ static volatile sig_atomic_t g_record_stop_pending = 0;
 static char g_record_start_dir[256];
 static pthread_mutex_t g_record_mutex = PTHREAD_MUTEX_INITIALIZER;
 static VencRecordStatusFn g_record_status_fn;
+/* Separate from g_record_status_fn: a backend may expose live status
+ * (so /api/v1/record/status reflects daemon-config-driven recording)
+ * without consuming the HTTP-driven start/stop request flags.  Backends
+ * that *do* consume those flags (currently Star6E only) call
+ * venc_api_set_record_http_control_supported(1) so /api/v1/record/start
+ * and /stop stop returning 501. */
+static bool g_record_http_control_supported;
 
 void venc_api_request_reinit(void)
 {
@@ -236,6 +261,11 @@ int venc_api_get_record_stop(void)
 void venc_api_set_record_status_fn(VencRecordStatusFn fn)
 {
 	g_record_status_fn = fn;
+}
+
+void venc_api_set_record_http_control_supported(bool supported)
+{
+	g_record_http_control_supported = supported;
 }
 
 void venc_api_get_record_dir(char *buf, size_t buf_size)
@@ -317,6 +347,7 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(isp, legacy_ae,      FT_BOOL,   MUT_RESTART),
 	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
+	FIELD(isp, ae_mode,        FT_STRING, MUT_RESTART),
 	FIELD(isp, keep_aspect,    FT_BOOL,   MUT_RESTART),
 
 	FIELD(audio, enabled,      FT_BOOL,   MUT_RESTART),
@@ -352,6 +383,16 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
+	FIELD(video0, intra_refresh_mode,   FT_STRING, MUT_RESTART),
+	FIELD(video0, intra_refresh_lines,  FT_UINT16, MUT_RESTART),
+	FIELD(video0, intra_refresh_qp,     FT_UINT8,  MUT_RESTART),
+	/* zoom_pct shrinks the encoded resolution to the crop dim (no SCL
+	 * upscale, no bandwidth pressure) — that requires resizing the VPE
+	 * port and VENC channel, hence MUT_RESTART.  zoom_x/y stay live for
+	 * smooth panning at the same crop dim via MI_VPE_SetPortCrop. */
+	FIELD(video0, zoom_pct,    FT_DOUBLE, MUT_RESTART),
+	FIELD(video0, zoom_x,      FT_DOUBLE, MUT_LIVE),
+	FIELD(video0, zoom_y,      FT_DOUBLE, MUT_LIVE),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -396,6 +437,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "fpv.noiseLevel", "fpv.noise_level" },
 	{ "isp.legacyAe", "isp.legacy_ae" },
 	{ "isp.aeFps", "isp.ae_fps" },
+	{ "isp.aeMode", "isp.ae_mode" },
 	{ "isp.keepAspect", "isp.keep_aspect" },
 	{ "audio.sampleRate", "audio.sample_rate" },
 	{ "imu.i2cDevice", "imu.i2c_device" },
@@ -409,6 +451,12 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.gopSize", "record.gop_size" },
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
+	{ "video0.intraRefreshMode", "video0.intra_refresh_mode" },
+	{ "video0.intraRefreshLines", "video0.intra_refresh_lines" },
+	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
+	{ "video0.zoomPct", "video0.zoom_pct" },
+	{ "video0.zoomX", "video0.zoom_x" },
+	{ "video0.zoomY", "video0.zoom_y" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -598,6 +646,23 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.qp_delta < -12 || cfg->video0.qp_delta > 12)
 			return "qp_delta must be in range [-12, 12]";
 	}
+	if (strcmp(key, "video0.zoom_pct") == 0) {
+		double v = cfg->video0.zoom_pct;
+		if (!isfinite(v))
+			return "zoom_pct must be finite";
+		if (v != 0.0 && (v < 0.25 || v > 1.0))
+			return "zoom_pct must be 0.0 or in range [0.25, 1.0]";
+	}
+	if (strcmp(key, "video0.zoom_x") == 0) {
+		double v = cfg->video0.zoom_x;
+		if (!isfinite(v) || v < 0.0 || v > 1.0)
+			return "zoom_x must be in range [0.0, 1.0]";
+	}
+	if (strcmp(key, "video0.zoom_y") == 0) {
+		double v = cfg->video0.zoom_y;
+		if (!isfinite(v) || v < 0.0 || v > 1.0)
+			return "zoom_y must be in range [0.0, 1.0]";
+	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
 			return "roi_qp must be in range [-30, 30]";
@@ -663,6 +728,9 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.qp_delta",
 		"video0.size",
 		"video0.scene_holdoff",
+		"video0.zoom_pct",
+		"video0.zoom_x",
+		"video0.zoom_y",
 		"fpv.roi_qp",
 		"fpv.roi_steps",
 		"fpv.roi_center",
@@ -804,6 +872,7 @@ typedef enum {
 	LIVE_GROUP_OUTGOING,
 	LIVE_GROUP_MAX_PAYLOAD,
 	LIVE_GROUP_MUTE,
+	LIVE_GROUP_ZOOM,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -963,6 +1032,10 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_MAX_PAYLOAD;
 	if (strcmp(canonical_key, "audio.mute") == 0)
 		return LIVE_GROUP_MUTE;
+	if (strcmp(canonical_key, "video0.zoom_pct") == 0 ||
+	    strcmp(canonical_key, "video0.zoom_x") == 0 ||
+	    strcmp(canonical_key, "video0.zoom_y") == 0)
+		return LIVE_GROUP_ZOOM;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -990,6 +1063,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "outgoing.max_payload_size";
 	case LIVE_GROUP_MUTE:
 		return "audio.mute";
+	case LIVE_GROUP_ZOOM:
+		return "video0.zoom_*";
 	default:
 		return "unknown";
 	}
@@ -1136,6 +1211,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_max_payload_size != NULL;
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute != NULL;
+	case LIVE_GROUP_ZOOM:
+		return g_cb->apply_zoom != NULL;
 	default:
 		return 0;
 	}
@@ -1193,6 +1270,11 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_MUTE:
 		dst->audio.mute = src->audio.mute;
+		break;
+	case LIVE_GROUP_ZOOM:
+		dst->video0.zoom_pct = src->video0.zoom_pct;
+		dst->video0.zoom_x   = src->video0.zoom_x;
+		dst->video0.zoom_y   = src->video0.zoom_y;
 		break;
 	default:
 		break;
@@ -1289,6 +1371,9 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_max_payload_size(cfg->outgoing.max_payload_size);
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute(cfg->audio.mute);
+	case LIVE_GROUP_ZOOM:
+		return g_cb->apply_zoom(cfg->video0.zoom_pct,
+			cfg->video0.zoom_x, cfg->video0.zoom_y);
 	default:
 		return -2;
 	}
@@ -1555,24 +1640,35 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	if (rc != 0)
 		return rc > 0 ? 0 : rc;
 
+	/* Snapshot g_cfg under the mutex, then drop it for the
+	 * validation/preflight pass.  field_from_string_cfg(),
+	 * validate_field_cfg(), validate_backend_config(), and
+	 * live_group_supported_for_cfg() all operate on the local copy and
+	 * only read write-once globals (g_backend, g_cb function table) —
+	 * no shared mutable state, so they're safe outside the mutex.
+	 *
+	 * Safety of the unlock/relock split: the httpd is single-threaded
+	 * (one accept loop, one in-flight handler), so no other writer can
+	 * mutate g_cfg in this window.  Any future move to a multi-threaded
+	 * httpd would need to revisit this. */
 	pthread_mutex_lock(&g_cfg_mutex);
 	old_cfg = *g_cfg;
+	pthread_mutex_unlock(&g_cfg_mutex);
+
 	new_cfg = old_cfg;
 	actual_cfg = old_cfg;
 
 	rc = stage_params_into_cfg(&new_cfg, params, param_count, status_code,
 		response_json);
-	if (rc != 0) {
-		pthread_mutex_unlock(&g_cfg_mutex);
+	if (rc != 0)
 		return rc > 0 ? 0 : rc;
-	}
 
 	rc = preflight_live_group_callbacks(&new_cfg, group_order, group_count,
 		&touched, param_count, status_code, response_json);
-	if (rc != 0) {
-		pthread_mutex_unlock(&g_cfg_mutex);
+	if (rc != 0)
 		return rc > 0 ? 0 : rc;
-	}
+
+	pthread_mutex_lock(&g_cfg_mutex);
 
 	rc = apply_live_group_sequence_locked(group_order, group_count, &touched,
 		&old_cfg, &new_cfg, &actual_cfg, status_code, response_json);
@@ -1763,7 +1859,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.3.0\","
+		"\"contract_version\":\"0.10.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2073,6 +2169,23 @@ static int handle_transport_status(int fd, const HttpRequest *req, void *ctx)
 	return ret;
 }
 
+static int handle_audio_status(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+	if (!g_cb || !g_cb->query_audio_status) {
+		return httpd_send_error(fd, 501, "not_implemented",
+			"audio status not available on this backend");
+	}
+	char *text = g_cb->query_audio_status();
+	if (!text) {
+		return httpd_send_error(fd, 500, "internal_error",
+			"audio status query failed");
+	}
+	int ret = httpd_send_json(fd, 200, text);
+	free(text);
+	return ret;
+}
+
 static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
 {
 	VencConfig snapshot;
@@ -2134,11 +2247,28 @@ static int handle_idr(int fd, const HttpRequest *req, void *ctx)
 
 /* ── Record control endpoints ────────────────────────────────────────── */
 
+/* `g_record_status_fn` only signals that the backend can report live
+ * recorder state (used by `/api/v1/record/status`).  HTTP-driven
+ * start/stop requires a backend that actually consumes the request
+ * flags from its main loop; Star6E does, Maruko does not yet (Phase 6.5
+ * backlog).  Backends opt in via
+ * `venc_api_set_record_http_control_supported(1)` so /record/start|stop
+ * don't lie with `{"ok":true}` on backends that silently drop the
+ * request. */
+static int record_http_supported(void)
+{
+	return g_record_http_control_supported ? 1 : 0;
+}
+
 static int handle_record_start(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)ctx;
 	char dir[256] = {0};
 	char dummy[4];
+
+	if (!record_http_supported())
+		return httpd_send_error(fd, 501, "not_implemented",
+			"HTTP record control not available on this backend");
 
 	/* Optional ?dir=/path query parameter */
 	if (req->query[0]) {
@@ -2176,6 +2306,9 @@ static int handle_record_start(int fd, const HttpRequest *req, void *ctx)
 static int handle_record_stop(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
+	if (!record_http_supported())
+		return httpd_send_error(fd, 501, "not_implemented",
+			"HTTP record control not available on this backend");
 	venc_api_request_record_stop();
 	return httpd_send_ok(fd, "{\"action\":\"stop\"}");
 }
@@ -2455,6 +2588,137 @@ static int handle_idr_stats(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_json(fd, 200, buf);
 }
 
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
+static int handle_intra_status(int fd, const HttpRequest *req, void *ctx)
+{
+	struct {
+		char mode_name[16];
+		int active, mi_supported, apply_ok;
+		uint32_t target_ms, total_rows;
+		uint32_t requested_lines, effective_lines_per_p;
+		int      lines_clamped;
+		uint32_t requested_qp, effective_qp;
+		double   explicit_gop_sec, effective_gop_sec;
+		int      gop_auto;
+	} s;
+	char buf[512];
+
+	(void)req; (void)ctx;
+	memset(&s, 0, sizeof(s));
+#if HAVE_BACKEND_STAR6E
+	{
+		Star6eIntraRefreshStatus st;
+		star6e_pipeline_intra_refresh_status(&st);
+		snprintf(s.mode_name, sizeof(s.mode_name), "%s", st.mode_name);
+		s.active                = st.active;
+		s.mi_supported          = st.mi_supported;
+		s.apply_ok              = st.apply_ok;
+		s.target_ms             = st.target_ms;
+		s.total_rows            = st.total_rows;
+		s.requested_lines       = st.requested_lines;
+		s.effective_lines_per_p = st.effective_lines_per_p;
+		s.lines_clamped         = st.lines_clamped;
+		s.requested_qp          = st.requested_qp;
+		s.effective_qp          = st.effective_qp;
+		s.explicit_gop_sec      = st.explicit_gop_sec;
+		s.effective_gop_sec     = st.effective_gop_sec;
+		s.gop_auto              = st.gop_auto;
+	}
+#elif HAVE_BACKEND_MARUKO
+	{
+		MarukoIntraRefreshStatus st;
+		maruko_pipeline_intra_refresh_status(&st);
+		snprintf(s.mode_name, sizeof(s.mode_name), "%s", st.mode_name);
+		s.active                = st.active;
+		s.mi_supported          = st.mi_supported;
+		s.apply_ok              = st.apply_ok;
+		s.target_ms             = st.target_ms;
+		s.total_rows            = st.total_rows;
+		s.requested_lines       = st.requested_lines;
+		s.effective_lines_per_p = st.effective_lines_per_p;
+		s.lines_clamped         = st.lines_clamped;
+		s.requested_qp          = st.requested_qp;
+		s.effective_qp          = st.effective_qp;
+		s.explicit_gop_sec      = st.explicit_gop_sec;
+		s.effective_gop_sec     = st.effective_gop_sec;
+		s.gop_auto              = st.gop_auto;
+	}
+#endif
+	if (s.mode_name[0] == '\0')
+		snprintf(s.mode_name, sizeof(s.mode_name), "off");
+
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{"
+		"\"mode\":\"%s\","
+		"\"active\":%s,"
+		"\"mi_supported\":%s,"
+		"\"apply_ok\":%s,"
+		"\"target_ms\":%u,"
+		"\"total_rows\":%u,"
+		"\"lines\":{\"requested\":%u,\"effective\":%u,\"clamped\":%s},"
+		"\"qp\":{\"requested\":%u,\"effective\":%u},"
+		"\"gop\":{\"explicit_sec\":%.3f,\"effective_sec\":%.3f,\"auto\":%s}"
+		"}}",
+		s.mode_name,
+		s.active ? "true" : "false",
+		s.mi_supported ? "true" : "false",
+		s.apply_ok ? "true" : "false",
+		s.target_ms,
+		s.total_rows,
+		s.requested_lines, s.effective_lines_per_p,
+		s.lines_clamped ? "true" : "false",
+		s.requested_qp, s.effective_qp,
+		s.explicit_gop_sec, s.effective_gop_sec,
+		s.gop_auto ? "true" : "false");
+	return httpd_send_json(fd, 200, buf);
+}
+
+static int handle_intra_mode(int fd, const HttpRequest *req, void *ctx)
+{
+	char mode_arg[16];
+	IntraRefreshMode mode;
+	const char *name;
+	VencConfig snapshot;
+	int save_rc;
+	char buf[256];
+
+	(void)ctx;
+	if (httpd_query_param(req, "mode", mode_arg, sizeof(mode_arg)) != 0
+		|| mode_arg[0] == '\0')
+		return httpd_send_error(fd, 400, "missing_mode",
+			"Query param 'mode' is required");
+
+	mode = intra_refresh_parse_mode(mode_arg);
+	name = intra_refresh_mode_name(mode);
+	if (mode == INTRA_MODE_OFF && strcasecmp(mode_arg, "off") != 0)
+		return httpd_send_error(fd, 400, "invalid_mode",
+			"mode must be one of: off, fast, balanced, robust");
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	if (!g_cfg) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return httpd_send_error(fd, 500, "internal_error",
+			"config not registered");
+	}
+	snprintf(g_cfg->video0.intra_refresh_mode,
+		sizeof(g_cfg->video0.intra_refresh_mode), "%s", name);
+	/* Clear per-field overrides so the mode's defaults take effect. */
+	g_cfg->video0.intra_refresh_lines = 0;
+	g_cfg->video0.intra_refresh_qp = 0;
+	snapshot = *g_cfg;
+	pthread_mutex_unlock(&g_cfg_mutex);
+
+	save_rc = venc_api_save_config_to_disk(&snapshot);
+	venc_api_request_reinit();
+
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"mode\":\"%s\",\"saved\":%s,"
+		"\"reinit\":true}}",
+		name, save_rc == 0 ? "true" : "false");
+	return httpd_send_json(fd, 200, buf);
+}
+#endif
+
 static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 {
 	MI_VENC_CHN ch;
@@ -2536,6 +2800,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/modes",        handle_modes, NULL);
 	r |= venc_httpd_route("GET", "/metrics/isp",         handle_isp_metrics, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/transport/status", handle_transport_status, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/audio/status", handle_audio_status, NULL);
 	r |= venc_httpd_route("GET", "/request/idr",         handle_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/record/start",  handle_record_start, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/record/stop",   handle_record_stop, NULL);
@@ -2544,6 +2809,11 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/set",    handle_dual_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
+	r |= venc_httpd_route("GET", "/api/v1/intra/status", handle_intra_status, NULL);
+	r |= venc_httpd_route("POST", "/api/v1/intra/mode",  handle_intra_mode, NULL);
+	r |= venc_httpd_route("GET",  "/api/v1/intra/mode",  handle_intra_mode, NULL);
+#endif
 	r |= venc_webui_register();
 	if (r != 0) {
 		pthread_mutex_lock(&g_cfg_mutex);

@@ -2,6 +2,7 @@
 #include "venc_api.h"
 #include "pipeline_common.h"
 #include "star6e_recorder.h"
+#include "intra_refresh.h"
 #include "../lib/cJSON.h"
 
 #include <errno.h>
@@ -84,6 +85,7 @@ void venc_config_defaults(VencConfig *cfg)
 	/* isp */
 	cfg->isp.sensor_bin[0] = '\0';
 	cfg->isp.legacy_ae = true;
+	safe_strcpy(cfg->isp.ae_mode, sizeof(cfg->isp.ae_mode), "native");
 	cfg->isp.ae_fps = 15;
 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
 	cfg->isp.awb_ct = 5500;
@@ -154,6 +156,17 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.scene_threshold = 0;   /* 0 = off */
 	cfg->video0.scene_holdoff = 2;
 
+	/* intra refresh (video0) — disabled by default; mode-driven */
+	safe_strcpy(cfg->video0.intra_refresh_mode,
+		sizeof(cfg->video0.intra_refresh_mode), "off");
+	cfg->video0.intra_refresh_lines = 0;
+	cfg->video0.intra_refresh_qp = 0;
+
+	/* digital zoom (video0) — disabled by default */
+	cfg->video0.zoom_pct = 0.0;
+	cfg->video0.zoom_x = 0.5;
+	cfg->video0.zoom_y = 0.5;
+
 	/* debug */
 	cfg->debug.show_osd = false;
 }
@@ -221,6 +234,8 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 	safe_strcpy(s->sensor_bin, sizeof(s->sensor_bin),
 		json_get_string(obj, "sensorBin", s->sensor_bin));
 	s->legacy_ae = json_get_bool(obj, "legacyAe", s->legacy_ae);
+	safe_strcpy(s->ae_mode, sizeof(s->ae_mode),
+		json_get_string(obj, "aeMode", s->ae_mode));
 	s->ae_fps = (uint32_t)json_get_int(obj, "aeFps", (int)s->ae_fps);
 	s->gain_max = (uint32_t)json_get_int(obj, "gainMax", (int)s->gain_max);
 	safe_strcpy(s->awb_mode, sizeof(s->awb_mode),
@@ -301,6 +316,42 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->scene_holdoff = (uint8_t)json_get_int(obj, "sceneHoldoff",
 		(int)v->scene_holdoff);
 	if (v->scene_holdoff < 1 && v->scene_threshold > 0) v->scene_holdoff = 1;
+
+	{
+		const char *m = json_get_string(obj, "intraRefreshMode",
+			v->intra_refresh_mode);
+		IntraRefreshMode parsed = intra_refresh_parse_mode(m);
+		safe_strcpy(v->intra_refresh_mode, sizeof(v->intra_refresh_mode),
+			intra_refresh_mode_name(parsed));
+	}
+	v->intra_refresh_lines = (uint16_t)json_get_int(obj, "intraRefreshLines",
+		(int)v->intra_refresh_lines);
+	v->intra_refresh_qp = (uint8_t)json_get_int(obj, "intraRefreshQp",
+		(int)v->intra_refresh_qp);
+	if (v->intra_refresh_qp > 51) v->intra_refresh_qp = 51;
+
+	v->zoom_pct = json_get_double(obj, "zoomPct", v->zoom_pct);
+	v->zoom_x   = json_get_double(obj, "zoomX",   v->zoom_x);
+	v->zoom_y   = json_get_double(obj, "zoomY",   v->zoom_y);
+	if (v->zoom_pct < 0.0)
+		v->zoom_pct = 0.0;
+	if (v->zoom_pct > 1.0)
+		v->zoom_pct = 1.0;
+	/* Min 0.25 keeps the encoded frame large enough for receiver-side
+	 * decoders that ignore mid-stream SPS resolution changes (going
+	 * smaller produces a stream the receiver still renders at the first
+	 * SPS dim, so deeper zoom is invisible).  This also stays comfortably
+	 * above the VENC_CreateChn minimum dim. */
+	if (v->zoom_pct > 0.0 && v->zoom_pct < 0.25)
+		v->zoom_pct = 0.25;
+	if (v->zoom_x < 0.0)
+		v->zoom_x = 0.0;
+	if (v->zoom_x > 1.0)
+		v->zoom_x = 1.0;
+	if (v->zoom_y < 0.0)
+		v->zoom_y = 0.0;
+	if (v->zoom_y > 1.0)
+		v->zoom_y = 1.0;
 }
 
 static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
@@ -803,6 +854,7 @@ static void render_isp(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_section_open(p, 1, "isp");
 	pp_field_string(p, 2, "sensorBin",  cfg->isp.sensor_bin,  0);
 	pp_field_bool(p,   2, "legacyAe",   cfg->isp.legacy_ae,   0);
+	pp_field_string(p, 2, "aeMode",     cfg->isp.ae_mode,     0);
 	pp_field_uint(p,   2, "aeFps",      cfg->isp.ae_fps,      0);
 	pp_field_uint(p,   2, "gainMax",    cfg->isp.gain_max,    0);
 	pp_field_string(p, 2, "awbMode",    cfg->isp.awb_mode,    0);
@@ -839,7 +891,13 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_int(p,    2, "qpDelta",        cfg->video0.qp_delta,        0);
 	pp_field_bool(p,   2, "frameLost",      cfg->video0.frame_lost,      0);
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
-	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   1);
+	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
+	pp_field_string(p, 2, "intraRefreshMode", cfg->video0.intra_refresh_mode, 0);
+	pp_field_uint(p,   2, "intraRefreshLines", cfg->video0.intra_refresh_lines, 0);
+	pp_field_uint(p,   2, "intraRefreshQp",    cfg->video0.intra_refresh_qp,    0);
+	pp_field_double(p, 2, "zoomPct",           cfg->video0.zoom_pct,            0);
+	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
+	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -979,6 +1037,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	if (isp) {
 		cJSON_AddStringToObject(isp, "sensorBin", cfg->isp.sensor_bin);
 		cJSON_AddBoolToObject(isp, "legacyAe", cfg->isp.legacy_ae);
+		cJSON_AddStringToObject(isp, "aeMode", cfg->isp.ae_mode);
 		cJSON_AddNumberToObject(isp, "aeFps", cfg->isp.ae_fps);
 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);
 		cJSON_AddStringToObject(isp, "awbMode", cfg->isp.awb_mode);
@@ -1014,6 +1073,15 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(vid, "frameLost", cfg->video0.frame_lost);
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
+		cJSON_AddStringToObject(vid, "intraRefreshMode",
+			cfg->video0.intra_refresh_mode);
+		cJSON_AddNumberToObject(vid, "intraRefreshLines",
+			cfg->video0.intra_refresh_lines);
+		cJSON_AddNumberToObject(vid, "intraRefreshQp",
+			cfg->video0.intra_refresh_qp);
+		cJSON_AddNumberToObject(vid, "zoomPct", cfg->video0.zoom_pct);
+		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
+		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);
 	}
 
 	/* outgoing */
