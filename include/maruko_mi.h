@@ -121,6 +121,10 @@ typedef struct {
 	int (*fnSetInputSourceConfig)(int dev, int chn, void *cfg);
 	int (*fnSetFrameLostStrategy)(int dev, int chn, void *strategy);
 	int (*fnGetFrameLostStrategy)(int dev, int chn, void *strategy);
+	/* Optional — Maruko SDK exports these but older drops may not.
+	 * Code paths must NULL-check before invoking. */
+	int (*fnSetIntraRefresh)(int dev, int chn, void *cfg);
+	int (*fnGetIntraRefresh)(int dev, int chn, void *cfg);
 } maruko_venc_impl;
 
 /* MI_AI (audio input) — i6c surface differs from Star6E:

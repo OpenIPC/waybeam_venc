@@ -457,6 +457,83 @@ Codec note:
 - Star6E with `outgoing.stream_mode="rtp"` requires `video0.codec="h265"`.
 - Maruko accepts both `h264` and `h265`.
 
+#### Intra Refresh (Star6E + Maruko)
+
+GDR-style rolling stripe: a configurable number of MB/LCU rows in each P-frame
+are intra-coded so a decoder that joins mid-stream — or recovers from a packet
+loss burst — can resync without waiting for the next IDR. Layered over normal
+GOP-based IDRs (Majestic-style belt-and-suspenders).
+
+| Field | Type | Mutability | Description |
+|-------|------|------------|-------------|
+| `video0.intra_refresh` | bool | restart | Enable rolling intra refresh (default `false`) |
+| `video0.intra_refresh_lines` | uint16 | restart | LCU/MB rows refreshed per P-frame (`0` = auto, ~500 ms full-picture window) |
+| `video0.intra_refresh_qp` | uint8 | restart | QP for the intra-refreshed rows (`0` = SDK default) |
+
+CamelCase aliases: `video0.intraRefresh`, `video0.intraRefreshLines`,
+`video0.intraRefreshQp`.
+
+The auto formula (when `intra_refresh_lines=0`) computes
+`ceil(LCU_rows / (fps/2))` so the full picture refreshes in roughly half a
+second. LCU height is 32 px for H.265 and 16 px for H.264. Explicit values
+greater than the picture's LCU-row count are clamped (with a `[venc] WARNING`
+in the boot log) to avoid SDK underflow.
+
+Tuning reference (Majestic-style 1080p60 H.265):
+
+```json
+"video0": {
+  "gopSize": 0.1,
+  "intraRefresh": true,
+  "intraRefreshLines": 12,
+  "intraRefreshQp": 0,
+  "bitrate": 15000
+}
+```
+
+Notes:
+- Budget +20–30 % bitrate when enabling refresh; intra-coded rows compress
+  worse than inter-coded ones.
+- `gop_size` is **not** overridden when refresh is on. Keep periodic IDRs
+  short (0.1 s is the Majestic default) so the recorder ch1 and any decoder
+  that ignores the rolling refresh still get a hard sync point on cadence.
+- Refresh is applied to ch0 only. The dual-VENC recorder (ch1) is
+  intentionally skipped — TS containers expect IDRs at GOP boundaries.
+- `intra_refresh_qp=0` means "use the SDK default for I-blocks". Set
+  non-zero only after measuring; the SDK gives reasonable defaults already.
+- Both backends use the identical `MI_VENC_IntraRefresh_t` layout
+  (`bEnable`, `u32RefreshLineNum`, `u32ReqIQp`); the Maruko symbol takes
+  `(MI_VENC_DEV, MI_VENC_CHN, *cfg)` while Star6E takes `(MI_VENC_CHN, *cfg)`.
+- Maruko: `MI_VENC_SetIntraRefresh` is treated as an optional symbol — the
+  loader logs an ERROR if `dlsym` misses on older firmware drops, and the
+  pipeline silently falls back to plain GOP-based IDRs (`mi_supported=false`
+  in the status endpoint).
+
+Status endpoint:
+
+```bash
+curl http://<device>/api/v1/intra/status
+# { "ok":true, "data":{
+#     "enabled": true,            # config requested
+#     "mi_supported": true,       # libmi_venc.so exports MI_VENC_SetIntraRefresh
+#     "apply_ok": true,           # SetIntraRefresh returned 0 at pipeline start
+#     "requested_lines": 12,      # config value (0 = auto)
+#     "effective_lines_per_p": 12,# what was actually programmed
+#     "requested_qp": 0
+# }}
+```
+
+Boot log (from stderr):
+
+```
+[venc] intra refresh enabled: chn=0 lines/P=12 reqIqp=0
+```
+
+If `mi_supported=false` the deployed `libmi_venc.so` predates
+`MI_VENC_SetIntraRefresh`; the encoder still runs without rolling refresh.
+A non-zero `[venc] ERROR: MI_VENC_SetIntraRefresh ... failed` line is the
+only path where `apply_ok=false` while `enabled=true` and `mi_supported=true`.
+
 #### Outgoing (Streaming)
 
 | Field | Type | Mutability | Description |

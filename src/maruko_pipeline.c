@@ -762,6 +762,106 @@ static void fill_maruko_rc_attr(i6c_venc_chn *attr,
 	}
 }
 
+/* IntraRefresh status snapshot — populated by
+ * maruko_pipeline_apply_intra_refresh() at every pipeline_start, cleared by
+ * maruko_stop_venc().  Read by venc_api's /api/v1/intra/status handler. */
+static MarukoIntraRefreshStatus g_intra_status;
+static pthread_mutex_t g_intra_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void maruko_pipeline_intra_refresh_status(MarukoIntraRefreshStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_intra_status_mutex);
+	*out = g_intra_status;
+	pthread_mutex_unlock(&g_intra_status_mutex);
+}
+
+/* LCU rows: H.265 = 32px, H.264 = 16px.  When explicit_lines == 0 the
+ * caller wants the auto formula (~500ms refresh window).  Explicit values
+ * are clamped to the actual picture LCU count so the SDK can't underflow. */
+static uint32_t maruko_intra_refresh_lines(uint32_t height, uint32_t fps,
+	PAYLOAD_TYPE_E codec, uint32_t explicit_lines)
+{
+	uint32_t lcu_h = (codec == PT_H265) ? 32u : 16u;
+	uint32_t total_rows = (height == 0) ? 1u : (height + lcu_h - 1) / lcu_h;
+	uint32_t refresh_frames, lines;
+
+	if (explicit_lines > 0) {
+		if (explicit_lines > total_rows) {
+			fprintf(stderr, "[venc] WARNING: intra_refresh_lines=%u "
+				"exceeds picture LCU rows=%u, clamping\n",
+				explicit_lines, total_rows);
+			return total_rows;
+		}
+		return explicit_lines;
+	}
+	if (fps == 0)
+		return 1;
+	refresh_frames = (fps + 1) / 2;
+	if (refresh_frames == 0)
+		refresh_frames = 1;
+	lines = (total_rows + refresh_frames - 1) / refresh_frames;
+	return lines == 0 ? 1u : lines;
+}
+
+static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
+	const MarukoBackendConfig *cfg, uint32_t height, uint32_t fps,
+	PAYLOAD_TYPE_E codec)
+{
+	MI_VENC_IntraRefresh_t ir;
+	MarukoIntraRefreshStatus snap;
+
+	memset(&snap, 0, sizeof(snap));
+	if (cfg) {
+		snap.enabled = cfg->intra_refresh ? 1 : 0;
+		snap.requested_lines = cfg->intra_refresh_lines;
+		snap.requested_qp = cfg->intra_refresh_qp;
+	}
+	snap.mi_supported = g_mi_venc.fnSetIntraRefresh ? 1 : 0;
+
+	if (!cfg || !cfg->intra_refresh) {
+		pthread_mutex_lock(&g_intra_status_mutex);
+		g_intra_status = snap;
+		pthread_mutex_unlock(&g_intra_status_mutex);
+		return 0;
+	}
+	if (!g_mi_venc.fnSetIntraRefresh) {
+		fprintf(stderr, "[venc] WARNING: video0.intra_refresh requested "
+			"but libmi_venc.so does not export "
+			"MI_VENC_SetIntraRefresh\n");
+		pthread_mutex_lock(&g_intra_status_mutex);
+		g_intra_status = snap;
+		pthread_mutex_unlock(&g_intra_status_mutex);
+		return -1;
+	}
+
+	memset(&ir, 0, sizeof(ir));
+	ir.bEnable = 1;
+	ir.u32RefreshLineNum = maruko_intra_refresh_lines(height, fps, codec,
+		cfg->intra_refresh_lines);
+	ir.u32ReqIQp = cfg->intra_refresh_qp;
+	snap.effective_lines_per_p = ir.u32RefreshLineNum;
+
+	if (maruko_mi_venc_set_intra_refresh(dev, chn, &ir) != 0) {
+		fprintf(stderr, "[venc] ERROR: MI_VENC_SetIntraRefresh(dev=%d, "
+			"chn=%d, lines=%u, qp=%u) failed\n", dev, chn,
+			ir.u32RefreshLineNum, ir.u32ReqIQp);
+		pthread_mutex_lock(&g_intra_status_mutex);
+		g_intra_status = snap;
+		pthread_mutex_unlock(&g_intra_status_mutex);
+		return -1;
+	}
+	snap.apply_ok = 1;
+	pthread_mutex_lock(&g_intra_status_mutex);
+	g_intra_status = snap;
+	pthread_mutex_unlock(&g_intra_status_mutex);
+	fprintf(stderr, "[venc] intra refresh enabled: dev=%d chn=%d "
+		"lines/P=%u reqIqp=%u\n", dev, chn, ir.u32RefreshLineNum,
+		ir.u32ReqIQp);
+	return 0;
+}
+
 static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	uint32_t width, uint32_t height, uint32_t framerate,
 	MI_VENC_DEV venc_dev, MI_VENC_CHN *chn, int *dev_created)
@@ -863,6 +963,13 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 		}
 	}
 
+	/* IntraRefresh — opt-in via video0.intra_refresh.  Ch0 only; the
+	 * dual ch1 path is intentionally skipped since TS containers need
+	 * IDRs.  Failure is logged and snapshotted but never aborts the
+	 * pipeline (matches Star6E behavior). */
+	(void)maruko_apply_intra_refresh(venc_dev, *chn, cfg, height,
+		framerate, cfg->rc_codec);
+
 	/* Phase 7 dual-VENC SDK probe (debug-only, env-gated).
 	 *
 	 * Set MARUKO_DUAL_VENC_PROBE=1 to attempt CreateChn(dev, 1, ...)
@@ -922,6 +1029,13 @@ static void maruko_stop_venc(MI_VENC_DEV venc_dev, MI_VENC_CHN chn,
 	(void)maruko_mi_venc_destroy_chn(venc_dev, chn);
 	if (destroy_dev)
 		(void)maruko_mi_venc_destroy_dev(venc_dev);
+
+	/* Clear IntraRefresh status snapshot — the channel is gone, so
+	 * /api/v1/intra/status should not keep reporting enabled=true
+	 * until the next pipeline_start runs. */
+	pthread_mutex_lock(&g_intra_status_mutex);
+	memset(&g_intra_status, 0, sizeof(g_intra_status));
+	pthread_mutex_unlock(&g_intra_status_mutex);
 }
 
 static void maruko_sysfs_write(const char *path, const char *value)

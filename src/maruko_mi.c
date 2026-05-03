@@ -254,6 +254,12 @@ static int i6c_venc_load(maruko_venc_impl *venc)
 		int (*)(int, int, void *), "MI_VENC_SetFrameLostStrategy");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetFrameLostStrategy,
 		int (*)(int, int, void *), "MI_VENC_GetFrameLostStrategy");
+	/* IntraRefresh is optional — older Maruko drops may lack the symbol.
+	 * Loader does not fail if dlsym misses; callers must NULL-check. */
+	LOAD_SYM(venc, "libmi_venc.so", fnSetIntraRefresh,
+		int (*)(int, int, void *), "MI_VENC_SetIntraRefresh");
+	LOAD_SYM(venc, "libmi_venc.so", fnGetIntraRefresh,
+		int (*)(int, int, void *), "MI_VENC_GetIntraRefresh");
 
 	if (!venc->fnCreateDev || !venc->fnDestroyDev ||
 	    !venc->fnCreateChn || !venc->fnDestroyChn ||

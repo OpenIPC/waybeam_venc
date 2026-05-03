@@ -107,4 +107,18 @@ void star6e_pipeline_cus3a_reset(void);
 /** Calculate max exposure time to avoid frame drops at target FPS. */
 int star6e_pipeline_cap_exposure_for_fps(uint32_t fps);
 
+/** Snapshot of the IntraRefresh configuration applied to ch0 at the most
+ *  recent pipeline start.  All zeros (enabled=0) when video0.intra_refresh
+ *  is not set in config. */
+typedef struct {
+	int enabled;                    /* config requested */
+	int mi_supported;               /* libmi_venc.so exports SetIntraRefresh */
+	int apply_ok;                   /* SetIntraRefresh succeeded */
+	uint32_t requested_lines;       /* config value (0 = auto) */
+	uint32_t effective_lines_per_p; /* what was actually programmed */
+	uint32_t requested_qp;
+} Star6eIntraRefreshStatus;
+
+void star6e_pipeline_intra_refresh_status(Star6eIntraRefreshStatus *out);
+
 #endif /* STAR6E_PIPELINE_H */

@@ -60,6 +60,11 @@ typedef struct {
 	uint16_t scene_threshold;
 	uint8_t scene_holdoff;
 	uint8_t frame_lost;
+	/* IntraRefresh (GDR-style rolling stripe) — applied to ch0 after
+	 * StartRecvPic.  Mirror of VencConfig::video0.intra_refresh{,_lines,_qp}. */
+	uint8_t intra_refresh;
+	uint16_t intra_refresh_lines;
+	uint8_t intra_refresh_qp;
 	int verbose;
 	int connected_udp;
 	int keep_aspect;
