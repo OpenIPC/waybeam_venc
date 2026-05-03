@@ -191,6 +191,13 @@ static volatile sig_atomic_t g_record_stop_pending = 0;
 static char g_record_start_dir[256];
 static pthread_mutex_t g_record_mutex = PTHREAD_MUTEX_INITIALIZER;
 static VencRecordStatusFn g_record_status_fn;
+/* Separate from g_record_status_fn: a backend may expose live status
+ * (so /api/v1/record/status reflects daemon-config-driven recording)
+ * without consuming the HTTP-driven start/stop request flags.  Backends
+ * that *do* consume those flags (currently Star6E only) call
+ * venc_api_set_record_http_control_supported(1) so /api/v1/record/start
+ * and /stop stop returning 501. */
+static bool g_record_http_control_supported;
 
 void venc_api_request_reinit(void)
 {
@@ -252,6 +259,11 @@ int venc_api_get_record_stop(void)
 void venc_api_set_record_status_fn(VencRecordStatusFn fn)
 {
 	g_record_status_fn = fn;
+}
+
+void venc_api_set_record_http_control_supported(bool supported)
+{
+	g_record_http_control_supported = supported;
 }
 
 void venc_api_get_record_dir(char *buf, size_t buf_size)
@@ -1798,7 +1810,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.8.3\","
+		"\"contract_version\":\"0.8.4\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2186,14 +2198,17 @@ static int handle_idr(int fd, const HttpRequest *req, void *ctx)
 
 /* ── Record control endpoints ────────────────────────────────────────── */
 
-/* Star6E registers `g_record_status_fn` during runtime init; Maruko does
- * not yet (Phase 6.5 backlog).  Treat the callback's presence as the
- * proxy for "this backend has runtime polling for HTTP record control,"
- * so /record/start|stop don't lie with `{"ok":true}` on backends that
- * silently drop the request. */
+/* `g_record_status_fn` only signals that the backend can report live
+ * recorder state (used by `/api/v1/record/status`).  HTTP-driven
+ * start/stop requires a backend that actually consumes the request
+ * flags from its main loop; Star6E does, Maruko does not yet (Phase 6.5
+ * backlog).  Backends opt in via
+ * `venc_api_set_record_http_control_supported(1)` so /record/start|stop
+ * don't lie with `{"ok":true}` on backends that silently drop the
+ * request. */
 static int record_http_supported(void)
 {
-	return g_record_status_fn != NULL;
+	return g_record_http_control_supported ? 1 : 0;
 }
 
 static int handle_record_start(int fd, const HttpRequest *req, void *ctx)
