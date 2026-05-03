@@ -15,6 +15,7 @@
 #include "venc_webui.h"
 #include "cJSON.h"
 
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -385,6 +386,13 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, intra_refresh_mode,   FT_STRING, MUT_RESTART),
 	FIELD(video0, intra_refresh_lines,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, intra_refresh_qp,     FT_UINT8,  MUT_RESTART),
+	/* zoom_pct shrinks the encoded resolution to the crop dim (no SCL
+	 * upscale, no bandwidth pressure) — that requires resizing the VPE
+	 * port and VENC channel, hence MUT_RESTART.  zoom_x/y stay live for
+	 * smooth panning at the same crop dim via MI_VPE_SetPortCrop. */
+	FIELD(video0, zoom_pct,    FT_DOUBLE, MUT_RESTART),
+	FIELD(video0, zoom_x,      FT_DOUBLE, MUT_LIVE),
+	FIELD(video0, zoom_y,      FT_DOUBLE, MUT_LIVE),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -446,6 +454,9 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.intraRefreshMode", "video0.intra_refresh_mode" },
 	{ "video0.intraRefreshLines", "video0.intra_refresh_lines" },
 	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
+	{ "video0.zoomPct", "video0.zoom_pct" },
+	{ "video0.zoomX", "video0.zoom_x" },
+	{ "video0.zoomY", "video0.zoom_y" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -635,6 +646,23 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.qp_delta < -12 || cfg->video0.qp_delta > 12)
 			return "qp_delta must be in range [-12, 12]";
 	}
+	if (strcmp(key, "video0.zoom_pct") == 0) {
+		double v = cfg->video0.zoom_pct;
+		if (!isfinite(v))
+			return "zoom_pct must be finite";
+		if (v != 0.0 && (v < 0.25 || v > 1.0))
+			return "zoom_pct must be 0.0 or in range [0.25, 1.0]";
+	}
+	if (strcmp(key, "video0.zoom_x") == 0) {
+		double v = cfg->video0.zoom_x;
+		if (!isfinite(v) || v < 0.0 || v > 1.0)
+			return "zoom_x must be in range [0.0, 1.0]";
+	}
+	if (strcmp(key, "video0.zoom_y") == 0) {
+		double v = cfg->video0.zoom_y;
+		if (!isfinite(v) || v < 0.0 || v > 1.0)
+			return "zoom_y must be in range [0.0, 1.0]";
+	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
 			return "roi_qp must be in range [-30, 30]";
@@ -700,6 +728,9 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.qp_delta",
 		"video0.size",
 		"video0.scene_holdoff",
+		"video0.zoom_pct",
+		"video0.zoom_x",
+		"video0.zoom_y",
 		"fpv.roi_qp",
 		"fpv.roi_steps",
 		"fpv.roi_center",
@@ -841,6 +872,7 @@ typedef enum {
 	LIVE_GROUP_OUTGOING,
 	LIVE_GROUP_MAX_PAYLOAD,
 	LIVE_GROUP_MUTE,
+	LIVE_GROUP_ZOOM,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1000,6 +1032,10 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_MAX_PAYLOAD;
 	if (strcmp(canonical_key, "audio.mute") == 0)
 		return LIVE_GROUP_MUTE;
+	if (strcmp(canonical_key, "video0.zoom_pct") == 0 ||
+	    strcmp(canonical_key, "video0.zoom_x") == 0 ||
+	    strcmp(canonical_key, "video0.zoom_y") == 0)
+		return LIVE_GROUP_ZOOM;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1027,6 +1063,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "outgoing.max_payload_size";
 	case LIVE_GROUP_MUTE:
 		return "audio.mute";
+	case LIVE_GROUP_ZOOM:
+		return "video0.zoom_*";
 	default:
 		return "unknown";
 	}
@@ -1173,6 +1211,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_max_payload_size != NULL;
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute != NULL;
+	case LIVE_GROUP_ZOOM:
+		return g_cb->apply_zoom != NULL;
 	default:
 		return 0;
 	}
@@ -1230,6 +1270,11 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_MUTE:
 		dst->audio.mute = src->audio.mute;
+		break;
+	case LIVE_GROUP_ZOOM:
+		dst->video0.zoom_pct = src->video0.zoom_pct;
+		dst->video0.zoom_x   = src->video0.zoom_x;
+		dst->video0.zoom_y   = src->video0.zoom_y;
 		break;
 	default:
 		break;
@@ -1326,6 +1371,9 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_max_payload_size(cfg->outgoing.max_payload_size);
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute(cfg->audio.mute);
+	case LIVE_GROUP_ZOOM:
+		return g_cb->apply_zoom(cfg->video0.zoom_pct,
+			cfg->video0.zoom_x, cfg->video0.zoom_y);
 	default:
 		return -2;
 	}
@@ -1811,7 +1859,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.9.0\","
+		"\"contract_version\":\"0.10.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);

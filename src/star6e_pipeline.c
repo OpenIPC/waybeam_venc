@@ -13,6 +13,7 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -519,6 +520,184 @@ static void star6e_pipeline_stop_vpe(void)
 	MI_VPE_DestroyChannel(0);
 }
 
+/* Compute the effective output dim for digital zoom.
+ *
+ * Approach C: zoom_pct shrinks BOTH crop and encoded output.  SCL output
+ * dim == crop dim → 1:1 read/write, no upscale, no SCL bandwidth pressure.
+ * The receiver sees the smaller frame in SPS/PPS and renders accordingly.
+ *
+ * Alignment 16 matches VENC and SCL.  Floor at 256 keeps the smallest
+ * crop sane.  pct outside (0, 1) returns image dim unchanged. */
+static void star6e_compute_zoom_dim(uint32_t image_w, uint32_t image_h,
+	double pct, uint32_t *out_w, uint32_t *out_h)
+{
+	const uint32_t ALIGN = 16;
+	const uint32_t MIN_DIM = 256;
+	double dw, dh;
+	uint32_t w, h;
+
+	if (!isfinite(pct) || pct <= 0.0 || pct >= 1.0) {
+		if (out_w) *out_w = image_w;
+		if (out_h) *out_h = image_h;
+		return;
+	}
+
+	/* Promote pct so neither dim drops under MIN_DIM — keeps the zoom
+	 * AR-preserving instead of squishing the shorter axis when the
+	 * floor kicks in. */
+	if ((double)image_w * pct < (double)MIN_DIM)
+		pct = (double)MIN_DIM / (double)image_w;
+	if ((double)image_h * pct < (double)MIN_DIM)
+		pct = (double)MIN_DIM / (double)image_h;
+	if (pct > 1.0) pct = 1.0;
+
+	dw = (double)image_w * pct;
+	dh = (double)image_h * pct;
+	w = (uint32_t)(dw + 0.5);
+	h = (uint32_t)(dh + 0.5);
+	w &= ~(ALIGN - 1);
+	h &= ~(ALIGN - 1);
+	if (w < MIN_DIM) w = MIN_DIM;
+	if (h < MIN_DIM) h = MIN_DIM;
+	if (w > image_w) w = image_w & ~(ALIGN - 1);
+	if (h > image_h) h = image_h & ~(ALIGN - 1);
+	if (out_w) *out_w = w;
+	if (out_h) *out_h = h;
+}
+
+/* Build a VPE port-crop rect that places a (rect_w × rect_h) 1:1 window
+ * inside (vpe_w × vpe_h) input, centred at fractional (x, y).  No scaling:
+ * the VPE port output is set to the same (rect_w × rect_h) by SetPortMode,
+ * so SCL reads the rect verbatim and emits it unchanged.  X/Y are 8-px
+ * aligned (VPE requirement); rect_w/h are 16-px-aligned by the caller via
+ * compute_zoom_dim. */
+static i6_common_rect star6e_compute_zoom_rect(uint32_t vpe_w, uint32_t vpe_h,
+	uint32_t rect_w, uint32_t rect_h, double x, double y)
+{
+	const uint32_t XY_ALIGN = 8;
+	i6_common_rect r;
+	double cx, cy;
+	uint32_t rx, ry;
+
+	if (!isfinite(x)) x = 0.5;
+	if (!isfinite(y)) y = 0.5;
+	if (x < 0.0)
+		x = 0.0;
+	if (x > 1.0)
+		x = 1.0;
+	if (y < 0.0)
+		y = 0.0;
+	if (y > 1.0)
+		y = 1.0;
+	if (rect_w > vpe_w) rect_w = vpe_w & ~(XY_ALIGN - 1);
+	if (rect_h > vpe_h) rect_h = vpe_h & ~(XY_ALIGN - 1);
+
+	cx = (double)vpe_w * x - (double)rect_w * 0.5;
+	cy = (double)vpe_h * y - (double)rect_h * 0.5;
+	if (cx < 0.0) cx = 0.0;
+	if (cy < 0.0) cy = 0.0;
+	if (cx + (double)rect_w > (double)vpe_w) cx = (double)(vpe_w - rect_w);
+	if (cy + (double)rect_h > (double)vpe_h) cy = (double)(vpe_h - rect_h);
+
+	rx = (uint32_t)(cx + 0.5) & ~(XY_ALIGN - 1);
+	ry = (uint32_t)(cy + 0.5) & ~(XY_ALIGN - 1);
+	if (rx + rect_w > vpe_w) rx = (vpe_w - rect_w) & ~(XY_ALIGN - 1);
+	if (ry + rect_h > vpe_h) ry = (vpe_h - rect_h) & ~(XY_ALIGN - 1);
+
+	r.x = (unsigned short)rx;
+	r.y = (unsigned short)ry;
+	r.width = (unsigned short)rect_w;
+	r.height = (unsigned short)rect_h;
+	return r;
+}
+
+static Star6eZoomStatus g_zoom_status;
+static pthread_mutex_t g_zoom_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t star6e_zoom_level_x100(double pct)
+{
+	if (!isfinite(pct) || pct <= 0.0)
+		return 0;
+	return (uint32_t)(100.0 / pct + 0.5);
+}
+
+static void star6e_pipeline_set_zoom_status(double pct,
+	uint32_t output_w, uint32_t output_h, const Star6ePrecropRect *base,
+	const i6_common_rect *rect)
+{
+	Star6eZoomStatus snap;
+
+	memset(&snap, 0, sizeof(snap));
+	if (base && rect) {
+		snap.active = 1;
+		snap.level_x100 = star6e_zoom_level_x100(pct);
+		snap.output_w = output_w;
+		snap.output_h = output_h;
+		snap.crop_x = (uint32_t)base->x + rect->x;
+		snap.crop_y = (uint32_t)base->y + rect->y;
+		snap.crop_w = rect->width;
+		snap.crop_h = rect->height;
+	}
+
+	pthread_mutex_lock(&g_zoom_status_mutex);
+	g_zoom_status = snap;
+	pthread_mutex_unlock(&g_zoom_status_mutex);
+}
+
+static void star6e_pipeline_clear_zoom_status(void)
+{
+	pthread_mutex_lock(&g_zoom_status_mutex);
+	memset(&g_zoom_status, 0, sizeof(g_zoom_status));
+	pthread_mutex_unlock(&g_zoom_status_mutex);
+}
+
+void star6e_pipeline_zoom_status(Star6eZoomStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_zoom_status_mutex);
+	*out = g_zoom_status;
+	pthread_mutex_unlock(&g_zoom_status_mutex);
+}
+
+/* Live pan: zoom_pct is MUT_RESTART (changing crop dim resizes VPE port and
+ * VENC, which needs reinit), so the live path only handles x/y.  pct is
+ * accepted just to short-circuit when zoom is off (rect dim == image dim). */
+int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
+	double pct, double x, double y)
+{
+	i6_common_rect rect;
+	MI_S32 ret;
+	uint32_t in_w, in_h;
+
+	if (!state) return -1;
+	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
+		return -1;
+	if (pct <= 0.0 || pct >= 1.0) {
+		star6e_pipeline_clear_zoom_status();
+		return 0;  /* zoom off — nothing to pan */
+	}
+
+	in_w = state->active_precrop.w;
+	in_h = state->active_precrop.h;
+	if (in_w == 0 || in_h == 0)
+		return -1;  /* VPE not started yet */
+
+	rect = star6e_compute_zoom_rect(in_w, in_h,
+		state->image_width, state->image_height, x, y);
+	ret = MI_VPE_SetPortCrop(0, 0, &rect);
+	if (ret != 0) {
+		fprintf(stderr,
+			"WARNING: MI_VPE_SetPortCrop(0,0) pan x=%.3f y=%.3f failed %d\n",
+			x, y, (int)ret);
+		return -1;
+	}
+
+	star6e_pipeline_set_zoom_status(pct, state->image_width,
+		state->image_height, &state->active_precrop, &rect);
+	return 0;
+}
+
 static void star6e_pipeline_fill_h26x_attr(i6_venc_attr_h26x *attr,
 	uint32_t width, uint32_t height)
 {
@@ -987,12 +1166,36 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	}
 	pipeline_common_clamp_image_size("", sensor_width, sensor_height,
 		&pconf->image_width, &pconf->image_height);
-	state->image_width  = pconf->image_width;
-	state->image_height = pconf->image_height;
 
+	/* Precrop is computed BEFORE the zoom override so the VIF→VPE window
+	 * keeps the user-configured aspect ratio against the full sensor.
+	 * Zoom is applied as a 1:1 sub-rect of the VPE output (not by shrinking
+	 * the sensor read area). */
 	pconf->precrop = star6e_pipeline_compute_precrop(sensor_width,
 		sensor_height, pconf->image_width, pconf->image_height,
 		vcfg->isp.keep_aspect);
+
+	/* Approach C zoom: when zoom_pct ∈ (0, 1), shrink image_width/height
+	 * to the crop dim.  VPE port output, SetPortCrop rect, and VENC channel
+	 * all run at this smaller dim — no SCL upscale, no bandwidth pressure.
+	 * The receiver sees the smaller resolution in SPS/PPS.  zoom_pct is
+	 * MUT_RESTART so this only runs at start; live x/y pan stays in
+	 * apply_zoom which only moves the rect inside VPE input. */
+	if (vcfg->video0.zoom_pct > 0.0 && vcfg->video0.zoom_pct < 1.0) {
+		uint32_t zw = pconf->image_width;
+		uint32_t zh = pconf->image_height;
+		star6e_compute_zoom_dim(pconf->image_width, pconf->image_height,
+			vcfg->video0.zoom_pct, &zw, &zh);
+		if (vcfg->system.verbose)
+			printf("> Zoom: pct=%.3f → %ux%u (from image %ux%u)\n",
+				vcfg->video0.zoom_pct, zw, zh,
+				pconf->image_width, pconf->image_height);
+		pconf->image_width  = zw;
+		pconf->image_height = zh;
+	}
+
+	state->image_width  = pconf->image_width;
+	state->image_height = pconf->image_height;
 	overscan_x = (uint16_t)(((state->sensor.plane.capt.width  - sensor_width)
 		/ 2) & ~1u);
 	overscan_y = (uint16_t)(((state->sensor.plane.capt.height - sensor_height)
@@ -1211,7 +1414,9 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 	}
 
-	/* Debug OSD */
+	/* Debug OSD.  Canvas dim is the encoded frame dim; on Star6E RGN
+	 * attaches at the VPE port output (post-SCL crop), so the canvas is
+	 * already 1:1 with the encoded frame and needs no zoom-time offset. */
 	if (vcfg->debug.show_osd) {
 		state->debug_osd = debug_osd_create(
 			state->image_width, state->image_height, &state->vpe_port);
@@ -1284,6 +1489,7 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	g_last_isp_bin_path[0] = '\0';
 	g_cus3a_handoff_done = 0;
 	venc_api_clear_active_precrop();
+	star6e_pipeline_clear_zoom_status();
 
 	/* Clear IntraRefresh status snapshot — the channel it described is
 	 * about to be destroyed, so /api/v1/intra/status should not keep
@@ -1398,6 +1604,7 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 		return -1;
 
 	star6e_pipeline_reset(state);
+	star6e_pipeline_clear_zoom_status();
 
 	if (prepare_pipeline_config(state, vcfg, &pconf) != 0)
 		return -1;
@@ -1420,6 +1627,16 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 		pconf.vpe_level_3dnr, sdk_quiet);
 	if (ret != 0)
 		goto fail_vif;
+
+	/* image_width/height aren't stored on state until bind; pre-populate so
+	 * the initial zoom apply (and subsequent live updates before first
+	 * frame) sees correct port-output dims. */
+	state->image_width = pconf.image_width;
+	state->image_height = pconf.image_height;
+
+	if (vcfg->video0.zoom_pct > 0.0)
+		(void)star6e_pipeline_apply_zoom(state, vcfg->video0.zoom_pct,
+			vcfg->video0.zoom_x, vcfg->video0.zoom_y);
 
 	state->venc_channel = 0;
 	venc_fps = vcfg->video0.fps;

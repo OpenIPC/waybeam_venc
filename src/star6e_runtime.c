@@ -886,17 +886,32 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			debug_osd_get_cpu(ps->debug_osd));
 
 		{
+			int osd_row = 2;
 			Star6eIntraRefreshStatus ir;
 			star6e_pipeline_intra_refresh_status(&ir);
 			if (ir.active) {
-				debug_osd_text(ps->debug_osd, 2, "intra",
+				debug_osd_text(ps->debug_osd, osd_row++, "intra",
 					"%s L%u q%u",
 					ir.mode_name, ir.effective_lines_per_p,
 					ir.effective_qp);
-				debug_osd_text(ps->debug_osd, 3, "gop",
+				debug_osd_text(ps->debug_osd, osd_row++, "gop",
 					"%.2fs %s",
 					ir.effective_gop_sec,
 					ir.gop_auto ? "auto" : "fixed");
+			}
+
+			Star6eZoomStatus zoom;
+			star6e_pipeline_zoom_status(&zoom);
+			if (zoom.active) {
+				debug_osd_text(ps->debug_osd, osd_row++, "zoom",
+					"%u.%02ux %ux%u",
+					zoom.level_x100 / 100,
+					zoom.level_x100 % 100,
+					zoom.output_w, zoom.output_h);
+				debug_osd_text(ps->debug_osd, osd_row++, "crop",
+					"%ux%u+%u+%u",
+					zoom.crop_w, zoom.crop_h,
+					zoom.crop_x, zoom.crop_y);
 			}
 		}
 

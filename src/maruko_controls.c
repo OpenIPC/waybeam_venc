@@ -1067,6 +1067,18 @@ static char *maruko_query_audio_status(void)
 	return maruko_audio_query_status(&backend->audio);
 }
 
+static int maruko_apply_zoom(double pct, double x, double y)
+{
+	MarukoBackendContext *backend = g_ctx.backend;
+	if (!backend)
+		return -1;
+	/* Don't mirror into ctx->cfg — venc_api owns the canonical config and
+	 * the next maruko_config_from_venc() (SIGHUP / reinit) reads from
+	 * VencConfig directly.  Avoiding the cfg write also avoids a torn
+	 * 8-byte double race with the runner thread on 32-bit ARM. */
+	return maruko_pipeline_apply_zoom(backend, pct, x, y);
+}
+
 static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_bitrate = maruko_apply_bitrate,
 	.apply_fps = maruko_apply_fps,
@@ -1089,6 +1101,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_max_payload_size = maruko_apply_max_payload_size,
 	.query_transport_status = maruko_query_transport_status,
 	.query_audio_status = maruko_query_audio_status,
+	.apply_zoom = maruko_apply_zoom,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)

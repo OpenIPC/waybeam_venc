@@ -16,6 +16,17 @@ struct DebugOsdState; /* forward declaration — see debug_osd.h */
 struct MarukoDualVenc; /* forward declaration — see maruko_pipeline.c */
 
 typedef struct {
+	int active;
+	uint32_t level_x100;
+	uint32_t output_w;
+	uint32_t output_h;
+	uint32_t crop_x;
+	uint32_t crop_y;
+	uint32_t crop_w;
+	uint32_t crop_h;
+} MarukoZoomStatus;
+
+typedef struct {
   int system_initialized;
   int sensor_enabled;
   int vif_started;
@@ -47,6 +58,13 @@ typedef struct {
    * mirror mode the chn 0 frame loop drives it; in dual mode the chn 1
    * drain thread does. */
   Star6eTsRecorderState ts_recorder;
+  /* SCL crop base after optional binning and AR-matched precrop.  Stored
+   * here so maruko_pipeline_apply_zoom can reposition the zoom rect on
+   * live x/y pan without recomputing pipeline geometry. */
+  uint32_t scl_crop_x;
+  uint32_t scl_crop_y;
+  uint32_t scl_crop_w;
+  uint32_t scl_crop_h;
   /* Audio capture + RTP/UDP output (Phase 5).  Inactive when
    * audio.enabled=false or libmi_ai.so is missing. */
   MarukoAudioState audio;
@@ -96,6 +114,15 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 /** Tear down the secondary VENC channel if active.  Safe to call when
  *  ctx->dual is NULL (no-op). */
 void maruko_pipeline_stop_dual(MarukoBackendContext *ctx);
+
+/** Apply SCL digital zoom pan on chn 0.  pct=0 disables (full frame).
+ *  zoom_pct changes are restart-required; live calls only reposition the
+ *  crop at the active output dim.  Affects ch1 mirror as well because SCL
+ *  fan-out happens downstream of the shared crop.  Returns 0 on success,
+ *  -1 if the graph is not started or the rect was rejected. */
+int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
+  double pct, double x, double y);
+void maruko_pipeline_zoom_status(MarukoZoomStatus *out);
 
 extern volatile sig_atomic_t g_maruko_running;
 

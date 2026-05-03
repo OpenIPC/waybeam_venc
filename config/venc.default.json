@@ -41,7 +41,10 @@
     "sceneHoldoff": 2,
     "intraRefreshMode": "off",
     "intraRefreshLines": 0,
-    "intraRefreshQp": 0
+    "intraRefreshQp": 0,
+    "zoomPct": 0.0,
+    "zoomX": 0.5,
+    "zoomY": 0.5
   },
   "outgoing": {
     "enabled": false,

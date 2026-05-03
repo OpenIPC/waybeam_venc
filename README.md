@@ -412,8 +412,50 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |
 | `video0.frame_lost` | bool | restart | Enable frame-lost safety net |
+| `video0.zoom_pct` | double | restart | Digital zoom crop fraction (`0.0` = off, `0.25..1.0` = crop fraction) |
+| `video0.zoom_x` | double | live | Zoom crop center X (`0.0` left to `1.0` right) |
+| `video0.zoom_y` | double | live | Zoom crop center Y (`0.0` top to `1.0` bottom) |
 
-#### Adaptive Encoder Control (Star6E only)
+#### Digital Zoom (Star6E + Maruko)
+
+Approach-C digital zoom shrinks both the crop window and encoded output
+resolution. The SCL path reads the crop at 1:1 and emits it unchanged, so
+there is no upscale pass and no extra bandwidth pressure. Receivers see the
+smaller resolution in SPS/PPS.
+
+| Field | Type | Mutability | Description |
+|-------|------|------------|-------------|
+| `video0.zoom_pct` | double | restart | `0.0` = off/full frame; `0.25..1.0` = crop fraction (smaller = deeper zoom) |
+| `video0.zoom_x` | double | live | Crop center X, `0.0` = left, `1.0` = right |
+| `video0.zoom_y` | double | live | Crop center Y, `0.0` = top, `1.0` = bottom |
+
+CamelCase aliases: `video0.zoomPct`, `video0.zoomX`, `video0.zoomY`.
+
+Examples:
+
+```bash
+# Restart-required: enable a 2x crop.
+curl "http://<device>/api/v1/set?video0.zoomPct=0.5"
+
+# Live pan inside the current crop size.
+curl "http://<device>/api/v1/set?video0.zoomX=0.25&video0.zoomY=0.75"
+
+# Disable zoom on the next reinit.
+curl "http://<device>/api/v1/set?video0.zoomPct=0.0"
+```
+
+When `debug.showOsd=true` and zoom is active, the overlay adds rows after
+existing OSD stats:
+
+```
+zoom  2.00x 960x540
+crop  960x540+480+270
+```
+
+`zoom` shows magnification and encoded resolution. `crop` shows the source
+crop size and placement within the sensor/precrop surface.
+
+#### Adaptive Encoder Control (Star6E + Maruko)
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
@@ -591,16 +633,20 @@ Boot log (from stderr):
 ```
 
 When `debug.showOsd=true` and a mode is active, two extra OSD rows render
-the live values:
+the live values. If zoom is also active, zoom rows are appended below them
+instead of replacing the intra rows:
 
 ```
 intra balanced L2 q32
 gop   0.28s auto
+zoom  2.00x 960x540
+crop  960x540+480+270
 ```
 
 `intra` shows mode, effective stripe lines per P-frame, and effective QP.
 `gop` shows the IDR period in seconds and whether it came from auto or an
-explicit `gopSize` override.
+explicit `gopSize` override. `zoom` shows magnification and encoded
+resolution; `crop` shows source placement.
 
 #### Outgoing (Streaming)
 

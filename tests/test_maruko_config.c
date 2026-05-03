@@ -34,6 +34,9 @@ int test_maruko_config(void)
 	vcfg.video0.fps = 90;
 	vcfg.video0.bitrate = 6000;
 	vcfg.video0.gop_size = 1.5;
+	vcfg.video0.zoom_pct = 0.5;
+	vcfg.video0.zoom_x = 0.25;
+	vcfg.video0.zoom_y = 0.75;
 	strcpy(vcfg.video0.codec, "h264");
 	strcpy(vcfg.video0.rc_mode, "vbr");
 	strcpy(vcfg.outgoing.server, "udp://192.168.2.20:5602");
@@ -52,6 +55,9 @@ int test_maruko_config(void)
 	CHECK("maruko config bitrate", cfg.venc_max_rate == 6000);
 	CHECK("maruko config gop", cfg.venc_gop_size == 135);
 	CHECK("maruko config gop seconds", cfg.venc_gop_seconds == 1.5);
+	CHECK("maruko config zoom pct", cfg.zoom_pct == 0.5);
+	CHECK("maruko config zoom x", cfg.zoom_x == 0.25);
+	CHECK("maruko config zoom y", cfg.zoom_y == 0.75);
 	CHECK("maruko config payload", cfg.rtp_payload_size == 900);
 	CHECK("maruko config uri type", cfg.output_uri.type == VENC_OUTPUT_URI_UDP);
 	CHECK("maruko config sink host",

@@ -56,6 +56,10 @@ typedef struct {
 	 * and Opus encoder availability.  Returns NULL when audio is
 	 * compiled out or the backend has no observability hook. */
 	char *(*query_audio_status)(void);
+	/* Apply digital zoom (video0.zoom_pct/x/y) live.  pct=0 disables.
+	 * Returns 0 on success, -1 on backend/SDK error.  NULL when the
+	 * backend has no zoom path. */
+	int (*apply_zoom)(double pct, double x, double y);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

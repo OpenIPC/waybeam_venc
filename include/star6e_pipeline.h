@@ -26,6 +26,17 @@ typedef struct {
 } Star6ePrecropRect;
 
 typedef struct {
+	int active;
+	uint32_t level_x100;
+	uint32_t output_w;
+	uint32_t output_h;
+	uint32_t crop_x;
+	uint32_t crop_y;
+	uint32_t crop_w;
+	uint32_t crop_h;
+} Star6eZoomStatus;
+
+typedef struct {
 	SensorSelectResult sensor;
 	MI_VENC_CHN venc_channel;
 	MI_SYS_ChnPort_t vif_port;
@@ -96,6 +107,13 @@ void star6e_pipeline_stop(Star6ePipelineState *state);
 
 /** Disable VPE prescaler (cleanup during shutdown). */
 void star6e_pipeline_vpe_scl_preset_shutdown(void);
+
+/** Apply digital zoom on VPE port 0.  pct=0 disables (full-frame).
+ *  Returns 0 on success, -1 if VPE not yet started or SDK rejected the
+ *  rect.  Safe to call before pipeline start (no-op returns -1). */
+int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
+	double pct, double x, double y);
+void star6e_pipeline_zoom_status(Star6eZoomStatus *out);
 
 /** Service custom 3A (AWB/AE) at regular intervals. */
 void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,

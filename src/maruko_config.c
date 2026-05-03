@@ -114,6 +114,9 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->intra_refresh_lines = vcfg->video0.intra_refresh_lines;
 	cfg->intra_refresh_qp = vcfg->video0.intra_refresh_qp;
 	cfg->gop_size_sec = vcfg->video0.gop_size;
+	cfg->zoom_pct = vcfg->video0.zoom_pct;
+	cfg->zoom_x   = vcfg->video0.zoom_x;
+	cfg->zoom_y   = vcfg->video0.zoom_y;
 	cfg->verbose = vcfg->system.verbose ? 1 : 0;
 	cfg->connected_udp = vcfg->outgoing.connected_udp ? 1 : 0;
 	cfg->keep_aspect = vcfg->isp.keep_aspect ? 1 : 0;

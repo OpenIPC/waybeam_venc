@@ -224,6 +224,7 @@ static void cpu_sample(DebugOsdState *osd)
 DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
                                 const void *vpe_port)
 {
+	(void)vpe_port;
 	DebugOsdState *ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) return NULL;
 

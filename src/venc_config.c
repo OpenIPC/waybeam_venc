@@ -162,6 +162,11 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.intra_refresh_lines = 0;
 	cfg->video0.intra_refresh_qp = 0;
 
+	/* digital zoom (video0) — disabled by default */
+	cfg->video0.zoom_pct = 0.0;
+	cfg->video0.zoom_x = 0.5;
+	cfg->video0.zoom_y = 0.5;
+
 	/* debug */
 	cfg->debug.show_osd = false;
 }
@@ -324,6 +329,29 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->intra_refresh_qp = (uint8_t)json_get_int(obj, "intraRefreshQp",
 		(int)v->intra_refresh_qp);
 	if (v->intra_refresh_qp > 51) v->intra_refresh_qp = 51;
+
+	v->zoom_pct = json_get_double(obj, "zoomPct", v->zoom_pct);
+	v->zoom_x   = json_get_double(obj, "zoomX",   v->zoom_x);
+	v->zoom_y   = json_get_double(obj, "zoomY",   v->zoom_y);
+	if (v->zoom_pct < 0.0)
+		v->zoom_pct = 0.0;
+	if (v->zoom_pct > 1.0)
+		v->zoom_pct = 1.0;
+	/* Min 0.25 keeps the encoded frame large enough for receiver-side
+	 * decoders that ignore mid-stream SPS resolution changes (going
+	 * smaller produces a stream the receiver still renders at the first
+	 * SPS dim, so deeper zoom is invisible).  This also stays comfortably
+	 * above the VENC_CreateChn minimum dim. */
+	if (v->zoom_pct > 0.0 && v->zoom_pct < 0.25)
+		v->zoom_pct = 0.25;
+	if (v->zoom_x < 0.0)
+		v->zoom_x = 0.0;
+	if (v->zoom_x > 1.0)
+		v->zoom_x = 1.0;
+	if (v->zoom_y < 0.0)
+		v->zoom_y = 0.0;
+	if (v->zoom_y > 1.0)
+		v->zoom_y = 1.0;
 }
 
 static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
@@ -866,7 +894,10 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
 	pp_field_string(p, 2, "intraRefreshMode", cfg->video0.intra_refresh_mode, 0);
 	pp_field_uint(p,   2, "intraRefreshLines", cfg->video0.intra_refresh_lines, 0);
-	pp_field_uint(p,   2, "intraRefreshQp",    cfg->video0.intra_refresh_qp,    1);
+	pp_field_uint(p,   2, "intraRefreshQp",    cfg->video0.intra_refresh_qp,    0);
+	pp_field_double(p, 2, "zoomPct",           cfg->video0.zoom_pct,            0);
+	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
+	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1048,6 +1079,9 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 			cfg->video0.intra_refresh_lines);
 		cJSON_AddNumberToObject(vid, "intraRefreshQp",
 			cfg->video0.intra_refresh_qp);
+		cJSON_AddNumberToObject(vid, "zoomPct", cfg->video0.zoom_pct);
+		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
+		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);
 	}
 
 	/* outgoing */

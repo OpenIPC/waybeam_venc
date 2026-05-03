@@ -6,8 +6,9 @@
 
 ## Design Principles
 - Keep endpoints lean and focused on direct operational value.
-- All API changes are **in-memory only** — never saved to disk. This prevents a
-  bad config from bricking the device on reboot.
+- Accepted `/api/v1/set` and `/api/v1/defaults` changes are persisted to the
+  registered config path before the response returns. Manual `/api/v1/restart`
+  still reloads exactly what is already on disk.
 - Keep JSON payloads simple and descriptive.
 - Keep mutability semantics explicit:
   - `live` — applied immediately without pipeline restart.
@@ -15,7 +16,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.8.4`
+- `contract_version`: `0.10.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -77,7 +78,7 @@ Response `200`:
   "ok": true,
   "data": {
     "app_version": "0.1.7",
-    "contract_version": "0.1.2",
+    "contract_version": "0.10.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -102,7 +103,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1, "unlockEnabled": true, "..." : "..." },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2 },
+      "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "frameLost": true, "sceneThreshold": 0, "sceneHoldoff": 2, "intraRefreshMode": "off", "intraRefreshLines": 0, "intraRefreshQp": 0, "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5 },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -119,9 +120,9 @@ The `runtime` block is read-only and reports pipeline state that is not
 part of the editable config:
 
 - `active_precrop` — VIF crop rectangle currently programmed (includes
-  any sensor overscan offsets).  Present whenever a Star6E pipeline has
-  been started; absent before pipeline start, after pipeline stop, or on
-  Maruko (no precrop support yet).
+  any sensor overscan offsets or SCL crop origin). Present whenever a
+  Star6E or Maruko pipeline has been started; absent before pipeline start
+  or after pipeline stop.
 
 ### `GET /api/v1/capabilities`
 
@@ -145,6 +146,12 @@ Response `200`:
       "video0.size": { "mutability": "restart_required", "supported": true },
       "video0.scene_threshold": { "mutability": "restart_required", "supported": true },
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
+      "video0.intra_refresh_mode": { "mutability": "restart_required", "supported": true },
+      "video0.intra_refresh_lines": { "mutability": "restart_required", "supported": true },
+      "video0.intra_refresh_qp": { "mutability": "restart_required", "supported": true },
+      "video0.zoom_pct": { "mutability": "restart_required", "supported": true },
+      "video0.zoom_x": { "mutability": "live", "supported": true },
+      "video0.zoom_y": { "mutability": "live", "supported": true },
       "system.verbose": { "mutability": "live", "supported": true },
       "outgoing.enabled": { "mutability": "live", "supported": true },
       "outgoing.server": { "mutability": "live", "supported": true },
@@ -157,9 +164,8 @@ Response `200`:
 ```
 (truncated — all fields listed in actual response)
 
-`supported` is backend-specific. On Star6E, `video0.scene_threshold` / `video0.scene_holdoff` report
-`supported: true`; on Maruko they report `supported: false` and writes are
-rejected with `501 not_implemented`.
+`supported` is backend-specific. Current Star6E and Maruko builds both expose
+scene detection, intra refresh, and digital zoom fields.
 
 ### `GET /api/v1/config.json`
 
@@ -216,6 +222,8 @@ including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `fpv.noiseLevel`, `isp.sensorBin`, `isp.awbMode`, `isp.awbCt`,
 `isp.keepAspect`, `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
 `video0.sceneThreshold`, `video0.sceneHoldoff`,
+`video0.intraRefreshMode`, `video0.intraRefreshLines`,
+`video0.intraRefreshQp`, `video0.zoomPct`, `video0.zoomX`, `video0.zoomY`,
 `outgoing.maxPayloadSize`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
 
@@ -237,6 +245,9 @@ curl "http://<device-ip>/api/v1/set?video0.gop_size=0.5"
 
 # Bias relative I-frame QP (Majestic-compatible range: -12..12)
 curl "http://<device-ip>/api/v1/set?video0.qp_delta=-4"
+
+# Pan within the active digital zoom crop
+curl "http://<device-ip>/api/v1/set?video0.zoomX=0.25&video0.zoomY=0.75"
 
 # Apply multiple live fields atomically in one request
 curl "http://<device-ip>/api/v1/set?video0.bitrate=4096&system.verbose=true"
@@ -277,8 +288,11 @@ curl "http://<device-ip>/api/v1/set?video0.size=auto"
 curl "http://<device-ip>/api/v1/set?video0.size=720p"
 curl "http://<device-ip>/api/v1/set?video0.size=1080p"
 
-# Enable Star6E scene-change IDR control
+# Enable scene-change IDR control
 curl "http://<device-ip>/api/v1/set?video0.scene_threshold=150"
+
+# Enable 2x digital zoom (encoded resolution becomes half width/height)
+curl "http://<device-ip>/api/v1/set?video0.zoomPct=0.5"
 ```
 
 Response `200` (includes `"reinit_pending": true`):
@@ -337,6 +351,22 @@ Majestic-oriented clients.
 - Mutability: `live`
 - Alias: `video0.qpDelta`
 - Semantics: adjusts I-frame QP relative to P-frame; negative values lower I-frame QP (higher quality keyframes), positive values raise it.
+
+### `video0.zoom_pct`, `video0.zoom_x`, `video0.zoom_y`
+
+- Types: double
+- Ranges:
+  - `video0.zoom_pct`: `0.0` to disable zoom, or `0.25..1.0` crop fraction
+  - `video0.zoom_x`: `0.0..1.0`
+  - `video0.zoom_y`: `0.0..1.0`
+- Mutability:
+  - `video0.zoom_pct`: `restart_required` because it changes encoded resolution
+  - `video0.zoom_x`, `video0.zoom_y`: `live`
+- Aliases: `video0.zoomPct`, `video0.zoomX`, `video0.zoomY`
+- Semantics: digital zoom uses a 1:1 crop. The crop window and encoded output
+  resolution shrink together; there is no SCL upscale and no additional output
+  bandwidth pressure. `zoom_x` and `zoom_y` move the crop center inside the
+  active aspect-ratio-corrected source surface.
 
 ### `GET /api/v1/fps/config`
 
@@ -1187,9 +1217,10 @@ Behavior:
 
 ## Important Safety Notes
 
-1. **API changes are in-memory only.** No API call writes to `/etc/venc.json`.
-   A reboot always restores the on-disk config. To persist changes, edit
-   `/etc/venc.json` directly and then `SIGHUP` or call `/api/v1/restart`.
+1. **Accepted config writes are persistent.** `/api/v1/set` persists accepted
+   live and restart-required field changes to the registered config path before
+   returning. `/api/v1/defaults` persists compiled defaults. `/api/v1/restart`
+   reloads the on-disk config and does not synthesize new changes by itself.
 
 2. **Codec restriction is backend-specific.** Star6E RTP mode requires
    `video0.codec=h265`, so attempting to set `video0.codec=h264` there returns
@@ -1211,7 +1242,7 @@ Behavior:
 ### Backend Support Matrix
 
 Endpoints that behave the same on both backends are omitted.  Only feature
-divergence is listed.  As of `contract_version: 0.8.3`:
+divergence is listed.  As of `contract_version: 0.10.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1226,10 +1257,20 @@ divergence is listed.  As of `contract_version: 0.8.3`:
 | `/api/v1/transport/status` | yes | yes | SHM-ring fields are shown when `outgoing.server=shm://`; otherwise the UDP/Unix subset. |
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
 | `video0.codec=h264` | rejected with 409 | accepted | Star6E RTP mode is HEVC-only on this build. |
-| `video0.scene_threshold` / `scene_holdoff` | live | rejected with 501 | `/api/v1/capabilities` reports `supported:false` on Maruko. |
+| `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
+| `video0.zoom_pct` / `zoom_x` / `zoom_y` | yes | yes | `zoom_pct` requires reinit; `zoom_x/y` are live pan controls. |
 | `isp.aeMode` ("native" / "throttle") | accepted but no-op | applied | Maruko-only opt-in; switching modes mid-run requires a process restart.  Default `"native"` on both backends. |
 
 ## Change Log (Contract)
+- `0.10.0`:
+  - Added digital zoom fields: `video0.zoom_pct` (`zoomPct` alias,
+    restart-required) plus live pan fields `video0.zoom_x` / `video0.zoom_y`
+    (`zoomX` / `zoomY` aliases).
+  - Added validation for zoom API writes: `zoom_pct` must be `0.0` or
+    `[0.25, 1.0]`; `zoom_x/y` must be finite values in `[0.0, 1.0]`.
+  - Updated WebUI-facing field metadata examples for intra refresh and zoom.
+  - Corrected the persistence note: accepted `/api/v1/set` writes have been
+    persisted since v0.7.8.
 - `0.8.4`:
   - `GET /api/v1/record/status` now reflects daemon-config-driven recording
     on Maruko (mirror/dual): previously the response was zero-fill

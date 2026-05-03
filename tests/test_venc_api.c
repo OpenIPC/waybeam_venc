@@ -44,6 +44,7 @@ typedef struct {
 	int apply_awb_mode_calls;
 	int apply_server_calls;
 	int apply_max_payload_calls;
+	int apply_zoom_calls;
 
 	uint32_t last_bitrate;
 	uint32_t last_fps;
@@ -54,6 +55,9 @@ typedef struct {
 	uint32_t last_awb_ct;
 	char last_server[128];
 	uint16_t last_max_payload;
+	double last_zoom_pct;
+	double last_zoom_x;
+	double last_zoom_y;
 
 	int fail_bitrate;
 	int fail_verbose;
@@ -61,6 +65,7 @@ typedef struct {
 	int fail_gop;
 	int fail_server;
 	int fail_max_payload;
+	int fail_zoom;
 } ApiCallbackState;
 
 static ApiCallbackState g_api_cb_state;
@@ -293,6 +298,15 @@ static int test_apply_max_payload(uint16_t size)
 	g_api_cb_state.apply_max_payload_calls++;
 	g_api_cb_state.last_max_payload = size;
 	return g_api_cb_state.fail_max_payload ? -1 : 0;
+}
+
+static int test_apply_zoom(double pct, double x, double y)
+{
+	g_api_cb_state.apply_zoom_calls++;
+	g_api_cb_state.last_zoom_pct = pct;
+	g_api_cb_state.last_zoom_x = x;
+	g_api_cb_state.last_zoom_y = y;
+	return g_api_cb_state.fail_zoom ? -1 : 0;
 }
 
 /* Whitebox access to internal functions via extern declarations.
@@ -925,6 +939,113 @@ static int test_live_set_max_payload_size_no_callback(void)
 	return failures;
 }
 
+static int test_live_zoom_pan_applies(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	cfg.video0.zoom_pct = 0.5;
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_zoom = test_apply_zoom;
+
+	CHECK("zoom pan rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.zoomX=0.25&video0.zoomY=0.75",
+			&status, response, sizeof(response)) == 0);
+	CHECK("zoom pan status", status == 200);
+	CHECK("zoom pan x cfg", cfg.video0.zoom_x == 0.25);
+	CHECK("zoom pan y cfg", cfg.video0.zoom_y == 0.75);
+	CHECK("zoom pan callback once", g_api_cb_state.apply_zoom_calls == 1);
+	CHECK("zoom pan callback pct", g_api_cb_state.last_zoom_pct == 0.5);
+	CHECK("zoom pan callback x", g_api_cb_state.last_zoom_x == 0.25);
+	CHECK("zoom pan callback y", g_api_cb_state.last_zoom_y == 0.75);
+	CHECK("zoom pan response alias", strstr(response, "video0.zoomX") != NULL);
+
+	return failures;
+}
+
+static int test_zoom_validation_rejects_invalid(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	cfg.video0.zoom_pct = 0.5;
+	cfg.video0.zoom_x = 0.5;
+	cfg.video0.zoom_y = 0.5;
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_zoom = test_apply_zoom;
+
+	CHECK("zoom x reject rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.zoomX=1.1", &status, response,
+			sizeof(response)) == 0);
+	CHECK("zoom x reject status", status == 409);
+	CHECK("zoom x reject error",
+		strstr(response, "zoom_x must be in range [0.0, 1.0]") != NULL);
+	CHECK("zoom x unchanged", cfg.video0.zoom_x == 0.5);
+	CHECK("zoom x no callback", g_api_cb_state.apply_zoom_calls == 0);
+
+	CHECK("zoom y nan reject rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.zoomY=nan", &status, response,
+			sizeof(response)) == 0);
+	CHECK("zoom y nan reject status", status == 409);
+	CHECK("zoom y nan reject error",
+		strstr(response, "zoom_y must be in range [0.0, 1.0]") != NULL);
+	CHECK("zoom y unchanged", cfg.video0.zoom_y == 0.5);
+	CHECK("zoom y no callback", g_api_cb_state.apply_zoom_calls == 0);
+
+	CHECK("zoom pct floor reject rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.zoomPct=0.1", &status, response,
+			sizeof(response)) == 0);
+	CHECK("zoom pct floor reject status", status == 409);
+	CHECK("zoom pct floor reject error",
+		strstr(response, "zoom_pct must be 0.0 or in range [0.25, 1.0]") != NULL);
+	CHECK("zoom pct unchanged", cfg.video0.zoom_pct == 0.5);
+	CHECK("zoom pct no callback", g_api_cb_state.apply_zoom_calls == 0);
+
+	return failures;
+}
+
+static int test_zoom_pct_restart(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_zoom = test_apply_zoom;
+
+	CHECK("zoom pct restart rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.zoomPct=0.5", &status, response,
+			sizeof(response)) == 0);
+	CHECK("zoom pct restart status", status == 200);
+	CHECK("zoom pct restart cfg", cfg.video0.zoom_pct == 0.5);
+	CHECK("zoom pct restart response",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+	CHECK("zoom pct restart no live callback",
+		g_api_cb_state.apply_zoom_calls == 0);
+	venc_api_clear_reinit();
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_api(void)
@@ -945,6 +1066,9 @@ int test_venc_api(void)
 	failures += test_live_set_rejects_out_of_range_roi_values();
 	failures += test_live_set_max_payload_size_bounds();
 	failures += test_live_set_max_payload_size_no_callback();
+	failures += test_live_zoom_pan_applies();
+	failures += test_zoom_validation_rejects_invalid();
+	failures += test_zoom_pct_restart();
 	failures += test_restart_set_accepts_maruko_h264_config();
 	failures += test_restart_set_rejects_star6e_h264_rtp();
 	failures += test_restart_set_accepts_star6e_h264_compact();

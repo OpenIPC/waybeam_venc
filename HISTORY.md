@@ -1,5 +1,38 @@
 # History
 
+## [0.10.0] - 2026-05-03
+
+`video0` digital zoom (Approach C) — Star6E + Maruko parity.
+
+Adds three new `video0` fields driving a 1:1 SCL crop (output dim = crop
+dim, no upscale, no bandwidth pressure).  Receivers see the smaller dim
+in SPS/PPS; receivers that pin to first SPS render deeper zoom invisibly,
+which is why `zoom_pct` is clamped at a 0.25 floor in the parser.
+
+Schema:
+- `video0.zoomPct` — `0.0` = zoom OFF (full image); `0.25..1.0` = crop
+  fraction (smaller = deeper zoom).  MUT_RESTART (encoder dim change).
+- `video0.zoomX`, `video0.zoomY` — crop centre, `0..1` (0 = top/left,
+  1 = bottom/right).  MUT_LIVE (no respawn — joystick / head-tracker
+  friendly).
+
+Implementation:
+- **Star6E**: `MI_VPE_SetPortCrop(0, 0, ...)` on the existing VPE port —
+  no new SCL channel, no extra mem.  SCL clock bumped 384 → 432 MHz to
+  unblock crop+resize at full sensor input.  Debug OSD canvas stays 1:1
+  with the encoded frame (RGN attaches at the post-SCL VPE port output,
+  not at VPE input — no per-zoom offset needed).
+- **Maruko**: `MI_SCL_SetPortConfig(0,0,0)` carrying both crop and
+  output dim atomically.  Output dimensions stay 16-px aligned and crop
+  offsets stay 2-px aligned; the smaller dimension drives the crop to
+  keep the encoded AR matching the sensor.
+
+Verification:
+- Live sweep on both devices: pct ∈ {1.0, 0.7, 0.5, 0.3, 0.25} × pan ∈
+  {(0.5,0.5), (0,0), (1,0), (0,1), (1,1), (0.5,0.5)}.  Star6E sustains
+  60 fps, Maruko sustains 30 fps across all combinations.  Pan
+  confirmed visually on the live RTP stream for both backends.
+
 ## [0.9.16] - 2026-05-03
 
 IntraRefresh: single-knob `intraRefreshMode` enum.

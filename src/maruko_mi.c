@@ -43,6 +43,13 @@ void *maruko_load_symbol(void *handle, const char *lib_name,
 #define LOAD_SYM(impl, lib_str, field, cast, sym_str) \
 	(impl)->field = (cast)maruko_load_symbol((impl)->handle, lib_str, sym_str)
 
+/* Optional symbol — quiet on miss (used for SDK features that may not
+ * exist on older firmware).  The caller must NULL-check before invoking. */
+#define LOAD_SYM_OPTIONAL(impl, lib_str, field, cast, sym_str) \
+	do { (void)dlerror(); \
+	     (impl)->field = (cast)dlsym((impl)->handle, sym_str); \
+	     (void)dlerror(); } while (0)
+
 /* --- SYS ---------------------------------------------------------------- */
 
 static int i6c_sys_load(maruko_sys_impl *sys)
@@ -317,6 +324,18 @@ static int i6c_isp_load(maruko_isp_impl *isp)
 		int (*)(int, int, int), "MI_ISP_EnableOutputPort");
 	LOAD_SYM(isp, "libmi_isp.so", fnSetPortConfig,
 		int (*)(int, int, int, void *), "MI_ISP_SetOutputPortParam");
+
+	/* Zoom APIs are optional — older SDK builds may not export them.
+	 * Symbols are looked up but missing entries don't fail the load;
+	 * apply_zoom checks for NULL at call time. */
+	LOAD_SYM_OPTIONAL(isp, "libmi_isp.so", fnLoadPortZoomTable,
+		int (*)(int, int, void *), "MI_ISP_LoadPortZoomTable");
+	LOAD_SYM_OPTIONAL(isp, "libmi_isp.so", fnStartPortZoom,
+		int (*)(int, int, void *), "MI_ISP_StartPortZoom");
+	LOAD_SYM_OPTIONAL(isp, "libmi_isp.so", fnStopPortZoom,
+		int (*)(int, int), "MI_ISP_StopPortZoom");
+	LOAD_SYM_OPTIONAL(isp, "libmi_isp.so", fnGetPortCurZoomAttr,
+		int (*)(int, int, void *), "MI_ISP_GetPortCurZoomAttr");
 
 	if (!isp->fnCreateDevice || !isp->fnDestroyDevice ||
 	    !isp->fnCreateChannel || !isp->fnDestroyChannel ||

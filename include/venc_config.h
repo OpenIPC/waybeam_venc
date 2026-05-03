@@ -79,6 +79,16 @@ typedef struct {
 	char intra_refresh_mode[16]; /* "off" | "fast" | "balanced" | "robust" */
 	uint16_t intra_refresh_lines; /* MB/LCU rows refreshed per P-frame; 0 = mode auto */
 	uint8_t intra_refresh_qp;  /* I-MB QP override for stripe; 0 = codec default (48 H.265 / 45 H.264) */
+	/* Approach-C digital zoom: zoom_pct shrinks BOTH the input crop and
+	 * the encoded output dim — SCL runs 1:1, no upscale, no bandwidth
+	 * pressure.  The receiver sees the smaller resolution in SPS/PPS.
+	 * 0 = off (full image), 0.25..1.0 = crop fraction (parser clamps
+	 * below 0.25 — receivers that ignore mid-stream SPS changes render
+	 * deeper zoom invisibly).  pct change requires reinit (encoder size
+	 * change); x/y pan is live. */
+	double zoom_pct;
+	double zoom_x;             /* crop centre x, 0..1 */
+	double zoom_y;             /* crop centre y, 0..1 */
 } VencConfigVideo;
 
 typedef struct {

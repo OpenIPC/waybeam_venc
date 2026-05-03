@@ -36,6 +36,14 @@ typedef struct {
 	int (*fnDisablePort)(int device, int channel, int port);
 	int (*fnEnablePort)(int device, int channel, int port);
 	int (*fnSetPortConfig)(int device, int channel, int port, void *config);
+	/* Optional: digital-zoom port APIs.  NULL on SDK builds without them.
+	 * The "Port" in the name is misleading — these act on an ISP channel
+	 * (Dev+Chn), with the cropped output flowing through SCL fan-out to
+	 * every downstream VENC. */
+	int (*fnLoadPortZoomTable)(int device, int channel, void *table);
+	int (*fnStartPortZoom)(int device, int channel, void *attr);
+	int (*fnStopPortZoom)(int device, int channel);
+	int (*fnGetPortCurZoomAttr)(int device, int channel, void *attr);
 } maruko_isp_impl;
 
 typedef struct {
