@@ -666,6 +666,59 @@ static void star6e_pipeline_stop_venc(MI_VENC_CHN chn)
 	MI_VENC_DestroyChn(chn);
 }
 
+/* Auto line count: refresh full picture in ~500ms.  Caller passes 0 to use
+ * this default; any non-zero explicit value (e.g. Majestic's 12 for 1080p60)
+ * is honored verbatim. */
+static uint32_t star6e_pipeline_intra_refresh_lines(uint32_t height,
+	uint32_t fps, PAYLOAD_TYPE_E codec, uint32_t explicit_lines)
+{
+	uint32_t lcu_h, total_rows, refresh_frames, lines;
+
+	if (explicit_lines > 0)
+		return explicit_lines;
+	if (height == 0 || fps == 0)
+		return 1;
+
+	lcu_h = (codec == PT_H265) ? 32u : 16u;
+	total_rows = (height + lcu_h - 1) / lcu_h;
+	refresh_frames = (fps + 1) / 2;          /* ~500ms */
+	if (refresh_frames == 0)
+		refresh_frames = 1;
+	lines = (total_rows + refresh_frames - 1) / refresh_frames;
+	return lines == 0 ? 1u : lines;
+}
+
+static int star6e_pipeline_apply_intra_refresh(MI_VENC_CHN chn,
+	const VencConfig *vcfg, uint32_t height, uint32_t fps,
+	PAYLOAD_TYPE_E codec)
+{
+	MI_VENC_IntraRefresh_t cfg;
+
+	if (!vcfg || !vcfg->video0.intra_refresh)
+		return 0;
+	if (!g_mi_venc.fnSetIntraRefresh) {
+		fprintf(stderr, "[venc] WARNING: video0.intra_refresh requested "
+			"but libmi_venc.so does not export MI_VENC_SetIntraRefresh\n");
+		return -1;
+	}
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.bEnable = 1;
+	cfg.u32RefreshLineNum = star6e_pipeline_intra_refresh_lines(
+		height, fps, codec, vcfg->video0.intra_refresh_lines);
+	cfg.u32ReqIQp = vcfg->video0.intra_refresh_qp;
+
+	if (MI_VENC_SetIntraRefresh(chn, &cfg) != 0) {
+		fprintf(stderr, "[venc] ERROR: MI_VENC_SetIntraRefresh(chn=%d, "
+			"lines=%u, qp=%u) failed\n", chn,
+			cfg.u32RefreshLineNum, cfg.u32ReqIQp);
+		return -1;
+	}
+	fprintf(stderr, "[venc] intra refresh enabled: chn=%d lines/P=%u "
+		"reqIqp=%u\n", chn, cfg.u32RefreshLineNum, cfg.u32ReqIQp);
+	return 0;
+}
+
 static void star6e_pipeline_sysfs_write(const char *path, const char *value)
 {
 	FILE *handle = fopen(path, "w");
@@ -1314,6 +1367,11 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 		vcfg->video0.frame_lost, &state->venc_channel);
 	if (ret != 0)
 		goto fail_vpe;
+
+	/* IntraRefresh — opt-in via video0.intra_refresh.  Failure is logged
+	 * but not fatal: stream still works without rolling refresh. */
+	(void)star6e_pipeline_apply_intra_refresh(state->venc_channel, vcfg,
+		pconf.image_height, venc_fps, pconf.rc_codec);
 
 	ret = bind_and_finalize_pipeline(state, vcfg, &pconf, sdk_quiet);
 	if (ret != 0)

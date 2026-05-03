@@ -95,6 +95,9 @@ typedef struct {
 	int (*fnSetFrameLostStrategy)(int chn, void *p);
 	int (*fnGetFrameLostStrategy)(int chn, void *p);
 	int (*fnGetChnDevid)(int chn, uint32_t *dev_id);
+	/* Optional — may be NULL on older libmi_venc.so builds. */
+	int (*fnSetIntraRefresh)(int chn, void *cfg);
+	int (*fnGetIntraRefresh)(int chn, void *cfg);
 } star6e_venc_impl;
 
 /* Global instances — defined in star6e_mi.c.
