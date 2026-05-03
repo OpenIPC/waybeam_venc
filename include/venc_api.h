@@ -118,7 +118,7 @@ void venc_api_set_sensor_info(int pad, int mode_index, int forced_pad);
 /* Active VIF precrop rectangle — set by backend whenever it programs the
  * VIF capture region (initial start and reinit).  Includes any sensor
  * overscan offsets so the rectangle reflects exactly what is in hardware.
- * Exposed in /api/v1/config (runtime block) and /api/v1/ae (Star6E only). */
+ * Exposed in /api/v1/config (runtime block) and /api/v1/ae. */
 void venc_api_set_active_precrop(uint16_t x, uint16_t y,
 	uint16_t w, uint16_t h);
 void venc_api_clear_active_precrop(void);
@@ -138,6 +138,10 @@ typedef struct {
 
 typedef void (*VencRecordStatusFn)(VencRecordStatus *out);
 void venc_api_set_record_status_fn(VencRecordStatusFn fn);
+/* Opt in to HTTP-driven record control (gates /api/v1/record/start|stop).
+ * Set independently of the status callback so a backend can report state
+ * without claiming it consumes the start/stop request flags. */
+void venc_api_set_record_http_control_supported(int supported);
 
 /* Fill the supplied struct with live record status via the registered
  * callback.  When no callback is set, zeroes the struct. */
