@@ -363,6 +363,9 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
+	FIELD(video0, intra_refresh,        FT_BOOL,   MUT_RESTART),
+	FIELD(video0, intra_refresh_lines,  FT_UINT16, MUT_RESTART),
+	FIELD(video0, intra_refresh_qp,     FT_UINT8,  MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -421,6 +424,9 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.gopSize", "record.gop_size" },
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
+	{ "video0.intraRefresh", "video0.intra_refresh" },
+	{ "video0.intraRefreshLines", "video0.intra_refresh_lines" },
+	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },

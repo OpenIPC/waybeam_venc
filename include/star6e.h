@@ -468,6 +468,17 @@ typedef struct {
 _Static_assert(sizeof(MI_VENC_ParamFrameLost_t) == 16,
 	"MI_VENC_ParamFrameLost_t layout changed — verify SDK match");
 
+/* Intra refresh (GDR-style rolling stripe) — identical layout on star6e and
+ * maruko (mi_venc_datatype.h:992 for both).  Only the function arity differs
+ * (maruko adds VeDev), handled by the per-backend macros below. */
+typedef struct {
+	MI_BOOL bEnable;
+	MI_U32  u32RefreshLineNum;
+	MI_U32  u32ReqIQp;
+} MI_VENC_IntraRefresh_t;
+_Static_assert(sizeof(MI_VENC_IntraRefresh_t) == 12,
+	"MI_VENC_IntraRefresh_t layout changed — verify SDK match");
+
 /* MI_VENC ----------------------------------------------------------------- */
 #if defined(PLATFORM_MARUKO)
 #define MI_VENC_CreateChn(chn, attr)  g_mi_venc.fnCreateChn(0, (chn), (attr))
@@ -506,6 +517,12 @@ _Static_assert(sizeof(MI_VENC_ParamFrameLost_t) == 16,
 #define MI_VENC_SetFrameLostStrategy(chn, p) g_mi_venc.fnSetFrameLostStrategy((chn), (p))
 #define MI_VENC_GetFrameLostStrategy(chn, p) g_mi_venc.fnGetFrameLostStrategy((chn), (p))
 #define MI_VENC_GetChnDevid(chn, dev) g_mi_venc.fnGetChnDevid((chn), (dev))
+#define MI_VENC_SetIntraRefresh(chn, cfg) \
+	(g_mi_venc.fnSetIntraRefresh ? \
+		g_mi_venc.fnSetIntraRefresh((chn), (cfg)) : -1)
+#define MI_VENC_GetIntraRefresh(chn, cfg) \
+	(g_mi_venc.fnGetIntraRefresh ? \
+		g_mi_venc.fnGetIntraRefresh((chn), (cfg)) : -1)
 #else
 MI_S32 MI_VENC_CreateChn(MI_VENC_CHN chn, MI_VENC_ChnAttr_t* attr);
 MI_S32 MI_VENC_DestroyChn(MI_VENC_CHN chn);
