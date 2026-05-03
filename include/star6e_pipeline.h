@@ -108,15 +108,23 @@ void star6e_pipeline_cus3a_reset(void);
 int star6e_pipeline_cap_exposure_for_fps(uint32_t fps);
 
 /** Snapshot of the IntraRefresh configuration applied to ch0 at the most
- *  recent pipeline start.  All zeros (enabled=0) when video0.intra_refresh
- *  is not set in config. */
+ *  recent pipeline start.  All zeros (mode_name="off") when feature is
+ *  disabled.  Populated by mode-driven path in star6e_pipeline.c. */
 typedef struct {
-	int enabled;                    /* config requested */
+	char mode_name[16];             /* "off" | "fast" | "balanced" | "robust" */
+	int active;                     /* mode != off and apply_ok */
 	int mi_supported;               /* libmi_venc.so exports SetIntraRefresh */
 	int apply_ok;                   /* SetIntraRefresh succeeded */
-	uint32_t requested_lines;       /* config value (0 = auto) */
+	uint32_t target_ms;             /* mode constant, 0 if off */
+	uint32_t total_rows;            /* ceil(height / lcu_h) */
+	uint32_t requested_lines;       /* config override value (0 = mode auto) */
 	uint32_t effective_lines_per_p; /* what was actually programmed */
-	uint32_t requested_qp;
+	int      lines_clamped;         /* override exceeded total_rows */
+	uint32_t requested_qp;          /* config override value (0 = codec default) */
+	uint32_t effective_qp;          /* what was actually programmed */
+	double   explicit_gop_sec;      /* config gop_size (0.0 = mode auto) */
+	double   effective_gop_sec;     /* what was actually programmed */
+	int      gop_auto;              /* 1 if effective_gop_sec came from auto */
 } Star6eIntraRefreshStatus;
 
 void star6e_pipeline_intra_refresh_status(Star6eIntraRefreshStatus *out);

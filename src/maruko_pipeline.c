@@ -3,6 +3,7 @@
 #include "debug_osd.h"
 #include "hevc_rtp.h"
 #include "idr_rate_limit.h"
+#include "intra_refresh.h"
 #include "isp_runtime.h"
 #include "maruko_bindings.h"
 #include "maruko_config.h"
@@ -777,88 +778,99 @@ void maruko_pipeline_intra_refresh_status(MarukoIntraRefreshStatus *out)
 	pthread_mutex_unlock(&g_intra_status_mutex);
 }
 
-/* LCU rows: H.265 = 32px, H.264 = 16px.  When explicit_lines == 0 the
- * caller wants the auto formula (~500ms refresh window).  Explicit values
- * are clamped to the actual picture LCU count so the SDK can't underflow. */
-static uint32_t maruko_intra_refresh_lines(uint32_t height, uint32_t fps,
-	PAYLOAD_TYPE_E codec, uint32_t explicit_lines)
+/* Compute IntraRefresh derived params from the maruko config snapshot. */
+static IntraRefreshMode maruko_intra_refresh_derive(
+	const MarukoBackendConfig *cfg, uint32_t height, uint32_t fps,
+	PAYLOAD_TYPE_E codec, IntraRefreshDerived *out_ir)
 {
-	uint32_t lcu_h = (codec == PT_H265) ? 32u : 16u;
-	uint32_t total_rows = (height == 0) ? 1u : (height + lcu_h - 1) / lcu_h;
-	uint32_t refresh_frames, lines;
+	IntraRefreshMode mode = INTRA_MODE_OFF;
 
-	if (explicit_lines > 0) {
-		if (explicit_lines > total_rows) {
-			fprintf(stderr, "[venc] WARNING: intra_refresh_lines=%u "
-				"exceeds picture LCU rows=%u, clamping\n",
-				explicit_lines, total_rows);
-			return total_rows;
-		}
-		return explicit_lines;
+	memset(out_ir, 0, sizeof(*out_ir));
+	if (cfg) {
+		mode = intra_refresh_parse_mode(cfg->intra_refresh_mode);
+		intra_refresh_compute(mode, height, fps, codec == PT_H265,
+			cfg->intra_refresh_lines, cfg->intra_refresh_qp,
+			cfg->gop_size_sec, out_ir);
 	}
-	if (fps == 0)
-		return 1;
-	refresh_frames = (fps + 1) / 2;
-	if (refresh_frames == 0)
-		refresh_frames = 1;
-	lines = (total_rows + refresh_frames - 1) / refresh_frames;
-	return lines == 0 ? 1u : lines;
+	return mode;
 }
 
 static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	const MarukoBackendConfig *cfg, uint32_t height, uint32_t fps,
 	PAYLOAD_TYPE_E codec)
 {
-	MI_VENC_IntraRefresh_t ir;
+	MI_VENC_IntraRefresh_t ir_sdk;
 	MarukoIntraRefreshStatus snap;
+	IntraRefreshDerived ir;
+	IntraRefreshMode mode;
+	const char *name;
 
 	memset(&snap, 0, sizeof(snap));
-	if (cfg) {
-		snap.enabled = cfg->intra_refresh ? 1 : 0;
-		snap.requested_lines = cfg->intra_refresh_lines;
-		snap.requested_qp = cfg->intra_refresh_qp;
-	}
-	snap.mi_supported = g_mi_venc.fnSetIntraRefresh ? 1 : 0;
+	mode = maruko_intra_refresh_derive(cfg, height, fps, codec, &ir);
+	name = intra_refresh_mode_name(mode);
 
-	if (!cfg || !cfg->intra_refresh) {
+	snprintf(snap.mode_name, sizeof(snap.mode_name), "%s", name);
+	snap.mi_supported = g_mi_venc.fnSetIntraRefresh ? 1 : 0;
+	if (cfg) {
+		snap.requested_lines  = cfg->intra_refresh_lines;
+		snap.requested_qp     = cfg->intra_refresh_qp;
+		snap.explicit_gop_sec = cfg->gop_size_sec;
+	}
+	snap.target_ms             = ir.target_ms;
+	snap.total_rows            = ir.total_rows;
+	snap.effective_lines_per_p = ir.lines;
+	snap.lines_clamped         = ir.lines_clamped;
+	snap.effective_qp          = ir.req_iqp;
+	snap.effective_gop_sec     = ir.gop_overridden ? snap.explicit_gop_sec : ir.gop_sec;
+	snap.gop_auto              = ir.gop_overridden ? 0 : (ir.gop_sec > 0.0);
+
+	if (mode == INTRA_MODE_OFF) {
 		pthread_mutex_lock(&g_intra_status_mutex);
 		g_intra_status = snap;
 		pthread_mutex_unlock(&g_intra_status_mutex);
 		return 0;
 	}
 	if (!g_mi_venc.fnSetIntraRefresh) {
-		fprintf(stderr, "[venc] WARNING: video0.intra_refresh requested "
+		fprintf(stderr, "[venc] WARNING: intraRefreshMode=%s requested "
 			"but libmi_venc.so does not export "
-			"MI_VENC_SetIntraRefresh\n");
+			"MI_VENC_SetIntraRefresh\n", name);
 		pthread_mutex_lock(&g_intra_status_mutex);
 		g_intra_status = snap;
 		pthread_mutex_unlock(&g_intra_status_mutex);
 		return -1;
 	}
+	if (ir.lines_clamped) {
+		fprintf(stderr, "[venc] WARNING: intraRefreshLines exceeds picture "
+			"LCU rows=%u, clamped\n", ir.total_rows);
+	}
+	if (ir.gop_overridden) {
+		fprintf(stderr, "[venc] intra auto-GOP suppressed: explicit "
+			"gopSize=%.2fs\n", snap.explicit_gop_sec);
+	}
 
-	memset(&ir, 0, sizeof(ir));
-	ir.bEnable = 1;
-	ir.u32RefreshLineNum = maruko_intra_refresh_lines(height, fps, codec,
-		cfg->intra_refresh_lines);
-	ir.u32ReqIQp = cfg->intra_refresh_qp;
-	snap.effective_lines_per_p = ir.u32RefreshLineNum;
+	memset(&ir_sdk, 0, sizeof(ir_sdk));
+	ir_sdk.bEnable = 1;
+	ir_sdk.u32RefreshLineNum = ir.lines;
+	ir_sdk.u32ReqIQp = ir.req_iqp;
 
-	if (maruko_mi_venc_set_intra_refresh(dev, chn, &ir) != 0) {
+	if (maruko_mi_venc_set_intra_refresh(dev, chn, &ir_sdk) != 0) {
 		fprintf(stderr, "[venc] ERROR: MI_VENC_SetIntraRefresh(dev=%d, "
 			"chn=%d, lines=%u, qp=%u) failed\n", dev, chn,
-			ir.u32RefreshLineNum, ir.u32ReqIQp);
+			ir_sdk.u32RefreshLineNum, ir_sdk.u32ReqIQp);
 		pthread_mutex_lock(&g_intra_status_mutex);
 		g_intra_status = snap;
 		pthread_mutex_unlock(&g_intra_status_mutex);
 		return -1;
 	}
 	snap.apply_ok = 1;
+	snap.active   = 1;
 	pthread_mutex_lock(&g_intra_status_mutex);
 	g_intra_status = snap;
 	pthread_mutex_unlock(&g_intra_status_mutex);
-	fprintf(stderr, "[venc] intra refresh enabled: dev=%d chn=%d "
-		"lines/P=%u reqIqp=%u\n", dev, chn, ir.u32RefreshLineNum,
-		ir.u32ReqIQp);
+	fprintf(stderr, "[venc] intraRefresh: mode=%s dev=%d chn=%d lines/P=%u "
+		"qp=%u gop=%.2fs (%s)\n", name, dev, chn, ir_sdk.u32RefreshLineNum,
+		ir_sdk.u32ReqIQp, snap.effective_gop_sec,
+		snap.gop_auto ? "auto" : "explicit");
 	return 0;
 }
 
@@ -1173,6 +1185,17 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 	ctx->cfg.image_height = out_h;
 	ctx->cfg.venc_gop_size = pipeline_common_gop_frames(
 		ctx->cfg.venc_gop_seconds, ctx->sensor.fps);
+
+	/* IntraRefresh auto-GOP override: when intraRefreshMode != off and the
+	 * user did not pin gopSize, align IDR period with one full GDR pass. */
+	{
+		IntraRefreshDerived ir;
+		IntraRefreshMode mode = maruko_intra_refresh_derive(
+			&ctx->cfg, ctx->cfg.image_height, ctx->sensor.fps,
+			ctx->cfg.rc_codec, &ir);
+		if (mode != INTRA_MODE_OFF && !ir.gop_overridden && ir.gop_frames > 0)
+			ctx->cfg.venc_gop_size = ir.gop_frames;
+	}
 
 	/* ISP throughput note: the Maruko ISP stalls when the sensor
 	 * pixel throughput exceeds ~144M pix/s.  Mode 3 (1472x816@120fps
@@ -2412,6 +2435,21 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		debug_osd_text(ctx->debug_osd, 0, "fps", "%u", osd_fps);
 		debug_osd_text(ctx->debug_osd, 1, "cpu", "%d%%",
 			debug_osd_get_cpu(ctx->debug_osd));
+
+		{
+			MarukoIntraRefreshStatus ir;
+			maruko_pipeline_intra_refresh_status(&ir);
+			if (ir.active) {
+				debug_osd_text(ctx->debug_osd, 2, "intra",
+					"%s L%u q%u",
+					ir.mode_name, ir.effective_lines_per_p,
+					ir.effective_qp);
+				debug_osd_text(ctx->debug_osd, 3, "gop",
+					"%.2fs %s",
+					ir.effective_gop_sec,
+					ir.gop_auto ? "auto" : "fixed");
+			}
+		}
 
 		debug_osd_end_frame(ctx->debug_osd);
 	}

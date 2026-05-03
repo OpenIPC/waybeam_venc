@@ -1,5 +1,6 @@
 #include "venc_api.h"
 #include "idr_rate_limit.h"
+#include "intra_refresh.h"
 #include "pipeline_common.h"
 #if HAVE_BACKEND_STAR6E
 #include "star6e_pipeline.h"
@@ -381,7 +382,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
-	FIELD(video0, intra_refresh,        FT_BOOL,   MUT_RESTART),
+	FIELD(video0, intra_refresh_mode,   FT_STRING, MUT_RESTART),
 	FIELD(video0, intra_refresh_lines,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, intra_refresh_qp,     FT_UINT8,  MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
@@ -442,7 +443,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.gopSize", "record.gop_size" },
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
-	{ "video0.intraRefresh", "video0.intra_refresh" },
+	{ "video0.intraRefreshMode", "video0.intra_refresh_mode" },
 	{ "video0.intraRefreshLines", "video0.intra_refresh_lines" },
 	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
@@ -1810,7 +1811,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.8.4\","
+		"\"contract_version\":\"0.9.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2543,49 +2544,129 @@ static int handle_idr_stats(int fd, const HttpRequest *req, void *ctx)
 static int handle_intra_status(int fd, const HttpRequest *req, void *ctx)
 {
 	struct {
-		int enabled, mi_supported, apply_ok;
-		uint32_t requested_lines, effective_lines_per_p, requested_qp;
-	} s = {0};
-	char buf[256];
+		char mode_name[16];
+		int active, mi_supported, apply_ok;
+		uint32_t target_ms, total_rows;
+		uint32_t requested_lines, effective_lines_per_p;
+		int      lines_clamped;
+		uint32_t requested_qp, effective_qp;
+		double   explicit_gop_sec, effective_gop_sec;
+		int      gop_auto;
+	} s;
+	char buf[512];
 
 	(void)req; (void)ctx;
+	memset(&s, 0, sizeof(s));
 #if HAVE_BACKEND_STAR6E
 	{
-		Star6eIntraRefreshStatus star6e;
-		star6e_pipeline_intra_refresh_status(&star6e);
-		s.enabled = star6e.enabled;
-		s.mi_supported = star6e.mi_supported;
-		s.apply_ok = star6e.apply_ok;
-		s.requested_lines = star6e.requested_lines;
-		s.effective_lines_per_p = star6e.effective_lines_per_p;
-		s.requested_qp = star6e.requested_qp;
+		Star6eIntraRefreshStatus st;
+		star6e_pipeline_intra_refresh_status(&st);
+		snprintf(s.mode_name, sizeof(s.mode_name), "%s", st.mode_name);
+		s.active                = st.active;
+		s.mi_supported          = st.mi_supported;
+		s.apply_ok              = st.apply_ok;
+		s.target_ms             = st.target_ms;
+		s.total_rows            = st.total_rows;
+		s.requested_lines       = st.requested_lines;
+		s.effective_lines_per_p = st.effective_lines_per_p;
+		s.lines_clamped         = st.lines_clamped;
+		s.requested_qp          = st.requested_qp;
+		s.effective_qp          = st.effective_qp;
+		s.explicit_gop_sec      = st.explicit_gop_sec;
+		s.effective_gop_sec     = st.effective_gop_sec;
+		s.gop_auto              = st.gop_auto;
 	}
 #elif HAVE_BACKEND_MARUKO
 	{
-		MarukoIntraRefreshStatus mar;
-		maruko_pipeline_intra_refresh_status(&mar);
-		s.enabled = mar.enabled;
-		s.mi_supported = mar.mi_supported;
-		s.apply_ok = mar.apply_ok;
-		s.requested_lines = mar.requested_lines;
-		s.effective_lines_per_p = mar.effective_lines_per_p;
-		s.requested_qp = mar.requested_qp;
+		MarukoIntraRefreshStatus st;
+		maruko_pipeline_intra_refresh_status(&st);
+		snprintf(s.mode_name, sizeof(s.mode_name), "%s", st.mode_name);
+		s.active                = st.active;
+		s.mi_supported          = st.mi_supported;
+		s.apply_ok              = st.apply_ok;
+		s.target_ms             = st.target_ms;
+		s.total_rows            = st.total_rows;
+		s.requested_lines       = st.requested_lines;
+		s.effective_lines_per_p = st.effective_lines_per_p;
+		s.lines_clamped         = st.lines_clamped;
+		s.requested_qp          = st.requested_qp;
+		s.effective_qp          = st.effective_qp;
+		s.explicit_gop_sec      = st.explicit_gop_sec;
+		s.effective_gop_sec     = st.effective_gop_sec;
+		s.gop_auto              = st.gop_auto;
 	}
 #endif
+	if (s.mode_name[0] == '\0')
+		snprintf(s.mode_name, sizeof(s.mode_name), "off");
+
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
-		"\"enabled\":%s,"
+		"\"mode\":\"%s\","
+		"\"active\":%s,"
 		"\"mi_supported\":%s,"
 		"\"apply_ok\":%s,"
-		"\"requested_lines\":%u,"
-		"\"effective_lines_per_p\":%u,"
-		"\"requested_qp\":%u}}",
-		s.enabled ? "true" : "false",
+		"\"target_ms\":%u,"
+		"\"total_rows\":%u,"
+		"\"lines\":{\"requested\":%u,\"effective\":%u,\"clamped\":%s},"
+		"\"qp\":{\"requested\":%u,\"effective\":%u},"
+		"\"gop\":{\"explicit_sec\":%.3f,\"effective_sec\":%.3f,\"auto\":%s}"
+		"}}",
+		s.mode_name,
+		s.active ? "true" : "false",
 		s.mi_supported ? "true" : "false",
 		s.apply_ok ? "true" : "false",
-		s.requested_lines,
-		s.effective_lines_per_p,
-		s.requested_qp);
+		s.target_ms,
+		s.total_rows,
+		s.requested_lines, s.effective_lines_per_p,
+		s.lines_clamped ? "true" : "false",
+		s.requested_qp, s.effective_qp,
+		s.explicit_gop_sec, s.effective_gop_sec,
+		s.gop_auto ? "true" : "false");
+	return httpd_send_json(fd, 200, buf);
+}
+
+static int handle_intra_mode(int fd, const HttpRequest *req, void *ctx)
+{
+	char mode_arg[16];
+	IntraRefreshMode mode;
+	const char *name;
+	VencConfig snapshot;
+	int save_rc;
+	char buf[256];
+
+	(void)ctx;
+	if (httpd_query_param(req, "mode", mode_arg, sizeof(mode_arg)) != 0
+		|| mode_arg[0] == '\0')
+		return httpd_send_error(fd, 400, "missing_mode",
+			"Query param 'mode' is required");
+
+	mode = intra_refresh_parse_mode(mode_arg);
+	name = intra_refresh_mode_name(mode);
+	if (mode == INTRA_MODE_OFF && strcasecmp(mode_arg, "off") != 0)
+		return httpd_send_error(fd, 400, "invalid_mode",
+			"mode must be one of: off, fast, balanced, robust");
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	if (!g_cfg) {
+		pthread_mutex_unlock(&g_cfg_mutex);
+		return httpd_send_error(fd, 500, "internal_error",
+			"config not registered");
+	}
+	snprintf(g_cfg->video0.intra_refresh_mode,
+		sizeof(g_cfg->video0.intra_refresh_mode), "%s", name);
+	/* Clear per-field overrides so the mode's defaults take effect. */
+	g_cfg->video0.intra_refresh_lines = 0;
+	g_cfg->video0.intra_refresh_qp = 0;
+	snapshot = *g_cfg;
+	pthread_mutex_unlock(&g_cfg_mutex);
+
+	save_rc = venc_api_save_config_to_disk(&snapshot);
+	venc_api_request_reinit();
+
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"mode\":\"%s\",\"saved\":%s,"
+		"\"reinit\":true}}",
+		name, save_rc == 0 ? "true" : "false");
 	return httpd_send_json(fd, 200, buf);
 }
 #endif
@@ -2682,6 +2763,8 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
 #if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
 	r |= venc_httpd_route("GET", "/api/v1/intra/status", handle_intra_status, NULL);
+	r |= venc_httpd_route("POST", "/api/v1/intra/mode",  handle_intra_mode, NULL);
+	r |= venc_httpd_route("GET",  "/api/v1/intra/mode",  handle_intra_mode, NULL);
 #endif
 	r |= venc_webui_register();
 	if (r != 0) {

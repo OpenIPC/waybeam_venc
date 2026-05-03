@@ -41,6 +41,8 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->ae_fps = 15;
 	cfg->isp_gain_max = 0;
 	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s", "native");
+	snprintf(cfg->intra_refresh_mode, sizeof(cfg->intra_refresh_mode),
+		"%s", "off");
 	memset(&cfg->imu, 0, sizeof(cfg->imu));
 	memset(&cfg->audio, 0, sizeof(cfg->audio));
 	cfg->audio_port = 5601;
@@ -107,9 +109,11 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->scene_threshold = vcfg->video0.scene_threshold;
 	cfg->scene_holdoff = vcfg->video0.scene_holdoff;
 	cfg->frame_lost = vcfg->video0.frame_lost ? 1 : 0;
-	cfg->intra_refresh = vcfg->video0.intra_refresh ? 1 : 0;
+	snprintf(cfg->intra_refresh_mode, sizeof(cfg->intra_refresh_mode), "%s",
+		vcfg->video0.intra_refresh_mode);
 	cfg->intra_refresh_lines = vcfg->video0.intra_refresh_lines;
 	cfg->intra_refresh_qp = vcfg->video0.intra_refresh_qp;
+	cfg->gop_size_sec = vcfg->video0.gop_size;
 	cfg->verbose = vcfg->system.verbose ? 1 : 0;
 	cfg->connected_udp = vcfg->outgoing.connected_udp ? 1 : 0;
 	cfg->keep_aspect = vcfg->isp.keep_aspect ? 1 : 0;

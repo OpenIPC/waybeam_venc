@@ -1,5 +1,36 @@
 # History
 
+## [0.9.16] - 2026-05-03
+
+IntraRefresh: single-knob `intraRefreshMode` enum.
+
+Replaces the boolean `intraRefresh` + two zero-sentinel fields from PR #92
+with one human-readable mode picker (`off` | `fast` | `balanced` | `robust`).
+Each mode targets a self-heal window (150 ms / 500 ms / 1000 ms) and derives
+lines, GOP, and QP from it; per-field overrides remain available.
+
+**Breaking change** (no backward compat): `video0.intraRefresh` boolean is
+removed. Configs from 0.9.15 and earlier carrying `intraRefresh: true` will
+fall through to `intraRefreshMode: "off"` (default) — re-enable explicitly
+via the mode field or `POST /api/v1/intra/mode?mode=balanced`.
+
+Highlights:
+- New `src/intra_refresh.{c,h}` shared helper (used by both backends)
+  computes lines, auto-GOP (one IDR per full GDR pass), and codec-default
+  QP (48 H.265 / 45 H.264 — `u32ReqIQp` is never passed as 0).
+- New `POST /api/v1/intra/mode?mode=<name>` endpoint: sets mode, clears
+  per-field overrides, persists, reinits. One call to switch presets.
+- Extended `/api/v1/intra/status` response: returns mode, target_ms,
+  total_rows, and per-field requested-vs-effective for lines/qp/gop.
+- Both Star6E and Maruko backends share the helper — drift between
+  parallel implementations is no longer possible.
+- Schema field `video0.intra_refresh_mode` registered (FT_STRING,
+  MUT_RESTART) with `intraRefreshMode` camelCase alias.
+- Auto-GOP overrides `gopSize` only when user did not pin a value;
+  explicit `gopSize > 0` is honored and logged at boot.
+- Contract bump 0.8.4 → 0.9.0 (breaking config field rename).
+- 44 new unit tests covering parse, compute, override, clamp, edge cases.
+
 ## [0.9.15] - 2026-05-02
 
 Maruko parity Phase 5 — audio capture (Opus / G.711 / raw PCM).

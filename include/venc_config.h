@@ -76,9 +76,9 @@ typedef struct {
 	bool frame_lost;           /* enable frame-lost safety net */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
-	bool intra_refresh;        /* enable rolling intra refresh (GDR-style stripe) */
-	uint16_t intra_refresh_lines; /* MB/LCU rows refreshed per P-frame; 0 = auto */
-	uint8_t intra_refresh_qp;  /* I-MB QP override for stripe; 0 = SDK default */
+	char intra_refresh_mode[16]; /* "off" | "fast" | "balanced" | "robust" */
+	uint16_t intra_refresh_lines; /* MB/LCU rows refreshed per P-frame; 0 = mode auto */
+	uint8_t intra_refresh_qp;  /* I-MB QP override for stripe; 0 = codec default (48 H.265 / 45 H.264) */
 } VencConfigVideo;
 
 typedef struct {

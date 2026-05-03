@@ -38,7 +38,10 @@
     "qpDelta": -4,
     "frameLost": true,
     "sceneThreshold": 0,
-    "sceneHoldoff": 2
+    "sceneHoldoff": 2,
+    "intraRefreshMode": "off",
+    "intraRefreshLines": 0,
+    "intraRefreshQp": 0
   },
   "outgoing": {
     "enabled": false,

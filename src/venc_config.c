@@ -2,6 +2,7 @@
 #include "venc_api.h"
 #include "pipeline_common.h"
 #include "star6e_recorder.h"
+#include "intra_refresh.h"
 #include "../lib/cJSON.h"
 
 #include <errno.h>
@@ -155,8 +156,9 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.scene_threshold = 0;   /* 0 = off */
 	cfg->video0.scene_holdoff = 2;
 
-	/* intra refresh (video0) — disabled by default; auto line count */
-	cfg->video0.intra_refresh = false;
+	/* intra refresh (video0) — disabled by default; mode-driven */
+	safe_strcpy(cfg->video0.intra_refresh_mode,
+		sizeof(cfg->video0.intra_refresh_mode), "off");
 	cfg->video0.intra_refresh_lines = 0;
 	cfg->video0.intra_refresh_qp = 0;
 
@@ -310,7 +312,13 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		(int)v->scene_holdoff);
 	if (v->scene_holdoff < 1 && v->scene_threshold > 0) v->scene_holdoff = 1;
 
-	v->intra_refresh = json_get_bool(obj, "intraRefresh", v->intra_refresh);
+	{
+		const char *m = json_get_string(obj, "intraRefreshMode",
+			v->intra_refresh_mode);
+		IntraRefreshMode parsed = intra_refresh_parse_mode(m);
+		safe_strcpy(v->intra_refresh_mode, sizeof(v->intra_refresh_mode),
+			intra_refresh_mode_name(parsed));
+	}
 	v->intra_refresh_lines = (uint16_t)json_get_int(obj, "intraRefreshLines",
 		(int)v->intra_refresh_lines);
 	v->intra_refresh_qp = (uint8_t)json_get_int(obj, "intraRefreshQp",
@@ -856,7 +864,7 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_bool(p,   2, "frameLost",      cfg->video0.frame_lost,      0);
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
-	pp_field_bool(p,   2, "intraRefresh",   cfg->video0.intra_refresh,   0);
+	pp_field_string(p, 2, "intraRefreshMode", cfg->video0.intra_refresh_mode, 0);
 	pp_field_uint(p,   2, "intraRefreshLines", cfg->video0.intra_refresh_lines, 0);
 	pp_field_uint(p,   2, "intraRefreshQp",    cfg->video0.intra_refresh_qp,    1);
 	pp_section_close(p, 1, is_last);
@@ -1034,7 +1042,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(vid, "frameLost", cfg->video0.frame_lost);
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
-		cJSON_AddBoolToObject(vid, "intraRefresh", cfg->video0.intra_refresh);
+		cJSON_AddStringToObject(vid, "intraRefreshMode",
+			cfg->video0.intra_refresh_mode);
 		cJSON_AddNumberToObject(vid, "intraRefreshLines",
 			cfg->video0.intra_refresh_lines);
 		cJSON_AddNumberToObject(vid, "intraRefreshQp",

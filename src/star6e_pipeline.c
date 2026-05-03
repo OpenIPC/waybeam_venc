@@ -6,6 +6,7 @@
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
 #include "file_util.h"
+#include "intra_refresh.h"
 #include "isp_runtime.h"
 #include "pipeline_common.h"
 #include "venc_api.h"
@@ -666,37 +667,6 @@ static void star6e_pipeline_stop_venc(MI_VENC_CHN chn)
 	MI_VENC_DestroyChn(chn);
 }
 
-/* Auto line count: refresh full picture in ~500ms.  Caller passes 0 to use
- * this default; explicit values are clamped to the actual LCU-row count of
- * the picture so a too-large value can't underflow the SDK's internal
- * row counter. */
-static uint32_t star6e_pipeline_intra_refresh_lines(uint32_t height,
-	uint32_t fps, PAYLOAD_TYPE_E codec, uint32_t explicit_lines)
-{
-	uint32_t lcu_h, total_rows, refresh_frames, lines;
-
-	lcu_h = (codec == PT_H265) ? 32u : 16u;
-	total_rows = (height == 0) ? 1u : (height + lcu_h - 1) / lcu_h;
-
-	if (explicit_lines > 0) {
-		if (explicit_lines > total_rows) {
-			fprintf(stderr, "[venc] WARNING: intra_refresh_lines=%u "
-				"exceeds picture LCU rows=%u, clamping\n",
-				explicit_lines, total_rows);
-			return total_rows;
-		}
-		return explicit_lines;
-	}
-	if (fps == 0)
-		return 1;
-
-	refresh_frames = (fps + 1) / 2;          /* ~500ms */
-	if (refresh_frames == 0)
-		refresh_frames = 1;
-	lines = (total_rows + refresh_frames - 1) / refresh_frames;
-	return lines == 0 ? 1u : lines;
-}
-
 static Star6eIntraRefreshStatus g_intra_status;
 static pthread_mutex_t g_intra_status_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -709,42 +679,82 @@ void star6e_pipeline_intra_refresh_status(Star6eIntraRefreshStatus *out)
 	pthread_mutex_unlock(&g_intra_status_mutex);
 }
 
+/* Compute IntraRefresh derived params from the current config.  Out param
+ * is always populated; mode is also returned for caller convenience. */
+static IntraRefreshMode star6e_pipeline_intra_refresh_derive(
+	const VencConfig *vcfg, uint32_t height, uint32_t fps,
+	PAYLOAD_TYPE_E codec, IntraRefreshDerived *out_ir)
+{
+	IntraRefreshMode mode = INTRA_MODE_OFF;
+
+	memset(out_ir, 0, sizeof(*out_ir));
+	if (vcfg) {
+		mode = intra_refresh_parse_mode(vcfg->video0.intra_refresh_mode);
+		intra_refresh_compute(mode, height, fps, codec == PT_H265,
+			vcfg->video0.intra_refresh_lines,
+			vcfg->video0.intra_refresh_qp,
+			vcfg->video0.gop_size, out_ir);
+	}
+	return mode;
+}
+
 static int star6e_pipeline_apply_intra_refresh(MI_VENC_CHN chn,
 	const VencConfig *vcfg, uint32_t height, uint32_t fps,
 	PAYLOAD_TYPE_E codec)
 {
 	MI_VENC_IntraRefresh_t cfg;
 	Star6eIntraRefreshStatus snap;
+	IntraRefreshDerived ir;
+	IntraRefreshMode mode;
+	const char *name;
 
 	memset(&snap, 0, sizeof(snap));
-	if (vcfg) {
-		snap.enabled = vcfg->video0.intra_refresh ? 1 : 0;
-		snap.requested_lines = vcfg->video0.intra_refresh_lines;
-		snap.requested_qp = vcfg->video0.intra_refresh_qp;
-	}
-	snap.mi_supported = g_mi_venc.fnSetIntraRefresh ? 1 : 0;
+	mode = star6e_pipeline_intra_refresh_derive(vcfg, height, fps, codec, &ir);
+	name = intra_refresh_mode_name(mode);
 
-	if (!vcfg || !vcfg->video0.intra_refresh) {
+	snprintf(snap.mode_name, sizeof(snap.mode_name), "%s", name);
+	snap.mi_supported = g_mi_venc.fnSetIntraRefresh ? 1 : 0;
+	if (vcfg) {
+		snap.requested_lines  = vcfg->video0.intra_refresh_lines;
+		snap.requested_qp     = vcfg->video0.intra_refresh_qp;
+		snap.explicit_gop_sec = vcfg->video0.gop_size;
+	}
+	snap.target_ms             = ir.target_ms;
+	snap.total_rows            = ir.total_rows;
+	snap.effective_lines_per_p = ir.lines;
+	snap.lines_clamped         = ir.lines_clamped;
+	snap.effective_qp          = ir.req_iqp;
+	snap.effective_gop_sec     = ir.gop_overridden ? snap.explicit_gop_sec : ir.gop_sec;
+	snap.gop_auto              = ir.gop_overridden ? 0 : (ir.gop_sec > 0.0);
+
+	if (mode == INTRA_MODE_OFF) {
 		pthread_mutex_lock(&g_intra_status_mutex);
 		g_intra_status = snap;
 		pthread_mutex_unlock(&g_intra_status_mutex);
 		return 0;
 	}
 	if (!g_mi_venc.fnSetIntraRefresh) {
-		fprintf(stderr, "[venc] WARNING: video0.intra_refresh requested "
-			"but libmi_venc.so does not export MI_VENC_SetIntraRefresh\n");
+		fprintf(stderr, "[venc] WARNING: intraRefreshMode=%s requested "
+			"but libmi_venc.so does not export MI_VENC_SetIntraRefresh\n",
+			name);
 		pthread_mutex_lock(&g_intra_status_mutex);
 		g_intra_status = snap;
 		pthread_mutex_unlock(&g_intra_status_mutex);
 		return -1;
 	}
+	if (ir.lines_clamped) {
+		fprintf(stderr, "[venc] WARNING: intraRefreshLines exceeds picture "
+			"LCU rows=%u, clamped\n", ir.total_rows);
+	}
+	if (ir.gop_overridden) {
+		fprintf(stderr, "[venc] intra auto-GOP suppressed: explicit "
+			"gopSize=%.2fs\n", snap.explicit_gop_sec);
+	}
 
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.bEnable = 1;
-	cfg.u32RefreshLineNum = star6e_pipeline_intra_refresh_lines(
-		height, fps, codec, vcfg->video0.intra_refresh_lines);
-	cfg.u32ReqIQp = vcfg->video0.intra_refresh_qp;
-	snap.effective_lines_per_p = cfg.u32RefreshLineNum;
+	cfg.u32RefreshLineNum = ir.lines;
+	cfg.u32ReqIQp = ir.req_iqp;
 
 	if (MI_VENC_SetIntraRefresh(chn, &cfg) != 0) {
 		fprintf(stderr, "[venc] ERROR: MI_VENC_SetIntraRefresh(chn=%d, "
@@ -756,11 +766,13 @@ static int star6e_pipeline_apply_intra_refresh(MI_VENC_CHN chn,
 		return -1;
 	}
 	snap.apply_ok = 1;
+	snap.active   = 1;
 	pthread_mutex_lock(&g_intra_status_mutex);
 	g_intra_status = snap;
 	pthread_mutex_unlock(&g_intra_status_mutex);
-	fprintf(stderr, "[venc] intra refresh enabled: chn=%d lines/P=%u "
-		"reqIqp=%u\n", chn, cfg.u32RefreshLineNum, cfg.u32ReqIQp);
+	fprintf(stderr, "[venc] intraRefresh: mode=%s lines/P=%u qp=%u "
+		"gop=%.2fs (%s)\n", name, cfg.u32RefreshLineNum, cfg.u32ReqIQp,
+		snap.effective_gop_sec, snap.gop_auto ? "auto" : "explicit");
 	return 0;
 }
 
@@ -1413,6 +1425,18 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	venc_fps = vcfg->video0.fps;
 	if (venc_fps == 0 || venc_fps > pconf.sensor_framerate)
 		venc_fps = pconf.sensor_framerate;
+
+	/* IntraRefresh auto-GOP: when intraRefreshMode != off and the user did
+	 * not pin gopSize, override the GOP frame count so each IDR aligns with
+	 * one full GDR pass. */
+	{
+		IntraRefreshDerived ir;
+		IntraRefreshMode mode = star6e_pipeline_intra_refresh_derive(
+			vcfg, pconf.image_height, venc_fps, pconf.rc_codec, &ir);
+		if (mode != INTRA_MODE_OFF && !ir.gop_overridden && ir.gop_frames > 0)
+			pconf.venc_gop_size = ir.gop_frames;
+	}
+
 	ret = star6e_pipeline_start_venc(pconf.image_width, pconf.image_height,
 		pconf.venc_max_rate, venc_fps, pconf.venc_gop_size,
 		pconf.rc_codec, pconf.rc_mode,

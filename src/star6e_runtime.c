@@ -885,6 +885,21 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		debug_osd_text(ps->debug_osd, 1, "cpu", "%d%%",
 			debug_osd_get_cpu(ps->debug_osd));
 
+		{
+			Star6eIntraRefreshStatus ir;
+			star6e_pipeline_intra_refresh_status(&ir);
+			if (ir.active) {
+				debug_osd_text(ps->debug_osd, 2, "intra",
+					"%s L%u q%u",
+					ir.mode_name, ir.effective_lines_per_p,
+					ir.effective_qp);
+				debug_osd_text(ps->debug_osd, 3, "gop",
+					"%.2fs %s",
+					ir.effective_gop_sec,
+					ir.gop_auto ? "auto" : "fixed");
+			}
+		}
+
 		debug_osd_end_frame(ps->debug_osd);
 	}
 

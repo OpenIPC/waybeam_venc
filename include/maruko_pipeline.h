@@ -103,12 +103,20 @@ extern volatile sig_atomic_t g_maruko_running;
  *  recent pipeline start.  Mirrors Star6eIntraRefreshStatus exactly so the
  *  /api/v1/intra/status handler can serialize either backend uniformly. */
 typedef struct {
-	int enabled;                    /* config requested */
-	int mi_supported;               /* libmi_venc.so exports SetIntraRefresh */
-	int apply_ok;                   /* SetIntraRefresh succeeded */
-	uint32_t requested_lines;       /* config value (0 = auto) */
-	uint32_t effective_lines_per_p; /* what was actually programmed */
+	char mode_name[16];             /* "off" | "fast" | "balanced" | "robust" */
+	int active;
+	int mi_supported;
+	int apply_ok;
+	uint32_t target_ms;
+	uint32_t total_rows;
+	uint32_t requested_lines;
+	uint32_t effective_lines_per_p;
+	int      lines_clamped;
 	uint32_t requested_qp;
+	uint32_t effective_qp;
+	double   explicit_gop_sec;
+	double   effective_gop_sec;
+	int      gop_auto;
 } MarukoIntraRefreshStatus;
 
 void maruko_pipeline_intra_refresh_status(MarukoIntraRefreshStatus *out);
