@@ -1,5 +1,26 @@
 # History
 
+## [0.10.5] - 2026-05-05
+
+Maruko-specific default config template (`config/venc.default.maruko.json`).
+
+The shipped `config/venc.default.json` defaults `sensor.unlockEnabled` to
+`true` because that flag is required on Star6E to unlock IMX415/IMX335
+high-FPS modes from cold boot (see
+`documentation/SENSOR_UNLOCK_IMX415_IMX335.md`).  The unlock command
+(`MI_SNR_CustFunction` cmd `0x23`, reg `0x300a`, value `0x80`) targets a
+driver internal latch present in the Star6E `sensor_imx*_mipi.ko`
+modules.  On Maruko the sensor driver layout is different and that latch
+does not exist — the call is at best a no-op + warning, at worst it
+prints a confusing failure on every boot.
+
+A new Maruko user starting from `venc.default.json` would inherit the
+unlock-on flag and see those warnings even though their pipeline is
+fine.  `config/venc.default.maruko.json` is identical to the Star6E
+default except for `sensor.unlockEnabled: false`, so packagers and
+first-time Maruko users have a clean starting point.  The runtime is
+unchanged — `/etc/venc.json` is still the only path the binary reads.
+
 ## [0.10.4] - 2026-05-05
 
 `/api/v1/dual/status` reachable on both backends.
