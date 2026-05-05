@@ -44,14 +44,18 @@ typedef struct {
 typedef struct {
 	char sensor_bin[VENC_CONFIG_STRING_MAX];
 	bool legacy_ae;        /* true = use legacy ISP AE + handoff instead of custom AE */
+	char ae_mode[16];      /* Maruko only: "native" (SDK runs AE/AWB at sensor
+	                        * rate, default) or "throttle" (no-op AE adaptor +
+	                        * 15 Hz manual SetAeParam, ~24% lower CPU). */
 	uint32_t ae_fps;       /* custom AE rate in Hz (default 15) */
 	uint32_t gain_max;     /* max sensor gain (0 = use ISP bin default) */
 	char awb_mode[16];     /* "auto" or "ct_manual" */
 	uint32_t awb_ct;       /* color temperature in Kelvin (for ct_manual) */
 	bool keep_aspect;      /* true = center-crop sensor to encode aspect ratio
 	                        * (preserves geometry); false = pass full sensor
-	                        * to VIF and stretch in VPE. Star6E only — Maruko
-	                        * ignores until SCL crop port lands. */
+	                        * downstream and stretch.  Star6E applies the
+	                        * crop at VIF; Maruko applies it at the SCL
+	                        * port.crop. */
 } VencConfigIsp;
 
 typedef struct {
@@ -72,6 +76,19 @@ typedef struct {
 	bool frame_lost;           /* enable frame-lost safety net */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
+	char intra_refresh_mode[16]; /* "off" | "fast" | "balanced" | "robust" */
+	uint16_t intra_refresh_lines; /* MB/LCU rows refreshed per P-frame; 0 = mode auto */
+	uint8_t intra_refresh_qp;  /* I-MB QP override for stripe; 0 = codec default (48 H.265 / 45 H.264) */
+	/* Approach-C digital zoom: zoom_pct shrinks BOTH the input crop and
+	 * the encoded output dim — SCL runs 1:1, no upscale, no bandwidth
+	 * pressure.  The receiver sees the smaller resolution in SPS/PPS.
+	 * 0 = off (full image), 0.25..1.0 = crop fraction (parser clamps
+	 * below 0.25 — receivers that ignore mid-stream SPS changes render
+	 * deeper zoom invisibly).  pct change requires reinit (encoder size
+	 * change); x/y pan is live. */
+	double zoom_pct;
+	double zoom_x;             /* crop centre x, 0..1 */
+	double zoom_y;             /* crop centre y, 0..1 */
 } VencConfigVideo;
 
 typedef struct {

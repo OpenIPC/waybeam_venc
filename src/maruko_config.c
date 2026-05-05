@@ -36,6 +36,22 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->vpe_level_3dnr = 1;
 	cfg->verbose = 0;
 	cfg->connected_udp = 1;  /* match VencConfig default */
+	cfg->keep_aspect = 1;    /* match VencConfig default (true) */
+	cfg->show_osd = 0;
+	cfg->ae_fps = 15;
+	cfg->isp_gain_max = 0;
+	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s", "native");
+	snprintf(cfg->intra_refresh_mode, sizeof(cfg->intra_refresh_mode),
+		"%s", "off");
+	memset(&cfg->imu, 0, sizeof(cfg->imu));
+	memset(&cfg->audio, 0, sizeof(cfg->audio));
+	cfg->audio_port = 5601;
+	cfg->max_payload_size = RTP_DEFAULT_PAYLOAD;
+	memset(&cfg->record, 0, sizeof(cfg->record));
+	snprintf(cfg->record.mode, sizeof(cfg->record.mode), "%s", "off");
+	snprintf(cfg->record.format, sizeof(cfg->record.format), "%s", "ts");
+	cfg->record.max_seconds = 300;
+	cfg->record.max_mb = 500;
 }
 
 int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
@@ -93,8 +109,42 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->scene_threshold = vcfg->video0.scene_threshold;
 	cfg->scene_holdoff = vcfg->video0.scene_holdoff;
 	cfg->frame_lost = vcfg->video0.frame_lost ? 1 : 0;
+	snprintf(cfg->intra_refresh_mode, sizeof(cfg->intra_refresh_mode), "%s",
+		vcfg->video0.intra_refresh_mode);
+	cfg->intra_refresh_lines = vcfg->video0.intra_refresh_lines;
+	cfg->intra_refresh_qp = vcfg->video0.intra_refresh_qp;
+	cfg->gop_size_sec = vcfg->video0.gop_size;
+	cfg->zoom_pct = vcfg->video0.zoom_pct;
+	cfg->zoom_x   = vcfg->video0.zoom_x;
+	cfg->zoom_y   = vcfg->video0.zoom_y;
 	cfg->verbose = vcfg->system.verbose ? 1 : 0;
 	cfg->connected_udp = vcfg->outgoing.connected_udp ? 1 : 0;
+	cfg->keep_aspect = vcfg->isp.keep_aspect ? 1 : 0;
+	cfg->show_osd = vcfg->debug.show_osd ? 1 : 0;
+	cfg->ae_fps = vcfg->isp.ae_fps;
+	cfg->isp_gain_max = vcfg->isp.gain_max;
+	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s",
+		vcfg->isp.ae_mode[0] ? vcfg->isp.ae_mode : "native");
+	cfg->imu = vcfg->imu;
+	cfg->audio = vcfg->audio;
+	cfg->audio_port = vcfg->outgoing.audio_port;
+	cfg->max_payload_size = vcfg->outgoing.max_payload_size;
+
+	cfg->record.enabled = vcfg->record.enabled ? 1 : 0;
+	snprintf(cfg->record.mode, sizeof(cfg->record.mode), "%s",
+		vcfg->record.mode);
+	snprintf(cfg->record.dir, sizeof(cfg->record.dir), "%s",
+		vcfg->record.dir);
+	snprintf(cfg->record.format, sizeof(cfg->record.format), "%s",
+		vcfg->record.format[0] ? vcfg->record.format : "ts");
+	snprintf(cfg->record.server, sizeof(cfg->record.server), "%s",
+		vcfg->record.server);
+	cfg->record.bitrate = vcfg->record.bitrate;
+	cfg->record.fps = vcfg->record.fps;
+	cfg->record.gop_size = vcfg->record.gop_size;
+	cfg->record.max_seconds = vcfg->record.max_seconds;
+	cfg->record.max_mb = vcfg->record.max_mb;
+	cfg->record.frame_lost = vcfg->video0.frame_lost ? 1 : 0;
 
 	return 0;
 }

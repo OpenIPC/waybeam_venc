@@ -10,6 +10,20 @@
 #include "star6e_runtime.h"
 #endif
 
+/* Single-instance gate.  We walk /proc and reject startup if any other
+ * userspace process has comm "venc".  An earlier flock-based pidfile
+ * lock was tried as belt-and-suspenders against the TOCTOU window
+ * here, but on Star6E the SIGHUP-respawn handoff hit a kernel race
+ * where the new image's flock() saw the OFD as still locked past
+ * 600 ms after parent reap, with no /proc/PID/fd entry referencing
+ * the file.  The /proc walk on its own is sufficient: the only path
+ * to a second venc is an external `/usr/bin/venc &` racing the init
+ * script, and the TOCTOU window between scan and process-exit is
+ * irrelevant because both processes would notice each other on the
+ * walk anyway.  Comm is pinned via prctl(PR_SET_NAME) early in main
+ * so the SIGHUP-respawn child (whose comm is "venc-resp" until
+ * execv) is correctly distinguished from a fully-running peer. */
+
 static int is_another_venc_running(void)
 {
   pid_t my_pid = getpid();

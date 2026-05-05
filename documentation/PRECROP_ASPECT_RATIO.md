@@ -134,7 +134,7 @@ in all modes.
 ## Configuration
 
 Precrop behaviour is controlled by the `isp.keepAspect` JSON config field
-(Star6E only — Maruko ignores until SCL crop port lands).
+on both Star6E (VIF capture rect) and Maruko (SCL port crop).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
@@ -189,9 +189,12 @@ Example `isp` section with aspect-ratio cropping disabled:
   `star6e_pipeline.c`. Reinit path tracks `state->active_precrop` so a
   `keepAspect` toggle without dimension change still triggers VIF+VPE
   reconfigure.
-- **Maruko**: Planned. Will use SCL-level crop (`scl_port.crop`) as described
-  above. Separate follow-up; `isp.keepAspect` is parsed but ignored on Maruko
-  until then.
+- **Maruko**: Implemented. SCL-level precrop via `pipeline_common_compute_precrop()`
+  applied in `configure_maruko_scl()` (`scl_port.crop`).  Computed against
+  the post-binning effective input (sensor capt clamped by `mode.output`),
+  so the rect always matches the surface that actually feeds the SCL stage.
+  Falls back to zero crop (full source area, downstream stretch) when
+  `isp.keepAspect=false`.
 
 ## Source Files
 
@@ -200,6 +203,9 @@ Example `isp` section with aspect-ratio cropping disabled:
   `star6e_pipeline_start()`, `star6e_pipeline_reinit()`,
   `star6e_pipeline_start_vif()`, `star6e_pipeline_start_vpe()`
 - `include/star6e_pipeline.h` — `Star6ePrecropRect`, `active_precrop`
+- `src/maruko_pipeline.c` — `maruko_pipeline_configure_graph()`
+  (computes the rect), `configure_maruko_scl()` (writes
+  `scl_port.crop`)
 
 ## SDK References
 

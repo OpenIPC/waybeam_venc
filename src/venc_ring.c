@@ -61,10 +61,12 @@ venc_ring_t *venc_ring_create(const char *shm_name, uint32_t slot_count,
 	 * detaches), then O_EXCL-create a fresh inode the old consumer
 	 * never saw.
 	 *
-	 * The unlink-then-O_EXCL window is closed by single-instance
-	 * enforcement in main.c (is_another_venc_running) — only one
-	 * producer can hold the venc role on this device, so no peer
-	 * can race in to recreate the name between these two syscalls. */
+	 * The unlink-then-O_EXCL window is closed by the race-free
+	 * pidfile + flock gate in main.c (acquire_pidfile_lock); the
+	 * legacy /proc check there is only a fallback when the pidfile
+	 * path is unavailable.  Only one producer can hold the venc role
+	 * on this device, so no peer can race in to recreate the name
+	 * between these two syscalls. */
 	(void)shm_unlink(name);
 	int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
 	if (fd < 0) {

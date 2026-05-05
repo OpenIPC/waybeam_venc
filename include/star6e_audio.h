@@ -1,6 +1,7 @@
 #ifndef STAR6E_AUDIO_H
 #define STAR6E_AUDIO_H
 
+#include "audio_codec.h"
 #include "audio_ring.h"
 #include "star6e_output.h"
 #include "venc_config.h"
@@ -45,8 +46,7 @@ typedef struct {
 	int verbose;
 	AudioRing cap_ring;    /* capture→encode bridge (owned by this struct) */
 	AudioRing *rec_ring;   /* recording ring buffer (NULL if not recording) */
-	void *opus_lib;        /* dlopen handle for libopus.so (NULL if not Opus) */
-	void *opus_enc;        /* OpusEncoder* opaque handle (NULL if not Opus) */
+	AudioCodecOpus opus;   /* Opus encoder handle (lib==NULL if not Opus) */
 } Star6eAudioState;
 
 /** Initialize audio capture, encoder, and RTP output thread. */
@@ -58,6 +58,12 @@ void star6e_audio_teardown(Star6eAudioState *state);
 
 /** Apply mute/unmute to audio encoder channel. */
 int star6e_audio_apply_mute(Star6eAudioState *state, int muted);
+
+/** Build a JSON status snapshot describing whether the audio lib loaded,
+ *  whether capture is running, the codec/rate/channels, and whether Opus
+ *  was successfully initialized.  Returns a malloc'd NUL-terminated string
+ *  the caller must free, or NULL on allocation failure. */
+char *star6e_audio_query_status(const Star6eAudioState *state);
 
 /** Return the real (unfiltered) stdout fd.
  *  When the stdout pipe filter is active, returns the saved fd that bypasses

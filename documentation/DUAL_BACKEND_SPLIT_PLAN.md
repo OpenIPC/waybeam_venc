@@ -57,17 +57,30 @@
   - allow Maruko to ship with explicit stubs until API parity is finished.
 
 ## Maruko Follow-Up Backlog (Must Track Explicitly)
-- JSON config:
-  - keep parser/validation in sync with Star6E.
-- HTTP runtime API:
-  - support read-only endpoints first,
-  - return explicit `not_implemented` for write paths not yet ported.
-- SigmaStar API-touching runtime changes:
-  - per-setting apply handlers for bitrate/GOP/image controls after Star6E validation.
-- Sensor-depth backlog (driver-dependent):
-  - mode/fps re-validation,
-  - direct ISP-bin load stability,
-  - >30fps verification once newer driver is available.
+
+The authoritative backlog now lives in
+`documentation/MARUKO_PARITY_PLAN.md` (verified-against-source gap audit
+plus phased plan).  This section keeps a short pointer + the
+runtime-agnostic items that don't fit the parity plan.
+
+- **Verified gaps and phase tracker:**
+  `documentation/MARUKO_PARITY_PLAN.md`.  As of v0.9.11 the closed gaps
+  are: aspect-ratio precrop (Phase 1), debug OSD overlay code +
+  runtime (Phase 2 + 2b), IMU/BMI270 (closed — no hardware on
+  192.168.2.12), cold-boot sensor unlock (already on Maruko), frame-lost
+  overshoot threshold (shared, raised to 1.5× in v0.9.8).  Open items:
+  live AR-change reinit (Phase 4), audio capture (Phase 5), SD card
+  recording (Phase 6), dual-VENC probe (Phase 7), driver-gated sensor
+  depth (Phase 8), opt-in CPU-saving 3A throttle (Phase 9 — code
+  ready, separate PR).
+- **JSON config parity** with Star6E remains a maintenance line item
+  for new fields.  Pattern: schema add in `venc_config.[ch]` →
+  bridge in `maruko_config.[ch]` → consumer in
+  `maruko_pipeline.c` / `maruko_runtime.c`.
+- **HTTP runtime API:** read-only endpoints first; explicit
+  `not_implemented` for write paths not yet ported.  Use Star6E
+  validation as the gate before porting any SigmaStar API-touching
+  apply handler.
 
 ## Comprehensive Settings Scope (JSON + HTTP)
 - Full setting review and API scope is maintained in:

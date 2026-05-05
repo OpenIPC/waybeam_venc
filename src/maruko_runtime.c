@@ -5,6 +5,8 @@
 #include "maruko_iq.h"
 #include "maruko_pipeline.h"
 #include "scene_detector.h"
+#include "star6e_recorder.h"
+#include "star6e_ts_recorder.h"
 #include "venc_api.h"
 #include "venc_config.h"
 #include "venc_httpd.h"
@@ -16,6 +18,42 @@ typedef struct {
 	VencConfig vcfg;
 	MarukoBackendContext backend;
 } MarukoRunnerContext;
+
+/* HTTP record-status callback needs access to the live recorder state.
+ * Star6E parks a static pointer to its runner in star6e_runtime.c for the
+ * same reason; mirror that pattern here so /api/v1/record/status reflects
+ * the daemon-config-driven TS recorder on Maruko. */
+static MarukoRunnerContext *g_maruko_runner_ctx;
+
+static void maruko_record_status_callback(VencRecordStatus *out)
+{
+	MarukoRunnerContext *ctx = g_maruko_runner_ctx;
+	Star6eTsRecorderState *ts;
+
+	memset(out, 0, sizeof(*out));
+	if (!ctx)
+		return;
+	ts = &ctx->backend.ts_recorder;
+
+	if (star6e_ts_recorder_is_active(ts)) {
+		out->active = 1;
+		snprintf(out->format, sizeof(out->format), "ts");
+		star6e_ts_recorder_status(ts,
+			&out->bytes_written, &out->frames_written,
+			&out->segments, NULL, NULL);
+		snprintf(out->path, sizeof(out->path), "%s", ts->path);
+		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
+	} else {
+		const char *reason = "manual";
+		Star6eRecorderStopReason sr = ts->last_stop_reason;
+		if (sr == RECORDER_STOP_DISK_FULL)
+			reason = "disk_full";
+		else if (sr == RECORDER_STOP_WRITE_ERROR)
+			reason = "write_error";
+		snprintf(out->stop_reason, sizeof(out->stop_reason), "%s",
+			reason);
+	}
+}
 
 static void maruko_bind_controls(MarukoRunnerContext *ctx)
 {
@@ -49,14 +87,12 @@ static int maruko_runner_init(void *opaque)
 	maruko_reset_scene(backend);
 	venc_api_register(&ctx->vcfg, "maruko", maruko_controls_callbacks());
 	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
+	g_maruko_runner_ctx = ctx;
+	venc_api_set_record_status_fn(maruko_record_status_callback);
 	if (ctx->vcfg.video0.qp_delta != 0 &&
 	    maruko_controls_callbacks()->apply_qp_delta) {
 		maruko_controls_callbacks()->apply_qp_delta(
 			ctx->vcfg.video0.qp_delta);
-	}
-
-	if (ctx->vcfg.audio.enabled) {
-		fprintf(stderr, "WARNING: audio output is not supported on maruko backend\n");
 	}
 
 	return 0;

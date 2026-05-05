@@ -1,5 +1,491 @@
 # History
 
+## [0.10.0] - 2026-05-03
+
+`video0` digital zoom (Approach C) — Star6E + Maruko parity.
+
+Adds three new `video0` fields driving a 1:1 SCL crop (output dim = crop
+dim, no upscale, no bandwidth pressure).  Receivers see the smaller dim
+in SPS/PPS; receivers that pin to first SPS render deeper zoom invisibly,
+which is why `zoom_pct` is clamped at a 0.25 floor in the parser.
+
+Schema:
+- `video0.zoomPct` — `0.0` = zoom OFF (full image); `0.25..1.0` = crop
+  fraction (smaller = deeper zoom).  MUT_RESTART (encoder dim change).
+- `video0.zoomX`, `video0.zoomY` — crop centre, `0..1` (0 = top/left,
+  1 = bottom/right).  MUT_LIVE (no respawn — joystick / head-tracker
+  friendly).
+
+Implementation:
+- **Star6E**: `MI_VPE_SetPortCrop(0, 0, ...)` on the existing VPE port —
+  no new SCL channel, no extra mem.  SCL clock bumped 384 → 432 MHz to
+  unblock crop+resize at full sensor input.  Debug OSD canvas stays 1:1
+  with the encoded frame (RGN attaches at the post-SCL VPE port output,
+  not at VPE input — no per-zoom offset needed).
+- **Maruko**: `MI_SCL_SetPortConfig(0,0,0)` carrying both crop and
+  output dim atomically.  Output dimensions stay 16-px aligned and crop
+  offsets stay 2-px aligned; the smaller dimension drives the crop to
+  keep the encoded AR matching the sensor.
+
+Verification:
+- Live sweep on both devices: pct ∈ {1.0, 0.7, 0.5, 0.3, 0.25} × pan ∈
+  {(0.5,0.5), (0,0), (1,0), (0,1), (1,1), (0.5,0.5)}.  Star6E sustains
+  60 fps, Maruko sustains 30 fps across all combinations.  Pan
+  confirmed visually on the live RTP stream for both backends.
+
+## [0.9.16] - 2026-05-03
+
+IntraRefresh: single-knob `intraRefreshMode` enum.
+
+Replaces the boolean `intraRefresh` + two zero-sentinel fields from PR #92
+with one human-readable mode picker (`off` | `fast` | `balanced` | `robust`).
+Each mode targets a self-heal window (150 ms / 500 ms / 1000 ms) and derives
+lines, GOP, and QP from it; per-field overrides remain available.
+
+**Breaking change** (no backward compat): `video0.intraRefresh` boolean is
+removed. Configs from 0.9.15 and earlier carrying `intraRefresh: true` will
+fall through to `intraRefreshMode: "off"` (default) — re-enable explicitly
+via the mode field or `POST /api/v1/intra/mode?mode=balanced`.
+
+Highlights:
+- New `src/intra_refresh.{c,h}` shared helper (used by both backends)
+  computes lines, auto-GOP (one IDR per full GDR pass), and codec-default
+  QP (48 H.265 / 45 H.264 — `u32ReqIQp` is never passed as 0).
+- New `POST /api/v1/intra/mode?mode=<name>` endpoint: sets mode, clears
+  per-field overrides, persists, reinits. One call to switch presets.
+- Extended `/api/v1/intra/status` response: returns mode, target_ms,
+  total_rows, and per-field requested-vs-effective for lines/qp/gop.
+- Both Star6E and Maruko backends share the helper — drift between
+  parallel implementations is no longer possible.
+- Schema field `video0.intra_refresh_mode` registered (FT_STRING,
+  MUT_RESTART) with `intraRefreshMode` camelCase alias.
+- Auto-GOP overrides `gopSize` only when user did not pin a value;
+  explicit `gopSize > 0` is honored and logged at boot.
+- Contract bump 0.8.4 → 0.9.0 (breaking config field rename).
+- 44 new unit tests covering parse, compute, override, clamp, edge cases.
+
+## [0.9.15] - 2026-05-02
+
+Maruko parity Phase 5 — audio capture (Opus / G.711 / raw PCM).
+
+Closes the last big standalone parity gap: Maruko now captures PCM via the
+i6c MI_AI ABI, encodes via the shared codec helpers, and ships the result
+as RTP (or compact UDP) on `outgoing.audioPort`.  The Phase 6 TS recorder
+automatically picks up audio when capture is active — PMT advertises an
+audio PID and PCM frames are interleaved by the existing `ts_mux_write_audio`
+path that Star6E was already wired to.
+
+What ships:
+- `vendor-libs/maruko/libmi_ai.so` (110 KB) and `libmi_ao.so` (85 KB),
+  pulled from the SDK uClibc bundle.  AO is reserved for a future Phase 5b
+  playback path.  MD5SUMS + README updated.
+- New `include/maruko_ai_types.h` carrying the small set of MI_AI types
+  used at runtime (Attr / Data / Format / SoundMode / SampleRate / If),
+  copied verbatim from the SDK headers so the build stays SDK-header-free.
+- New `maruko_ai_impl` shim in `include/maruko_mi.h` + `src/maruko_mi.c`.
+  Symbol set: `MI_AI_InitDev` / `DeInitDev` / `Open` / `Close` /
+  `AttachIf` / `EnableChnGroup` / `DisableChnGroup` / `Read` /
+  `ReleaseData` / `SetMute` / `SetGain` / `SetIfGain`.  Loaded with
+  `RTLD_LAZY|RTLD_GLOBAL` and tolerates absence — no `libmi_ai.so` →
+  audio disabled but the rest of the pipeline runs unchanged.
+- New `src/maruko_audio.c` (~510 LOC) — full capture state machine:
+  `Open(dev=0)` + `AttachIf(ADC_AB)` + `SetGain` + `SetMute` +
+  `SetChnOutputPortDepth` + `EnableChnGroup`; capture thread on
+  `SCHED_FIFO` doing `MI_AI_Read(0, 0, &mic, &echo, 50)` → push
+  PCM into the shared `audio_ring`; encode thread does Opus / G.711 /
+  L16 byte-swap and ships via RTP packetizer or compact UDP.
+- New shared helper `src/audio_codec.{c,h}` — extracted Opus / G.711
+  encoders + stdout filter (singleton, refcounted) from
+  `src/star6e_audio.c`, ~250 LOC moved.  Star6E side switched to the
+  shared helpers; `Star6eAudioState.opus_lib` / `opus_enc` replaced
+  by the new `AudioCodecOpus opus`.  No behavioural change on Star6E.
+- `MarukoBackendConfig` mirrors `vcfg->audio` + `vcfg->outgoing.audio_port`
+  + `outgoing.max_payload_size` so the pipeline can call
+  `maruko_audio_init` without taking a `VencConfig` dependency.
+- `MarukoBackendContext` gains `audio` (state) + `audio_recorder_ring`
+  (bridge from audio encode thread to TS recorder).  Init in
+  `maruko_pipeline_configure_graph` after `bind_maruko_pipeline`,
+  teardown in `maruko_pipeline_teardown_graph` after `stop_dual` and
+  `ts_recorder_stop` so no consumer can race the ring teardown.
+- `apply_mute = maruko_audio_apply_mute` in `maruko_controls.c`,
+  closing the trivial-after-audio-lands gap from the parity matrix.
+- Replaced the `maruko_runtime.c:58-60` "audio output is not supported"
+  warning with the live init call.
+
+Verify gate:
+- `make verify` passes both backends.
+- Bench (192.168.2.12, IMX415): `audio.enabled=true`,
+  `audio.codec=opus|g711a|pcm` → `[audio] Initialized` + RTP arrives on
+  the configured destination port.  Mute toggle via
+  `/api/v1/set?audio.mute=true` cuts audio cleanly.
+
+Caveats:
+- The SSC378QE bench's analog mic wiring is unverified.  `MI_AI_Open`
+  succeeds and `MI_AI_Read` returns frames, but the actual codec on this
+  board may not be wired to a microphone — capture may yield silence.
+  The init path still completes successfully so the userspace pipeline
+  itself is exercised; an analog mic is a separate hardware fix-up.
+- AO (playback) is intentionally not exposed yet — reserved for a
+  future Phase 5b once a use case appears.
+
+## [0.9.14] - 2026-05-02
+
+Maruko parity Phase 6 — TS recording (`record.mode="mirror"` / `"dual"`).
+
+Lights up on-device TS-mux recording on Maruko by reusing the Star6E
+TS recorder state machine.  Two modes wired:
+
+- **mirror**: chn 0 frames are written to the .ts file alongside the
+  RTP stream.  Single encoder, simplest case.
+- **dual**: chn 1 (created via Phase 7's `start_dual()`) drains into
+  the .ts file while chn 0 keeps streaming RTP to the configured
+  destination.  The chn 1 drain thread feeds the recorder; the chn 0
+  loop is guarded so it never co-writes.
+
+Audio is video-only for now (no audio backend on Maruko — Phase 5).
+Raw `.hevc` format is rejected with a warning; only `format="ts"` is
+implemented.
+
+Implementation notes:
+- Promoted `src/star6e_recorder.c`, `src/star6e_ts_recorder.c`,
+  `src/ts_mux.c` from `STAR6E_ONLY_SRC` to a new `RECORDER_SRC` list
+  built by both backends.  No `#ifdef PLATFORM_*` was needed — the
+  files only depend on type names from `star6e.h`, which Maruko
+  already pulls in for `MI_SYS_ChnPort_t`.
+- Added a small adapter `src/maruko_ts_recorder.c` that pulls NAL
+  units out of `i6c_venc_strm` (Maruko) and feeds the shared
+  `star6e_ts_recorder_write_video()` primitive.  Mirrors
+  `star6e_ts_recorder_write_stream()` 1:1.
+- `MarukoBackendConfigRecord` extended with `dir`, `format`,
+  `max_seconds`, `max_mb` (already present on the generic
+  `VencConfigRecord`).
+- New `Star6eTsRecorderState ts_recorder` field on
+  `MarukoBackendContext`; opened in `configure_graph` after
+  `start_dual` so the drain thread sees it ready.  Closed in
+  `teardown_graph` after `stop_dual` (no race window).
+
+Verified on 192.168.2.12 (OpenIPC SSC378QE / IMX415, no SD card —
+written to `/tmp` tmpfs).  Live test pending in the next session.
+
+Out of scope for this PR (deferred):
+- Raw `.hevc` recorder on Maruko (the `_write_frame` adapter still
+  takes Star6E's `MI_VENC_Stream_t`; will land alongside Phase 5
+  audio if anyone wants it).
+- HTTP `/api/v1/record/start|stop` for Maruko (daemon-config-driven
+  only for now).
+- Audio mux into the TS container (Phase 5).
+
+## [0.9.13] - 2026-05-02
+
+Maruko parity Phase 3 — BMI270 IMU port (opt-in via `imu.enabled`).
+
+Wires the existing platform-agnostic `src/imu_bmi270.c` into the
+Maruko pipeline so `imu.enabled=true` reads gyro + accel from a
+BMI270 over I2C (frame-synced FIFO mode, 200 Hz default ODR).  The
+push callback is currently a stub — samples are read and discarded —
+so this lands the lifecycle but no consumer yet.  Future telemetry /
+sidecar export plugs into the existing callback slot without touching
+init/teardown.
+
+Verified on 192.168.2.12 (OpenIPC SSC378QE / IMX415 1472x816@120,
+H.265 25 Mbps RTP):
+- BMI270 detected at `0x68` on `/dev/i2c-1` (chip_id=`0x24`).
+- 400-sample auto-bias (~2 s) completes cleanly; gyro bias ≈
+  (0.005, -0.006, -0.001) rad/s on bench.
+- 200 Hz FIFO drain runs every video frame; 1963 samples / 9 s of
+  streaming at 118 fps, 0 read errors.
+
+- **Maruko-specific ordering constraint.**  IMU init must run BEFORE
+  `MI_VENC_StartRecvPic` (i.e. before `bind_maruko_pipeline()`)
+  because the auto-bias loop blocks the main thread for ~2 s
+  (400 samples @ 200 Hz).  Empirically on Maruko, blocking the main
+  thread for 2 s after StartRecvPic leaves the VENC fd in a state
+  where `poll()` never returns POLLIN and the stream loop never
+  progresses.  Star6E does not exhibit this — IMU init can stay
+  post-VENC there.  The constraint is captured inline in
+  `maruko_pipeline_configure_graph()` so future re-orders don't
+  regress.
+- `src/imu_bmi270.c` moved from `STAR6E_ONLY_SRC` to `HELPER_SRC`
+  (already platform-agnostic; no `#ifdef PLATFORM_*` in the file).
+- New `imu` field on `MarukoBackendContext` (`ImuState *`, NULL when
+  disabled).  `MarukoBackendConfig` carries `VencConfigImu imu`
+  embedded from `vcfg->imu` so the pipeline does not reach into
+  `VencConfig` directly (consistent with the `show_osd` /
+  `keep_aspect` bridge fields).
+- Per-frame `imu_drain()` runs in `maruko_pipeline_process_stream()`
+  before `MI_VENC_GetStream` (Star6E parity at
+  `star6e_runtime.c:727`).  No-op when `ctx->imu == NULL`.
+- Stop/destroy in `maruko_pipeline_teardown_graph()` ahead of any
+  unbind/stop, mirroring Star6E.
+- No config-schema change.  `imu.enabled` default remains `false`,
+  so existing setups are untouched.
+
+## [0.9.12] - 2026-05-02
+
+Maruko parity Phase 9 — opt-in 3A CPU throttle (`isp.aeMode`).
+
+The 1080p120 H.265 25 Mbps profile burned ~62% of a single Cortex-A7
+core on Maruko (SSC378QE).  Per-thread sampling pinned ~17.5% to
+libcus3a.so's `3A_Proc_0` worker (spawned by `MI_ISP_EnableUserspace3A`,
+runs at sensor frame sync) plus matching kernel ISP/VENC kthread time.
+The host pipeline was already lean (~3% main thread) so the ceiling
+was the per-frame 3A loop — not anything we packetize or send.
+
+The cut: keep `MI_ISP_EnableUserspace3A` so the IQ→HW pump (the same
+`3A_Proc_0` thread) keeps writing saturation/sharpness/brightness to
+silicon, but swap the SDK's NATIVE AE algorithm for a no-op stub via
+`MI_ISP_CUS3A_RegInterfaceEX(ADAPTOR_1)`.  AWB stays NATIVE so white
+balance still tracks the scene (the 4096/1024/1024 R/G/B gains in the
+SDK demo turned out to be smoke-test values, not calibrated daylight
+gains — letting the bin drive AWB gives a usable picture).  AE is
+then driven by a 15 Hz supervisory thread (`src/maruko_cus3a.c`) that
+reads the 128x90 luminance grid via `MI_ISP_AE_GetAeHwAvgStats` and
+applies a three-stage cascade (shutter → sensor gain → ISP digital
+gain) via `MI_ISP_CUS3A_SetAeParam`.
+
+- New config field **`isp.aeMode`** (`"native"` default,
+  `"throttle"` opt-in).  Default preserves existing behaviour and
+  gives a safety hatch if a different sensor / firmware breaks the
+  no-op adaptor.  Live mode change requires restart (the adaptor swap
+  and `CUS3A_Enable` flags are init-only); SIGHUP at runtime is a
+  documented limitation.
+- New module **`src/maruko_cus3a.c` + `include/maruko_cus3a.h`**
+  (≈700 lines).  `_install_noop_adaptor()` registers the AE stub;
+  `_start()` launches the 15 Hz controller thread; `_stop()` joins
+  on teardown.  `MarukoCus3aConfig.throttle_mode` gates the
+  AE-control law — when 0 the thread still runs cap-enforcement +
+  stats reads (Star6E-equivalent behaviour).
+- **Pipeline integration** (`src/maruko_pipeline.c`): adaptor install
+  is gated on `cfg.ae_mode == "throttle"` after `MI_SNR_SetFps`;
+  thread starts when `ae_fps > 0` regardless of mode.  Default-on bin
+  gain ceiling switched to `bin_max_sensor_gain` (8192 on IMX415)
+  when user sets `gainMax=0`, fixing the previous over-bright bias
+  (the old default capped at a 32× synthetic ceiling).
+- **Config / fixture**: `config/venc.default.json` adds
+  `"aeMode": "native"` so the round-trip layout test passes.
+
+Verified on 192.168.2.12 (SSC378QE / IMX415 1472x816@120fps,
+H.265 25 Mbps RTP):
+- `aeMode=native` (default): unchanged behaviour, ~50% sys CPU.
+- `aeMode=throttle`: ~36% sys CPU (≈24 percentage-point drop on a
+  single-core SoC), `3A_Proc_0` ticks 89→36 per 3 s sample, AE
+  responds visibly to scene changes at 15 Hz, IQ knobs
+  (saturation / sharpness / brightness) still hot-apply.
+
+## [0.9.11] - 2026-05-02
+
+Maruko parity Phase 2b — debug OSD now functional (kernel-oops cured).
+
+Verified on 192.168.2.12 (OpenIPC SSC378QE, kernel 5.10.61): with
+`debug.showOsd=true`, RGN init/create/attach/getcanvas all succeed,
+encode loop runs at ~117 fps, no kernel taint, OSD canvas mapped at
+1472x816 stride 736.
+
+- **Root cause was a build-time conditional bug, not a kernel/lib
+  mismatch.**  The Maruko build defines BOTH `-DPLATFORM_STAR6E` and
+  `-DPLATFORM_MARUKO` (the Star6E backend's MI shim headers are reused
+  for type compatibility; see `Makefile:39`).  In Phase 2,
+  `src/debug_osd.c` started with `#ifdef PLATFORM_STAR6E`, so the
+  Star6E branch was compiled into the Maruko binary too — and the
+  Star6E ABI (1-arg `MI_RGN_Init(palette*)`, mod_id 0 = VPE, 3-arg
+  `AttachToChn`) ran against the Maruko kernel/lib pair.  That
+  ABI mismatch produced the `MI_DEVICE_Ioctl → kfree → compound_head`
+  oops with a userspace-shaped pointer (`r0=0x0f9c0900`) reaching
+  kfree.  Fixed by changing the first conditional to
+  `#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)` so
+  Maruko binaries enter the proper Maruko branch.
+- **`debug_osd`: Maruko ABI branch (now active).**  Targets the
+  OpenIPC libmi_rgn.so v3 API as documented in
+  `Maruko_work_dir/SourceCode/project/release/include/mi_rgn.h` and
+  used by the official IPC demo at
+  `Maruko_work_dir/ipc_demo/maruko/common/osd/osd.cpp`:
+  `MI_RGN_Init(soc_id, palette*)` (palette as direct arg, not wrapped),
+  3-arg `MI_RGN_Create(soc_id, handle, attr*)`, 4-arg
+  `MI_RGN_AttachToChn(soc_id, handle, chnport*, param*)`, 64-bit
+  `MI_PHY` / pointer-width `MI_VIRT` in `MI_RGN_CanvasInfo_t`,
+  module ID 34 (`E_MI_MODULE_ID_SCL` — RGN is attached to SCL/0/0/0).
+- **`maruko_mi`: pre-load `libmi_rgn.so`.**  Added to the existing
+  RTLD_GLOBAL dep chain in `maruko_mi_init()` (alongside
+  `libcam_os_wrapper`, `libmi_common`, `libispalgo`, `libcus3a`) so the
+  later `dlopen` from `debug_osd.c` finds the dependency graph fully
+  resolved.  (`src/maruko_mi.c`)
+- **`maruko_pipeline`: init-before-kthread ordering.**  Moved
+  `debug_osd_create()` ahead of `bind_maruko_pipeline()` so it runs
+  after the SCL channel exists (`maruko_start_vpe`) but BEFORE
+  `MI_VENC_StartRecvPic` spawns the encoder kthread.  The v5.10
+  OpenIPC kernel mi_rgn driver requires the singlethread workqueue
+  to be created from the main task.  Dropped the Phase 2 safety-gate
+  WARN-and-skip — the runtime is now real.  (`src/maruko_pipeline.c`)
+
+Recipe cross-referenced with `waybeam-hub/src/rgn_backend_maruko.c`,
+which had already verified the dep preload + module-ID-34 pattern
+against the same kernel/lib pair (different `MI_RGN_OsdChnPortParam_t`
+trailing field — the Maruko SDK header in
+`Maruko_work_dir/SourceCode/project/release/include/mi_rgn_datatype.h`
+omits `stColorInvertAttr` that the hub's older vendored header
+includes; both work because the kernel reads only the union prefix).
+
+## [0.9.10] - 2026-05-02
+
+Maruko parity Phase 2 — debug OSD overlay wired to both backends.
+
+- **`maruko_pipeline`: debug OSD plumbed.**  Mirrors Star6E
+  (`star6e_runtime.c:825-849`):
+  `debug_osd_create()` runs at the end of
+  `maruko_pipeline_configure_graph()` after VENC bind+start (gated on
+  the new `cfg.show_osd`, sourced from `debug.showOsd`),
+  `debug_osd_begin_frame / sample_cpu / text / end_frame` runs
+  per frame inside `maruko_pipeline_process_stream()` showing fps + cpu,
+  and `debug_osd_destroy()` runs at the top of
+  `maruko_pipeline_teardown_graph()` before any unbind/stop.  Both
+  backends now share `src/debug_osd.c` + `src/debug_osd_draw.c`
+  (moved from `STAR6E_ONLY_SRC` to `HELPER_SRC`).  When
+  `debug.showOsd=false` (default) no OSD code runs on either backend.
+- **Maruko runtime path safety-gated.**  On the test target
+  (192.168.2.12, OpenIPC SSC378QE), invoking `MI_RGN_Init` triggers a
+  kernel Oops in `MI_DEVICE_Ioctl` (kfree path) and wedges the encode
+  loop — the same lib/kernel SDK vintage mismatch documented in
+  `memory/maruko_osd_render_bringup.md`.  Until Phase 2b ships the cure
+  (RTLD_GLOBAL dep preload, `MI_MODULE_ID_SCL`=34, init-before-worker-
+  thread; tracked in `documentation/MARUKO_PARITY_PLAN.md`),
+  `debug.showOsd=true` on Maruko emits a one-time warning and skips the
+  attach so a stale config never hangs venc.  Star6E behaviour is
+  unchanged.  (`src/maruko_pipeline.c`, `src/maruko_config.c`,
+  `include/maruko_config.h`, `include/maruko_pipeline.h`, `Makefile`)
+
+## [0.9.9] - 2026-05-02
+
+Maruko parity Phase 1 — aspect-ratio precrop on the SCL stage.
+
+- **`maruko_pipeline`: SCL precrop wired up.**  `configure_maruko_scl()`
+  now writes a centered crop rect into `scl_port.crop` instead of zero
+  when `isp.keepAspect=true` and the encode aspect ratio differs from the
+  sensor's effective output.  The rect is computed via the existing
+  `pipeline_common_compute_precrop()` helper (Star6E parity) against the
+  post-binning effective input (`sensor.plane.capt` clamped by
+  `mode.output`), so it always matches the surface that actually feeds
+  the SCL stage.  Falls back to zero crop (full source area, downstream
+  stretch) when `isp.keepAspect=false`.  `venc_api_set_active_precrop()`
+  is called on success for `/api/v1/config` visibility, and
+  `venc_api_clear_active_precrop()` runs in
+  `maruko_pipeline_teardown_graph()` for symmetry with Star6E.  Verified
+  on bench (192.168.2.12, IMX415): 960x720 (4:3) on 1920x1080 sensor
+  mode → `Precrop: 1920x1080 -> 1440x1080 (offset 240,0)`, encoding
+  89 fps @ 25 Mbps without stretching; 1280x720 (16:9) and
+  `keepAspect=false` paths both produce the legacy zero-crop output.
+  (`src/maruko_pipeline.c`, `src/maruko_config.c`,
+  `include/maruko_config.h`, `include/venc_config.h`,
+  `documentation/PRECROP_ASPECT_RATIO.md`)
+
+## [0.9.8] - 2026-05-02
+
+Frame-drop fix: relax the SDK FrameLost rate-control threshold from 120% to
+150% of target bitrate.  Affects both Star6E and Maruko (shared
+`pipeline_common_frame_lost_threshold`).
+
+On Maruko at 5 Mbps / 60 fps, hand-wave motion routinely caused the
+encoder's measured output to spike to ~6.0–6.4 Mbps — past the old 120%
+floor (6.144 Mbps).  `MI_VENC_SetFrameLostStrategy(NORMAL)` then dropped
+whole frames as a safety net, costing 5–10 fps under motion even though
+CBR rate control would have absorbed the overshoot in the next few frames
+via QP feedback.
+
+Confirmed via per-frame timing on device: user-space loop work stayed
+≤230 µs avg / ≤365 µs max (well under the 16.67 ms 60-fps budget) in both
+modes; the missing frames were skipped at the SDK encoder layer, not by
+FIFO eviction.  Disabling `frameLost` entirely on test eliminated the
+drop; raising the threshold to 150% restores the safety net for genuine
+sustained network overload (>50% over target) while letting motion bursts
+through.
+
+- **`pipeline_common.c::pipeline_common_frame_lost_threshold`**: change
+  margin from `bits / 5U` (20%) to `bits / 2U` (50%).  Floor of 524288
+  bits (~512 kbps headroom) preserved for low-bitrate streams.
+- No config-schema change.  `frameLost` default remains `true`.
+
+Verified on 192.168.2.12 (SSC378QE / IMX415 @1920x1080 / 60 fps,
+H.265 5 Mbps RTP): under continuous hand-wave motion, app-observed FPS
+stays at 59 (vs 54–55 before); on-device VENC frame-arrival jitter goes
+from 33.3 ms (one-frame skip) to a flat 16.7 ms.
+
+## [0.9.7] - 2026-05-02
+
+May 2026 code-review follow-up bundle (PRs P1+P2+P3+P4+P5 squashed).
+
+- **P2 — `httpd`: Content-Length parser anchored.**  The HTTP request
+  parser previously located `Content-Length:` via an unanchored
+  case-insensitive substring search across the entire header block,
+  which would latch onto the literal substring inside an arbitrary
+  header value (e.g. `X-Forwarded: content-length:99`).  Fix walks
+  the header block line by line and only matches at the start of a
+  line.  Eliminates a request-smuggling vector against the live
+  config / set endpoints; also drops the now-unused
+  `httpd_strcasestr` helper.  (`src/venc_httpd.c`)
+
+- **P4 — Move orphaned `snr_*` harnesses to `tools/`.**
+  `snr_sequence_probe.c` and `snr_toggle_test.c` were never wired
+  into the build (orphaned since 0.6.2).  Relocated under `tools/`
+  to match the rest of the standalone diagnostic harnesses; updated
+  the path reference in `documentation/REFACTORING_PLAN.md`.  No
+  Makefile changes required.
+
+- **P3 — `main`: pidfile + flock single-instance gate.**  The legacy
+  guard scanned `/proc/*/comm` for a process named `venc`, which is
+  inherently racy: two near-simultaneous launches each see no peer
+  and both proceed to grab the SHM ring.  New `acquire_pidfile_lock()`
+  takes an exclusive non-blocking `flock(LOCK_EX | LOCK_NB)` on
+  `/var/run/venc.pid` (falling back to `/tmp/venc.pid`) before the
+  legacy `/proc` scan; `EWOULDBLOCK` exits cleanly with rc=1.  The
+  fd is held with `O_CLOEXEC` and intentionally leaked so the kernel
+  releases the lock at process exit even on SIGKILL.  Old `/proc`
+  fallback retained as defence-in-depth for the case where pidfile
+  lock acquisition itself fails (e.g. read-only fs).  Updated comment
+  in `src/venc_ring.c` to reference the new mechanism.
+  (`src/main.c`, `src/venc_ring.c`)
+
+- **P1 — `venc_api`: shrink `g_cfg_mutex` hold time.**  The live-set
+  apply path held `g_cfg_mutex` across `stage_params_into_cfg` and
+  `preflight_live_group_callbacks` even though both operate purely
+  on stack-local config copies and do not read or mutate the shared
+  `g_cfg` pointer.  Moved both calls outside the mutex region; the
+  mutex is now only held during `apply_live_group_sequence_locked`,
+  which is the irreducible window where backend `apply_*` callbacks
+  read additional vcfg fields beyond their parameters via the
+  registered `&ctx->vcfg`.  No behavior change; reduces serialization
+  in the rapid-fire `/api/v1/set` path used by the link_controller.
+  Documented the irreducible hold-time contract in the mutex
+  declaration's doc comment.  (`src/venc_api.c`)
+
+  Note on scope: the original CR claim of "torn-string reads at
+  120 fps" did not match any reachable code path — backend reads
+  of `vcfg->...` strings happen only at init/teardown or inside
+  the `apply_*` callbacks (under the mutex).  The deeper deferred
+  work-queue rework deferred until the apply-callback contract is
+  changed.
+
+- **P5 — `maruko_pipeline_run()` split.**  Reduced from 301 lines
+  to ~50 by extracting `maruko_pipeline_init_streaming`,
+  `maruko_pipeline_cleanup_streaming`,
+  `maruko_pipeline_check_idle_abort`,
+  `maruko_pipeline_await_frame`,
+  `maruko_pipeline_process_stream`, and
+  `maruko_pipeline_log_verbose_frame` into `MarukoStreamRuntime`
+  helpers.  Outer loop now mirrors the Star6E shape
+  (`star6e_runner_run` + `star6e_runtime_process_stream`).
+  Behavior preserved: idle-abort timer (`MARUKO_IDLE_ABORT_US`),
+  idle-warn timer (`MARUKO_IDLE_WARN_US`), FPS-kick, pressure-gating,
+  verbose-cadence (`MARUKO_PKTZR_VERBOSE_ACTIVE`), cached pack
+  reuse, POLLERR fallback.  (`src/maruko_pipeline.c`)
+
+- **Tests.**  `tests/test_venc_httpd.c` gains coverage of the new
+  Content-Length walker (anchored match, case-insensitive,
+  multi-header, header-value-confused-with-body, missing/oversized,
+  negative).  `scripts/test_pidfile_lock.sh` exercises the flock
+  gate by launching two short-lived test processes and asserting
+  the second exits with `EWOULDBLOCK`.  Existing `test_multi_set_*`
+  cases continue to cover the now-mutex-free stage/preflight path
+  in `apply_live_set_query`.
+
 ## [0.9.2] - 2026-04-28
 
 Transport-pressure observability (the prior "Level 2 — local FPS skip"
@@ -238,7 +724,6 @@ the only path that scales.
   in `src/venc_config.c` is now an explicit sync point alongside the
   struct, parser/serializer, API field+alias tables, WebUI `SECTIONS[]`,
   and `config/venc.default.json`.
-
 ## [0.8.1] - 2026-04-25
 
 SD-card recording browser (dashboard tab + JSON API):

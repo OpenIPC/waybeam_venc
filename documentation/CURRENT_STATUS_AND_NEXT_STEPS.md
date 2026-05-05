@@ -98,11 +98,17 @@
 - Deep sensor-mode/high-FPS mapping on Maruko is deferred until newer driver update.
 - Treat Maruko validation scope for now as stable 30fps streaming + backend correctness.
 
-## High-FPS Unlock Summary (Star6E)
+## High-FPS Unlock Summary (Star6E + Maruko)
 - Sensor custom-command pre-latch sequence for cold-boot unlock is documented in:
   - `documentation/SENSOR_UNLOCK_IMX415_IMX335.md`
 - Historical unlock experiments and rationale are tracked in:
   - `documentation/IMPLEMENTATION_PHASES.md`
+- **Ported to Maruko** (`maruko_pipeline.c:930-933`): IMX415 / IMX335 cold-boot
+  latch unlock runs identically on Maruko before sensor mode select.
+- **Frame-lost overshoot protection** is shared via
+  `pipeline_common_frame_lost_threshold()` (`src/pipeline_common.c`) and runs on
+  both backends.  Threshold is target × 1.5 with a 512 kbps floor since v0.9.8;
+  see `HISTORY.md` 0.9.8 entry for the motion-burst rationale.
 
 ## Prioritized Next Steps
 1. ~~Introduce HTTP control API for live updates~~ — **done** (v0.1.7):
@@ -114,9 +120,10 @@
    - keep direct helper, HTTP API, and on-disk config examples synchronized,
    - validate Star6E parity against the current `/etc/venc.json` runtime path,
    - add config migration notes for future schema versions.
-3. Precrop aspect-ratio correction for Maruko (SCL-level crop):
-   - Port Star6E precrop logic to Maruko using `scl_port.crop`.
-   - Design doc is ready: `documentation/PRECROP_ASPECT_RATIO.md`.
+3. ~~Precrop aspect-ratio correction for Maruko (SCL-level crop)~~ — **done**
+   (v0.9.9): `configure_maruko_scl()` writes a centered rect via
+   `pipeline_common_compute_precrop()`; see `documentation/PRECROP_ASPECT_RATIO.md`
+   and `documentation/MARUKO_PARITY_PLAN.md` Phase 1.
 4. Extend 3A controls from on/off into cadence/profile tuning (Star6E-first):
    - **done:** `--ae-cadence N` implemented for Star6E (v0.1.6), auto mode at >60fps.
    - quantify CPU savings vs image adaptation behavior,

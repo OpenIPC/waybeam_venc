@@ -10,10 +10,16 @@ uint32_t pipeline_common_frame_lost_threshold(uint32_t kbps)
 {
 	uint32_t bits, margin;
 
+	/* SDK FrameLost (E_MI_VENC_FRMLOST_NORMAL) skips whole frames when the
+	 * encoder's measured output exceeds this threshold.  Set 50% above
+	 * target so transient motion bursts (which routinely overshoot CBR by
+	 * 20-40% before QP feedback catches up) don't drop frames; the rate
+	 * controller absorbs them in a few frames.  Tighter (e.g. 20%) caused
+	 * 5-10 fps loss on Maruko under hand-wave motion at 5 Mbps/60 fps. */
 	if (kbps > 200000U)
 		kbps = 200000U;
 	bits = kbps * 1024U;
-	margin = bits / 5U;
+	margin = bits / 2U;
 	if (margin < 524288U)
 		margin = 524288U;
 	return bits + margin;

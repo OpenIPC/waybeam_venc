@@ -26,6 +26,17 @@ typedef struct {
 } Star6ePrecropRect;
 
 typedef struct {
+	int active;
+	uint32_t level_x100;
+	uint32_t output_w;
+	uint32_t output_h;
+	uint32_t crop_x;
+	uint32_t crop_y;
+	uint32_t crop_w;
+	uint32_t crop_h;
+} Star6eZoomStatus;
+
+typedef struct {
 	SensorSelectResult sensor;
 	MI_VENC_CHN venc_channel;
 	MI_SYS_ChnPort_t vif_port;
@@ -97,6 +108,13 @@ void star6e_pipeline_stop(Star6ePipelineState *state);
 /** Disable VPE prescaler (cleanup during shutdown). */
 void star6e_pipeline_vpe_scl_preset_shutdown(void);
 
+/** Apply digital zoom on VPE port 0.  pct=0 disables (full-frame).
+ *  Returns 0 on success, -1 if VPE not yet started or SDK rejected the
+ *  rect.  Safe to call before pipeline start (no-op returns -1). */
+int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
+	double pct, double x, double y);
+void star6e_pipeline_zoom_status(Star6eZoomStatus *out);
+
 /** Service custom 3A (AWB/AE) at regular intervals. */
 void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 	struct timespec *ts_last);
@@ -106,5 +124,27 @@ void star6e_pipeline_cus3a_reset(void);
 
 /** Calculate max exposure time to avoid frame drops at target FPS. */
 int star6e_pipeline_cap_exposure_for_fps(uint32_t fps);
+
+/** Snapshot of the IntraRefresh configuration applied to ch0 at the most
+ *  recent pipeline start.  All zeros (mode_name="off") when feature is
+ *  disabled.  Populated by mode-driven path in star6e_pipeline.c. */
+typedef struct {
+	char mode_name[16];             /* "off" | "fast" | "balanced" | "robust" */
+	int active;                     /* mode != off and apply_ok */
+	int mi_supported;               /* libmi_venc.so exports SetIntraRefresh */
+	int apply_ok;                   /* SetIntraRefresh succeeded */
+	uint32_t target_ms;             /* mode constant, 0 if off */
+	uint32_t total_rows;            /* ceil(height / lcu_h) */
+	uint32_t requested_lines;       /* config override value (0 = mode auto) */
+	uint32_t effective_lines_per_p; /* what was actually programmed */
+	int      lines_clamped;         /* override exceeded total_rows */
+	uint32_t requested_qp;          /* config override value (0 = codec default) */
+	uint32_t effective_qp;          /* what was actually programmed */
+	double   explicit_gop_sec;      /* config gop_size (0.0 = mode auto) */
+	double   effective_gop_sec;     /* what was actually programmed */
+	int      gop_auto;              /* 1 if effective_gop_sec came from auto */
+} Star6eIntraRefreshStatus;
+
+void star6e_pipeline_intra_refresh_status(Star6eIntraRefreshStatus *out);
 
 #endif /* STAR6E_PIPELINE_H */

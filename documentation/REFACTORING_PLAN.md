@@ -105,8 +105,8 @@ lifecycle flow.
 - Replace `main.h` includes in:
   - `src/backend_star6e.c`
   - `src/backend_maruko.c`
-  - `src/snr_toggle_test.c`
-  - `src/snr_sequence_probe.c`
+  - `tools/snr_toggle_test.c`
+  - `tools/snr_sequence_probe.c`
   - any other remaining users
 - Update `Makefile` source and dependency lists.
 - Remove all `__double_underscore__` identifiers and legacy parser macros.
