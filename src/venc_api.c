@@ -2507,7 +2507,7 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 	 * Maruko binding, refuse the write rather than corrupt the channel
 	 * attr struct. */
 #if !HAVE_BACKEND_STAR6E
-	(void)buf; (void)q; (void)ret;
+	(void)req; (void)buf; (void)q; (void)ret;
 	return httpd_send_error(fd, 501, "not_implemented",
 		"dual/set not implemented on this backend");
 #else
