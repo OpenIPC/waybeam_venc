@@ -8,6 +8,7 @@
 #include "maruko_output.h"
 #include "scene_detector.h"
 #include "sensor_select.h"
+#include "star6e_recorder.h"
 #include "star6e_ts_recorder.h"
 
 #include <signal.h>
@@ -58,6 +59,10 @@ typedef struct {
    * mirror mode the chn 0 frame loop drives it; in dual mode the chn 1
    * drain thread does. */
   Star6eTsRecorderState ts_recorder;
+  /* Raw HEVC recorder state — used when record.format == "hevc" (Star6E
+   * parity).  Active when recorder.fd >= 0.  At most one of recorder /
+   * ts_recorder is active at a time; format dispatch happens at start. */
+  Star6eRecorderState recorder;
   /* SCL crop base after optional binning and AR-matched precrop.  Stored
    * here so maruko_pipeline_apply_zoom can reposition the zoom rect on
    * live x/y pan without recomputing pipeline geometry. */

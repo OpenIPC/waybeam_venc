@@ -20,11 +20,22 @@
 
 /* HEVC stream type per ISO/IEC 13818-1 */
 #define TS_STREAM_TYPE_HEVC      0x24
-/* Private data for LPCM audio */
+/* Private data — used for both SMPTE 302M and Opus audio */
 #define TS_STREAM_TYPE_PRIVATE   0x06
 
 /* PAT/PMT re-emission interval in video frames */
 #define TS_PAT_PMT_INTERVAL  15
+
+/* Audio codec selection.
+ *   PCM_S302M — 16-bit PCM packed per SMPTE 302M (BSSD descriptor).  Default
+ *               and only universally-decodable PCM-in-TS form.
+ *   OPUS      — Opus packets per the Opus-in-MPEG-TS mapping.  Requires the
+ *               caller to feed already-encoded Opus access units to
+ *               ts_mux_write_audio (one packet per call).
+ * G.711 is intentionally not supported as a recorded codec — there is no
+ * in-band TS framing that VLC/ffmpeg/mpv decode without external hints. */
+#define TS_AUDIO_CODEC_PCM_S302M  0
+#define TS_AUDIO_CODEC_OPUS       1
 
 typedef struct {
 	uint8_t cc_pat;          /* continuity counter for PAT */
@@ -32,14 +43,18 @@ typedef struct {
 	uint8_t cc_video;        /* continuity counter for video PID */
 	uint8_t cc_audio;        /* continuity counter for audio PID */
 	uint32_t video_frames;   /* frames since last PAT/PMT emission */
-	uint32_t audio_rate;     /* audio sample rate (for LPCM descriptor) */
+	uint32_t audio_rate;     /* audio sample rate */
 	uint8_t audio_channels;  /* audio channel count */
+	uint8_t audio_codec;     /* TS_AUDIO_CODEC_* */
 	uint8_t discontinuity;   /* set 1 to emit discontinuity_indicator on next video */
 	uint32_t pcr_offset;     /* PCR leads PTS by this many 90kHz ticks */
 } TsMuxState;
 
-/** Zero-initialize mux state. */
-void ts_mux_init(TsMuxState *s, uint32_t audio_rate, uint8_t audio_channels);
+/** Zero-initialize mux state.  audio_codec selects how PMT and PES frames
+ *  are emitted; for SMPTE 302M the muxer packs raw s16le samples itself,
+ *  for Opus the caller passes already-encoded Opus packets. */
+void ts_mux_init(TsMuxState *s, uint32_t audio_rate, uint8_t audio_channels,
+	uint8_t audio_codec);
 
 /** Reset continuity counters for a new segment. */
 void ts_mux_reset_cc(TsMuxState *s);

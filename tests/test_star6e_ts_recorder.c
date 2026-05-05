@@ -29,7 +29,7 @@ static int test_ts_recorder_init(void)
 	Star6eTsRecorderState state;
 	int failures = 0;
 
-	star6e_ts_recorder_init(&state, 16000, 1);
+	star6e_ts_recorder_init(&state, 16000, 1, TS_AUDIO_CODEC_PCM_S302M);
 	CHECK("ts_rec init fd", state.fd == -1);
 	CHECK("ts_rec init bytes", state.bytes_written == 0);
 	CHECK("ts_rec init frames", state.frames_written == 0);
@@ -39,7 +39,7 @@ static int test_ts_recorder_init(void)
 	CHECK("ts_rec init max_seconds",
 		state.max_seconds == TS_RECORDER_DEFAULT_MAX_SECONDS);
 
-	star6e_ts_recorder_init(NULL, 0, 0);
+	star6e_ts_recorder_init(NULL, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	CHECK("ts_rec init null no crash", 1);
 	return failures;
 }
@@ -50,7 +50,7 @@ static int test_ts_recorder_start_stop(void)
 	int failures = 0;
 	int ret;
 
-	star6e_ts_recorder_init(&state, 16000, 1);
+	star6e_ts_recorder_init(&state, 16000, 1, TS_AUDIO_CODEC_PCM_S302M);
 	ret = star6e_ts_recorder_start(&state, g_test_dir, NULL);
 	CHECK("ts_rec start ok", ret == 0);
 	CHECK("ts_rec active", star6e_ts_recorder_is_active(&state));
@@ -78,7 +78,7 @@ static int test_ts_recorder_write_video(void)
 	uint8_t video[500];
 
 	memset(video, 0xAB, sizeof(video));
-	star6e_ts_recorder_init(&state, 0, 0);
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	ret = star6e_ts_recorder_start(&state, g_test_dir, NULL);
 	CHECK("ts_rec write start ok", ret == 0);
 
@@ -109,7 +109,7 @@ static int test_ts_recorder_with_audio(void)
 	uint8_t pcm[640];
 
 	audio_ring_init(&ring);
-	star6e_ts_recorder_init(&state, 16000, 1);
+	star6e_ts_recorder_init(&state, 16000, 1, TS_AUDIO_CODEC_PCM_S302M);
 	ret = star6e_ts_recorder_start(&state, g_test_dir, &ring);
 	CHECK("ts_rec audio start ok", ret == 0);
 
@@ -138,7 +138,7 @@ static int test_ts_recorder_not_active(void)
 	uint8_t video[10];
 	int failures = 0;
 
-	star6e_ts_recorder_init(&state, 0, 0);
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	CHECK("ts_rec write not active returns 0",
 		star6e_ts_recorder_write_video(&state, video, 10, 0, 0) == 0);
 	return failures;
@@ -153,7 +153,7 @@ static int test_ts_recorder_status(void)
 	const char *path;
 	Star6eRecorderStopReason reason;
 
-	star6e_ts_recorder_init(&state, 0, 0);
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	star6e_ts_recorder_status(&state, &bytes, &frames, &segs,
 		&path, &reason);
 	CHECK("ts_rec status init bytes", bytes == 0);
@@ -173,7 +173,7 @@ static int test_ts_recorder_start_null(void)
 	Star6eTsRecorderState state;
 	int failures = 0;
 
-	star6e_ts_recorder_init(&state, 0, 0);
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	CHECK("ts_rec start null state",
 		star6e_ts_recorder_start(NULL, g_test_dir, NULL) == -1);
 	CHECK("ts_rec start null dir",
@@ -191,7 +191,7 @@ static int test_ts_recorder_multi_frame(void)
 	uint8_t video[100];
 
 	memset(video, 0xEE, sizeof(video));
-	star6e_ts_recorder_init(&state, 0, 0);
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	ret = star6e_ts_recorder_start(&state, g_test_dir, NULL);
 	CHECK("ts_rec multi start ok", ret == 0);
 

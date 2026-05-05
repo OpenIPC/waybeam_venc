@@ -1,5 +1,173 @@
 # History
 
+## [0.10.5] - 2026-05-05
+
+Maruko-specific default config template (`config/venc.default.maruko.json`).
+
+The shipped `config/venc.default.json` defaults `sensor.unlockEnabled` to
+`true` because that flag is required on Star6E to unlock IMX415/IMX335
+high-FPS modes from cold boot (see
+`documentation/SENSOR_UNLOCK_IMX415_IMX335.md`).  The unlock command
+(`MI_SNR_CustFunction` cmd `0x23`, reg `0x300a`, value `0x80`) targets a
+driver internal latch present in the Star6E `sensor_imx*_mipi.ko`
+modules.  On Maruko the sensor driver layout is different and that latch
+does not exist — the call is at best a no-op + warning, at worst it
+prints a confusing failure on every boot.
+
+A new Maruko user starting from `venc.default.json` would inherit the
+unlock-on flag and see those warnings even though their pipeline is
+fine.  `config/venc.default.maruko.json` is identical to the Star6E
+default except for `sensor.unlockEnabled: false`, so packagers and
+first-time Maruko users have a clean starting point.  The runtime is
+unchanged — `/etc/venc.json` is still the only path the binary reads.
+
+## [0.10.4] - 2026-05-05
+
+`/api/v1/dual/status` reachable on both backends.
+
+Two related issues fixed:
+
+- **Maruko never registered the dual VENC handle with the HTTP API.**
+  `maruko_pipeline_start_dual` brought up chn 1, started the drain
+  thread, and set `ctx->dual`, but it never called
+  `venc_api_dual_register()`.  Result: `/api/v1/dual/status`,
+  `/api/v1/dual/set`, and `/api/v1/dual/idr` all returned 404 even
+  with `record.mode = "dual"` or `"dual-stream"` — a regression vs.
+  Star6E parity claimed in HTTP_API_CONTRACT §"Dual VENC".
+  `maruko_pipeline_stop_dual` now mirrors Star6E by calling
+  `venc_api_dual_unregister()` before tearing down chn 1.
+- **`/api/v1/dual/status` now always returns 200 with `active`.**
+  Previously the handler returned 404 with `not_active` when dual
+  was disabled, which made the endpoint indistinguishable from a
+  routing miss.  Aligned with the `/api/v1/record/status` shape:
+  `{"ok":true,"data":{"active":false}}` when off,
+  `{"ok":true,"data":{"active":true,"channel":1,"bitrate":...,
+  "fps":...,"gop":...}}` when on.  Write endpoints `/dual/set` and
+  `/dual/idr` keep the 404+`not_active` semantics — those still need
+  a live channel to operate on.
+- **`/api/v1/dual/set` is Star6E-only** (returns 501 on Maruko).
+  The previous handler dereferenced `MI_VENC_ChnAttr_t` (i.e.
+  `i6_venc_chn`), but Maruko's venc library expects `i6c_venc_chn`
+  with a different layout — calling it through the wrong typedef
+  corrupted the attr struct.  The latent bug went undetected until
+  this version because Maruko never registered the dual handle, so
+  `/dual/set` always short-circuited to 404 on Maruko before the
+  bad call.  `/dual/idr` is single-arg and works on both.
+
+Verified on 192.168.1.13 (Star6E) with `record.mode` in `{off, dual}`
+— `/dual/status` returns `active:false` and `active:true` respectively;
+`/dual/set?bitrate=8000` and `/dual/idr` both return 200 in dual mode.
+Verified on 192.168.2.12 (Maruko) with `record.mode` in `{off,
+dual-stream}` — same status shape, `/dual/idr` returns 200, `/dual/set`
+returns 501.  `dual` mode (TS file write) was not exercised on Maruko
+because `record.dir=/tmp` is tmpfs there and fills RAM under load;
+`dual-stream` exercises the same `venc_api_dual_register` path.
+
+## [0.10.3] - 2026-05-05
+
+HTTP dispatch pause/resume across pipeline reinit and teardown.
+
+Closes a long-standing HTTP↔runner thread race: the httpd worker
+dereferences SDK handles (VENC/ISP/SCL/VPE channels, audio capture,
+output socket) that the runner thread destroys and recreates during
+reinit or shutdown.  Symptoms ranged from `MI_*` errors against a
+destroyed channel to outright segfaults under heavy WebUI traffic
+during a SIGHUP reinit on Star6E, and visible HTTP hangs across the
+in-process reinit window on Maruko.
+
+Fix: a single chokepoint at the httpd worker's dispatch call.
+
+- `venc_httpd_pause()` sets a flag and drains the in-flight handler
+  (it takes the same mutex the worker holds across `dispatch()`).
+  After pause returns, every new request is answered with 503
+  immediately, so SDK state is safe to tear down.
+- `venc_httpd_resume()` clears the flag.
+
+Call sites:
+
+- `maruko_runtime.c` brackets `teardown_graph` + `reinit_pipeline` with
+  `pause` / `resume` (the in-process reinit window).
+- `maruko_pipeline.c` pauses before final teardown (no resume — the
+  process is exiting).
+- `star6e_runtime.c` pauses across the SDK shutdown teardown until
+  `venc_httpd_stop()` returns (no resume — fork+exec parent or normal
+  exit).
+
+Hardware verification on 192.168.1.13 (Star6E IMX335 @ 60 fps fork+exec
+respawn) and 192.168.2.12 (Maruko in-process reinit): under sustained
+mixed `apply_*` / `query_*` traffic, the pause window emits fast
+sub-4 ms 503s for clients that hit it, no requests hang, no daemon
+crashes, and the encoder keeps streaming throughout the Maruko reinit.
+
+## [0.10.2] - 2026-05-05
+
+Maruko: HTTP record control + raw HEVC recording (Star6E parity).
+
+**HTTP record control** — `/api/v1/record/start` and `/stop` previously
+returned 501 "HTTP record control not available on this backend" so
+the WebUI dashboard record buttons were dead.  The HTTP request
+flags are now drained in the chn 0 drain loop, gated by the same
+`!ctx->dual` guard that protects the chn 0 write (the dual chn 1
+drain thread owns the recorder when active).  Back-to-back `/start`
+calls rotate the segment cleanly and request an IDR so the new
+segment begins on a keyframe.
+
+**Raw HEVC recording** — `record.format = "hevc"` is now accepted on
+Maruko, matching Star6E.  The pipeline holds parallel `ts_recorder`
+and `recorder` (Star6eRecorderState) state; format dispatch happens
+at start and selects which one consumes the chn 0 / chn 1 stream.
+A new `src/maruko_recorder.c` adapter walks `i6c_venc_strm` with the
+same iovec-collected `writev` pattern as `star6e_recorder.c`,
+reusing all the disk-space / sync_file_range plumbing.
+
+Both modes verified on 192.168.2.12 via WebUI: 3760×2116 HEVC Main
+in `.hevc`, HEVC + Opus in `.ts`.
+
+## [0.10.1] - 2026-05-05
+
+TS recorder: universally-decodable audio in `.ts` files.
+
+The recorder previously muxed audio as private-data with an "LPCM"
+registration descriptor that no standard player recognised — VLC,
+ffmpeg, and mpv treated it as `bin_data` and either dropped it or
+played white noise.  Recordings now carry audio in one of two forms,
+selected by `audio.codec`:
+
+- `audio.codec = "pcm"` → SMPTE 302M (BSSD).  Broadcast standard for
+  16-bit PCM in MPEG-TS.  Mono inputs are upmixed to stereo per the
+  302M requirement.  Universally decoded.
+- `audio.codec = "opus"` → Opus-in-MPEG-TS provisional mapping.
+  Re-uses the same Opus encoder feeding the RTP path, so no extra CPU
+  cost.  Each PES carries one Opus access unit prefixed by the
+  `0x7FE0` control header.  Recommended — about 30× smaller audio than
+  PCM at the same intelligibility.
+- `audio.codec = "g711a"` / `"g711u"` → audio is not muxed into the
+  recording (no in-band TS framing that VLC/ffmpeg decode without
+  hints).  Video-only file.
+
+Filenames now carry a `_opus` or `_pcm` suffix so the codec is visible
+without ffprobe (e.g. `rec_02h23m07s_c9e2_opus.ts`).
+
+ts_mux additions:
+- `ts_mux_init` gains an `audio_codec` argument
+  (`TS_AUDIO_CODEC_PCM_S302M` / `TS_AUDIO_CODEC_OPUS`)
+- PMT writer emits the matching registration descriptor (BSSD or Opus)
+  plus the Opus extension descriptor with `channel_config_code`
+- `ts_mux_write_audio` dispatches: SMPTE 302M packs raw s16le with
+  bit-reversal per the AES3 16-bit layout; Opus path wraps each
+  pre-encoded packet in the 11-bit prefix + au_size control header
+- `star6e_ts_recorder_init` gains an `audio_codec` argument plumbed
+  through from `audio.codec`
+
+The Star6E and Maruko audio threads now route the encoded buffer
+(rather than raw PCM) into the recording ring when codec is Opus.
+
+Verification:
+- Host: 1520 unit tests pass; offline sine encode round-trips
+  bit-exact through ffmpeg's SMPTE 302M and Opus parsers.
+- Hardware: Star6E bench (`192.168.1.13`, IMX335).  HEVC + audio
+  recordings in both modes play directly in VLC, mpv, and ffmpeg.
+
 ## [0.10.0] - 2026-05-03
 
 `video0` digital zoom (Approach C) — Star6E + Maruko parity.

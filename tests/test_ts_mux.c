@@ -10,7 +10,7 @@ static int test_ts_mux_init(void)
 	TsMuxState s;
 	int failures = 0;
 
-	ts_mux_init(&s, 16000, 1);
+	ts_mux_init(&s, 16000, 1, TS_AUDIO_CODEC_PCM_S302M);
 	CHECK("ts_mux init cc_pat", s.cc_pat == 0);
 	CHECK("ts_mux init cc_pmt", s.cc_pmt == 0);
 	CHECK("ts_mux init cc_video", s.cc_video == 0);
@@ -20,7 +20,7 @@ static int test_ts_mux_init(void)
 	CHECK("ts_mux init video_frames forces pat/pmt",
 		s.video_frames >= TS_PAT_PMT_INTERVAL);
 
-	ts_mux_init(NULL, 0, 0);
+	ts_mux_init(NULL, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	CHECK("ts_mux init null no crash", 1);
 	return failures;
 }
@@ -32,7 +32,7 @@ static int test_ts_mux_pat_pmt(void)
 	size_t written;
 	int failures = 0;
 
-	ts_mux_init(&s, 16000, 1);
+	ts_mux_init(&s, 16000, 1, TS_AUDIO_CODEC_PCM_S302M);
 	written = ts_mux_write_pat_pmt(&s, buf, sizeof(buf));
 	CHECK("pat_pmt writes 2 packets", written == 2 * TS_PACKET_SIZE);
 
@@ -62,7 +62,7 @@ static int test_ts_mux_pat_pmt_no_audio(void)
 	size_t written;
 	int failures = 0;
 
-	ts_mux_init(&s, 0, 0);
+	ts_mux_init(&s, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	written = ts_mux_write_pat_pmt(&s, buf, sizeof(buf));
 	CHECK("pat_pmt no audio writes 2 packets", written == 2 * TS_PACKET_SIZE);
 	CHECK("pat_pmt no audio sync", buf[0] == TS_SYNC_BYTE);
@@ -75,7 +75,7 @@ static int test_ts_mux_pat_pmt_small_buf(void)
 	uint8_t buf[100];
 	int failures = 0;
 
-	ts_mux_init(&s, 16000, 1);
+	ts_mux_init(&s, 16000, 1, TS_AUDIO_CODEC_PCM_S302M);
 	CHECK("pat_pmt small buf returns 0",
 		ts_mux_write_pat_pmt(&s, buf, sizeof(buf)) == 0);
 	return failures;
@@ -91,7 +91,7 @@ static int test_ts_mux_write_video(void)
 	int failures = 0;
 
 	memset(data, 0xAB, sizeof(data));
-	ts_mux_init(&s, 16000, 1);
+	ts_mux_init(&s, 16000, 1, TS_AUDIO_CODEC_PCM_S302M);
 
 	written = ts_mux_write_video(&s, buf, sizeof(buf),
 		data, sizeof(data), 90000, 1);
@@ -132,7 +132,7 @@ static int test_ts_mux_write_video_no_patpmt(void)
 	int failures = 0;
 
 	memset(data, 0xCD, sizeof(data));
-	ts_mux_init(&s, 0, 0);
+	ts_mux_init(&s, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 
 	/* Write first frame — consumes PAT/PMT */
 	ts_mux_write_video(&s, buf, sizeof(buf), data, sizeof(data), 90000, 0);
@@ -151,13 +151,14 @@ static int test_ts_mux_write_video_no_patpmt(void)
 static int test_ts_mux_write_audio(void)
 {
 	TsMuxState s;
-	uint8_t buf[10 * TS_PACKET_SIZE];
-	uint8_t data[640];
+	uint8_t buf[40 * TS_PACKET_SIZE];
+	/* 960 mono s16le samples = 20 ms @ 48 kHz */
+	uint8_t data[1920];
 	size_t written;
 	int failures = 0;
 
 	memset(data, 0x55, sizeof(data));
-	ts_mux_init(&s, 16000, 1);
+	ts_mux_init(&s, 48000, 1, TS_AUDIO_CODEC_PCM_S302M);
 
 	written = ts_mux_write_audio(&s, buf, sizeof(buf),
 		data, sizeof(data), 45000);
@@ -168,7 +169,96 @@ static int test_ts_mux_write_audio(void)
 	/* Check PID is audio */
 	uint16_t pid = (uint16_t)(((buf[1] & 0x1F) << 8) | buf[2]);
 	CHECK("audio packet pid", pid == TS_PID_AUDIO);
-	CHECK("audio cc incremented", s.cc_audio > 0);
+	CHECK("audio cc tracks packet count",
+		s.cc_audio == ((written / TS_PACKET_SIZE) & 0x0F));
+
+	/* Locate PES payload start: TS header (4) + PES header (14) = byte 18.
+	 * First 4 bytes of PES payload are the SMPTE 302M audio_data_header. */
+	const uint8_t *aes = buf + 4 + 14;
+	/* 960 sample-frames × 5 bytes per stereo pair (mono upmixed) = 4800 */
+	uint16_t aes_size = (uint16_t)((aes[0] << 8) | aes[1]);
+	CHECK("aes audio_packet_size = 4800", aes_size == 4800);
+	/* number_channels: stereo = 00 → top 2 bits of byte 2 are 0 */
+	CHECK("aes number_channels stereo", (aes[2] & 0xC0) == 0x00);
+	/* bits_per_sample: 16-bit = 00 → bits 5..4 of byte 3 are 0 */
+	CHECK("aes bits_per_sample 16", (aes[3] & 0x30) == 0x00);
+	return failures;
+}
+
+static int test_ts_mux_audio_bssd_descriptor(void)
+{
+	TsMuxState s;
+	uint8_t buf[2 * TS_PACKET_SIZE];
+	int failures = 0;
+
+	ts_mux_init(&s, 48000, 1, TS_AUDIO_CODEC_PCM_S302M);
+	ts_mux_write_pat_pmt(&s, buf, sizeof(buf));
+
+	/* Search the PMT packet for the 4-byte "BSSD" registration tag. */
+	const uint8_t *pmt = buf + TS_PACKET_SIZE;
+	int found_bssd = 0;
+	for (size_t i = 0; i + 3 < TS_PACKET_SIZE; i++) {
+		if (pmt[i] == 'B' && pmt[i + 1] == 'S' &&
+		    pmt[i + 2] == 'S' && pmt[i + 3] == 'D') {
+			found_bssd = 1;
+			break;
+		}
+	}
+	CHECK("PMT carries BSSD registration descriptor", found_bssd);
+	return failures;
+}
+
+static int test_ts_mux_audio_opus_pmt(void)
+{
+	TsMuxState s;
+	uint8_t buf[2 * TS_PACKET_SIZE];
+	int failures = 0;
+
+	ts_mux_init(&s, 48000, 1, TS_AUDIO_CODEC_OPUS);
+	ts_mux_write_pat_pmt(&s, buf, sizeof(buf));
+
+	const uint8_t *pmt = buf + TS_PACKET_SIZE;
+	int found_opus = 0, found_ext = 0;
+	for (size_t i = 0; i + 3 < TS_PACKET_SIZE; i++) {
+		if (pmt[i] == 'O' && pmt[i + 1] == 'p' &&
+		    pmt[i + 2] == 'u' && pmt[i + 3] == 's')
+			found_opus = 1;
+		/* extension_descriptor 0x7F len=2 ext_tag=0x80 chcfg=1 (mono) */
+		if (pmt[i] == 0x7F && pmt[i + 1] == 0x02 &&
+		    pmt[i + 2] == 0x80 && pmt[i + 3] == 0x01)
+			found_ext = 1;
+	}
+	CHECK("PMT carries Opus registration descriptor", found_opus);
+	CHECK("PMT carries Opus extension descriptor", found_ext);
+	return failures;
+}
+
+static int test_ts_mux_write_audio_opus(void)
+{
+	TsMuxState s;
+	uint8_t buf[10 * TS_PACKET_SIZE];
+	/* Fake Opus access unit — content doesn't matter for framing. */
+	uint8_t opus[120];
+	size_t written;
+	int failures = 0;
+
+	memset(opus, 0xAA, sizeof(opus));
+	ts_mux_init(&s, 48000, 1, TS_AUDIO_CODEC_OPUS);
+
+	written = ts_mux_write_audio(&s, buf, sizeof(buf),
+		opus, sizeof(opus), 90000);
+
+	CHECK("write_audio opus non-zero", written > 0);
+	CHECK("write_audio opus aligned", (written % TS_PACKET_SIZE) == 0);
+
+	/* PES payload starts at TS(4) + PES(14) = 18.
+	 * First 2 bytes are the Opus control_header_prefix = 0x7F 0xE0;
+	 * byte 2 = au_size = 120 (0x78). */
+	const uint8_t *pes = buf + 4 + 14;
+	CHECK("opus prefix byte 0 = 0x7F", pes[0] == 0x7F);
+	CHECK("opus prefix byte 1 = 0xE0", pes[1] == 0xE0);
+	CHECK("opus au_size = 120",         pes[2] == 0x78);
+	CHECK("opus payload first byte",    pes[3] == 0xAA);
 	return failures;
 }
 
@@ -179,7 +269,7 @@ static int test_ts_mux_write_null_args(void)
 	uint8_t data[10];
 	int failures = 0;
 
-	ts_mux_init(&s, 0, 0);
+	ts_mux_init(&s, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	CHECK("write_video null state",
 		ts_mux_write_video(NULL, buf, sizeof(buf), data, 10, 0, 0) == 0);
 	CHECK("write_video null buf",
@@ -214,7 +304,7 @@ static int test_ts_mux_cc_wraps(void)
 	int failures = 0;
 
 	memset(data, 0x01, sizeof(data));
-	ts_mux_init(&s, 0, 0);
+	ts_mux_init(&s, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	s.video_frames = 0;  /* prevent PAT/PMT */
 
 	/* Write 20 frames — CC should wrap at 16 */
@@ -235,7 +325,7 @@ static int test_ts_mux_small_data(void)
 	size_t written;
 	int failures = 0;
 
-	ts_mux_init(&s, 0, 0);
+	ts_mux_init(&s, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	s.video_frames = 0;
 
 	written = ts_mux_write_video(&s, buf, sizeof(buf),
@@ -257,6 +347,9 @@ int test_ts_mux(void)
 	failures += test_ts_mux_write_video();
 	failures += test_ts_mux_write_video_no_patpmt();
 	failures += test_ts_mux_write_audio();
+	failures += test_ts_mux_audio_bssd_descriptor();
+	failures += test_ts_mux_audio_opus_pmt();
+	failures += test_ts_mux_write_audio_opus();
 	failures += test_ts_mux_write_null_args();
 	failures += test_ts_mux_timespec_to_pts();
 	failures += test_ts_mux_cc_wraps();

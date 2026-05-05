@@ -183,8 +183,12 @@ static void *star6e_audio_encode_fn(void *arg)
 		data = entry.pcm;
 		len  = entry.length;
 
-		/* Forward raw PCM to recording ring before encode */
-		if (state->rec_ring)
+		/* Recording ring is fed in a codec-specific way so the bytes
+		 * match what the TS PMT advertised:
+		 *   PCM/RAW → raw s16le samples (SMPTE 302M repacks below)
+		 *   OPUS    → encoded Opus access unit (Opus-in-TS PES wrap)
+		 *   G.711   → not recorded (no in-band TS framing) */
+		if (state->codec_type < 0 && state->rec_ring && len > 0)
 			audio_ring_push(state->rec_ring, data,
 				(uint16_t)len, entry.timestamp_us);
 
@@ -201,6 +205,9 @@ static void *star6e_audio_encode_fn(void *arg)
 			}
 			data = enc_buf;
 			len = (size_t)encoded;
+			if (state->rec_ring)
+				audio_ring_push(state->rec_ring, data,
+					(uint16_t)len, entry.timestamp_us);
 		} else if (len > 0 &&
 		           (state->codec_type == AUDIO_TYPE_G711A ||
 		            state->codec_type == AUDIO_TYPE_G711U)) {

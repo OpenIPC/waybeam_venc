@@ -264,7 +264,10 @@ static void *encode_fn(void *arg)
 		data = entry.pcm;
 		len  = entry.length;
 
-		if (st->rec_ring)
+		/* Codec-specific routing into the recording ring — see the
+		 * matching block in src/star6e_audio.c for the rationale. */
+		if (st->codec_type == AUDIO_CODEC_TYPE_RAW &&
+		    st->rec_ring && len > 0)
 			audio_ring_push(st->rec_ring, data, (uint16_t)len,
 				entry.timestamp_us);
 
@@ -282,6 +285,9 @@ static void *encode_fn(void *arg)
 			}
 			data = enc_buf;
 			len  = (size_t)encoded;
+			if (st->rec_ring)
+				audio_ring_push(st->rec_ring, data, (uint16_t)len,
+					entry.timestamp_us);
 		} else if (len > 0 &&
 		           (st->codec_type == AUDIO_CODEC_TYPE_G711A ||
 		            st->codec_type == AUDIO_CODEC_TYPE_G711U)) {
