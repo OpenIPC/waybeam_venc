@@ -2152,6 +2152,8 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	d->started_thread = 1;
 
 	ctx->dual = d;
+	venc_api_dual_register(d->channel, d->bitrate, d->fps, d->gop,
+		d->frame_lost);
 	return 0;
 }
 
@@ -2159,6 +2161,8 @@ void maruko_pipeline_stop_dual(MarukoBackendContext *ctx)
 {
 	if (!ctx || !ctx->dual)
 		return;
+
+	venc_api_dual_unregister();
 
 	struct MarukoDualVenc *d = ctx->dual;
 	MI_VENC_DEV dev = ctx->venc_device;

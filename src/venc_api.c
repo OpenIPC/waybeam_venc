@@ -1859,7 +1859,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.10.0\","
+		"\"contract_version\":\"0.10.1\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2387,22 +2387,22 @@ void venc_api_dual_unregister(void)
 static int handle_dual_status(int fd, const HttpRequest *req, void *ctx)
 {
 	char buf[512];
-	int ch;
+	int active, ch;
 	uint32_t br, fps, gop;
 
 	(void)req; (void)ctx;
 
 	pthread_mutex_lock(&g_dual_mutex);
-	if (!g_dual.active) {
-		pthread_mutex_unlock(&g_dual_mutex);
-		return httpd_send_error(fd, 404, "not_active",
-			"Dual VENC channel is not active");
-	}
+	active = g_dual.active;
 	ch = (int)g_dual.channel;
 	br = g_dual.bitrate;
 	fps = g_dual.fps;
 	gop = g_dual.gop;
 	pthread_mutex_unlock(&g_dual_mutex);
+
+	if (!active)
+		return httpd_send_json(fd, 200,
+			"{\"ok\":true,\"data\":{\"active\":false}}");
 
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
@@ -2416,7 +2416,11 @@ static int handle_dual_status(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_json(fd, 200, buf);
 }
 
-/* Apply bitrate/gop to ch1 via MI_VENC — same kernel ioctl pattern as ch0. */
+#if HAVE_BACKEND_STAR6E
+/* Apply bitrate/gop to ch1 via MI_VENC — same kernel ioctl pattern as ch0.
+ * Star6E-only: the MI_VENC_*ChnAttr macros bind to i6_venc_chn here, but
+ * Maruko's venc library expects i6c_venc_chn (different layout).  Until
+ * a Maruko binding is wired up, /api/v1/dual/set returns 501 there. */
 static int dual_apply_bitrate(uint32_t kbps)
 {
 	MI_VENC_ChnAttr_t attr = {0};
@@ -2486,6 +2490,7 @@ static int dual_apply_gop(uint32_t gop_frames)
 	g_dual.gop = gop_frames;
 	return 0;
 }
+#endif /* HAVE_BACKEND_STAR6E */
 
 static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 {
@@ -2495,6 +2500,17 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 
 	(void)ctx;
 
+	/* dual_apply_{bitrate,gop} below operate through MI_VENC_*ChnAttr
+	 * macros that bind to the Star6E i6_venc_chn struct layout.  On
+	 * Maruko the venc library expects i6c_venc_chn (different layout)
+	 * and the call path is wrong.  Until dual_apply_* is ported to the
+	 * Maruko binding, refuse the write rather than corrupt the channel
+	 * attr struct. */
+#if !HAVE_BACKEND_STAR6E
+	(void)buf; (void)q; (void)ret;
+	return httpd_send_error(fd, 501, "not_implemented",
+		"dual/set not implemented on this backend");
+#else
 	pthread_mutex_lock(&g_dual_mutex);
 	if (!g_dual.active) {
 		pthread_mutex_unlock(&g_dual_mutex);
@@ -2555,6 +2571,7 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 	pthread_mutex_unlock(&g_dual_mutex);
 	return httpd_send_error(fd, 400, "unknown_param",
 		"Supported: bitrate, gop");
+#endif /* HAVE_BACKEND_STAR6E */
 }
 
 static int handle_idr_stats(int fd, const HttpRequest *req, void *ctx)

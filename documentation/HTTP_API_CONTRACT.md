@@ -16,7 +16,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.10.0`
+- `contract_version`: `0.10.1`
 - `status`: `active`
 
 ## Governance Rules
@@ -78,7 +78,7 @@ Response `200`:
   "ok": true,
   "data": {
     "app_version": "0.1.7",
-    "contract_version": "0.10.0",
+    "contract_version": "0.10.1",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1001,21 +1001,21 @@ is the intended external interface for per-frame size/type/complexity observatio
 
 ### `GET /api/v1/dual/status`
 
-Query the secondary VENC channel status. Only available when dual or dual-stream
-mode is active.
+Query the secondary VENC channel status. Always returns 200; the `active`
+field tells you whether dual or dual-stream mode is currently running.
 
 ```bash
 wget -q -O- "http://<device-ip>/api/v1/dual/status"
 ```
 
-Response `200`:
+Response `200` — dual VENC active:
 ```json
 {"ok":true,"data":{"active":true,"channel":1,"bitrate":20000,"fps":120,"gop":240}}
 ```
 
-Error `404` — dual VENC not active:
+Response `200` — dual VENC not active (off, mirror, or any non-dual mode):
 ```json
-{"ok":false,"error":{"code":"not_active","message":"Dual VENC channel is not active"}}
+{"ok":true,"data":{"active":false}}
 ```
 
 ### `GET /api/v1/dual/set?<param>=<value>`
@@ -1047,6 +1047,10 @@ Error `400` — missing or invalid parameter:
 ```
 
 Error `404` — dual VENC not active.
+
+Error `501` — backend does not support live dual/set (Maruko).  The Star6E
+binding owns the low-level `MI_VENC_*ChnAttr` write path; a Maruko port has
+not landed yet.
 
 ### `GET /api/v1/dual/idr`
 
@@ -1242,7 +1246,7 @@ Behavior:
 ### Backend Support Matrix
 
 Endpoints that behave the same on both backends are omitted.  Only feature
-divergence is listed.  As of `contract_version: 0.10.0`:
+divergence is listed.  As of `contract_version: 0.10.1`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1250,7 +1254,8 @@ divergence is listed.  As of `contract_version: 0.10.0`:
 | `/api/v1/record/status` | live counters | live counters | Both backends register a status callback against the live `Star6eTsRecorderState`; Maruko reflects daemon-config-driven recording (mirror/dual). |
 | `/api/v1/recordings*` | yes | yes | File listing/download/delete works against `record.dir` regardless of which backend wrote the file. |
 | `/api/v1/audio/status` | yes | yes | Both backends register `query_audio_status`. |
-| `/api/v1/dual/*` | yes | yes | Phase 7 closed Maruko's dual-VENC port (`feature/maruko-dual-venc-port`, v0.9.x).  Returns 404 on either backend when dual is not active. |
+| `/api/v1/dual/status`, `/dual/idr` | yes | yes | `/dual/status` always 200 (`active:false` when off, `active:true,channel,bitrate,fps,gop` when on).  `/dual/idr` returns 200 when active, 404 when not. Maruko HTTP registration landed in 0.10.4 — earlier Maruko builds returned 404 from these even when `record.mode=dual` was running. |
+| `/api/v1/dual/set` | yes | **501** | Star6E-only: the underlying `MI_VENC_*ChnAttr` write path binds to `i6_venc_chn`, but Maruko's venc library expects `i6c_venc_chn` (different layout). Maruko returns 501 until the call path is ported. |
 | `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Both backends use the same IQ table schema. |
 | `/api/v1/awb` | live | live | Both backends register `query_awb_info`. |
 | `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
@@ -1262,6 +1267,19 @@ divergence is listed.  As of `contract_version: 0.10.0`:
 | `isp.aeMode` ("native" / "throttle") | accepted but no-op | applied | Maruko-only opt-in; switching modes mid-run requires a process restart.  Default `"native"` on both backends. |
 
 ## Change Log (Contract)
+- `0.10.1`:
+  - `GET /api/v1/dual/status` always returns `200` now.  When dual VENC
+    is not active the body is `{"ok":true,"data":{"active":false}}`
+    instead of the previous `404` + `not_active` error envelope.
+    `/dual/set` and `/dual/idr` keep the `404` + `not_active` semantics
+    — those are write endpoints that need a live ch1 to operate on.
+  - Maruko: `/api/v1/dual/{status,idr}` now actually reflect the live
+    dual VENC state.  Before this version Maruko started chn 1 when
+    `record.mode = "dual"` or `"dual-stream"` but never registered the
+    handle with the HTTP API, so all three endpoints returned `404`
+    even when dual was running.  Star6E behaviour unchanged.
+  - `/api/v1/dual/set` returns `501` on Maruko (was: silent 404).
+    Star6E behaviour unchanged.  See "Backend Support Matrix".
 - `0.10.0`:
   - Added digital zoom fields: `video0.zoom_pct` (`zoomPct` alias,
     restart-required) plus live pan fields `video0.zoom_x` / `video0.zoom_y`

@@ -1,5 +1,47 @@
 # History
 
+## [0.10.4] - 2026-05-05
+
+`/api/v1/dual/status` reachable on both backends.
+
+Two related issues fixed:
+
+- **Maruko never registered the dual VENC handle with the HTTP API.**
+  `maruko_pipeline_start_dual` brought up chn 1, started the drain
+  thread, and set `ctx->dual`, but it never called
+  `venc_api_dual_register()`.  Result: `/api/v1/dual/status`,
+  `/api/v1/dual/set`, and `/api/v1/dual/idr` all returned 404 even
+  with `record.mode = "dual"` or `"dual-stream"` — a regression vs.
+  Star6E parity claimed in HTTP_API_CONTRACT §"Dual VENC".
+  `maruko_pipeline_stop_dual` now mirrors Star6E by calling
+  `venc_api_dual_unregister()` before tearing down chn 1.
+- **`/api/v1/dual/status` now always returns 200 with `active`.**
+  Previously the handler returned 404 with `not_active` when dual
+  was disabled, which made the endpoint indistinguishable from a
+  routing miss.  Aligned with the `/api/v1/record/status` shape:
+  `{"ok":true,"data":{"active":false}}` when off,
+  `{"ok":true,"data":{"active":true,"channel":1,"bitrate":...,
+  "fps":...,"gop":...}}` when on.  Write endpoints `/dual/set` and
+  `/dual/idr` keep the 404+`not_active` semantics — those still need
+  a live channel to operate on.
+- **`/api/v1/dual/set` is Star6E-only** (returns 501 on Maruko).
+  The previous handler dereferenced `MI_VENC_ChnAttr_t` (i.e.
+  `i6_venc_chn`), but Maruko's venc library expects `i6c_venc_chn`
+  with a different layout — calling it through the wrong typedef
+  corrupted the attr struct.  The latent bug went undetected until
+  this version because Maruko never registered the dual handle, so
+  `/dual/set` always short-circuited to 404 on Maruko before the
+  bad call.  `/dual/idr` is single-arg and works on both.
+
+Verified on 192.168.1.13 (Star6E) with `record.mode` in `{off, dual}`
+— `/dual/status` returns `active:false` and `active:true` respectively;
+`/dual/set?bitrate=8000` and `/dual/idr` both return 200 in dual mode.
+Verified on 192.168.2.12 (Maruko) with `record.mode` in `{off,
+dual-stream}` — same status shape, `/dual/idr` returns 200, `/dual/set`
+returns 501.  `dual` mode (TS file write) was not exercised on Maruko
+because `record.dir=/tmp` is tmpfs there and fills RAM under load;
+`dual-stream` exercises the same `venc_api_dual_register` path.
+
 ## [0.10.3] - 2026-05-05
 
 HTTP dispatch pause/resume across pipeline reinit and teardown.
