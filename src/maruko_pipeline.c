@@ -11,6 +11,7 @@
 #include "maruko_controls.h"
 #include "maruko_cus3a.h"
 #include "maruko_output.h"
+#include "maruko_recorder.h"
 #include "maruko_ts_recorder.h"
 #include "maruko_video.h"
 #include "output_socket.h"
@@ -1691,9 +1692,12 @@ struct MarukoDualVenc {
 	char server[128];
 	int frame_lost;
 	int is_dual_stream;
-	/* Non-NULL when mode == "dual": chn 1 frames are written here
-	 * (TS file).  Owned by MarukoBackendContext, weak ptr here. */
+	/* Non-NULL when mode == "dual": chn 1 frames are written here.
+	 * Exactly one of ts_recorder / recorder is non-NULL based on
+	 * record.format ("ts" or "hevc"), set when the dual struct is
+	 * built.  Both owned by MarukoBackendContext, weak ptrs here. */
 	Star6eTsRecorderState *ts_recorder;
+	Star6eRecorderState *recorder;
 	pthread_t thread;
 	volatile sig_atomic_t running;
 	int started_thread;
@@ -1843,6 +1847,9 @@ static void *maruko_dual_stream_thread(void *arg)
 				 * pipeline tears down. */
 				(void)maruko_ts_recorder_write_stream(
 					d->ts_recorder, &stream);
+			} else if (d->recorder) {
+				(void)maruko_recorder_write_frame(
+					d->recorder, &stream);
 			}
 		}
 
@@ -1955,7 +1962,16 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	d->gop = gop_frames;
 	d->frame_lost = frame_lost;
 	d->is_dual_stream = (strcmp(mode, "dual-stream") == 0);
-	d->ts_recorder = d->is_dual_stream ? NULL : &ctx->ts_recorder;
+	if (d->is_dual_stream) {
+		d->ts_recorder = NULL;
+		d->recorder = NULL;
+	} else if (strcmp(ctx->cfg.record.format, "hevc") == 0) {
+		d->ts_recorder = NULL;
+		d->recorder = &ctx->recorder;
+	} else {
+		d->ts_recorder = &ctx->ts_recorder;
+		d->recorder = NULL;
+	}
 	snprintf(d->mode, sizeof(d->mode), "%s", mode);
 	if (server)
 		snprintf(d->server, sizeof(d->server), "%s", server);
@@ -2347,6 +2363,7 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 		star6e_ts_recorder_init(&ctx->ts_recorder, rate, (uint8_t)ch,
 			ts_codec);
 	}
+	star6e_recorder_init(&ctx->recorder);
 	if (ctx->cfg.record.max_seconds > 0)
 		ctx->ts_recorder.max_seconds = ctx->cfg.record.max_seconds;
 	if (ctx->cfg.record.max_mb > 0)
@@ -2373,29 +2390,40 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 			ctx->cfg.record.frame_lost);
 	}
 
-	/* Phase 6: open TS file for "mirror" (chn 0 → TS) and "dual" (chn 1
-	 * → TS) modes.  Must run AFTER start_dual so that, in dual mode,
-	 * the drain thread sees ts_recorder.fd >= 0 by the time it pulls
-	 * the first chn 1 frame.  Started here so that a follow-up SIGHUP
-	 * reload that flips mode also re-opens the file.
+	/* Phase 6: open recorder for "mirror" (chn 0 → file) and "dual"
+	 * (chn 1 → file) modes.  Must run AFTER start_dual so that, in
+	 * dual mode, the drain thread sees the recorder fd >= 0 by the
+	 * time it pulls the first chn 1 frame.  Started here so that a
+	 * follow-up SIGHUP reload that flips mode also re-opens the file.
 	 *
-	 * Format note: only "ts" is implemented on Maruko; "hevc" requires
-	 * the raw HEVC recorder which depends on the Star6E adapter — log
-	 * and decline rather than silently producing nothing. */
+	 * Format dispatch: "ts" → TS muxer + audio interleaving;
+	 * "hevc" → raw HEVC stream (no audio).  Both backends share the
+	 * same disk-space / rotation / sync_file_range plumbing. */
 	if (ctx->cfg.record.enabled && ctx->cfg.record.dir[0] &&
 	    (strcmp(ctx->cfg.record.mode, "mirror") == 0 ||
 	     strcmp(ctx->cfg.record.mode, "dual") == 0)) {
-		if (strcmp(ctx->cfg.record.format, "ts") != 0) {
+		if (strcmp(ctx->cfg.record.format, "hevc") == 0) {
+			if (star6e_recorder_start(&ctx->recorder,
+			    ctx->cfg.record.dir) == 0) {
+				printf("> [maruko] recording HEVC to %s (%s)\n",
+					ctx->cfg.record.dir,
+					ctx->cfg.record.mode);
+			}
+		} else if (strcmp(ctx->cfg.record.format, "ts") == 0) {
+			if (star6e_ts_recorder_start(&ctx->ts_recorder,
+			    ctx->cfg.record.dir,
+			    ctx->audio.started
+				? &ctx->audio_recorder_ring : NULL) == 0) {
+				printf("> [maruko] recording TS to %s (%s%s)\n",
+					ctx->cfg.record.dir,
+					ctx->cfg.record.mode,
+					ctx->audio.started ? " + audio" : "");
+			}
+		} else {
 			fprintf(stderr,
 				"WARNING: [maruko] record.format '%s' not "
-				"supported (TS only) — recording disabled\n",
+				"supported (ts|hevc) — recording disabled\n",
 				ctx->cfg.record.format);
-		} else if (star6e_ts_recorder_start(&ctx->ts_recorder,
-		    ctx->cfg.record.dir,
-		    ctx->audio.started ? &ctx->audio_recorder_ring : NULL) == 0) {
-			printf("> [maruko] recording to %s (%s%s)\n",
-				ctx->cfg.record.dir, ctx->cfg.record.mode,
-				ctx->audio.started ? " + audio" : "");
 		}
 	}
 
@@ -2776,13 +2804,17 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			MARUKO_PKTZR_VERBOSE_ACTIVE(ctx) ? &frame_pktzr : NULL);
 	}
 
-	/* Mirror mode: write chn 0 frames to the TS recorder before the
-	 * stream is released.  In dual mode the chn 1 drain thread feeds
-	 * the recorder, so chn 0 must NOT also write — concurrent writes
-	 * would interleave NAL units from two encoders into one TS file. */
-	if (!ctx->dual)
+	/* Mirror mode: write chn 0 frames to whichever recorder is active
+	 * before the stream is released.  In dual mode the chn 1 drain
+	 * thread feeds the recorder, so chn 0 must NOT also write —
+	 * concurrent writes would interleave NAL units from two encoders.
+	 * At most one of recorder / ts_recorder is active (format dispatch
+	 * happens at start), so the inactive call is an fd<0 no-op. */
+	if (!ctx->dual) {
 		(void)maruko_ts_recorder_write_stream(&ctx->ts_recorder,
 			&stream);
+		(void)maruko_recorder_write_frame(&ctx->recorder, &stream);
+	}
 
 	/* Release the encoder stream immediately after the last consumer
 	 * of stream payload (maruko_video_send_frame) so the sidecar emit
@@ -2792,6 +2824,61 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	unsigned int pack_count = stream.count;
 	(void)maruko_mi_venc_release_stream(ctx->venc_device,
 		ctx->venc_channel, &stream);
+
+	/* HTTP record control: drain the start/stop request flags so they
+	 * never accumulate across reinit, then act only when this runtime
+	 * actually owns the recorder.  Maruko's chn 1 drain thread (dual
+	 * mode) writes the file directly — same race rationale as the
+	 * `if (!ctx->dual)` guard on the chn 0 write above.  Format
+	 * dispatch mirrors the config-driven start path. */
+	if (!ctx->dual) {
+		char rec_dir[256];
+		int start_pending = venc_api_get_record_start(rec_dir,
+			sizeof(rec_dir));
+		int stop_pending = venc_api_get_record_stop();
+		int is_hevc = (strcmp(ctx->cfg.record.format, "hevc") == 0);
+		int is_ts   = (strcmp(ctx->cfg.record.format, "ts") == 0);
+
+		if ((start_pending || stop_pending) && !is_ts && !is_hevc) {
+			fprintf(stderr,
+				"WARNING: [maruko] HTTP record control "
+				"ignored: format='%s' not supported "
+				"(ts|hevc)\n", ctx->cfg.record.format);
+		} else {
+			if (start_pending) {
+				/* Stop both — only the format-matching one is
+				 * active, but keeping both calls is cheaper
+				 * than a branch and matches Star6E's pattern. */
+				star6e_recorder_stop(&ctx->recorder);
+				star6e_ts_recorder_stop(&ctx->ts_recorder);
+				ctx->audio.rec_ring = NULL;
+				if (is_hevc) {
+					if (star6e_recorder_start(&ctx->recorder,
+					    rec_dir) == 0)
+						(void)maruko_mi_venc_request_idr(
+							ctx->venc_device,
+							ctx->venc_channel, 1);
+				} else {
+					ctx->audio.rec_ring = ctx->audio.started
+						? &ctx->audio_recorder_ring
+						: NULL;
+					if (star6e_ts_recorder_start(
+					    &ctx->ts_recorder, rec_dir,
+					    ctx->audio.started
+						? &ctx->audio_recorder_ring
+						: NULL) == 0)
+						(void)maruko_mi_venc_request_idr(
+							ctx->venc_device,
+							ctx->venc_channel, 1);
+				}
+			}
+			if (stop_pending) {
+				star6e_recorder_stop(&ctx->recorder);
+				star6e_ts_recorder_stop(&ctx->ts_recorder);
+				ctx->audio.rec_ring = NULL;
+			}
+		}
+	}
 
 	if (sidecar_subscribed) {
 		RtpSidecarTransportInfo tinfo;
@@ -2888,10 +2975,12 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 * the binding shares the VPE port with chn 0.  Tearing down chn 0
 	 * before unbinding chn 1 wedges the SDK on the next reinit. */
 	maruko_pipeline_stop_dual(ctx);
-	/* TS recorder runs after stop_dual: in dual mode the drain thread
+	/* Recorders run after stop_dual: in dual mode the drain thread
 	 * has already exited and is no longer issuing writes, so close()
-	 * cannot race with a write().  In mirror mode no thread holds it. */
+	 * cannot race with a write().  In mirror mode no thread holds it.
+	 * Stop both — at most one is open, the inactive call is a no-op. */
 	star6e_ts_recorder_stop(&ctx->ts_recorder);
+	star6e_recorder_stop(&ctx->recorder);
 	/* Audio teardown after recorder stop: the recorder pops from
 	 * audio_recorder_ring, so the recorder must be quiet before we
 	 * can destroy the ring or join the encode thread that pushes

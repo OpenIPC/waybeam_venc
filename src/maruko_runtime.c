@@ -29,11 +29,14 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 {
 	MarukoRunnerContext *ctx = g_maruko_runner_ctx;
 	Star6eTsRecorderState *ts;
+	Star6eRecorderState *rec;
+	Star6eRecorderStopReason sr = RECORDER_STOP_MANUAL;
 
 	memset(out, 0, sizeof(*out));
 	if (!ctx)
 		return;
 	ts = &ctx->backend.ts_recorder;
+	rec = &ctx->backend.recorder;
 
 	if (star6e_ts_recorder_is_active(ts)) {
 		out->active = 1;
@@ -43,9 +46,21 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 			&out->segments, NULL, NULL);
 		snprintf(out->path, sizeof(out->path), "%s", ts->path);
 		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
+	} else if (star6e_recorder_is_active(rec)) {
+		const char *path = "";
+		out->active = 1;
+		snprintf(out->format, sizeof(out->format), "hevc");
+		star6e_recorder_status(rec, &out->bytes_written,
+			&out->frames_written, &path, NULL);
+		out->segments = 1;  /* HEVC recorder has no rotation */
+		snprintf(out->path, sizeof(out->path), "%s", path);
+		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
 	} else {
 		const char *reason = "manual";
-		Star6eRecorderStopReason sr = ts->last_stop_reason;
+		/* Whichever stopped most recently — both reasons are
+		 * disjoint because only one recorder is ever active. */
+		sr = ts->last_stop_reason != RECORDER_STOP_MANUAL
+			? ts->last_stop_reason : rec->last_stop_reason;
 		if (sr == RECORDER_STOP_DISK_FULL)
 			reason = "disk_full";
 		else if (sr == RECORDER_STOP_WRITE_ERROR)
@@ -89,6 +104,7 @@ static int maruko_runner_init(void *opaque)
 	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
 	g_maruko_runner_ctx = ctx;
 	venc_api_set_record_status_fn(maruko_record_status_callback);
+	venc_api_set_record_http_control_supported(true);
 	if (ctx->vcfg.video0.qp_delta != 0 &&
 	    maruko_controls_callbacks()->apply_qp_delta) {
 		maruko_controls_callbacks()->apply_qp_delta(

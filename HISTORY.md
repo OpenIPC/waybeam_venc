@@ -1,5 +1,29 @@
 # History
 
+## [0.10.2] - 2026-05-05
+
+Maruko: HTTP record control + raw HEVC recording (Star6E parity).
+
+**HTTP record control** — `/api/v1/record/start` and `/stop` previously
+returned 501 "HTTP record control not available on this backend" so
+the WebUI dashboard record buttons were dead.  The HTTP request
+flags are now drained in the chn 0 drain loop, gated by the same
+`!ctx->dual` guard that protects the chn 0 write (the dual chn 1
+drain thread owns the recorder when active).  Back-to-back `/start`
+calls rotate the segment cleanly and request an IDR so the new
+segment begins on a keyframe.
+
+**Raw HEVC recording** — `record.format = "hevc"` is now accepted on
+Maruko, matching Star6E.  The pipeline holds parallel `ts_recorder`
+and `recorder` (Star6eRecorderState) state; format dispatch happens
+at start and selects which one consumes the chn 0 / chn 1 stream.
+A new `src/maruko_recorder.c` adapter walks `i6c_venc_strm` with the
+same iovec-collected `writev` pattern as `star6e_recorder.c`,
+reusing all the disk-space / sync_file_range plumbing.
+
+Both modes verified on 192.168.2.12 via WebUI: 3760×2116 HEVC Main
+in `.hevc`, HEVC + Opus in `.ts`.
+
 ## [0.10.1] - 2026-05-05
 
 TS recorder: universally-decodable audio in `.ts` files.
