@@ -3044,6 +3044,11 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 
 void maruko_pipeline_teardown(MarukoBackendContext *ctx)
 {
+	/* Pause first: venc_httpd_stop() only detaches the worker thread, so
+	 * a request accepted before the listen socket closed may still be in
+	 * dispatch.  pause() drains it and gates any further dispatch with
+	 * 503 — by the time it returns, no handler is touching SDK state. */
+	venc_httpd_pause();
 	venc_httpd_stop();
 	maruko_cus3a_stop();
 	maruko_pipeline_teardown_graph(ctx);
@@ -3053,4 +3058,5 @@ void maruko_pipeline_teardown(MarukoBackendContext *ctx)
 		printf("> [maruko] stage teardown: MI_SYS_Exit\n");
 	}
 	maruko_mi_deinit();
+	/* No resume: the process is exiting (or about to). */
 }

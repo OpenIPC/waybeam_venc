@@ -418,6 +418,19 @@ static void dispatch(int client_fd, const HttpRequest *req)
 	httpd_send_error(client_fd, 404, "not_found", "no matching route");
 }
 
+/* ── Pause gate ──────────────────────────────────────────────────────── */
+
+/* g_dispatch_mu is held by the worker for the duration of dispatch().
+ * Pause sets g_paused under the same mutex, which (a) sets the flag
+ * atomically with respect to the worker checking it, and (b) blocks
+ * pause() until the in-flight handler finishes — that's the drain.
+ * Resume just clears the flag.
+ *
+ * Single-threaded worker: at most one dispatch in flight, so a plain
+ * mutex is sufficient (no refcount needed). */
+static pthread_mutex_t g_dispatch_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_paused = 0;
+
 /* ── Server thread ───────────────────────────────────────────────────── */
 
 static int g_listen_fd = -1;
@@ -447,7 +460,18 @@ static void *httpd_thread(void *arg)
 
 		HttpRequest req;
 		if (parse_request(client_fd, &req) == 0) {
-			dispatch(client_fd, &req);
+			pthread_mutex_lock(&g_dispatch_mu);
+			if (g_paused) {
+				pthread_mutex_unlock(&g_dispatch_mu);
+				httpd_send_error(client_fd, 503, "paused",
+					"service paused for pipeline reinit, retry");
+			} else {
+				/* Hold g_dispatch_mu across the entire dispatch so a
+				 * concurrent venc_httpd_pause() drains in-flight work
+				 * before returning. */
+				dispatch(client_fd, &req);
+				pthread_mutex_unlock(&g_dispatch_mu);
+			}
 		}
 
 		close(client_fd);
@@ -528,4 +552,18 @@ void venc_httpd_stop(void)
 	 * cause pthread_join to hang and block the entire shutdown sequence. */
 	pthread_detach(g_thread);
 	fprintf(stderr, "[httpd] stopped\n");
+}
+
+void venc_httpd_pause(void)
+{
+	pthread_mutex_lock(&g_dispatch_mu);
+	g_paused = 1;
+	pthread_mutex_unlock(&g_dispatch_mu);
+}
+
+void venc_httpd_resume(void)
+{
+	pthread_mutex_lock(&g_dispatch_mu);
+	g_paused = 0;
+	pthread_mutex_unlock(&g_dispatch_mu);
 }

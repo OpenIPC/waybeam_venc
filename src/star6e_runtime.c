@@ -1096,6 +1096,15 @@ static void star6e_runner_teardown(void *opaque)
 	}
 	alarm(0);  /* cancel SIGALRM — watchdog replaces it */
 
+	/* Pause HTTP dispatch across the SDK teardown window: the httpd
+	 * worker is still alive (venc_httpd_stop runs later, and even then
+	 * it only detaches), so any in-flight HTTP handler would dereference
+	 * the static control context that star6e_controls_reset is about to
+	 * zero, plus VENC channels that star6e_pipeline_stop destroys.
+	 * pause() drains any in-flight handler before returning; new requests
+	 * during the window receive 503.  No resume — the process is exiting
+	 * (SIGHUP fork+exec parent, or normal shutdown). */
+	venc_httpd_pause();
 	star6e_cus3a_request_stop();
 
 	/* Pipeline stop MUST happen before recorder stop.  The recording

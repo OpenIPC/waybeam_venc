@@ -1,5 +1,41 @@
 # History
 
+## [0.10.3] - 2026-05-05
+
+HTTP dispatch pause/resume across pipeline reinit and teardown.
+
+Closes a long-standing HTTP↔runner thread race: the httpd worker
+dereferences SDK handles (VENC/ISP/SCL/VPE channels, audio capture,
+output socket) that the runner thread destroys and recreates during
+reinit or shutdown.  Symptoms ranged from `MI_*` errors against a
+destroyed channel to outright segfaults under heavy WebUI traffic
+during a SIGHUP reinit on Star6E, and visible HTTP hangs across the
+in-process reinit window on Maruko.
+
+Fix: a single chokepoint at the httpd worker's dispatch call.
+
+- `venc_httpd_pause()` sets a flag and drains the in-flight handler
+  (it takes the same mutex the worker holds across `dispatch()`).
+  After pause returns, every new request is answered with 503
+  immediately, so SDK state is safe to tear down.
+- `venc_httpd_resume()` clears the flag.
+
+Call sites:
+
+- `maruko_runtime.c` brackets `teardown_graph` + `reinit_pipeline` with
+  `pause` / `resume` (the in-process reinit window).
+- `maruko_pipeline.c` pauses before final teardown (no resume — the
+  process is exiting).
+- `star6e_runtime.c` pauses across the SDK shutdown teardown until
+  `venc_httpd_stop()` returns (no resume — fork+exec parent or normal
+  exit).
+
+Hardware verification on 192.168.1.13 (Star6E IMX335 @ 60 fps fork+exec
+respawn) and 192.168.2.12 (Maruko in-process reinit): under sustained
+mixed `apply_*` / `query_*` traffic, the pause window emits fast
+sub-4 ms 503s for clients that hit it, no requests hang, no daemon
+crashes, and the encoder keeps streaming throughout the Maruko reinit.
+
 ## [0.10.2] - 2026-05-05
 
 Maruko: HTTP record control + raw HEVC recording (Star6E parity).

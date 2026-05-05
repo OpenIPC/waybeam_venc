@@ -199,13 +199,23 @@ static int maruko_runner_run(void *opaque)
 		if (result != 1)
 			break;
 
+		/* Pause HTTP dispatch for the entire teardown + reinit window.
+		 * Vendor SDK handles (ISP/SCL/VENC channels, audio capture,
+		 * output socket) are destroyed and recreated inside; new HTTP
+		 * requests during the window receive 503 immediately instead
+		 * of blocking on a stale dispatch.  pause() drains any handler
+		 * already in flight before returning, so SDK state is safe to
+		 * tear down once it returns. */
+		venc_httpd_pause();
 		printf("> [maruko] reinit: tearing down pipeline graph\n");
 		maruko_pipeline_teardown_graph(&ctx->backend);
 
 		if (maruko_reinit_pipeline(ctx) != 0) {
+			venc_httpd_resume();
 			result = -1;
 			break;
 		}
+		venc_httpd_resume();
 	}
 
 	return result;

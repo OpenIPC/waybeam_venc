@@ -41,6 +41,28 @@ int venc_httpd_start(uint16_t port);
 /* Stop the HTTP server.  Closes socket and detaches the listener thread. */
 void venc_httpd_stop(void);
 
+/* Pause request dispatch.
+ *
+ * After this returns, any new request the worker accepts is answered
+ * with 503 instead of being dispatched to a route handler.  The call
+ * blocks until the in-flight handler (if any) finishes — so once it
+ * returns, the caller may safely tear down state that route handlers
+ * dereference (vendor SDK channels, control contexts, ring buffers).
+ *
+ * Idempotent.  Safe to call before venc_httpd_start() or after
+ * venc_httpd_stop() — in either case the flag is just set with no
+ * worker contention.
+ *
+ * Lock ordering: do NOT call while holding any mutex that a route
+ * handler might also acquire (e.g. g_cfg_mutex), since handlers take
+ * their mutexes after passing the dispatch gate.  In practice, the
+ * runner never holds those mutexes during teardown / reinit, so this
+ * constraint is trivially satisfied. */
+void venc_httpd_pause(void);
+
+/* Resume request dispatch.  Idempotent.  Pairs with venc_httpd_pause(). */
+void venc_httpd_resume(void);
+
 /* ── Response helpers ────────────────────────────────────────────────── */
 
 /* Send a raw HTTP response with the given status code and JSON body string. */
