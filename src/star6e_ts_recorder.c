@@ -29,13 +29,15 @@ static ssize_t write_all(int fd, const uint8_t *data, size_t len)
 	return (ssize_t)total;
 }
 
-static int build_ts_path(char *path, size_t path_size, const char *dir)
+static int build_ts_path(char *path, size_t path_size, const char *dir,
+	const TsMuxState *mux)
 {
 	struct timespec ts;
 	unsigned long uptime_s;
 	unsigned int hours, mins, secs;
 	unsigned int rand_suffix;
 	const char *sep;
+	const char *codec_tag;
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	uptime_s = (unsigned long)ts.tv_sec;
@@ -46,8 +48,18 @@ static int build_ts_path(char *path, size_t path_size, const char *dir)
 	rand_suffix = (unsigned int)(ts.tv_nsec / 1000) & 0xFFFF;
 
 	sep = (dir[strlen(dir) - 1] == '/') ? "" : "/";
-	snprintf(path, path_size, "%s%srec_%02uh%02um%02us_%04x.ts",
-		dir, sep, hours, mins, secs, rand_suffix);
+
+	/* Codec suffix marks how the audio in this segment was muxed so the
+	 * file is self-describing without needing ffprobe.  Audio-less
+	 * segments get no suffix (current behaviour). */
+	if (mux && mux->audio_rate > 0 && mux->audio_channels > 0)
+		codec_tag = (mux->audio_codec == TS_AUDIO_CODEC_OPUS)
+			? "_opus" : "_pcm";
+	else
+		codec_tag = "";
+
+	snprintf(path, path_size, "%s%srec_%02uh%02um%02us_%04x%s.ts",
+		dir, sep, hours, mins, secs, rand_suffix, codec_tag);
 	return 0;
 }
 
@@ -79,7 +91,7 @@ static void stop_with_reason(Star6eTsRecorderState *state,
 /* ── Public API ──────────────────────────────────────────────────────── */
 
 void star6e_ts_recorder_init(Star6eTsRecorderState *state,
-	uint32_t audio_rate, uint8_t audio_channels)
+	uint32_t audio_rate, uint8_t audio_channels, uint8_t audio_codec)
 {
 	if (!state)
 		return;
@@ -88,7 +100,7 @@ void star6e_ts_recorder_init(Star6eTsRecorderState *state,
 	state->sync_interval_frames = RECORDER_SYNC_DEFAULT_FRAMES;
 	state->max_seconds = TS_RECORDER_DEFAULT_MAX_SECONDS;
 	state->max_bytes = TS_RECORDER_DEFAULT_MAX_BYTES;
-	ts_mux_init(&state->mux, audio_rate, audio_channels);
+	ts_mux_init(&state->mux, audio_rate, audio_channels, audio_codec);
 }
 
 static int open_new_segment(Star6eTsRecorderState *state)
@@ -97,7 +109,8 @@ static int open_new_segment(Star6eTsRecorderState *state)
 	size_t pat_pmt_len;
 	ssize_t ret;
 
-	build_ts_path(state->path, sizeof(state->path), state->dir);
+	build_ts_path(state->path, sizeof(state->path), state->dir,
+		&state->mux);
 
 	state->fd = open(state->path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (state->fd < 0) {

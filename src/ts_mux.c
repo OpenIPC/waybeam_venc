@@ -79,6 +79,43 @@ static uint32_t ts_crc32(const uint8_t *data, size_t len)
 	return crc;
 }
 
+/* ── 8-bit reversal table (SMPTE 302M bit ordering) ─────────────────── */
+
+static const uint8_t ts_bit_reverse[256] = {
+	0x00, 0x80, 0x40, 0xC0, 0x20, 0xA0, 0x60, 0xE0,
+	0x10, 0x90, 0x50, 0xD0, 0x30, 0xB0, 0x70, 0xF0,
+	0x08, 0x88, 0x48, 0xC8, 0x28, 0xA8, 0x68, 0xE8,
+	0x18, 0x98, 0x58, 0xD8, 0x38, 0xB8, 0x78, 0xF8,
+	0x04, 0x84, 0x44, 0xC4, 0x24, 0xA4, 0x64, 0xE4,
+	0x14, 0x94, 0x54, 0xD4, 0x34, 0xB4, 0x74, 0xF4,
+	0x0C, 0x8C, 0x4C, 0xCC, 0x2C, 0xAC, 0x6C, 0xEC,
+	0x1C, 0x9C, 0x5C, 0xDC, 0x3C, 0xBC, 0x7C, 0xFC,
+	0x02, 0x82, 0x42, 0xC2, 0x22, 0xA2, 0x62, 0xE2,
+	0x12, 0x92, 0x52, 0xD2, 0x32, 0xB2, 0x72, 0xF2,
+	0x0A, 0x8A, 0x4A, 0xCA, 0x2A, 0xAA, 0x6A, 0xEA,
+	0x1A, 0x9A, 0x5A, 0xDA, 0x3A, 0xBA, 0x7A, 0xFA,
+	0x06, 0x86, 0x46, 0xC6, 0x26, 0xA6, 0x66, 0xE6,
+	0x16, 0x96, 0x56, 0xD6, 0x36, 0xB6, 0x76, 0xF6,
+	0x0E, 0x8E, 0x4E, 0xCE, 0x2E, 0xAE, 0x6E, 0xEE,
+	0x1E, 0x9E, 0x5E, 0xDE, 0x3E, 0xBE, 0x7E, 0xFE,
+	0x01, 0x81, 0x41, 0xC1, 0x21, 0xA1, 0x61, 0xE1,
+	0x11, 0x91, 0x51, 0xD1, 0x31, 0xB1, 0x71, 0xF1,
+	0x09, 0x89, 0x49, 0xC9, 0x29, 0xA9, 0x69, 0xE9,
+	0x19, 0x99, 0x59, 0xD9, 0x39, 0xB9, 0x79, 0xF9,
+	0x05, 0x85, 0x45, 0xC5, 0x25, 0xA5, 0x65, 0xE5,
+	0x15, 0x95, 0x55, 0xD5, 0x35, 0xB5, 0x75, 0xF5,
+	0x0D, 0x8D, 0x4D, 0xCD, 0x2D, 0xAD, 0x6D, 0xED,
+	0x1D, 0x9D, 0x5D, 0xDD, 0x3D, 0xBD, 0x7D, 0xFD,
+	0x03, 0x83, 0x43, 0xC3, 0x23, 0xA3, 0x63, 0xE3,
+	0x13, 0x93, 0x53, 0xD3, 0x33, 0xB3, 0x73, 0xF3,
+	0x0B, 0x8B, 0x4B, 0xCB, 0x2B, 0xAB, 0x6B, 0xEB,
+	0x1B, 0x9B, 0x5B, 0xDB, 0x3B, 0xBB, 0x7B, 0xFB,
+	0x07, 0x87, 0x47, 0xC7, 0x27, 0xA7, 0x67, 0xE7,
+	0x17, 0x97, 0x57, 0xD7, 0x37, 0xB7, 0x77, 0xF7,
+	0x0F, 0x8F, 0x4F, 0xCF, 0x2F, 0xAF, 0x6F, 0xEF,
+	0x1F, 0x9F, 0x5F, 0xDF, 0x3F, 0xBF, 0x7F, 0xFF,
+};
+
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
 static void put_be16(uint8_t *p, uint16_t v)
@@ -134,13 +171,15 @@ static uint8_t *start_ts_packet(uint8_t *pkt, uint16_t pid,
 	return pkt + 4;
 }
 
-void ts_mux_init(TsMuxState *s, uint32_t audio_rate, uint8_t audio_channels)
+void ts_mux_init(TsMuxState *s, uint32_t audio_rate, uint8_t audio_channels,
+	uint8_t audio_codec)
 {
 	if (!s)
 		return;
 	memset(s, 0, sizeof(*s));
 	s->audio_rate = audio_rate;
 	s->audio_channels = audio_channels;
+	s->audio_codec = audio_codec;
 	/* PCR leads PTS by ~1 frame at 30fps (3000 ticks at 90kHz) */
 	s->pcr_offset = 3000;
 	/* Force PAT/PMT emission on first frame */
@@ -227,17 +266,43 @@ size_t ts_mux_write_pat_pmt(TsMuxState *s, uint8_t *buf, size_t buf_size)
 	*p++ = 4;     /* descriptor_length */
 	*p++ = 'H'; *p++ = 'E'; *p++ = 'V'; *p++ = 'C';
 
-	/* Audio stream entry: private data with LPCM registration descriptor */
+	/* Audio stream entry — descriptors depend on codec:
+	 *
+	 *   SMPTE 302M PCM (BSSD): stream_type 0x06 + "BSSD" registration.
+	 *     48 kHz only (302M requirement).  Mono inputs are upmixed to
+	 *     stereo so number_channels >= 2.
+	 *
+	 *   Opus: stream_type 0x06 + "Opus" registration + extension
+	 *     descriptor 0x7F/0x80 with channel_config_code (per the
+	 *     Opus-in-MPEG-TS mapping; VLC 3+, ffmpeg, mpv, GStreamer).
+	 */
 	if (s->audio_rate > 0 && s->audio_channels > 0) {
 		*p++ = TS_STREAM_TYPE_PRIVATE;
 		put_be16(p, (uint16_t)(0xE000 | TS_PID_AUDIO));
 		p += 2;
-		/* Registration descriptor: format_identifier "LPCM" */
-		put_be16(p, (uint16_t)(0xF000 | 6));  /* ES_info_length = 6 */
-		p += 2;
-		*p++ = 0x05;  /* descriptor_tag: registration_descriptor */
-		*p++ = 4;     /* descriptor_length */
-		*p++ = 'L'; *p++ = 'P'; *p++ = 'C'; *p++ = 'M';
+
+		if (s->audio_codec == TS_AUDIO_CODEC_OPUS) {
+			put_be16(p, (uint16_t)(0xF000 | 10));  /* ES_info = 10 */
+			p += 2;
+			*p++ = 0x05;  /* registration_descriptor */
+			*p++ = 4;
+			*p++ = 'O'; *p++ = 'p'; *p++ = 'u'; *p++ = 's';
+			*p++ = 0x7F;  /* extension_descriptor */
+			*p++ = 2;
+			*p++ = 0x80;  /* extension_descriptor_tag = Opus */
+			/* channel_config_code: mapping family 0 is 1-based
+			 *   0x00 = dual mono (NOT what we want for 1-channel input)
+			 *   0x01 = mono, 0x02 = stereo, 0x03..0x08 = surround
+			 * Clamp to 0x01..0x08; mono passes through as 1. */
+			*p++ = s->audio_channels >= 1 && s->audio_channels <= 8
+				? s->audio_channels : 1;
+		} else {
+			put_be16(p, (uint16_t)(0xF000 | 6));  /* ES_info = 6 */
+			p += 2;
+			*p++ = 0x05;
+			*p++ = 4;
+			*p++ = 'B'; *p++ = 'S'; *p++ = 'S'; *p++ = 'D';
+		}
 	}
 
 	/* Fill in section_length: bytes from after section_length field to end
@@ -417,14 +482,156 @@ size_t ts_mux_write_video(TsMuxState *s, uint8_t *buf, size_t buf_size,
 	return written;
 }
 
+/* SMPTE 302M PES payload buffer.
+ * Worst-case input is one 65535-byte audio_ring entry, but in practice
+ * star6e_audio.c pushes one MI_AI frame at a time (~20-40 ms @ 48 kHz =
+ * 1920-3840 bytes mono s16le).  16-bit 302M packs each stereo pair as
+ * 5 bytes (4 audio + 1 parity); cap at 16 KB input → ~40 KB AES3 output. */
+#define TS_MUX_AUDIO_PES_MAX  (4 + 16384 * 5)
+
+/* Opus-in-MPEG-TS access unit framing.  Each PES carries one or more Opus
+ * packets prefixed by a control header:
+ *   [11] control_header_prefix = 0x3FF (zero + ten 1s, packs as 0x7F 0xE0)
+ *   [ 1] start_trim_flag = 0
+ *   [ 1] end_trim_flag = 0
+ *   [ 1] control_extension_flag = 0
+ *   [ 2] reserved = 0
+ *   [ 8N] au_size — (N-1) bytes of 0xFF + one byte < 0xFF; total = sum
+ * ffmpeg's parser scans for 16-bit value 0x7FE0 (mask 0xFFE0) — see
+ * libavcodec/opus/opus.h's OPUS_TS_HEADER / OPUS_TS_MASK.
+ * For typical Opus packets (<255 B), au_size is one byte. */
+static size_t write_opus_pes(TsMuxState *s, uint8_t *buf, size_t buf_size,
+	const uint8_t *opus, size_t opus_len, uint64_t pts_90khz)
+{
+	uint8_t pes[2 + 32 + 4096];  /* hdr + au_size + Opus packet */
+	size_t hdr_len = 2;
+	size_t remaining = opus_len;
+
+	if (opus_len + 32 + 2 > sizeof(pes))
+		return 0;
+
+	pes[0] = 0x7F;  /* prefix bits 10..3 (high byte of 0x7FE0) */
+	pes[1] = 0xE0;  /* prefix bits 2..0 + 5 zero flag/reserved bits */
+
+	while (remaining >= 0xFF) {
+		pes[hdr_len++] = 0xFF;
+		remaining -= 0xFF;
+	}
+	pes[hdr_len++] = (uint8_t)remaining;
+
+	memcpy(pes + hdr_len, opus, opus_len);
+
+	return write_pes_packets(s, buf, buf_size,
+		TS_PID_AUDIO, &s->cc_audio, 0xBD,
+		pes, hdr_len + opus_len, pts_90khz, 0, 0);
+}
+
 size_t ts_mux_write_audio(TsMuxState *s, uint8_t *buf, size_t buf_size,
 	const uint8_t *data, size_t data_len,
 	uint64_t pts_90khz)
 {
+	uint8_t aes_buf[TS_MUX_AUDIO_PES_MAX];
+	const int16_t *samples;
+	uint8_t *out;
+	size_t in_frames;
+	size_t aes_data_size;
+	size_t pes_size;
+	uint8_t in_channels;
+	uint8_t out_channels;
+	uint8_t out_pairs;
+	uint8_t nch_code;
+	int upmix_mono;
+
 	if (!s || !buf || !data || data_len == 0)
 		return 0;
 
+	if (s->audio_codec == TS_AUDIO_CODEC_OPUS)
+		return write_opus_pes(s, buf, buf_size, data, data_len, pts_90khz);
+
+	if (data_len & 1)
+		return 0;  /* SMPTE 302M needs whole 16-bit samples */
+
+	in_channels = s->audio_channels ? s->audio_channels : 1;
+
+	/* SMPTE 302M needs even channel counts (2/4/6/8).  Mono → upmix
+	 * by duplicating L into R; otherwise round up to next even count
+	 * (the extra channel gets zero samples — kept simple, won't trigger
+	 * for 1/2-channel MI_AI captures). */
+	upmix_mono = (in_channels == 1);
+	out_channels = upmix_mono ? 2 :
+		(uint8_t)((in_channels + 1) & ~1u);
+	if (out_channels < 2 || out_channels > 8)
+		return 0;
+	out_pairs = (uint8_t)(out_channels / 2);
+
+	in_frames = data_len / (sizeof(int16_t) * in_channels);
+	if (in_frames == 0)
+		return 0;
+
+	/* 16-bit 302M layout per stereo sample frame (5 bytes, bit-packed).
+	 *
+	 *   byte[0] = bit_reverse_8(L & 0xFF)        — L low byte
+	 *   byte[1] = bit_reverse_8((L >> 8) & 0xFF) — L high byte
+	 *   byte[2] = bit_reverse_4(R & 0x0F)        — R low nibble in LOW nibble
+	 *   byte[3] = bit_reverse_8((R >> 4) & 0xFF) — R middle byte
+	 *   byte[4] = bit_reverse_4((R >> 12) & 0xF) << 4  — R high nibble in HIGH nibble
+	 *
+	 * Each AES3 sub-frame is 24 bits (4 sync bits + 16 audio + 4 status/parity);
+	 * paired LR frames pack as 5 bytes total.  The ffmpeg decoder logic mirrored
+	 * here lives in libavcodec/s302m.c.  Status/parity nibbles are emitted as 0.
+	 *
+	 * For N>2 channels: emit (N/2) consecutive 5-byte cells per frame. */
+	aes_data_size = in_frames * out_pairs * 5;
+	pes_size = 4 + aes_data_size;
+	if (pes_size > sizeof(aes_buf))
+		return 0;
+
+	/* AES3 audio_data_header (32 bits, big-endian):
+	 *   [16] audio_packet_size       — bytes following the header
+	 *   [ 2] number_channels         — 00=2, 01=4, 10=6, 11=8
+	 *   [ 8] channel_identification  — 0x00 (default)
+	 *   [ 2] bits_per_sample         — 00=16, 01=20, 10=24
+	 *   [ 4] alignment_bits          — 0
+	 */
+	nch_code = (uint8_t)(out_pairs - 1);
+	put_be16(aes_buf, (uint16_t)aes_data_size);
+	aes_buf[2] = (uint8_t)(nch_code << 6);  /* nch_code | (chan_id >> 2) */
+	aes_buf[3] = 0x00;                       /* chan_id_lo | bps(16)=00 | align=0 */
+
+	samples = (const int16_t *)data;
+	out = aes_buf + 4;
+
+	for (size_t i = 0; i < in_frames; i++) {
+		uint8_t c = 0;
+		uint8_t pair;
+		for (pair = 0; pair < out_pairs; pair++) {
+			uint16_t l = 0, r = 0;
+			if (upmix_mono) {
+				l = (uint16_t)samples[i];
+				r = l;
+			} else {
+				if (c < in_channels)
+					l = (uint16_t)samples[i * in_channels + c];
+				c++;
+				if (c < in_channels)
+					r = (uint16_t)samples[i * in_channels + c];
+				c++;
+			}
+			*out++ = ts_bit_reverse[l & 0xFF];
+			*out++ = ts_bit_reverse[(l >> 8) & 0xFF];
+			/* byte 2 low nibble = bit_reverse_4(R[3..0]); high nibble = 0
+			 * Using the 8-bit table: place 4-bit value in top nibble of
+			 * input → reverse swaps into bottom nibble of output. */
+			*out++ = ts_bit_reverse[(r & 0x0F) << 4];
+			*out++ = ts_bit_reverse[(r >> 4) & 0xFF];
+			/* byte 4 high nibble = bit_reverse_4(R[15..12]); low nibble = 0
+			 * Same trick, then shift the resulting 4-bit value back to
+			 * the high nibble. */
+			*out++ = (uint8_t)(ts_bit_reverse[((r >> 12) & 0x0F) << 4] << 4);
+		}
+	}
+
 	return write_pes_packets(s, buf, buf_size,
 		TS_PID_AUDIO, &s->cc_audio, 0xBD,
-		data, data_len, pts_90khz, 0, 0);
+		aes_buf, pes_size, pts_90khz, 0, 0);
 }

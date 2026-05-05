@@ -1,5 +1,6 @@
 #include "maruko_pipeline.h"
 
+#include "audio_codec.h"
 #include "debug_osd.h"
 #include "hevc_rtp.h"
 #include "idr_rate_limit.h"
@@ -2331,9 +2332,20 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	 * maruko_audio_init succeeded — when active, the PMT advertises
 	 * audio and the recorder pops PCM frames off audio_recorder_ring. */
 	{
-		uint32_t rate = ctx->audio.started ? ctx->audio.sample_rate : 0;
-		uint32_t ch   = ctx->audio.started ? ctx->audio.channels    : 0;
-		star6e_ts_recorder_init(&ctx->ts_recorder, rate, ch);
+		/* Mirror star6e_runtime: route Opus capture into Opus-in-TS PMT,
+		 * PCM into SMPTE 302M.  G.711 is not muxed (rate stays 0). */
+		int parsed = audio_codec_parse_name(ctx->cfg.audio.codec);
+		uint8_t ts_codec = (parsed == AUDIO_CODEC_TYPE_OPUS)
+			? TS_AUDIO_CODEC_OPUS : TS_AUDIO_CODEC_PCM_S302M;
+		uint32_t rate = 0, ch = 0;
+		if (ctx->audio.started &&
+		    (parsed == AUDIO_CODEC_TYPE_RAW ||
+		     parsed == AUDIO_CODEC_TYPE_OPUS)) {
+			rate = ctx->audio.sample_rate;
+			ch   = ctx->audio.channels;
+		}
+		star6e_ts_recorder_init(&ctx->ts_recorder, rate, (uint8_t)ch,
+			ts_codec);
 	}
 	if (ctx->cfg.record.max_seconds > 0)
 		ctx->ts_recorder.max_seconds = ctx->cfg.record.max_seconds;

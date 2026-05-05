@@ -1,5 +1,50 @@
 # History
 
+## [0.10.1] - 2026-05-05
+
+TS recorder: universally-decodable audio in `.ts` files.
+
+The recorder previously muxed audio as private-data with an "LPCM"
+registration descriptor that no standard player recognised — VLC,
+ffmpeg, and mpv treated it as `bin_data` and either dropped it or
+played white noise.  Recordings now carry audio in one of two forms,
+selected by `audio.codec`:
+
+- `audio.codec = "pcm"` → SMPTE 302M (BSSD).  Broadcast standard for
+  16-bit PCM in MPEG-TS.  Mono inputs are upmixed to stereo per the
+  302M requirement.  Universally decoded.
+- `audio.codec = "opus"` → Opus-in-MPEG-TS provisional mapping.
+  Re-uses the same Opus encoder feeding the RTP path, so no extra CPU
+  cost.  Each PES carries one Opus access unit prefixed by the
+  `0x7FE0` control header.  Recommended — about 30× smaller audio than
+  PCM at the same intelligibility.
+- `audio.codec = "g711a"` / `"g711u"` → audio is not muxed into the
+  recording (no in-band TS framing that VLC/ffmpeg decode without
+  hints).  Video-only file.
+
+Filenames now carry a `_opus` or `_pcm` suffix so the codec is visible
+without ffprobe (e.g. `rec_02h23m07s_c9e2_opus.ts`).
+
+ts_mux additions:
+- `ts_mux_init` gains an `audio_codec` argument
+  (`TS_AUDIO_CODEC_PCM_S302M` / `TS_AUDIO_CODEC_OPUS`)
+- PMT writer emits the matching registration descriptor (BSSD or Opus)
+  plus the Opus extension descriptor with `channel_config_code`
+- `ts_mux_write_audio` dispatches: SMPTE 302M packs raw s16le with
+  bit-reversal per the AES3 16-bit layout; Opus path wraps each
+  pre-encoded packet in the 11-bit prefix + au_size control header
+- `star6e_ts_recorder_init` gains an `audio_codec` argument plumbed
+  through from `audio.codec`
+
+The Star6E and Maruko audio threads now route the encoded buffer
+(rather than raw PCM) into the recording ring when codec is Opus.
+
+Verification:
+- Host: 1520 unit tests pass; offline sine encode round-trips
+  bit-exact through ffmpeg's SMPTE 302M and Opus parsers.
+- Hardware: Star6E bench (`192.168.1.13`, IMX335).  HEVC + audio
+  recordings in both modes play directly in VLC, mpv, and ffmpeg.
+
 ## [0.10.0] - 2026-05-03
 
 `video0` digital zoom (Approach C) — Star6E + Maruko parity.
