@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Guard the live max_payload_size ceiling against future tightenings:
  * - RTP_BUFFER_MAX is the hard cap inside the packetizer (silently
@@ -318,7 +319,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(sensor, unlock_value,    FT_UINT16, MUT_RESTART),
 	FIELD(sensor, unlock_dir,      FT_INT,    MUT_RESTART),
 
-	FIELD(isp, sensor_bin,         FT_STRING, MUT_RESTART),
+	FIELD(isp, sensor_bin,         FT_STRING, MUT_LIVE),
 	FIELD(isp, gain_max,           FT_UINT,   MUT_LIVE),
 	FIELD(isp, awb_mode,           FT_STRING, MUT_LIVE),
 	FIELD(isp, awb_ct,             FT_UINT,   MUT_LIVE),
@@ -642,6 +643,16 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		    strcmp(cfg->isp.awb_mode, "ct_manual") != 0)
 			return "awb_mode must be 'auto' or 'ct_manual'";
 	}
+	if (strcmp(key, "isp.sensor_bin") == 0) {
+		/* Empty string opts into the /etc/sensors/<sensor>.bin fallback;
+		 * a non-empty path must point at a readable file or the live
+		 * apply callback would silently fall back to auto-detect (or to
+		 * the previously-loaded bin via dedup) while the persisted
+		 * config still names a bogus path. */
+		if (cfg->isp.sensor_bin[0] &&
+		    access(cfg->isp.sensor_bin, R_OK) != 0)
+			return "isp.sensor_bin path is not readable";
+	}
 	if (strcmp(key, "video0.qp_delta") == 0) {
 		if (cfg->video0.qp_delta < -12 || cfg->video0.qp_delta > 12)
 			return "qp_delta must be in range [-12, 12]";
@@ -873,6 +884,7 @@ typedef enum {
 	LIVE_GROUP_MAX_PAYLOAD,
 	LIVE_GROUP_MUTE,
 	LIVE_GROUP_ZOOM,
+	LIVE_GROUP_ISP_BIN,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -883,6 +895,7 @@ typedef struct {
 	int awb_ct;
 	int outgoing_enabled;
 	int outgoing_server;
+	int isp_sensor_bin;
 } LiveBatchTouched;
 
 static int make_error_json(const char *code, const char *message, char **out_json)
@@ -1036,6 +1049,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	    strcmp(canonical_key, "video0.zoom_x") == 0 ||
 	    strcmp(canonical_key, "video0.zoom_y") == 0)
 		return LIVE_GROUP_ZOOM;
+	if (strcmp(canonical_key, "isp.sensor_bin") == 0)
+		return LIVE_GROUP_ISP_BIN;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1065,6 +1080,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "audio.mute";
 	case LIVE_GROUP_ZOOM:
 		return "video0.zoom_*";
+	case LIVE_GROUP_ISP_BIN:
+		return "isp.sensor_bin";
 	default:
 		return "unknown";
 	}
@@ -1088,6 +1105,8 @@ static void note_live_group_touch(LiveBatchTouched *touched,
 		touched->outgoing_enabled = 1;
 	else if (strcmp(canonical_key, "outgoing.server") == 0)
 		touched->outgoing_server = 1;
+	else if (strcmp(canonical_key, "isp.sensor_bin") == 0)
+		touched->isp_sensor_bin = 1;
 }
 
 static int parse_query_params(const char *query, SetQueryParam *params,
@@ -1213,6 +1232,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_mute != NULL;
 	case LIVE_GROUP_ZOOM:
 		return g_cb->apply_zoom != NULL;
+	case LIVE_GROUP_ISP_BIN:
+		return g_cb->apply_isp_bin != NULL;
 	default:
 		return 0;
 	}
@@ -1275,6 +1296,12 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		dst->video0.zoom_pct = src->video0.zoom_pct;
 		dst->video0.zoom_x   = src->video0.zoom_x;
 		dst->video0.zoom_y   = src->video0.zoom_y;
+		break;
+	case LIVE_GROUP_ISP_BIN:
+		if (touched && touched->isp_sensor_bin) {
+			snprintf(dst->isp.sensor_bin, sizeof(dst->isp.sensor_bin),
+				"%s", src->isp.sensor_bin);
+		}
 		break;
 	default:
 		break;
@@ -1374,6 +1401,8 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_ZOOM:
 		return g_cb->apply_zoom(cfg->video0.zoom_pct,
 			cfg->video0.zoom_x, cfg->video0.zoom_y);
+	case LIVE_GROUP_ISP_BIN:
+		return g_cb->apply_isp_bin(cfg->isp.sensor_bin);
 	default:
 		return -2;
 	}

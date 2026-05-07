@@ -240,6 +240,9 @@ curl "http://<device-ip>/api/v1/set?video0.bitrate=4096"
 # Change FPS
 curl "http://<device-ip>/api/v1/set?video0.fps=60"
 
+# Swap ISP tuning bin (empty = auto-detect /etc/sensors/<sensor>.bin)
+curl "http://<device-ip>/api/v1/set?isp.sensorBin=/etc/sensors/imx415_fpv.bin"
+
 # Change GOP interval (seconds between keyframes; 0 = all-intra)
 curl "http://<device-ip>/api/v1/set?video0.gop_size=0.5"
 

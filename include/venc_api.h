@@ -60,6 +60,12 @@ typedef struct {
 	 * Returns 0 on success, -1 on backend/SDK error.  NULL when the
 	 * backend has no zoom path. */
 	int (*apply_zoom)(double pct, double x, double y);
+	/* Reload the ISP tuning bin (isp.sensor_bin) on the running pipeline.
+	 * Empty path falls back to /etc/sensors/<sensor>.bin.  Returns 0 on
+	 * success (or no-op when the resolved path already matches the
+	 * last-loaded one), -1 on resolve/load error.  NULL when the backend
+	 * cannot reload bins without a full restart. */
+	int (*apply_isp_bin)(const char *path);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

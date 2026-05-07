@@ -129,6 +129,14 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
   double pct, double x, double y);
 void maruko_pipeline_zoom_status(MarukoZoomStatus *out);
 
+/** Reload the ISP tuning bin against the running pipeline.
+ *  configured_path is the new bin location (NULL/empty falls back to
+ *  /etc/sensors/<sensor>.bin keyed off ctx->sensor.plane.sensName).
+ *  No-op when the resolved path matches the bin already loaded.
+ *  Returns 0 on success / no-op, -1 on resolve or SDK failure. */
+int maruko_pipeline_load_isp_bin_live(MarukoBackendContext *ctx,
+  const char *configured_path);
+
 extern volatile sig_atomic_t g_maruko_running;
 
 /** Snapshot of the IntraRefresh configuration applied to ch0 at the most
