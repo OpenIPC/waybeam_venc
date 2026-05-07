@@ -1142,6 +1142,23 @@ static char *query_audio_status(void)
 	return star6e_audio_query_status(&ps->audio);
 }
 
+static int apply_isp_bin(const char *path)
+{
+	const char *sensor_name = NULL;
+	MI_SNR_PAD_ID_e pad_id = 0;
+
+	if (!g_star6e_control_ctx.vcfg)
+		return -1;
+
+	if (g_star6e_control_ctx.pipeline) {
+		sensor_name = g_star6e_control_ctx.pipeline->sensor.plane.sensName;
+		pad_id = g_star6e_control_ctx.pipeline->sensor.pad_id;
+	}
+
+	return star6e_pipeline_load_isp_bin_live(path, g_star6e_control_ctx.vcfg,
+		sensor_name, pad_id, g_star6e_control_ctx.sensor_fps);
+}
+
 static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_bitrate = apply_bitrate,
 	.apply_fps = apply_fps,
@@ -1165,6 +1182,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.query_transport_status = query_transport_status,
 	.query_audio_status = query_audio_status,
 	.apply_zoom = apply_zoom,
+	.apply_isp_bin = apply_isp_bin,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

@@ -125,6 +125,22 @@ void star6e_pipeline_cus3a_reset(void);
 /** Calculate max exposure time to avoid frame drops at target FPS. */
 int star6e_pipeline_cap_exposure_for_fps(uint32_t fps);
 
+/** Reload the ISP tuning bin against the running pipeline.
+ *  configured_path is the new bin location (NULL/empty falls back to
+ *  /etc/sensors/<sensor>.bin keyed off sensor_name).  vcfg supplies
+ *  contextual state (video0.fps for the exposure cap, isp.legacy_ae for
+ *  the SetFps kick) — its isp.sensor_bin is NOT consulted.  No-op when
+ *  the resolved path matches the bin already loaded.  Reapplies the
+ *  FPS-derived exposure cap on success since the bin's AE limits may
+ *  override it; in legacy-AE mode also kicks MI_SNR_SetFps so the
+ *  sensor's physical shutter register isn't left at the bin's cold-boot
+ *  value (which would lock the sensor below the configured fps — see
+ *  star6e_pipeline.c bind_and_finalize_pipeline comment).  Returns 0 on
+ *  success / no-op, -1 on resolve or SDK failure. */
+int star6e_pipeline_load_isp_bin_live(const char *configured_path,
+	const VencConfig *vcfg, const char *sensor_name,
+	MI_SNR_PAD_ID_e pad_id, uint32_t sensor_framerate);
+
 /** Snapshot of the IntraRefresh configuration applied to ch0 at the most
  *  recent pipeline start.  All zeros (mode_name="off") when feature is
  *  disabled.  Populated by mode-driven path in star6e_pipeline.c. */

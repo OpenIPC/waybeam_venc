@@ -249,6 +249,7 @@ static int star6e_pipeline_load_isp_bin(const char *isp_bin_path,
 	return isp_runtime_load_bin_file(isp_bin_path, &hooks);
 }
 
+
 static void star6e_pipeline_enable_cus3a(SdkQuietState *sdk_quiet)
 {
 	typedef int (*cus3a_fn_t)(int channel, void *params);
@@ -1255,6 +1256,63 @@ static int g_isp_initialized = 0;
  * following MI_SYS_Exit releases ISP driver state and the next start
  * needs to reload the bin against the fresh kernel. */
 static char g_last_isp_bin_path[256] = {0};
+
+int star6e_pipeline_load_isp_bin_live(const char *configured_path,
+	const VencConfig *vcfg, const char *sensor_name,
+	MI_SNR_PAD_ID_e pad_id, uint32_t sensor_framerate)
+{
+	char resolved[256];
+	const char *configured;
+	int ret;
+
+	if (!vcfg)
+		return -1;
+
+	configured = (configured_path && *configured_path) ? configured_path : NULL;
+	if (!pipeline_common_resolve_isp_bin(configured, sensor_name,
+	    resolved, sizeof(resolved))) {
+		fprintf(stderr,
+			"ERROR: ISP bin reload — no readable bin for '%s' "
+			"(sensor '%s')\n",
+			configured ? configured : "(unset)",
+			sensor_name ? sensor_name : "(unknown)");
+		return -1;
+	}
+
+	if (strcmp(resolved, g_last_isp_bin_path) == 0) {
+		printf("> ISP bin reload: %s already loaded, skipping\n",
+			resolved);
+		return 0;
+	}
+
+	/* sdk_quiet is only used to silence noisy SDK chatter during boot.
+	 * On a live reload we accept the extra logging — passing NULL keeps
+	 * the wrapper free of cross-module quiet-state plumbing. */
+	ret = star6e_pipeline_load_isp_bin(resolved, NULL);
+	if (ret != 0)
+		return ret;
+
+	snprintf(g_last_isp_bin_path, sizeof(g_last_isp_bin_path), "%s",
+		resolved);
+
+	/* Bin can reset MI_ISP_AE_SetExposureLimit to its own defaults; reapply
+	 * the FPS cap so AE doesn't relock to a shutter longer than the frame
+	 * period.  Same logic as bind_and_finalize_pipeline. */
+	if (vcfg->video0.fps > 0)
+		star6e_pipeline_cap_exposure_for_fps(vcfg->video0.fps);
+
+	/* Legacy-AE writes the bin's cold-boot shutter (often ~100 ms) directly
+	 * to the sensor register, which the SetExposureLimit cap above doesn't
+	 * touch.  Kick MI_SNR_SetFps to force the sensor driver to reconfigure
+	 * timing — without this, swapping to a darker bin can lock the sensor
+	 * at ~12 fps until reinit (cold_boot_fps_lock memory).  CUS3A mode
+	 * handles this via its periodic fps_kick logic, so skip the kick when
+	 * legacy_ae is off. */
+	if (vcfg->isp.legacy_ae && sensor_framerate > 0)
+		MI_SNR_SetFps(pad_id, sensor_framerate);
+
+	return 0;
+}
 
 /* Phase 3: assign port structs, issue all MI_SYS bind calls, init output,
  * video, ISP bin, exposure cap, cus3a, clocks, and audio.

@@ -1079,6 +1079,14 @@ static int maruko_apply_zoom(double pct, double x, double y)
 	return maruko_pipeline_apply_zoom(backend, pct, x, y);
 }
 
+static int maruko_apply_isp_bin(const char *path)
+{
+	if (!g_ctx.backend)
+		return -1;
+
+	return maruko_pipeline_load_isp_bin_live(g_ctx.backend, path);
+}
+
 static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_bitrate = maruko_apply_bitrate,
 	.apply_fps = maruko_apply_fps,
@@ -1102,6 +1110,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.query_transport_status = maruko_query_transport_status,
 	.query_audio_status = maruko_query_audio_status,
 	.apply_zoom = maruko_apply_zoom,
+	.apply_isp_bin = maruko_apply_isp_bin,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)

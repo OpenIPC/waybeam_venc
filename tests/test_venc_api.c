@@ -45,6 +45,7 @@ typedef struct {
 	int apply_server_calls;
 	int apply_max_payload_calls;
 	int apply_zoom_calls;
+	int apply_isp_bin_calls;
 
 	uint32_t last_bitrate;
 	uint32_t last_fps;
@@ -58,6 +59,7 @@ typedef struct {
 	double last_zoom_pct;
 	double last_zoom_x;
 	double last_zoom_y;
+	char last_isp_bin[256];
 
 	int fail_bitrate;
 	int fail_verbose;
@@ -66,6 +68,7 @@ typedef struct {
 	int fail_server;
 	int fail_max_payload;
 	int fail_zoom;
+	int fail_isp_bin;
 } ApiCallbackState;
 
 static ApiCallbackState g_api_cb_state;
@@ -307,6 +310,14 @@ static int test_apply_zoom(double pct, double x, double y)
 	g_api_cb_state.last_zoom_x = x;
 	g_api_cb_state.last_zoom_y = y;
 	return g_api_cb_state.fail_zoom ? -1 : 0;
+}
+
+static int test_apply_isp_bin(const char *path)
+{
+	g_api_cb_state.apply_isp_bin_calls++;
+	snprintf(g_api_cb_state.last_isp_bin,
+		sizeof(g_api_cb_state.last_isp_bin), "%s", path ? path : "");
+	return g_api_cb_state.fail_isp_bin ? -1 : 0;
 }
 
 /* Whitebox access to internal functions via extern declarations.
@@ -1046,6 +1057,95 @@ static int test_zoom_pct_restart(void)
 	return failures;
 }
 
+static int test_live_set_isp_bin_dispatches_callback(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+	/* /dev/null always exists and is readable — satisfies the path
+	 * validator without bringing in mkstemp / cleanup. The mocked
+	 * apply_isp_bin doesn't actually open the file. */
+	const char *bin_path = "/dev/null";
+	char query[160];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_isp_bin = test_apply_isp_bin;
+
+	snprintf(query, sizeof(query), "isp.sensorBin=%s", bin_path);
+	CHECK("isp_bin live rc",
+		apply_set_query_http(&cfg, "star6e", &cb, query,
+			&status, response, sizeof(response)) == 0);
+	CHECK("isp_bin live status", status == 200);
+	CHECK("isp_bin live cfg",
+		strcmp(cfg.isp.sensor_bin, bin_path) == 0);
+	CHECK("isp_bin live callback once",
+		g_api_cb_state.apply_isp_bin_calls == 1);
+	CHECK("isp_bin live callback path",
+		strcmp(g_api_cb_state.last_isp_bin, bin_path) == 0);
+	CHECK("isp_bin live no reinit pending",
+		strstr(response, "\"reinit_pending\":true") == NULL);
+	CHECK("isp_bin live did not request reinit",
+		venc_api_get_reinit() == false);
+
+	return failures;
+}
+
+static int test_live_set_isp_bin_rejects_unreadable_path(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_isp_bin = test_apply_isp_bin;
+
+	CHECK("isp_bin bad path rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"isp.sensorBin=/no/such/bin",
+			&status, response, sizeof(response)) == 0);
+	CHECK("isp_bin bad path status 409", status == 409);
+	CHECK("isp_bin bad path cfg unchanged", cfg.isp.sensor_bin[0] == '\0');
+	CHECK("isp_bin bad path callback skipped",
+		g_api_cb_state.apply_isp_bin_calls == 0);
+	CHECK("isp_bin bad path error message",
+		strstr(response, "not readable") != NULL);
+
+	return failures;
+}
+
+static int test_live_set_isp_bin_no_callback_returns_501(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));  /* apply_isp_bin == NULL */
+
+	CHECK("isp_bin no-cb rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"isp.sensorBin=/dev/null",
+			&status, response, sizeof(response)) == 0);
+	CHECK("isp_bin no-cb status 501", status == 501);
+	CHECK("isp_bin no-cb cfg unchanged",
+		cfg.isp.sensor_bin[0] == '\0');
+	CHECK("isp_bin no-cb error code",
+		strstr(response, "\"not_implemented\"") != NULL);
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_api(void)
@@ -1069,6 +1169,9 @@ int test_venc_api(void)
 	failures += test_live_zoom_pan_applies();
 	failures += test_zoom_validation_rejects_invalid();
 	failures += test_zoom_pct_restart();
+	failures += test_live_set_isp_bin_dispatches_callback();
+	failures += test_live_set_isp_bin_rejects_unreadable_path();
+	failures += test_live_set_isp_bin_no_callback_returns_501();
 	failures += test_restart_set_accepts_maruko_h264_config();
 	failures += test_restart_set_rejects_star6e_h264_rtp();
 	failures += test_restart_set_accepts_star6e_h264_compact();

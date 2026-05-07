@@ -1,5 +1,78 @@
 # History
 
+## [0.10.6] - 2026-05-07
+
+`isp.sensor_bin` is now a live mutable field on both backends.
+
+Previously, swapping the ISP tuning bin via `/api/v1/set?isp.sensorBin=...`
+fell into the `MUT_RESTART` path, which on Star6E means `g_running=0` →
+clean teardown → fork+exec a successor venc → MI_SYS_Init → reselect sensor
+→ rebuild VIF/VPE/VENC.  End-to-end downtime measured ~15 s on the
+192.168.1.13 bench — far longer than the ~80 ms the actual
+`MI_ISP_*CmdLoadBinFile` call needs.  The fork+exec path is the right call
+for sensor mode / size / codec changes (in-process MI_SYS_Init is broken on
+Star6E), but it is overkill for an ISP IQ refresh that does not touch the
+graph at all.
+
+- New `apply_isp_bin(const char *path)` callback on `VencApplyCallbacks`.
+- `FIELD(isp, sensor_bin, ..., MUT_LIVE)` plus a `LIVE_GROUP_ISP_BIN`
+  dispatch entry, so single-set and multi-set go through the same live
+  apply path that already drives bitrate / fps / awb_mode.
+- Star6E (`star6e_pipeline_load_isp_bin_live`):
+  resolve via `pipeline_common_resolve_isp_bin` (configured path → sensor
+  fallback → none), short-circuit when the resolved path matches the
+  last-loaded one, otherwise call the existing `*_load_isp_bin` path.
+  Reapplies `MI_ISP_AE_SetExposureLimit` (bin can reset AE limits) and,
+  in `legacyAe` mode, kicks `MI_SNR_SetFps` so the sensor's physical
+  shutter register isn't left at the bin's cold-boot value — without
+  this, swapping to a darker bin locks the sensor at ~12 fps until reinit
+  (cold_boot_fps_lock).
+- Maruko (`maruko_pipeline_load_isp_bin_live`): same resolve+dedup
+  shape, but uses a stripped-down `maruko_load_isp_bin_minimal` that
+  intentionally **skips** the `MI_ISP_DisableUserspace3A` and post-load
+  `MI_ISP_CUS3A_Enable` hooks the cold-boot path uses.  Re-entering
+  CUS3A_Enable on the still-active channel trips the same kernel-mutex
+  regression noted in `maruko_stop_vpe_channels` ("Skip DestroyChannel
+  — kernel ISP retains CUS3A mutex state") and segfaults venc on the
+  second swap.  3A_Proc_0 stays running across the load and picks up
+  the new IQ tables on its next tick.  `g_last_isp_bin_path` is
+  updated so the next reinit-time gate stays consistent, and cleared
+  in `maruko_pipeline_teardown_graph` so the SIGHUP in-process reinit
+  runs the cold-boot bin load unconditionally (Star6E gets that for
+  free via fork+exec).
+- New per-field validator: a non-empty `isp.sensor_bin` must point at a
+  readable file or the set is rejected with `409 validation_failed`.
+  Empty string still opts into the auto-detect fallback.
+
+Verified on 192.168.1.13 (Star6E, imx415, legacyAe):
+- 6 back-to-back swaps complete with end-to-end ~250 ms each (≈80 ms
+  reload + ssh round-trip), down from ~15 s.
+- Streaming holds at 59-60 fps through and after the swap sequence;
+  earlier prototype without the SetFps kick locked at 12 fps.
+- `/api/v1/set?isp.sensorBin=/no/such/bin` returns
+  `{"code":"validation_failed","message":"isp.sensor_bin path is not
+  readable"}` with HTTP 409 and leaves config unchanged.
+- `/api/v1/set?isp.sensorBin=` (empty) accepted.
+- Reloading the same bin twice short-circuits with
+  `> ISP bin reload: <path> already loaded, skipping`.
+
+Verified on 192.168.2.12 (Maruko, imx415):
+- 5 back-to-back swaps complete cleanly; venc still up after, 3A_Proc_0
+  ticks through the load.  End-to-end ~5.2 s/swap (the Maruko SDK's
+  `MI_ISP_API_CmdLoadBinFile` itself takes ~5 s on this BSP — visible
+  as a ~75 cus3a-tick gap in the log).  Same order of magnitude as the
+  in-process reinit it replaces, but no pipeline graph teardown and
+  no HTTP hang under load.
+- First minimal-hooks prototype that mirrored the cold-boot
+  disable/enable hooks crashed with "WARNING: Mutex is not initialized
+  before lock" → segfault on the second swap; that prompted the
+  cold-boot-vs-live hook split documented above.
+- Validator + empty path + idempotent re-set behave identically to
+  Star6E.
+
+Two new unit tests cover the live dispatch, the validator, and the 501
+fallback when a backend doesn't supply `apply_isp_bin`.
+
 ## [0.10.5] - 2026-05-05
 
 Maruko-specific default config template (`config/venc.default.maruko.json`).

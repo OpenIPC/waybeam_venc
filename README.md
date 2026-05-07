@@ -383,7 +383,7 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `isp.sensor_bin` | string | restart | ISP tuning binary path |
+| `isp.sensor_bin` | string | live | ISP tuning binary path (empty = auto-detect /etc/sensors/&lt;sensor&gt;.bin) |
 | `isp.legacy_ae` | bool | restart | Use ISP internal AE instead of custom 3A (Star6E) |
 | `isp.ae_fps` | uint | restart | Custom 3A processing rate in Hz (default 15) |
 | `isp.ae_mode` | string | restart | Maruko-only: `"native"` (default, SDK runs AE/AWB at sensor rate) or `"throttle"` (no-op AE adaptor + 15 Hz manual AE; saves ~24% sys CPU at 120 fps).  Alias: `isp.aeMode`. |

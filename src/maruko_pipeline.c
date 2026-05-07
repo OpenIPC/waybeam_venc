@@ -241,6 +241,63 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 	return ret;
 }
 
+/* Live-reload variant of maruko_load_isp_bin: only calls the bin loader
+ * symbol, intentionally skipping disable_userspace3a and post_load
+ * CUS3A_Enable.  Both are required at cold boot but on a running pipeline
+ * they trip the same kernel mutex regression that maruko_stop_vpe_channels
+ * works around — re-entering CUS3A_Enable on the still-active channel
+ * triggers "WARNING: Mutex is not initialized before lock" and segfaults
+ * within the next IQ access.  3A_Proc_0 keeps running across the load and
+ * picks up the new IQ tables on its next tick. */
+static int maruko_load_isp_bin_minimal(const char *isp_bin_path)
+{
+	IspRuntimeLoadHooks hooks;
+
+	memset(&hooks, 0, sizeof(hooks));
+	hooks.log_prefix = "[maruko] ";
+	hooks.load_key = 1234;
+	/* disable_userspace3a, wait_ready, post_load left NULL */
+	hooks.load_bin = maruko_call_load_bin;
+	return isp_runtime_load_bin_file(isp_bin_path, &hooks);
+}
+
+int maruko_pipeline_load_isp_bin_live(MarukoBackendContext *ctx,
+	const char *configured_path)
+{
+	char resolved[256];
+	const char *configured;
+	const char *sensor_name;
+
+	if (!ctx)
+		return -1;
+
+	configured = (configured_path && *configured_path) ? configured_path : NULL;
+	sensor_name = ctx->sensor.plane.sensName;
+
+	if (!pipeline_common_resolve_isp_bin(configured, sensor_name,
+	    resolved, sizeof(resolved))) {
+		fprintf(stderr,
+			"ERROR: [maruko] ISP bin reload — no readable bin for "
+			"'%s' (sensor '%s')\n",
+			configured ? configured : "(unset)",
+			sensor_name ? sensor_name : "(unknown)");
+		return -1;
+	}
+
+	if (strcmp(resolved, g_last_isp_bin_path) == 0) {
+		printf("> [maruko] ISP bin reload: %s already loaded, skipping\n",
+			resolved);
+		return 0;
+	}
+
+	if (maruko_load_isp_bin_minimal(resolved) != 0)
+		return -1;
+
+	snprintf(g_last_isp_bin_path, sizeof(g_last_isp_bin_path), "%s",
+		resolved);
+	return 0;
+}
+
 /* maruko_load_symbol, i6c_isp_load/unload, i6c_scl_load/unload moved to
  * maruko_mi.c — ISP/SCL are loaded centrally via maruko_mi_init(). */
 
@@ -2975,6 +3032,12 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 
 	venc_api_clear_active_precrop();
 	maruko_pipeline_clear_zoom_status();
+	/* Drop the cached ISP bin path: the next configure_graph cold-boot
+	 * load must run unconditionally (kernel ISP state was destroyed by
+	 * the teardown sequence below).  Star6E gets this for free via the
+	 * fork+exec process boundary; Maruko reinit is in-process so we
+	 * have to do it explicitly. */
+	g_last_isp_bin_path[0] = '\0';
 	/* Stop dual VENC FIRST — its thread reads from chn 1's fd and
 	 * the binding shares the VPE port with chn 0.  Tearing down chn 0
 	 * before unbinding chn 1 wedges the SDK on the next reinit. */
