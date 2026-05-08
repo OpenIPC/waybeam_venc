@@ -2,11 +2,13 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <limits.h>
 #include <linux/sockios.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -242,31 +244,94 @@ int output_socket_capture_capacity(int socket_handle, int *out_capacity)
 	return 0;
 }
 
+/* AF_UNIX SOCK_DGRAM blocks on the peer's receive queue length (capped by
+ * /proc/sys/net/unix/max_dgram_qlen, default 10), not on the sender's
+ * SO_SNDBUF.  SIOCOUTQ on the sender returns sk_wmem_alloc — the sum of
+ * per-skb truesize for in-flight datagrams — which saturates at roughly
+ * (qlen × per_skb_truesize) when the receiver hangs.  AVG_SKB_TRUESIZE_BYTES
+ * is the per-datagram kernel-overhead estimate (skb header + slab padding +
+ * a typical RTP/audio payload between 256 B and 2.5 KiB).  Larger payloads
+ * just saturate fill_pct earlier, which is the safe side for a backpressure
+ * trigger. */
+#define UNIX_DGRAM_AVG_SKB_TRUESIZE_BYTES 4096
+
+static int read_unix_max_dgram_qlen(void)
+{
+	static int cached = -1;
+	FILE *f;
+	int v = 10;  /* kernel default when /proc is missing */
+
+	if (cached > 0)
+		return cached;
+	f = fopen("/proc/sys/net/unix/max_dgram_qlen", "re");
+	if (f) {
+		if (fscanf(f, "%d", &v) != 1 || v <= 0)
+			v = 10;
+		fclose(f);
+	}
+	cached = v;
+	return cached;
+}
+
+static int socket_is_unix_dgram(int socket_handle)
+{
+	struct sockaddr_storage ss;
+	socklen_t sslen = sizeof(ss);
+
+	memset(&ss, 0, sizeof(ss));
+	if (getsockname(socket_handle, (struct sockaddr *)&ss, &sslen) != 0)
+		return 0;
+	return ss.ss_family == AF_UNIX;
+}
+
 int output_socket_get_fill_pct(int socket_handle, int sndbuf_capacity,
 	uint8_t *out_pct)
 {
 	int queued = 0;
-	int sndbuf;
+	int denom;
 	uint64_t pct;
 
 	if (socket_handle < 0 || !out_pct)
 		return -1;
 	if (ioctl(socket_handle, SIOCOUTQ, &queued) != 0)
 		return -1;
+	if (queued < 0)
+		queued = 0;
 
-	if (sndbuf_capacity > 0) {
-		sndbuf = sndbuf_capacity;
-	} else if (output_socket_capture_capacity(socket_handle, &sndbuf) != 0) {
+	if (socket_is_unix_dgram(socket_handle)) {
+		/* For UNIX datagram, the actual binding limit is
+		 * min(qlen × avg_skb_truesize, sender SO_SNDBUF).  Whichever
+		 * is smaller dictates when sendto() returns EAGAIN.  Without
+		 * this clamp, fill_pct floors at a few percent and the
+		 * 75 %-high-water backpressure trigger never fires on
+		 * unix:// transports.  Compute the qlen × truesize product in
+		 * 64-bit and saturate to INT_MAX so a tuned-up qlen sysctl
+		 * (some hosts run ≥ 100k) cannot wrap the int denominator. */
+		uint64_t denom64 = (uint64_t)read_unix_max_dgram_qlen() *
+			UNIX_DGRAM_AVG_SKB_TRUESIZE_BYTES;
+		int sndbuf;
+		denom = denom64 > (uint64_t)INT_MAX ? INT_MAX : (int)denom64;
+		if (sndbuf_capacity > 0)
+			sndbuf = sndbuf_capacity;
+		else if (output_socket_capture_capacity(socket_handle,
+		         &sndbuf) != 0)
+			sndbuf = 0;
+		if (sndbuf > 0 && sndbuf < denom)
+			denom = sndbuf;
+	} else if (sndbuf_capacity > 0) {
+		denom = sndbuf_capacity;
+	} else if (output_socket_capture_capacity(socket_handle, &denom) != 0) {
 		return -1;
 	}
+
+	if (denom <= 0)
+		return -1;
 
 	/* Linux reports SO_SNDBUF as 2× the requested size (kernel internal
 	 * accounting).  Both queued and sndbuf use the same units, so the
 	 * ratio is correct without correcting the doubling — what matters
 	 * is "queued / capacity-as-the-kernel-sees-it". */
-	if (queued < 0)
-		queued = 0;
-	pct = (uint64_t)queued * 100u / (uint64_t)sndbuf;
+	pct = (uint64_t)queued * 100u / (uint64_t)denom;
 	if (pct > 100)
 		pct = 100;
 	*out_pct = (uint8_t)pct;

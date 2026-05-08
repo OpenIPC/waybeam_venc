@@ -273,21 +273,51 @@ static void *encode_fn(void *arg)
 
 		if (len > 0 && st->codec_type == AUDIO_CODEC_TYPE_OPUS &&
 		    st->opus.encoder && st->opus.encode) {
-			int frame_size = (int)(len / 2 / st->channels);
-			int32_t encoded = st->opus.encode(st->opus.encoder,
-				(const int16_t *)data, frame_size,
-				enc_buf, (int32_t)sizeof(enc_buf));
-			if (encoded <= 0) {
-				fprintf(stderr,
-					"[audio] opus_encode error %d, dropping frame\n",
-					(int)encoded);
+			/* RFC 7587: one Opus access unit per RTP packet, 20ms each.
+			 * Slice the popped PCM buffer into fixed sample_rate/50
+			 * sample-per-channel chunks so opus_encode always emits a
+			 * single-frame packet (TOC code=0) and the static 960-tick
+			 * timestamp advance matches the actual audio duration.
+			 * Without this, a coalesced DMA delivery (e.g. 40ms in one
+			 * MI_AI_Read after scheduling latency) would yield a c=1
+			 * two-frame packet whose timestamp under-advances by half,
+			 * breaking the receiver's jitterbuffer. */
+			const int chunk_samples = (int)(st->sample_rate / 50);
+			const size_t chunk_bytes = (size_t)chunk_samples *
+				st->channels * 2;
+			/* Per-chunk PTS advance for the recording ring.  When MI_AI
+			 * coalesces multiple periods, every chunk must carry a
+			 * distinct PTS or the TS muxer emits PES with duplicate
+			 * timestamps and the recording's audio timeline collapses
+			 * on demux. */
+			const uint64_t chunk_us = 1000000ULL / 50;
+			size_t off = 0;
+			uint64_t ts_us = entry.timestamp_us;
+			if (chunk_bytes == 0)
 				continue;
+			while (off + chunk_bytes <= len) {
+				int32_t encoded = st->opus.encode(st->opus.encoder,
+					(const int16_t *)(data + off),
+					chunk_samples,
+					enc_buf, (int32_t)sizeof(enc_buf));
+				if (encoded <= 0) {
+					fprintf(stderr,
+						"[audio] opus_encode error %d, dropping frame\n",
+						(int)encoded);
+					off += chunk_bytes;
+					ts_us += chunk_us;
+					continue;
+				}
+				if (st->rec_ring)
+					audio_ring_push(st->rec_ring, enc_buf,
+						(uint16_t)encoded, ts_us);
+				(void)maruko_audio_send(&st->output, enc_buf,
+					(size_t)encoded, &st->rtp,
+					st->rtp_frame_ticks, rtp_mode);
+				off += chunk_bytes;
+				ts_us += chunk_us;
 			}
-			data = enc_buf;
-			len  = (size_t)encoded;
-			if (st->rec_ring)
-				audio_ring_push(st->rec_ring, data, (uint16_t)len,
-					entry.timestamp_us);
+			continue;
 		} else if (len > 0 &&
 		           (st->codec_type == AUDIO_CODEC_TYPE_G711A ||
 		            st->codec_type == AUDIO_CODEC_TYPE_G711U)) {
