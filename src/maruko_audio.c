@@ -285,7 +285,14 @@ static void *encode_fn(void *arg)
 			const int chunk_samples = (int)(st->sample_rate / 50);
 			const size_t chunk_bytes = (size_t)chunk_samples *
 				st->channels * 2;
+			/* Per-chunk PTS advance for the recording ring.  When MI_AI
+			 * coalesces multiple periods, every chunk must carry a
+			 * distinct PTS or the TS muxer emits PES with duplicate
+			 * timestamps and the recording's audio timeline collapses
+			 * on demux. */
+			const uint64_t chunk_us = 1000000ULL / 50;
 			size_t off = 0;
+			uint64_t ts_us = entry.timestamp_us;
 			if (chunk_bytes == 0)
 				continue;
 			while (off + chunk_bytes <= len) {
@@ -298,16 +305,17 @@ static void *encode_fn(void *arg)
 						"[audio] opus_encode error %d, dropping frame\n",
 						(int)encoded);
 					off += chunk_bytes;
+					ts_us += chunk_us;
 					continue;
 				}
 				if (st->rec_ring)
 					audio_ring_push(st->rec_ring, enc_buf,
-						(uint16_t)encoded,
-						entry.timestamp_us);
+						(uint16_t)encoded, ts_us);
 				(void)maruko_audio_send(&st->output, enc_buf,
 					(size_t)encoded, &st->rtp,
 					st->rtp_frame_ticks, rtp_mode);
 				off += chunk_bytes;
+				ts_us += chunk_us;
 			}
 			continue;
 		} else if (len > 0 &&

@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <limits.h>
 #include <linux/sockios.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -303,10 +304,13 @@ int output_socket_get_fill_pct(int socket_handle, int sndbuf_capacity,
 		 * is smaller dictates when sendto() returns EAGAIN.  Without
 		 * this clamp, fill_pct floors at a few percent and the
 		 * 75 %-high-water backpressure trigger never fires on
-		 * unix:// transports. */
-		int sndbuf;
-		denom = read_unix_max_dgram_qlen() *
+		 * unix:// transports.  Compute the qlen × truesize product in
+		 * 64-bit and saturate to INT_MAX so a tuned-up qlen sysctl
+		 * (some hosts run ≥ 100k) cannot wrap the int denominator. */
+		uint64_t denom64 = (uint64_t)read_unix_max_dgram_qlen() *
 			UNIX_DGRAM_AVG_SKB_TRUESIZE_BYTES;
+		int sndbuf;
+		denom = denom64 > (uint64_t)INT_MAX ? INT_MAX : (int)denom64;
 		if (sndbuf_capacity > 0)
 			sndbuf = sndbuf_capacity;
 		else if (output_socket_capture_capacity(socket_handle,
