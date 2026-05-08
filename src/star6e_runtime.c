@@ -16,6 +16,8 @@
 #include "venc_config.h"
 #include "venc_httpd.h"
 
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -690,13 +692,39 @@ void star6e_runtime_respawn_after_exit(void)
 	 * (e.g. fd table exhaustion from a leaked descriptor we missed in
 	 * teardown) bail before execv — running blind would lose any panic
 	 * output the fresh venc emits. */
-	int log = open(VENC_LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	int log = open(VENC_LOG_PATH,
+		O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
 	if (log >= 0) {
 		if (dup2(log, STDOUT_FILENO) < 0 ||
 		    dup2(log, STDERR_FILENO) < 0)
 			_exit(127);
 		if (log > 2)
 			close(log);
+	}
+
+	/* Scrub all non-stdio fds before execv: the SigmaStar SDK opens
+	 * /dev/mi_poll (and a few other internal fds) without CLOEXEC, and
+	 * MI_SYS_Exit does not release every one of them.  Without this
+	 * scrub, every respawn cycle leaks 1+ mi_poll fds; a long-running
+	 * device hits the per-process fd cap eventually.  Source-level
+	 * O_CLOEXEC on our own opens (sockets, pipes, recorder, IMU,
+	 * config, /dev/null) is still in effect and makes this loop a
+	 * narrow safety net rather than the primary defence. */
+	{
+		DIR *d = opendir("/proc/self/fd");
+		if (d) {
+			int dfd_keep = dirfd(d);
+			struct dirent *e;
+			while ((e = readdir(d)) != NULL) {
+				if (!isdigit((unsigned char)e->d_name[0]))
+					continue;
+				int fd = atoi(e->d_name);
+				if (fd <= STDERR_FILENO || fd == dfd_keep)
+					continue;
+				close(fd);
+			}
+			closedir(d);
+		}
 	}
 
 	/* argv is intentionally minimal — main.c currently ignores argv, so

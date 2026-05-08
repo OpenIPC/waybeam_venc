@@ -43,6 +43,13 @@ void star6e_video_init(Star6eVideoState *state, const VencConfig *vcfg,
 	if (!state || !vcfg)
 		return;
 
+	/* Defensive: callers normally go through star6e_video_reset first,
+	 * but the dual-stream init path at star6e_runtime.c calls us on a
+	 * struct that may already hold an open sidecar fd from a previous
+	 * lifecycle.  Closing here is a no-op on a freshly-zeroed struct
+	 * (sender_close skips fd <= 0) and avoids leaking the previous fd
+	 * across the upcoming memset. */
+	rtp_sidecar_sender_close(&state->sidecar);
 	memset(state, 0, sizeof(*state));
 	state->sensor_framerate = sensor_framerate;
 	state->max_frame_size = vcfg->outgoing.max_payload_size;

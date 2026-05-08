@@ -59,7 +59,7 @@ static int open_socket(int *socket_handle, VencOutputUriType type)
 		return -1;
 	}
 
-	*socket_handle = socket(domain, SOCK_DGRAM, 0);
+	*socket_handle = socket(domain, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (*socket_handle < 0) {
 		fprintf(stderr, "[output_socket] socket() failed: %s\n",
 			strerror(errno));

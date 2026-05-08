@@ -64,7 +64,12 @@ int rtp_sidecar_sender_init(RtpSidecarSender *s, uint16_t sidecar_port)
 	if (sidecar_port == 0)
 		return 0;  /* disabled — not an error */
 
-	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+	/* SOCK_CLOEXEC: must NOT survive execv() into the SIGHUP-respawn child.
+	 * AF_INET UDP + SO_REUSEADDR lets the child rebind 5602 alongside any
+	 * inherited stale fd, so without CLOEXEC each respawn cycle accumulates
+	 * one extra listener — the kernel's reuseaddr distribution then routes
+	 * subscribe packets to a socket no thread is reading. */
+	int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (fd < 0) {
 		fprintf(stderr, "[sidecar] socket: %s\n", strerror(errno));
 		return -1;
@@ -101,7 +106,13 @@ int rtp_sidecar_sender_init(RtpSidecarSender *s, uint16_t sidecar_port)
 
 void rtp_sidecar_sender_close(RtpSidecarSender *s)
 {
-	if (!s || s->fd < 0)
+	/* Skip on fd <= 0: -1 means already closed; 0 means a freshly-zeroed
+	 * struct (calloc / BSS / memset) where the field has never been
+	 * assigned a real socket.  fd 0 is stdin in this codebase — the
+	 * sidecar listener is always >= 3 — so treating 0 as "uninitialised"
+	 * lets star6e_video_init call this defensively before its own memset
+	 * without closing stdin on the first invocation. */
+	if (!s || s->fd <= 0)
 		return;
 	close(s->fd);
 	s->fd = -1;

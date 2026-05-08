@@ -1,6 +1,7 @@
 #include "audio_codec.h"
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -190,12 +191,21 @@ void audio_codec_stdout_filter_start(void)
 		pthread_mutex_unlock(&g_filter.lock);
 		return;
 	}
-	if (pipe(pipefd) != 0) {
+	/* O_CLOEXEC on the worker pipe: if SIGHUP-respawn fires before
+	 * audio_codec_stdout_filter_stop runs (which the normal teardown
+	 * path does call), pipefd[0] would otherwise be inherited by the
+	 * exec'd child and orphaned (no worker thread to drain it).
+	 * dup2 below clears CLOEXEC on STDOUT_FILENO, which is the correct
+	 * behaviour — fd 1 must survive exec; teardown will dup2 the real
+	 * stdout back over it before respawn. */
+	if (pipe2(pipefd, O_CLOEXEC) != 0) {
 		pthread_mutex_unlock(&g_filter.lock);
 		return;
 	}
 	fflush(stdout);
 	g_filter.real_stdout = dup(STDOUT_FILENO);
+	if (g_filter.real_stdout >= 0)
+		fcntl(g_filter.real_stdout, F_SETFD, FD_CLOEXEC);
 	g_filter.pipe_read   = pipefd[0];
 	dup2(pipefd[1], STDOUT_FILENO);
 	close(pipefd[1]);

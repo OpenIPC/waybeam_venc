@@ -1630,6 +1630,11 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	if (state->dual) {
 		venc_api_dual_unregister();
 		MI_VENC_DestroyChn(state->dual->channel);
+		/* Release the dual sidecar fd before freeing the struct.  Without
+		 * this, every dual-stream stop leaks the ch1 listener; usually
+		 * masked by fork+exec respawn but a clean process-exit path or
+		 * future in-process reinit would accumulate it. */
+		star6e_video_reset(&state->dual->video);
 		free(state->dual->stream_packs);
 		free(state->dual);
 		state->dual = NULL;
@@ -1829,6 +1834,12 @@ void star6e_pipeline_stop_dual(Star6ePipelineState *state)
 		d->bound = 0;
 	}
 	MI_VENC_DestroyChn(d->channel);
+	/* Mirrors the close-before-free in star6e_pipeline_stop above:
+	 * free(d) without releasing d->video.sidecar.fd would leak the ch1
+	 * sidecar listener.  star6e_pipeline_stop_dual is the live toggle-off
+	 * path (no respawn), so the SOCK_CLOEXEC safety net does not apply
+	 * here. */
+	star6e_video_reset(&d->video);
 	free(d->stream_packs);
 	free(d);
 	state->dual = NULL;

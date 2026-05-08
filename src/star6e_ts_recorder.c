@@ -112,7 +112,8 @@ static int open_new_segment(Star6eTsRecorderState *state)
 	build_ts_path(state->path, sizeof(state->path), state->dir,
 		&state->mux);
 
-	state->fd = open(state->path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	state->fd = open(state->path,
+		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (state->fd < 0) {
 		fprintf(stderr, "[ts_recorder] open %s failed: %s\n",
 			state->path, strerror(errno));

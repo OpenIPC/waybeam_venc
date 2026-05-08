@@ -428,7 +428,10 @@ struct ImuState {
 
 static int load_cal_file(ImuState *st, const char *path)
 {
-	FILE *fp = fopen(path, "r");
+	/* "re" — glibc/musl extension for O_CLOEXEC.  Cal file is
+	 * short-lived (fclose below) but SIGHUP racing the load would
+	 * otherwise inherit the fd into the respawn child. */
+	FILE *fp = fopen(path, "re");
 	if (!fp)
 		return -1;
 
@@ -875,7 +878,11 @@ static void *imu_fifo_reader_thread(void *arg)
  * Returns fd on success, -1 on failure. */
 static int bmi270_open_and_init(const char *dev, uint8_t addr)
 {
-	int fd = open(dev, O_RDWR);
+	/* O_CLOEXEC: I2C fd lives the full pipeline lifetime (closed only
+	 * in imu_destroy / bmi270_open_and_init failure paths).  Without
+	 * CLOEXEC, every SIGHUP-respawn while IMU is active would orphan
+	 * one I2C device fd in the new image. */
+	int fd = open(dev, O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
 		fprintf(stderr, "IMU: failed to open %s: %s\n", dev, strerror(errno));
 		return -1;
