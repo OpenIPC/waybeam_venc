@@ -194,20 +194,44 @@ static void *star6e_audio_encode_fn(void *arg)
 
 		if (len > 0 && state->codec_type == AUDIO_TYPE_OPUS &&
 		    state->opus.encoder && state->opus.encode) {
-			int frame_size = (int)(len / 2 / state->channels);
-			int32_t encoded = state->opus.encode(state->opus.encoder,
-				(const int16_t *)data, frame_size,
-				enc_buf, (int32_t)sizeof(enc_buf));
-			if (encoded <= 0) {
-				fprintf(stderr, "[audio] opus_encode error %d, dropping frame\n",
-					(int)encoded);
+			/* RFC 7587: one Opus access unit per RTP packet, 20ms each.
+			 * Slice the popped PCM buffer into fixed sample_rate/50
+			 * sample-per-channel chunks so opus_encode always emits a
+			 * single-frame packet (TOC code=0) and the static 960-tick
+			 * timestamp advance matches the actual audio duration.
+			 * Without this, a coalesced DMA delivery (e.g. 40ms in one
+			 * GetFrame after scheduling latency) would yield a c=1
+			 * two-frame packet whose timestamp under-advances by half,
+			 * breaking the receiver's jitterbuffer. */
+			const int chunk_samples = (int)(state->sample_rate / 50);
+			const size_t chunk_bytes = (size_t)chunk_samples *
+				state->channels * 2;
+			size_t off = 0;
+			if (chunk_bytes == 0)
 				continue;
+			while (off + chunk_bytes <= len) {
+				int32_t encoded = state->opus.encode(
+					state->opus.encoder,
+					(const int16_t *)(data + off),
+					chunk_samples,
+					enc_buf, (int32_t)sizeof(enc_buf));
+				if (encoded <= 0) {
+					fprintf(stderr,
+						"[audio] opus_encode error %d, dropping frame\n",
+						(int)encoded);
+					off += chunk_bytes;
+					continue;
+				}
+				if (state->rec_ring)
+					audio_ring_push(state->rec_ring, enc_buf,
+						(uint16_t)encoded,
+						entry.timestamp_us);
+				(void)star6e_audio_output_send(&state->output,
+					enc_buf, (size_t)encoded,
+					&state->rtp, state->rtp_frame_ticks);
+				off += chunk_bytes;
 			}
-			data = enc_buf;
-			len = (size_t)encoded;
-			if (state->rec_ring)
-				audio_ring_push(state->rec_ring, data,
-					(uint16_t)len, entry.timestamp_us);
+			continue;
 		} else if (len > 0 &&
 		           (state->codec_type == AUDIO_TYPE_G711A ||
 		            state->codec_type == AUDIO_TYPE_G711U)) {
