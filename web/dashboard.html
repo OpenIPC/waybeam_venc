@@ -807,17 +807,14 @@ async function refreshRecordings(){
     const mode = recCfg.mode || '\u2014';
     const cfgEnabled = !!recCfg.enabled;
     document.getElementById('rec-mode').textContent = mode;
-    const dualOwned = cfgEnabled && (mode === 'dual' || mode === 'dual-stream');
+    const noControl = cfgEnabled && mode === 'dual-stream';
     const btnStart = document.getElementById('rec-btn-start');
     const btnStop = document.getElementById('rec-btn-stop');
     const note = document.getElementById('rec-mode-note');
-    if(dualOwned){
+    if(noControl){
       btnStart.disabled = true;
       btnStop.disabled = true;
-      const reason = mode === 'dual'
-        ? 'record.mode=dual with record.enabled=true: the dedicated recording thread owns ch1 \u2014 HTTP start/stop is ignored. Recordings here are driven by the configured rotation limits.'
-        : 'record.mode=dual-stream with record.enabled=true: ch1 is sent to record.server over RTP, not written to disk. HTTP start/stop is ignored and no files land here.';
-      note.textContent = reason;
+      note.textContent = 'record.mode=dual-stream with record.enabled=true: ch1 is sent to record.server over RTP, not written to disk. HTTP start/stop is ignored and no files land here.';
       note.hidden = false;
     } else {
       btnStart.disabled = false;

@@ -82,9 +82,18 @@ typedef struct Star6eDualVenc {
 	volatile sig_atomic_t rec_running;
 	volatile sig_atomic_t rec_started;
 	Star6eTsRecorderState *ts_recorder;  /* borrowed, NULL in dual-stream */
+	AudioRing *audio_ring;               /* borrowed, NULL when audio off */
 	int is_dual_stream;
 	MI_VENC_Pack_t *stream_packs;     /* pre-allocated for rec thread */
 	uint32_t stream_packs_cap;
+	/* HTTP /api/v1/record/start|stop forwarding (dual mode only —
+	 * not dual-stream, which has no on-disk recorder).  The main loop
+	 * consumes the venc_api pending flag and sets rec_req_start_dir +
+	 * rec_req_start (or rec_req_stop) here; the recording thread acts
+	 * between frame writes so the ts_recorder stays single-threaded. */
+	volatile sig_atomic_t rec_req_start;
+	volatile sig_atomic_t rec_req_stop;
+	char rec_req_start_dir[256];
 } Star6eDualVenc;
 
 /** Create secondary VENC channel and bind to VPE output.

@@ -1257,7 +1257,8 @@ int venc_config_save(const char *path, const VencConfig *cfg)
 	}
 	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target);
 
-	int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, target_mode);
+	int fd = open(tmp_path,
+		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, target_mode);
 	if (fd < 0) {
 		fprintf(stderr, "[venc_config] ERROR: cannot open %s: %s\n",
 			tmp_path, strerror(errno));
@@ -1329,7 +1330,7 @@ int venc_config_save(const char *path, const VencConfig *cfg)
 		char *slash = strrchr(dir_buf, '/');
 		const char *dir_path = slash ?
 			(*slash = '\0', dir_buf) : ".";
-		int dfd = open(dir_path, O_RDONLY | O_DIRECTORY);
+		int dfd = open(dir_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 		if (dfd < 0) {
 			fprintf(stderr,
 				"[venc_config] ERROR: open dir %s: %s\n",

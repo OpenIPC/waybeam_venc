@@ -42,7 +42,7 @@ static int maruko_audio_output_init(MarukoAudioOutput *ao,
 	if (port_override == 0)
 		return 0;
 
-	ao->socket_handle = socket(AF_INET, SOCK_DGRAM, 0);
+	ao->socket_handle = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (ao->socket_handle < 0) {
 		fprintf(stderr, "[audio] ERROR: cannot create audio UDP socket\n");
 		return -1;

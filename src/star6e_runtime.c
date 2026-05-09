@@ -16,6 +16,8 @@
 #include "venc_config.h"
 #include "venc_httpd.h"
 
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -346,6 +348,23 @@ static void *dual_rec_thread_fn(void *arg)
 		MI_VENC_Stream_t stream = {0};
 		int ret;
 
+		/* Service HTTP record start/stop forwarded by main loop.
+		 * Dual-stream skips this (ts_recorder is NULL); dual mode
+		 * routes here so the ts_recorder is opened/closed by exactly
+		 * one thread. */
+		if (d->rec_req_stop && d->ts_recorder) {
+			star6e_ts_recorder_stop(d->ts_recorder);
+			d->rec_req_stop = 0;
+		}
+		if (d->rec_req_start && d->ts_recorder) {
+			star6e_ts_recorder_stop(d->ts_recorder);
+			star6e_ts_recorder_start(d->ts_recorder,
+				d->rec_req_start_dir, d->audio_ring);
+			if (d->ts_recorder->request_idr)
+				d->ts_recorder->request_idr();
+			d->rec_req_start = 0;
+		}
+
 		if (venc_fd >= 0) {
 			/* POLL_TIMEOUT_MS = 1000 is large on purpose — it
 			 * caps the rec_running cancellation latency
@@ -569,8 +588,11 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		if (ps->dual) {
 			ps->dual->is_dual_stream =
 				(strcmp(vcfg->record.mode, "dual-stream") == 0);
-			if (!ps->dual->is_dual_stream)
+			if (!ps->dual->is_dual_stream) {
 				ps->dual->ts_recorder = &ps->ts_recorder;
+				ps->dual->audio_ring =
+					vcfg->audio.enabled ? &ps->audio_ring : NULL;
+			}
 			dual_rec_thread_start(ps->dual);
 			venc_api_dual_register(ps->dual->channel,
 				ps->dual->bitrate, ps->dual->fps,
@@ -690,13 +712,39 @@ void star6e_runtime_respawn_after_exit(void)
 	 * (e.g. fd table exhaustion from a leaked descriptor we missed in
 	 * teardown) bail before execv — running blind would lose any panic
 	 * output the fresh venc emits. */
-	int log = open(VENC_LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	int log = open(VENC_LOG_PATH,
+		O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
 	if (log >= 0) {
 		if (dup2(log, STDOUT_FILENO) < 0 ||
 		    dup2(log, STDERR_FILENO) < 0)
 			_exit(127);
 		if (log > 2)
 			close(log);
+	}
+
+	/* Scrub all non-stdio fds before execv: the SigmaStar SDK opens
+	 * /dev/mi_poll (and a few other internal fds) without CLOEXEC, and
+	 * MI_SYS_Exit does not release every one of them.  Without this
+	 * scrub, every respawn cycle leaks 1+ mi_poll fds; a long-running
+	 * device hits the per-process fd cap eventually.  Source-level
+	 * O_CLOEXEC on our own opens (sockets, pipes, recorder, IMU,
+	 * config, /dev/null) is still in effect and makes this loop a
+	 * narrow safety net rather than the primary defence. */
+	{
+		DIR *d = opendir("/proc/self/fd");
+		if (d) {
+			int dfd_keep = dirfd(d);
+			struct dirent *e;
+			while ((e = readdir(d)) != NULL) {
+				if (!isdigit((unsigned char)e->d_name[0]))
+					continue;
+				int fd = atoi(e->d_name);
+				if (fd <= STDERR_FILENO || fd == dfd_keep)
+					continue;
+				close(fd);
+			}
+			closedir(d);
+		}
 	}
 
 	/* argv is intentionally minimal — main.c currently ignores argv, so
@@ -830,31 +878,64 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
 
 	/* Check HTTP record control flags.
-	 * In dual mode, the recording thread owns the ts_recorder
-	 * exclusively — skip HTTP record start/stop to prevent races. */
-	if (!ps->dual) {
+	 *
+	 * Mirror mode: act on the ts_recorder / hevc recorder directly here.
+	 *
+	 * Dual mode (not dual-stream): forward the request to the dual
+	 * recording thread, which owns the ts_recorder exclusively.  This
+	 * keeps the recorder single-threaded; the dual thread acts on the
+	 * request between frame writes.
+	 *
+	 * Dual-stream mode: ch1 is sent over RTP, no on-disk recorder —
+	 * consume and ignore the flag.
+	 */
+	{
 		char rec_dir[256];
-		if (venc_api_get_record_start(rec_dir, sizeof(rec_dir))) {
-			/* Stop any active recording first */
-			star6e_recorder_stop(&ps->recorder);
-			star6e_ts_recorder_stop(&ps->ts_recorder);
-			ps->audio.rec_ring = NULL;
-			if (strcmp(vcfg->record.format, "hevc") == 0) {
-				star6e_recorder_start(&ps->recorder, rec_dir);
-			} else {
+		int start_pending = venc_api_get_record_start(rec_dir,
+			sizeof(rec_dir));
+		int stop_pending = venc_api_get_record_stop();
+
+		if (start_pending) {
+			if (ps->dual && !ps->dual->is_dual_stream) {
 				if (vcfg->audio.enabled)
 					ps->audio.rec_ring = &ps->audio_ring;
-				star6e_ts_recorder_start(&ps->ts_recorder,
-					rec_dir,
-					vcfg->audio.enabled ? &ps->audio_ring : NULL);
+				snprintf(ps->dual->rec_req_start_dir,
+					sizeof(ps->dual->rec_req_start_dir),
+					"%s", rec_dir);
+				/* Set start flag last so the dual thread sees the
+				 * dir already populated when it consumes the flag. */
+				ps->dual->rec_req_stop = 0;
+				ps->dual->rec_req_start = 1;
+			} else if (!ps->dual) {
+				/* Mirror mode: act directly on the recorders */
+				star6e_recorder_stop(&ps->recorder);
+				star6e_ts_recorder_stop(&ps->ts_recorder);
+				ps->audio.rec_ring = NULL;
+				if (strcmp(vcfg->record.format, "hevc") == 0) {
+					star6e_recorder_start(&ps->recorder, rec_dir);
+				} else {
+					if (vcfg->audio.enabled)
+						ps->audio.rec_ring = &ps->audio_ring;
+					star6e_ts_recorder_start(&ps->ts_recorder,
+						rec_dir,
+						vcfg->audio.enabled ? &ps->audio_ring : NULL);
+				}
+				/* Request IDR so the recording starts with a keyframe */
+				runtime_request_idr();
 			}
-			/* Request IDR so the recording starts with a keyframe */
-			runtime_request_idr();
+			/* dual-stream: nothing to do */
 		}
-		if (venc_api_get_record_stop()) {
-			star6e_recorder_stop(&ps->recorder);
-			star6e_ts_recorder_stop(&ps->ts_recorder);
-			ps->audio.rec_ring = NULL;
+		if (stop_pending) {
+			if (ps->dual && !ps->dual->is_dual_stream) {
+				ps->audio.rec_ring = NULL;
+				ps->dual->rec_req_start = 0;
+				ps->dual->rec_req_stop = 1;
+			} else if (!ps->dual) {
+				star6e_recorder_stop(&ps->recorder);
+				star6e_ts_recorder_stop(&ps->ts_recorder);
+				ps->audio.rec_ring = NULL;
+			}
+			/* dual-stream: nothing to do */
 		}
 	}
 

@@ -116,7 +116,8 @@ int star6e_recorder_start(Star6eRecorderState *state, const char *dir)
 	snprintf(state->dir, sizeof(state->dir), "%s", dir);
 	build_recording_path(state->path, sizeof(state->path), dir);
 
-	state->fd = open(state->path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	state->fd = open(state->path,
+		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (state->fd < 0) {
 		fprintf(stderr, "[recorder] open %s failed: %s\n",
 			state->path, strerror(errno));

@@ -753,7 +753,7 @@ int star6e_audio_output_init(Star6eAudioOutput *audio_output,
 		return 0;
 	}
 
-	audio_output->socket_handle = socket(AF_INET, SOCK_DGRAM, 0);
+	audio_output->socket_handle = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (audio_output->socket_handle < 0) {
 		fprintf(stderr, "[audio] ERROR: cannot create audio UDP socket\n");
 		return -1;

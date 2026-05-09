@@ -445,9 +445,13 @@ static void *httpd_thread(void *arg)
 		struct sockaddr_in client_addr;
 		socklen_t addr_len = sizeof(client_addr);
 		int listen_fd = __atomic_load_n(&g_listen_fd, __ATOMIC_ACQUIRE);
+		/* accept4 + SOCK_CLOEXEC: if SIGHUP-respawn fires while a
+		 * client is mid-request, the inherited client fd would be
+		 * orphaned in the new image (no thread reading it).  Bounded
+		 * by the 2 s SO_RCVTIMEO below, but free hygiene. */
 		int client_fd = listen_fd >= 0 ?
-			accept(listen_fd, (struct sockaddr *)&client_addr,
-				&addr_len) : -1;
+			accept4(listen_fd, (struct sockaddr *)&client_addr,
+				&addr_len, SOCK_CLOEXEC) : -1;
 		if (client_fd < 0) {
 			if (__atomic_load_n(&g_running, __ATOMIC_ACQUIRE) && errno != EINTR)
 				fprintf(stderr, "[httpd] accept error: %s\n", strerror(errno));
@@ -489,7 +493,7 @@ int venc_httpd_start(uint16_t port)
 		return -1;
 	}
 
-	g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	g_listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (g_listen_fd < 0) {
 		fprintf(stderr, "[httpd] socket error: %s\n", strerror(errno));
 		return -1;
