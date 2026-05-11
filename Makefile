@@ -11,11 +11,11 @@ TOOLCHAIN_MARUKO_DIR := toolchain/toolchain.sigmastar-infinity6c
 CC_MARUKO_BIN := $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
 # Infinity6C kernel source for building sensor .ko via drivers/Makefile.
-# Override KSRC_MARUKO at the command line to point at an existing tree.
-KSRC_MARUKO_URL  ?= https://github.com/OpenIPC/firmware/releases/download/kernel/kernel.sigmastar-infinity6c.tgz
-KSRC_MARUKO_TGZ  := kernel.sigmastar-infinity6c.tgz
-KSRC_MARUKO_DIR  := toolchain/kernel.sigmastar-infinity6c
-KSRC_MARUKO      ?= $(KSRC_MARUKO_DIR)
+# KSRC_MARUKO must point at an existing Infinity6C 5.10.61 kernel source
+# tree (arch/arm + top-level Makefile). The tree is not hosted in this
+# repo and is not downloaded; obtain it from the appropriate SigmaStar
+# SDK and pass it on the command line.
+KSRC_MARUKO ?=
 
 STAR6E_CC ?= $(TOOLCHAIN_DIR)/bin/arm-openipc-linux-gnueabihf-gcc
 MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
@@ -87,8 +87,8 @@ help:
 	@echo "  make clean       Clean build outputs"
 	@echo "  make toolchain   Ensure Star6E cross-toolchain is present"
 	@echo "  make toolchain-maruko Ensure Maruko cross-toolchain is present"
-	@echo "  make ksrc-maruko Ensure Maruko (Infinity6C) kernel source is present"
-	@echo "  make drivers-maruko Build sensors/maruko/sensor_imx*_maruko.ko"
+	@echo "  make ksrc-maruko KSRC_MARUKO=/path/to/kernel  Validate Infinity6C kernel source tree"
+	@echo "  make drivers-maruko KSRC_MARUKO=/path/to/kernel  Build sensors/maruko/sensor_imx*_maruko.ko"
 	@echo "  make maruko-pull HOST=root@<ip>  Pull libs/drivers/isp-bins from a device"
 	@echo "  make maruko-deploy HOST=root@<ip>  Build + deploy venc (binary only) cycle"
 	@echo "  make maruko-full   HOST=root@<ip>  Full bring-up: binary + libs + drivers + ISP bins"
@@ -222,27 +222,30 @@ toolchain-maruko:
 
 # ── Maruko drivers ────────────────────────────────────────────────────
 #
-# Fetch and unpack a pinned Infinity6C kernel source tree so
-# drivers/Makefile (KSRC) can build sensor_imxNNN_maruko.ko in CI.
-# Override KSRC_MARUKO=/path/to/your/kernel to skip the download.
+# Validate that KSRC_MARUKO points at a usable Infinity6C 5.10.61 kernel
+# tree. The tree is not redistributable from this repo, so we never
+# fetch — pass KSRC_MARUKO=/path/to/kernel on the command line:
+#
+#   make drivers-maruko KSRC_MARUKO=/path/to/infinity6c-kernel
+#
+# If you cannot get the kernel source, populate sensors/maruko/ via
+# scripts/maruko_pull_artifacts.sh drivers from a known-good device
+# instead.
 ksrc-maruko:
-	@if [ -d "$(KSRC_MARUKO)" ] && [ -f "$(KSRC_MARUKO)/Makefile" ]; then \
-		echo "Maruko kernel source already present at $(KSRC_MARUKO)"; \
-	else \
-		echo "Fetching $(KSRC_MARUKO_TGZ)..."; \
-		wget -c -q --show-progress "$(KSRC_MARUKO_URL)" -O "$(KSRC_MARUKO_TGZ)" || { \
-			echo ""; \
-			echo "ERROR: failed to fetch Maruko kernel source from"; \
-			echo "       $(KSRC_MARUKO_URL)"; \
-			echo "       Override KSRC_MARUKO=/path/to/kernel and rerun, or"; \
-			echo "       populate sensors/maruko/ with prebuilt .ko via"; \
-			echo "       scripts/maruko_pull_artifacts.sh drivers."; \
-			rm -f "$(KSRC_MARUKO_TGZ)"; exit 1; \
-		}; \
-		mkdir -p "$(KSRC_MARUKO_DIR)"; \
-		tar -xf "$(KSRC_MARUKO_TGZ)" -C "$(KSRC_MARUKO_DIR)" --strip-components=1; \
-		rm -f "$(KSRC_MARUKO_TGZ)"; \
+	@if [ -z "$(KSRC_MARUKO)" ]; then \
+		echo "ERROR: KSRC_MARUKO is not set."; \
+		echo "       Pass KSRC_MARUKO=/path/to/infinity6c-kernel on the command line."; \
+		echo "       The Infinity6C 5.10.61 kernel source is not hosted by this repo."; \
+		echo "       Alternative: scripts/maruko_pull_artifacts.sh drivers to pull"; \
+		echo "       prebuilt .ko from a working bench device into sensors/maruko/."; \
+		exit 1; \
 	fi
+	@if [ ! -d "$(KSRC_MARUKO)" ] || [ ! -f "$(KSRC_MARUKO)/Makefile" ] || [ ! -d "$(KSRC_MARUKO)/arch/arm" ]; then \
+		echo "ERROR: KSRC_MARUKO=$(KSRC_MARUKO) is not a valid kernel source tree"; \
+		echo "       (need a directory containing Makefile and arch/arm/)."; \
+		exit 1; \
+	fi
+	@echo "Using Maruko kernel source at $(KSRC_MARUKO)"
 
 drivers-maruko: toolchain-maruko ksrc-maruko
 	$(MAKE) -C drivers sensor KSRC="$(KSRC_MARUKO)" \

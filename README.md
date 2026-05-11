@@ -133,18 +133,20 @@ scripts/maruko_direct_deploy.sh push-isp-bin imx415
 
 ### Building Maruko sensor drivers from source
 
-`drivers/sensor_imx{335,415}_maruko.c` needs the Infinity6C kernel tree.
-`make drivers-maruko` fetches and unpacks a pinned kernel source, then builds
-both modules into `sensors/maruko/`:
+`drivers/sensor_imx{335,415}_maruko.c` needs the Infinity6C 5.10.61 kernel
+source tree. The tree is part of the SigmaStar BSP and is not hosted by
+this repo, so you must supply it on the command line:
 
 ```sh
-make drivers-maruko
-# Or with an existing local kernel tree:
-make drivers-maruko KSRC_MARUKO=/path/to/i6c/kernel
+make drivers-maruko KSRC_MARUKO=/path/to/infinity6c-kernel
 ```
 
-If the kernel source is unavailable, fall back to the prebuilt `.ko` pulled
-by `make maruko-pull` — the deploy script treats both identically.
+`make drivers-maruko` without `KSRC_MARUKO` fails with a clear error — it
+does not auto-download the kernel.
+
+If you do not have the kernel source, fall back to the prebuilt `.ko`
+pulled by `make maruko-pull` from a known-good device — the deploy script
+treats either source identically.
 
 It deploys `/usr/bin/venc`, uses the production `/etc/venc.json`, waits for
 HTTP readiness, and captures `/tmp/venc.log`.
