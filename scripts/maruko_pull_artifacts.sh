@@ -87,8 +87,8 @@ if [[ ${#COMPONENTS[@]} -eq 0 ]]; then
 	COMPONENTS=(libs drivers isp-bins info)
 fi
 
-remote_sh()  { ssh -o BatchMode=yes -o ConnectTimeout=5 "${HOST}" "$@"; }
-remote_cat() { ssh -o BatchMode=yes -o ConnectTimeout=5 "${HOST}" "cat $1"; }
+remote_sh()  { ssh -n -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "$@"; }
+remote_cat() { ssh -n -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "cat $1"; }
 
 probe_remote() {
 	log "Probing ${HOST} ..."

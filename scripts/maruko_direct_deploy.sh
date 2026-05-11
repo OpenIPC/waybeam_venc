@@ -104,7 +104,7 @@ die() { printf '[maruko_direct] ERROR: %s\n' "$*" >&2; exit 1; }
 
 remote_sh() {
 	local script="$1"
-	ssh -o BatchMode=yes -o ConnectTimeout=5 "${HOST}" "sh -lc $(printf '%q' "${script}")"
+	ssh -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "sh -c $(printf '%q' "${script}")"
 }
 
 remote_capture() {
@@ -125,7 +125,7 @@ remote_capture() {
 push_stream() {
 	# push_stream LOCAL_PATH REMOTE_PATH
 	local src="$1" dst="$2"
-	ssh -o BatchMode=yes -o ConnectTimeout=5 "${HOST}" "cat > $(printf '%q' "${dst}")" < "${src}"
+	ssh -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "cat > $(printf '%q' "${dst}")" < "${src}"
 }
 
 require_local_bin() {
