@@ -99,6 +99,17 @@ device has been mirrored locally:
 | `sensors/maruko/*.ko`         | `/lib/modules/5.10.61/sigmastar/`     | pulled or built via `make drivers-maruko` |
 | `iq-profiles/maruko-bin/*.bin`| `/etc/sensors/`                       | pulled from device |
 | `out/maruko/venc`             | `/usr/bin/venc`                       | `make build SOC_BUILD=maruko` |
+| `out/maruko/json_cli`         | `/usr/bin/json_cli`                   | `make json_cli SOC_BUILD=maruko` (vendored from `waybeam-hub/tools/`) |
+
+`push-libs` also creates two uClibc compat symlinks on the target —
+`/lib/ld-uClibc.so.1` and `/lib/libc.so.0`, both pointing to `/lib/libc.so`.
+The vendor blob `libcam_os_wrapper.so` has hardcoded NEEDED tags for these
+two names; stock OpenIPC musl firmware only ships `libc.so`, so a fresh
+firstboot device would otherwise segfault on first `venc` start.
+
+`json_cli` is required by `config-get` / `config-set` / `status` in the
+deploy script — `maruko-full` (and `cycle --with-json-cli`) installs it
+automatically.
 
 One-time: mirror the working bench (`192.168.2.12` by default) into the repo:
 
@@ -116,7 +127,8 @@ make maruko-deploy HOST=root@<device-ip>
 # = scripts/maruko_direct_deploy.sh cycle
 ```
 
-Fresh-device bring-up (binary + libs + drivers + ISP bins, drivers reboot):
+Fresh-device bring-up (binary + libs + uClibc symlinks + json_cli +
+drivers + ISP bins, drivers reboot):
 
 ```sh
 make maruko-full HOST=root@<device-ip>
@@ -126,7 +138,8 @@ make maruko-full HOST=root@<device-ip>
 Selective pushes during debugging:
 
 ```sh
-scripts/maruko_direct_deploy.sh push-libs
+scripts/maruko_direct_deploy.sh push-libs           # libs + uClibc symlinks
+scripts/maruko_direct_deploy.sh push-json-cli       # /usr/bin/json_cli
 scripts/maruko_direct_deploy.sh push-drivers --reboot-after
 scripts/maruko_direct_deploy.sh push-isp-bin imx415
 ```

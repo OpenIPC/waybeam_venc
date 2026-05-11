@@ -24,17 +24,24 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch Star6E toolchain
         run: make toolchain
-      - name: Build Star6E
+      - name: Build Star6E venc
         run: make build SOC_BUILD=star6e
+      - name: Build Star6E json_cli
+        run: make json_cli SOC_BUILD=star6e
       - name: Stage Star6E
         run: make stage SOC_BUILD=star6e
       - name: Verify output
-        run: test -x out/star6e/venc
+        run: |
+          test -x out/star6e/venc
+          test -x out/star6e/json_cli
       - name: Upload Star6E staged output
         uses: actions/upload-artifact@v4
         with:
           name: venc-star6e
-          path: out/star6e/
+          # Exclude obj/ — incremental build dirs are not release content
+          path: |
+            out/star6e/
+            !out/star6e/obj/
 
   build-maruko:
     runs-on: ubuntu-latest
@@ -43,17 +50,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch Maruko toolchain
         run: make toolchain-maruko
-      - name: Build Maruko
+      - name: Build Maruko venc
         run: make build SOC_BUILD=maruko
+      - name: Build Maruko json_cli
+        run: make json_cli SOC_BUILD=maruko
       - name: Stage Maruko
         run: make stage SOC_BUILD=maruko
       - name: Verify output
-        run: test -x out/maruko/venc
+        run: |
+          test -x out/maruko/venc
+          test -x out/maruko/json_cli
       - name: Upload Maruko staged output
         uses: actions/upload-artifact@v4
         with:
           name: venc-maruko
-          path: out/maruko/
+          path: |
+            out/maruko/
+            !out/maruko/obj/
 
   # ── Create/update release ──────────────────────────────────────────
 
@@ -82,11 +95,13 @@ jobs:
           for backend in star6e maruko; do
             mkdir -p "release/venc-${backend}"
             mv "release/${backend}/venc" "release/venc-${backend}/venc"
+            mv "release/${backend}/json_cli" "release/venc-${backend}/json_cli"
             if [ -d "release/${backend}/lib" ]; then
               mv "release/${backend}/lib" "release/venc-${backend}/lib"
             fi
             cp config/venc.default.json "release/venc-${backend}/venc.json"
             chmod +x "release/venc-${backend}/venc"
+            chmod +x "release/venc-${backend}/json_cli"
             tar -czf "release/venc-${backend}.tar.gz" -C release "venc-${backend}"
           done
 
@@ -109,19 +124,30 @@ jobs:
 
             | File | Backend | SoC | Contents |
             |------|---------|-----|----------|
-            | `venc-star6e.tar.gz` | Star6E | SSC30KQ / SSC338Q (Infinity6E) | `venc` + `venc.json` |
-            | `venc-maruko.tar.gz` | Maruko | SSC378QE (Infinity6C) | `venc` + `venc.json` + `lib/` (10 MI libs) |
+            | `venc-star6e.tar.gz` | Star6E | SSC30KQ / SSC338Q (Infinity6E) | `venc` + `json_cli` + `venc.json` |
+            | `venc-maruko.tar.gz` | Maruko | SSC378QE (Infinity6C) | `venc` + `json_cli` + `venc.json` + `lib/` (10 MI libs) |
+
+            `json_cli` is a style-preserving JSON config get/set/del tool
+            (vendored from `waybeam-hub/tools/`) used by deploy scripts and
+            on-device automation to read and patch `/etc/venc.json`.
 
             ## Install
 
             ```bash
-            # Both backends: binary + default config
+            # Both backends: binary + json_cli + default config
             tar -xzf venc-<backend>.tar.gz -C /tmp
-            cp /tmp/venc-<backend>/venc     /usr/bin/venc
+            cp /tmp/venc-<backend>/venc      /usr/bin/venc
+            cp /tmp/venc-<backend>/json_cli  /usr/bin/json_cli
             cp /tmp/venc-<backend>/venc.json /etc/venc.json
 
             # Maruko only — stock OpenIPC Infinity6C firmware does not ship MI libs:
-            cp /tmp/venc-maruko/lib/*.so    /usr/lib/
+            cp /tmp/venc-maruko/lib/*.so     /usr/lib/
+
+            # Maruko only — vendor lib libcam_os_wrapper.so has hardcoded
+            # NEEDED tags for these two uClibc loader names; create them so
+            # the dynamic linker resolves on stock musl firmware:
+            ln -sf libc.so /lib/ld-uClibc.so.1
+            ln -sf libc.so /lib/libc.so.0
             ```
 
             ## Runtime library requirements
