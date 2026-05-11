@@ -579,8 +579,8 @@ struct DebugOsdState {
 	int cpu_pct;
 	struct timespec cpu_ts;
 
-	/* Maruko v3 API.  The official IPC demo (Maruko_work_dir/ipc_demo/
-	 * maruko/common/osd/osd.cpp) uses MI_RGN_Init/DeInit (palette as
+	/* Maruko v3 API.  The vendor's official IPC demo
+	 * (common/osd/osd.cpp) uses MI_RGN_Init/DeInit (palette as
 	 * direct arg, soc_id first) — NOT MI_RGN_InitDev/DeInitDev (with
 	 * the InitParam wrapper).  Both symbols exist in the OpenIPC
 	 * libmi_rgn.so on this device, but only MI_RGN_Init's kernel

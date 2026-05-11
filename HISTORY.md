@@ -536,10 +536,9 @@ encode loop runs at ~117 fps, no kernel taint, OSD canvas mapped at
   `#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)` so
   Maruko binaries enter the proper Maruko branch.
 - **`debug_osd`: Maruko ABI branch (now active).**  Targets the
-  OpenIPC libmi_rgn.so v3 API as documented in
-  `Maruko_work_dir/SourceCode/project/release/include/mi_rgn.h` and
-  used by the official IPC demo at
-  `Maruko_work_dir/ipc_demo/maruko/common/osd/osd.cpp`:
+  OpenIPC libmi_rgn.so v3 API as documented in the SigmaStar
+  Infinity6C BSP headers (`mi_rgn.h`) and used by the vendor's
+  official IPC demo (`common/osd/osd.cpp`):
   `MI_RGN_Init(soc_id, palette*)` (palette as direct arg, not wrapped),
   3-arg `MI_RGN_Create(soc_id, handle, attr*)`, 4-arg
   `MI_RGN_AttachToChn(soc_id, handle, chnport*, param*)`, 64-bit
@@ -561,8 +560,7 @@ encode loop runs at ~117 fps, no kernel taint, OSD canvas mapped at
 Recipe cross-referenced with `waybeam-hub/src/rgn_backend_maruko.c`,
 which had already verified the dep preload + module-ID-34 pattern
 against the same kernel/lib pair (different `MI_RGN_OsdChnPortParam_t`
-trailing field — the Maruko SDK header in
-`Maruko_work_dir/SourceCode/project/release/include/mi_rgn_datatype.h`
+trailing field — the current SigmaStar Infinity6C BSP `mi_rgn_datatype.h`
 omits `stColorInvertAttr` that the hub's older vendored header
 includes; both work because the kernel reads only the union prefix).
 

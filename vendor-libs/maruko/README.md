@@ -29,8 +29,8 @@ Original ten libs (2026-04-22): pulled from a known-good Maruko test device
 (SSC378QE @ 192.168.2.12) overlay partition (`/overlay/root/usr/lib/`).
 
 Audio additions (2026-05-02, v0.9.15): `libmi_ai.so` and `libmi_ao.so` pulled
-from the SDK source tree
-(`Maruko_work_dir/SourceCode/.../i6c/ipc/common/uclibc/9.1.0/mi_libs/dynamic/`).
+from the SigmaStar Infinity6C BSP SDK source tree
+(`i6c/ipc/common/uclibc/9.1.0/mi_libs/dynamic/`).
 Vermagic / runtime-verified against the same SSC378QE bench: kernel-side audio
 support is already compiled into the unified `mi.ko` (2.1 MB module) on the
 firmware in use, so no kmod insmod is required — only the userspace lib is
