@@ -21,19 +21,24 @@ STAR6E_CC ?= $(TOOLCHAIN_DIR)/bin/arm-openipc-linux-gnueabihf-gcc
 MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
 OUT_DIR := out/$(SOC_BUILD)
+OBJ_DIR := $(OUT_DIR)/obj
 TARGET := $(OUT_DIR)/venc
+JSON_CLI_TARGET := $(OUT_DIR)/json_cli
 TIMING_PROBE_TARGET := rtp_timing_probe
 TIMING_PROBE_SRC := tools/rtp_timing_probe.c
 
 VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
-COMMON_CFLAGS := -Os -s -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VERSION=\"$(VENC_VERSION)\" -D_GNU_SOURCE
+# -MMD -MP emits per-object .d files so a one-line change rebuilds just
+# that object + relink, instead of every source under the sun.  -s is in
+# LDFLAGS only (it's a link-time strip flag; not valid during -c).
+COMMON_CFLAGS := -Os -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VERSION=\"$(VENC_VERSION)\" -D_GNU_SOURCE -MMD -MP
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c lib/cJSON.c
 HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c
 MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c
 RECORDER_SRC := src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c
 LIB_RUNPATH ?= /usr/lib
-COMMON_LDFLAGS := -Wl,-rpath,$(LIB_RUNPATH) -Wl,--no-as-needed
+COMMON_LDFLAGS := -s -Wl,-rpath,$(LIB_RUNPATH) -Wl,--no-as-needed
 
 # BASE_LIBS is set per-SOC below — all MI libs are loaded via dlopen at runtime.
 ifeq ($(SOC_BUILD),maruko)
@@ -70,7 +75,7 @@ CFLAGS += $(COMMON_CFLAGS) $(SOC_CFLAGS) $(SOC_DEFS)
 LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
 
 .PHONY: help all build lint stage clean toolchain toolchain-maruko ksrc-maruko \
-        drivers-maruko maruko-pull maruko-deploy maruko-full \
+        drivers-maruko maruko-pull maruko-deploy maruko-full json_cli \
         remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
         webui webui-check
@@ -89,6 +94,7 @@ help:
 	@echo "  make toolchain-maruko Ensure Maruko cross-toolchain is present"
 	@echo "  make ksrc-maruko KSRC_MARUKO=/path/to/kernel  Validate Infinity6C kernel source tree"
 	@echo "  make drivers-maruko KSRC_MARUKO=/path/to/kernel  Build sensors/maruko/sensor_imx*_maruko.ko"
+	@echo "  make json_cli SOC_BUILD=maruko  Build out/<soc>/json_cli (vendored from waybeam-hub)"
 	@echo "  make maruko-pull HOST=root@<ip>  Pull libs/drivers/isp-bins from a device"
 	@echo "  make maruko-deploy HOST=root@<ip>  Build + deploy venc (binary only) cycle"
 	@echo "  make maruko-full   HOST=root@<ip>  Full bring-up: binary + libs + drivers + ISP bins"
@@ -104,6 +110,11 @@ all: build
 
 build: $(TOOLCHAIN_TARGET) check check-soc-stamp | $(OUT_DIR)
 build: $(TARGET)
+
+# Per-source object list — one .o per .c, deps tracked via .d files.
+# Maps both src/foo.c and lib/bar.c to $(OBJ_DIR)/src/foo.o, $(OBJ_DIR)/lib/bar.o.
+OBJS := $(addprefix $(OBJ_DIR)/,$(SRC:.c=.o))
+DEPS := $(OBJS:.o=.d)
 
 $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
@@ -123,12 +134,32 @@ check:
 lint: $(TOOLCHAIN_TARGET) check
 	$(CC) $(CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -Wno-old-style-declaration -fsyntax-only $(SRC)
 
-$(TARGET): $(SRC) include/backend.h include/codec_config.h include/codec_types.h include/file_util.h include/h26x_param_sets.h include/h26x_util.h include/hevc_rtp.h include/isp_runtime.h include/maruko_ai_types.h include/maruko_audio.h include/maruko_bindings.h include/maruko_config.h include/maruko_controls.h include/maruko_cus3a.h include/maruko_output.h include/maruko_pipeline.h include/maruko_runtime.h include/maruko_ts_recorder.h include/maruko_recorder.h include/maruko_video.h include/output_socket.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/sdk_quiet.h include/star6e_audio.h include/star6e_controls.h include/star6e_cus3a.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_pipeline.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_codec.h include/audio_ring.h include/star6e_runtime.h include/star6e_video.h include/stream_metrics.h include/timing.h include/idr_rate_limit.h include/venc_config.h include/venc_httpd.h include/venc_api.h include/venc_recordings.h include/sensor_select.h include/venc_ring.h include/star6e.h include/sigmastar_types.h include/ssc338q_compat.h include/maruko_mi.h include/star6e_mi.h include/imu_bmi270.h include/debug_osd.h
-	$(CC) $(CFLAGS) $(LDFLAGS) $(SRC) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(if $(DRV),-Ltools,) $(BASE_LIBS) $(SOC_LIBS) -o $@
+# Pattern rule — compile any source under src/, lib/, or vendor/ into
+# the mirrored layout under $(OBJ_DIR)/.  Header dependencies are
+# captured by -MMD -MP in COMMON_CFLAGS; the resulting .d files are
+# -include'd below.
+$(OBJ_DIR)/%.o: %.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(TARGET): $(OBJS)
+	$(CC) $(LDFLAGS) $(OBJS) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(if $(DRV),-Ltools,) $(BASE_LIBS) $(SOC_LIBS) -o $@
+
+-include $(DEPS)
 
 # Host-native timing probe (no cross-compiler or SDK libs needed)
 $(TIMING_PROBE_TARGET): $(TIMING_PROBE_SRC) include/rtp_sidecar.h
 	$(HOST_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE -Iinclude $(TIMING_PROBE_SRC) -lm -o $@
+
+# json_cli — vendored from waybeam-hub (tools/json_cli/{json_cli.c,jsmn.h}).
+# Cross-compiled with the SOC's toolchain so the same binary that runs venc
+# can also read/patch /etc/venc.json on the target.
+json_cli: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
+json_cli: $(JSON_CLI_TARGET)
+
+$(JSON_CLI_TARGET): tools/json_cli/json_cli.c tools/json_cli/jsmn.h
+	@mkdir -p $(@D)
+	$(CC) -Os -s -Wall -Wextra -std=c11 -D_GNU_SOURCE -Itools/json_cli -o $@ $< -lm
 
 stage: build
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi

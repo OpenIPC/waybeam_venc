@@ -30,6 +30,7 @@ SKIP_BACKUP=0
 WITH_LIBS=0
 WITH_DRIVERS=0
 WITH_ISP_BINS=0
+WITH_JSON_CLI=0
 REBOOT_AFTER_DRIVERS=0
 BACKUP_PATH=""
 COMMAND="cycle"
@@ -39,6 +40,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIBS_DIR="${ROOT_DIR}/vendor-libs/maruko"
 KO_DIR="${ROOT_DIR}/sensors/maruko"
 ISP_BIN_DIR="${ROOT_DIR}/iq-profiles/maruko-bin"
+JSON_CLI_LOCAL="${ROOT_DIR}/out/maruko/json_cli"
+JSON_CLI_REMOTE="/usr/bin/json_cli"
 
 usage() {
 	cat <<'EOF'
@@ -49,18 +52,22 @@ Defaults to host root@192.168.2.12.
 
 Commands:
   cycle                 Build, backup config, stop venc, deploy binary
-                        (+ libs/drivers/isp-bins if requested), start,
-                        wait, status
-  full                  cycle + push libs, drivers, isp-bins (fresh device)
+                        (+ libs/drivers/isp-bins/json_cli if requested),
+                        start, wait, status
+  full                  cycle + push libs, drivers, isp-bins, json_cli
+                        (fresh device)
   build                 Build local Maruko binary only
   backup-config         Copy /etc/venc.json to a timestamped backup on target
   restore-config [SRC]  Restore /etc/venc.json from SRC or latest backup
   deploy                Copy local binary to /usr/bin/venc on target
   push-libs             Push vendor-libs/maruko/*.so → /usr/lib/
+                        (also creates uClibc compat symlinks)
   push-drivers          Push sensors/maruko/*.ko → kernel modules dir
                         (use --reboot-after to apply)
   push-isp-bin [NAME]   Push iq-profiles/maruko-bin/[NAME.bin or all *.bin]
                         → /etc/sensors/
+  push-json-cli         Build (if needed) and push out/maruko/json_cli
+                        → /usr/bin/json_cli
   stop                  Stop running venc
   start                 Start venc as a daemon and log to /tmp/venc.log
   reload                Send SIGHUP to running venc
@@ -85,6 +92,7 @@ Options:
   --with-libs           cycle: also push MI vendor libs
   --with-drivers        cycle: also push sensor .ko (implies --reboot-after)
   --with-isp-bins       cycle: also push ISP .bin blobs
+  --with-json-cli       cycle: also push out/maruko/json_cli (built if missing)
   --reboot-after        push-drivers: reboot after install
   --help                Show this help
 
@@ -207,39 +215,77 @@ push_libs() {
 	done
 	shopt -u nullglob
 	[[ "${count}" -gt 0 ]] || warn "no .so files under ${LIBS_DIR}"
-	remote_sh "ldconfig 2>/dev/null || true"
-	log "Pushed ${count} libs"
+	# libcam_os_wrapper.so has hardcoded NEEDED tags ld-uClibc.so.1 and
+	# libc.so.0 (vendor blob; cannot be relinked).  Stock OpenIPC musl
+	# firmware ships /lib/libc.so only — create the missing symlinks so
+	# the dynamic loader can resolve the wrapper's deps.  Idempotent.
+	remote_sh "
+		cd /lib &&
+		[ -e ld-uClibc.so.1 ] || ln -sf libc.so ld-uClibc.so.1
+		[ -e libc.so.0 ] || ln -sf libc.so libc.so.0
+		ldconfig 2>/dev/null || true
+	"
+	log "Pushed ${count} libs (+ uClibc compat symlinks)"
 }
 
 push_drivers() {
 	[[ -d "${KO_DIR}" ]] || die "missing ${KO_DIR} — run scripts/maruko_pull_artifacts.sh first"
-	local count=0 f base
+	local count=0 skipped=0 f base remote
 	log "Pushing sensor .ko from ${KO_DIR} -> ${HOST}:${REMOTE_KO_DIR}"
 	remote_sh "mkdir -p $(printf '%q' "${REMOTE_KO_DIR}")"
 	shopt -s nullglob
+	# Two-pass: source-built (sensor_*_maruko.ko) win over pulled blobs
+	# (sensor_*_mipi.ko) when both exist for the same sensor.  Glob order
+	# is alphabetical, so without this skip the pulled blob would clobber
+	# the source-built rename on disk.
 	for f in "${KO_DIR}"/*.ko; do
 		base="$(basename "${f}")"
-		# Map sensor_imxNNN_maruko.ko -> sensor_imxNNN_mipi.ko on device per
-		# drivers/SENSOR_MODE_GUIDE.md. drv_ms_cus_* keep their name.
 		case "${base}" in
 			sensor_*_maruko.ko)
-				push_stream "${f}" "${REMOTE_KO_DIR}/${base%_maruko.ko}_mipi.ko"
+				remote="${base%_maruko.ko}_mipi.ko"
+				;;
+			sensor_*_mipi.ko)
+				# If a source-built sibling exists, prefer it.
+				local sibling="${KO_DIR}/${base%_mipi.ko}_maruko.ko"
+				if [[ -f "${sibling}" ]]; then
+					skipped=$((skipped + 1))
+					continue
+				fi
+				remote="${base}"
 				;;
 			*)
-				push_stream "${f}" "${REMOTE_KO_DIR}/${base}"
+				remote="${base}"
 				;;
 		esac
+		push_stream "${f}" "${REMOTE_KO_DIR}/${remote}"
 		count=$((count + 1))
 	done
 	shopt -u nullglob
 	[[ "${count}" -gt 0 ]] || warn "no .ko files under ${KO_DIR}"
-	log "Pushed ${count} drivers"
+	if [[ "${skipped}" -gt 0 ]]; then
+		log "Pushed ${count} drivers (${skipped} pulled _mipi.ko skipped in favor of source-built _maruko.ko)"
+	else
+		log "Pushed ${count} drivers"
+	fi
 	if [[ "${REBOOT_AFTER_DRIVERS}" -eq 1 ]]; then
 		log "Rebooting target to load new kernel modules..."
 		remote_sh "reboot" || true
 	else
 		log "Reboot required before new drivers take effect (use --reboot-after)"
 	fi
+}
+
+push_json_cli() {
+	# Build on demand so a stale repo without out/maruko/json_cli still works.
+	if [[ ! -f "${JSON_CLI_LOCAL}" ]]; then
+		log "Building json_cli for maruko..."
+		make -C "${ROOT_DIR}" json_cli SOC_BUILD=maruko >/dev/null
+	fi
+	[[ -f "${JSON_CLI_LOCAL}" ]] || die "build did not produce ${JSON_CLI_LOCAL}"
+	local remote_tmp="${JSON_CLI_REMOTE}.codex.new"
+	log "Deploying ${JSON_CLI_LOCAL} -> ${HOST}:${JSON_CLI_REMOTE}"
+	push_stream "${JSON_CLI_LOCAL}" "${remote_tmp}"
+	remote_sh "chmod 0755 $(printf '%q' "${remote_tmp}") && mv $(printf '%q' "${remote_tmp}") $(printf '%q' "${JSON_CLI_REMOTE}")"
 }
 
 push_isp_bin() {
@@ -366,6 +412,7 @@ run_cycle() {
 	stop_venc
 	deploy_binary
 	[[ "${WITH_LIBS}" -eq 1 ]]     && push_libs
+	[[ "${WITH_JSON_CLI}" -eq 1 ]] && push_json_cli
 	[[ "${WITH_DRIVERS}" -eq 1 ]]  && push_drivers
 	[[ "${WITH_ISP_BINS}" -eq 1 ]] && push_isp_bin
 	start_venc
@@ -377,6 +424,7 @@ run_full() {
 	WITH_LIBS=1
 	WITH_DRIVERS=1
 	WITH_ISP_BINS=1
+	WITH_JSON_CLI=1
 	# Drivers need a reboot before the next venc start can pick them up.
 	REBOOT_AFTER_DRIVERS=1
 	build_maruko
@@ -385,6 +433,7 @@ run_full() {
 	stop_venc
 	deploy_binary
 	push_libs
+	push_json_cli
 	push_isp_bin
 	push_drivers     # last — reboots the device
 	log "Device rebooting; not waiting for HTTP. Re-run 'cycle' or 'status' once it returns."
@@ -392,7 +441,7 @@ run_full() {
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-		cycle|full|build|backup-config|restore-config|deploy|push-libs|push-drivers|push-isp-bin|stop|start|reload|reboot|wait-http|status|config-get|config-set)
+		cycle|full|build|backup-config|restore-config|deploy|push-libs|push-drivers|push-isp-bin|push-json-cli|stop|start|reload|reboot|wait-http|status|config-get|config-set)
 			COMMAND="$1"; shift; COMMAND_ARGS=("$@"); break ;;
 		--host)              HOST="$2"; shift 2 ;;
 		--local-bin)         LOCAL_BIN="$2"; shift 2 ;;
@@ -408,6 +457,7 @@ while [[ $# -gt 0 ]]; do
 		--with-libs)         WITH_LIBS=1; shift ;;
 		--with-drivers)      WITH_DRIVERS=1; REBOOT_AFTER_DRIVERS=1; shift ;;
 		--with-isp-bins)     WITH_ISP_BINS=1; shift ;;
+		--with-json-cli)     WITH_JSON_CLI=1; shift ;;
 		--reboot-after)      REBOOT_AFTER_DRIVERS=1; shift ;;
 		--help|-h)           usage; exit 0 ;;
 		*)                   die "unknown option or command: $1" ;;
@@ -424,6 +474,7 @@ case "${COMMAND}" in
 	push-libs)      push_libs ;;
 	push-drivers)   push_drivers ;;
 	push-isp-bin)   push_isp_bin "${COMMAND_ARGS[0]:-}" ;;
+	push-json-cli)  push_json_cli ;;
 	stop)           stop_venc ;;
 	start)          start_venc ;;
 	reload)         reload_venc ;;

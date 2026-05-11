@@ -1,5 +1,46 @@
 # History
 
+## [0.10.7] - 2026-05-11
+
+Maruko deploy pipeline polish — fix four PR-review gaps and one
+build-cycle ergonomics issue surfaced during bench testing.
+
+- **Per-source object files + `-MMD -MP` dep tracking.**  The
+  top-level Makefile used a single monolithic CC invocation that
+  compiled and linked all 47 source files in one shot, so every
+  iteration of `make build SOC_BUILD=maruko` rebuilt everything from
+  scratch even for a one-line edit.  Split into `$(OBJ_DIR)/%.o`
+  pattern rules with auto-generated `.d` dep files.  Cold build
+  unchanged at ~3.3 s; touching one `.c` is now ~0.13 s (1 compile +
+  relink); a header change only rebuilds dependent objects.
+- **`push-drivers` no longer non-deterministic.**  When
+  `sensors/maruko/` contains both a source-built `sensor_imxNNN_maruko.ko`
+  (renamed to `_mipi.ko` on push) and a pulled-from-device blob
+  `sensor_imxNNN_mipi.ko`, the alphabetical glob ordering let the
+  pulled blob clobber the source-built rename.  `push_drivers` now
+  skips the pulled `_mipi.ko` when a `_maruko.ko` sibling exists, and
+  logs the skip count.
+- **uClibc compat symlinks pushed automatically.**  Stock OpenIPC
+  musl firmware ships `/lib/libc.so` only, but the vendor blob
+  `libcam_os_wrapper.so` has hardcoded NEEDED tags `ld-uClibc.so.1`
+  and `libc.so.0` in its `.dynamic` section (cannot be relinked — it
+  is a binary drop).  `push-libs` (and `cycle`/`full` when libs are
+  requested) now creates `ln -sf libc.so /lib/ld-uClibc.so.1` and
+  `ln -sf libc.so /lib/libc.so.0` after the library push.  Idempotent;
+  pristine firstboot devices no longer segfault on first `venc`
+  start.  `vendor-libs/maruko/README.md` updated — the previous claim
+  that `ld-uClibc.so.1` was "dead since v0.7.0" was wrong (only the
+  shim binary is dead; the NEEDED tag inside the wrapper is not).
+- **`json_cli` vendored from `waybeam-hub`.**  `scripts/maruko_direct_deploy.sh`'s
+  `config-get` / `config-set` / `status` paths all require
+  `/usr/bin/json_cli` on the target.  Previously the deploy script
+  assumed someone else had pushed it, which broke on firstboot.  Now
+  `tools/json_cli/{json_cli.c,jsmn.h}` ship in the repo (re-synced
+  from `../waybeam-hub/tools/`); `make json_cli SOC_BUILD=maruko`
+  builds `out/maruko/json_cli`; `scripts/maruko_direct_deploy.sh
+  push-json-cli` (and `cycle --with-json-cli` / `full`) installs it
+  to `/usr/bin/json_cli`.
+
 ## [0.10.6] - 2026-05-07
 
 `isp.sensor_bin` is now a live mutable field on both backends.
