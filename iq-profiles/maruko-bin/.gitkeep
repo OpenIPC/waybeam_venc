@@ -1,0 +1,11 @@
+# Maruko ISP tuning .bin blobs
+#
+# Pulled from /etc/sensors/*.bin on a known-good Maruko device by
+# scripts/maruko_pull_artifacts.sh isp-bins.
+#
+# Deployed back to /etc/sensors/ on target devices by
+# scripts/maruko_direct_deploy.sh push-isp-bin [NAME].
+#
+# These are vendor-tuned binary blobs (AE/AWB/CAC/LSC etc.) — there is no
+# source build for them. Treat as opaque artifacts; record provenance in
+# vendor-libs/maruko/device-info.txt when pulled.

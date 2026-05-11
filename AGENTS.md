@@ -166,7 +166,8 @@ after all output. This is the preferred way for agents to consume results:
 
 Both backends use dlopen for all MI vendor libs at runtime. Star6E runtime
 libs live in `/usr/lib` on the target firmware. Maruko deployments transfer
-the vendored MI SDK libs (from `libs/maruko/`) via `remote_test.sh`.
+the vendored MI SDK libs (from `vendor-libs/maruko/`) via `remote_test.sh`
+or `scripts/maruko_direct_deploy.sh`.
 Use these flags to skip unnecessary work:
 
 | Flag | What it skips | When to use |
@@ -439,6 +440,8 @@ Read these before working on related areas:
 | Current priorities | `documentation/CURRENT_STATUS_AND_NEXT_STEPS.md` |
 | Implementation timeline | `documentation/IMPLEMENTATION_PHASES.md` |
 | Star6E direct deploy helper | `scripts/star6e_direct_deploy.sh` |
+| Maruko direct deploy helper | `scripts/maruko_direct_deploy.sh` |
+| Maruko artifact pull (libs/.ko/.bin) | `scripts/maruko_pull_artifacts.sh` |
 | Remote testing | `documentation/REMOTE_TEST_WORKFLOW.md` |
 | HTTP API contract | `documentation/HTTP_API_CONTRACT.md` |
 | Precrop / aspect ratio | `documentation/PRECROP_ASPECT_RATIO.md` |

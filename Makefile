@@ -10,6 +10,13 @@ TOOLCHAIN_MARUKO_TGZ := toolchain.sigmastar-infinity6c.tgz
 TOOLCHAIN_MARUKO_DIR := toolchain/toolchain.sigmastar-infinity6c
 CC_MARUKO_BIN := $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
+# Infinity6C kernel source for building sensor .ko via drivers/Makefile.
+# Override KSRC_MARUKO at the command line to point at an existing tree.
+KSRC_MARUKO_URL  ?= https://github.com/OpenIPC/firmware/releases/download/kernel/kernel.sigmastar-infinity6c.tgz
+KSRC_MARUKO_TGZ  := kernel.sigmastar-infinity6c.tgz
+KSRC_MARUKO_DIR  := toolchain/kernel.sigmastar-infinity6c
+KSRC_MARUKO      ?= $(KSRC_MARUKO_DIR)
+
 STAR6E_CC ?= $(TOOLCHAIN_DIR)/bin/arm-openipc-linux-gnueabihf-gcc
 MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
@@ -62,7 +69,9 @@ endif
 CFLAGS += $(COMMON_CFLAGS) $(SOC_CFLAGS) $(SOC_DEFS)
 LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
 
-.PHONY: help all build lint stage clean toolchain toolchain-maruko remote-test verify pre-pr \
+.PHONY: help all build lint stage clean toolchain toolchain-maruko ksrc-maruko \
+        drivers-maruko maruko-pull maruko-deploy maruko-full \
+        remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
         webui webui-check
 
@@ -78,8 +87,14 @@ help:
 	@echo "  make clean       Clean build outputs"
 	@echo "  make toolchain   Ensure Star6E cross-toolchain is present"
 	@echo "  make toolchain-maruko Ensure Maruko cross-toolchain is present"
+	@echo "  make ksrc-maruko Ensure Maruko (Infinity6C) kernel source is present"
+	@echo "  make drivers-maruko Build sensors/maruko/sensor_imx*_maruko.ko"
+	@echo "  make maruko-pull HOST=root@<ip>  Pull libs/drivers/isp-bins from a device"
+	@echo "  make maruko-deploy HOST=root@<ip>  Build + deploy venc (binary only) cycle"
+	@echo "  make maruko-full   HOST=root@<ip>  Full bring-up: binary + libs + drivers + ISP bins"
 	@echo "  make remote-test Run bounded remote CLI/test-binary workflow (pass ARGS='...')"
 	@echo "  scripts/star6e_direct_deploy.sh cycle  Preferred Star6E venc deploy+HTTP smoke test"
+	@echo "  scripts/maruko_direct_deploy.sh cycle  Preferred Maruko venc deploy+HTTP smoke test"
 	@echo "  make verify      Build both backends and verify binaries exist"
 	@echo "  make pre-pr      Full pre-PR checklist (version, changelog, build)"
 	@echo "  make webui       Regenerate src/venc_webui.c from web/dashboard.html"
@@ -119,6 +134,15 @@ stage: build
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
 	@if [ -n "$(DRV)" ]; then cp -f $(DRV)/*.so $(OUT_DIR)/lib/; fi
 	@if [ -n "$(DRV_EXTRA)" ]; then cp -f "$(DRV_EXTRA)"/*.so $(OUT_DIR)/lib/; fi
+	@# Maruko-only: also stage sensor .ko and ISP .bin if cached locally.
+	@if [ "$(SOC_BUILD)" = "maruko" ]; then \
+		if ls sensors/maruko/*.ko >/dev/null 2>&1; then \
+			mkdir -p $(OUT_DIR)/drivers; cp -f sensors/maruko/*.ko $(OUT_DIR)/drivers/; \
+		fi; \
+		if ls iq-profiles/maruko-bin/*.bin >/dev/null 2>&1; then \
+			mkdir -p $(OUT_DIR)/isp-bins; cp -f iq-profiles/maruko-bin/*.bin $(OUT_DIR)/isp-bins/; \
+		fi; \
+	fi
 
 print-config:
 	@echo "SOC_BUILD=$(SOC_BUILD)"
@@ -195,6 +219,53 @@ toolchain-maruko:
 		tar -xf "$(TOOLCHAIN_MARUKO_TGZ)" -C "$(TOOLCHAIN_MARUKO_DIR)" --strip-components=1; \
 		rm -f "$(TOOLCHAIN_MARUKO_TGZ)"; \
 	fi
+
+# ── Maruko drivers ────────────────────────────────────────────────────
+#
+# Fetch and unpack a pinned Infinity6C kernel source tree so
+# drivers/Makefile (KSRC) can build sensor_imxNNN_maruko.ko in CI.
+# Override KSRC_MARUKO=/path/to/your/kernel to skip the download.
+ksrc-maruko:
+	@if [ -d "$(KSRC_MARUKO)" ] && [ -f "$(KSRC_MARUKO)/Makefile" ]; then \
+		echo "Maruko kernel source already present at $(KSRC_MARUKO)"; \
+	else \
+		echo "Fetching $(KSRC_MARUKO_TGZ)..."; \
+		wget -c -q --show-progress "$(KSRC_MARUKO_URL)" -O "$(KSRC_MARUKO_TGZ)" || { \
+			echo ""; \
+			echo "ERROR: failed to fetch Maruko kernel source from"; \
+			echo "       $(KSRC_MARUKO_URL)"; \
+			echo "       Override KSRC_MARUKO=/path/to/kernel and rerun, or"; \
+			echo "       populate sensors/maruko/ with prebuilt .ko via"; \
+			echo "       scripts/maruko_pull_artifacts.sh drivers."; \
+			rm -f "$(KSRC_MARUKO_TGZ)"; exit 1; \
+		}; \
+		mkdir -p "$(KSRC_MARUKO_DIR)"; \
+		tar -xf "$(KSRC_MARUKO_TGZ)" -C "$(KSRC_MARUKO_DIR)" --strip-components=1; \
+		rm -f "$(KSRC_MARUKO_TGZ)"; \
+	fi
+
+drivers-maruko: toolchain-maruko ksrc-maruko
+	$(MAKE) -C drivers sensor KSRC="$(KSRC_MARUKO)" \
+		CROSS="$(abspath $(TOOLCHAIN_MARUKO_DIR))/bin/arm-openipc-linux-musleabihf-"
+	@mkdir -p sensors/maruko
+	@cp -f drivers/sensor_imx*_maruko.ko sensors/maruko/ 2>/dev/null || true
+	@echo ""
+	@echo "Built modules in sensors/maruko/:"
+	@ls -lh sensors/maruko/*.ko 2>/dev/null || echo "  (none — check drivers/ build output)"
+
+# ── Maruko deploy convenience wrappers ────────────────────────────────
+
+maruko-pull:
+	@HOST="$${HOST:-root@192.168.2.12}"; \
+	./scripts/maruko_pull_artifacts.sh --host "$${HOST}"
+
+maruko-deploy:
+	@HOST="$${HOST:-root@192.168.2.12}"; \
+	./scripts/maruko_direct_deploy.sh --host "$${HOST}" cycle
+
+maruko-full:
+	@HOST="$${HOST:-root@192.168.2.12}"; \
+	./scripts/maruko_direct_deploy.sh --host "$${HOST}" full
 
 remote-test:
 	SOC_BUILD=$(SOC_BUILD) ./scripts/remote_test.sh $(ARGS)

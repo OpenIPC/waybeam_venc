@@ -70,6 +70,8 @@ make test-ci
 
 ## Deployment
 
+### Star6E (Infinity6E)
+
 Copy the binary to the target device:
 
 ```sh
@@ -81,6 +83,68 @@ For the current Star6E bench workflow, prefer the helper:
 ```sh
 scripts/star6e_direct_deploy.sh cycle
 ```
+
+### Maruko (Infinity6C)
+
+Maruko devices need more than just the `venc` binary because stock OpenIPC
+Infinity6C firmware does **not** ship MI vendor libraries, and bench devices
+also need matching sensor `.ko` modules and ISP `.bin` tuning blobs.
+
+The repo carries everything needed for a fresh deployment once a known-good
+device has been mirrored locally:
+
+| Repo location | Target path | Source |
+|---|---|---|
+| `vendor-libs/maruko/*.so`     | `/usr/lib/`                           | pulled from device |
+| `sensors/maruko/*.ko`         | `/lib/modules/5.10.61/sigmastar/`     | pulled or built via `make drivers-maruko` |
+| `iq-profiles/maruko-bin/*.bin`| `/etc/sensors/`                       | pulled from device |
+| `out/maruko/venc`             | `/usr/bin/venc`                       | `make build SOC_BUILD=maruko` |
+
+One-time: mirror the working bench (`192.168.2.12` by default) into the repo:
+
+```sh
+make maruko-pull HOST=root@192.168.2.12
+# or with finer control:
+scripts/maruko_pull_artifacts.sh libs drivers isp-bins info
+git status   # review and commit the cache that landed
+```
+
+Routine venc iteration (binary only):
+
+```sh
+make maruko-deploy HOST=root@<device-ip>
+# = scripts/maruko_direct_deploy.sh cycle
+```
+
+Fresh-device bring-up (binary + libs + drivers + ISP bins, drivers reboot):
+
+```sh
+make maruko-full HOST=root@<device-ip>
+# = scripts/maruko_direct_deploy.sh full
+```
+
+Selective pushes during debugging:
+
+```sh
+scripts/maruko_direct_deploy.sh push-libs
+scripts/maruko_direct_deploy.sh push-drivers --reboot-after
+scripts/maruko_direct_deploy.sh push-isp-bin imx415
+```
+
+### Building Maruko sensor drivers from source
+
+`drivers/sensor_imx{335,415}_maruko.c` needs the Infinity6C kernel tree.
+`make drivers-maruko` fetches and unpacks a pinned kernel source, then builds
+both modules into `sensors/maruko/`:
+
+```sh
+make drivers-maruko
+# Or with an existing local kernel tree:
+make drivers-maruko KSRC_MARUKO=/path/to/i6c/kernel
+```
+
+If the kernel source is unavailable, fall back to the prebuilt `.ko` pulled
+by `make maruko-pull` — the deploy script treats both identically.
 
 It deploys `/usr/bin/venc`, uses the production `/etc/venc.json`, waits for
 HTTP readiness, and captures `/tmp/venc.log`.

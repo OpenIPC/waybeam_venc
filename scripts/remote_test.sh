@@ -136,11 +136,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAR6E_CC="${ROOT_DIR}/toolchain/toolchain.sigmastar-infinity6e/bin/arm-openipc-linux-gnueabihf-gcc"
 SOC_BUILD_RESOLVED=""
 REMOTE_FAMILY=""
-MARUKO_RUNTIME_DIR="${MARUKO_RUNTIME_DIR:-${ROOT_DIR}/libs/maruko}"
+MARUKO_RUNTIME_DIR="${MARUKO_RUNTIME_DIR:-${ROOT_DIR}/vendor-libs/maruko}"
 MARUKO_RUNTIME_LIBS=(
   libcam_os_wrapper.so
   libcus3a.so
   libispalgo.so
+  libmi_ai.so
+  libmi_ao.so
   libmi_common.so
   libmi_isp.so
   libmi_scl.so
@@ -148,7 +150,6 @@ MARUKO_RUNTIME_LIBS=(
   libmi_sys.so
   libmi_venc.so
   libmi_vif.so
-  libmi_vpe.so
 )
 
 # --- SSH ControlMaster multiplexing ---
