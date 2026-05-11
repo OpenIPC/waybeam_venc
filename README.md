@@ -107,6 +107,16 @@ The vendor blob `libcam_os_wrapper.so` has hardcoded NEEDED tags for these
 two names; stock OpenIPC musl firmware only ships `libc.so`, so a fresh
 firstboot device would otherwise segfault on first `venc` start.
 
+If you provision a device by hand instead of through `push-libs`, run
+this on the target once (idempotent):
+
+```sh
+ssh root@<device-ip> '
+    ln -sf libc.so /lib/ld-uClibc.so.1
+    ln -sf libc.so /lib/libc.so.0
+'
+```
+
 `json_cli` is required by `config-get` / `config-set` / `status` in the
 deploy script — `maruko-full` (and `cycle --with-json-cli`) installs it
 automatically.
