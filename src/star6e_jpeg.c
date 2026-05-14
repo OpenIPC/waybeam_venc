@@ -214,6 +214,32 @@ stop:
 	return rc;
 }
 
+int venc_jpeg_backend_set_quality(uint32_t q)
+{
+	if (!g_chn_created)
+		return -ENODEV;
+	if (q == 0) q = 1;
+	if (q > 99) q = 99;
+
+	MI_VENC_ChnAttr_t attr = {0};
+	MI_S32 gret = MI_VENC_GetChnAttr(g_chn, &attr);
+	if (gret != 0) {
+		fprintf(stderr,
+			"[jpeg-star6e] GetChnAttr(%d) failed %d during live "
+			"quality update\n", (int)g_chn, gret);
+		return -EIO;
+	}
+	attr.rate.mjpgQp.quality = q;
+	MI_S32 sret = MI_VENC_SetChnAttr(g_chn, &attr);
+	if (sret != 0) {
+		fprintf(stderr,
+			"[jpeg-star6e] SetChnAttr(q=%u) failed %d\n", q, sret);
+		return -EIO;
+	}
+	g_quality = q;
+	return 0;
+}
+
 void venc_jpeg_backend_shutdown(void)
 {
 	if (g_bound) {

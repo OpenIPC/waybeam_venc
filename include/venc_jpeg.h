@@ -63,6 +63,13 @@ int venc_jpeg_capture(uint8_t **out_buf, size_t *out_len,
 /* Free a buffer returned by venc_jpeg_capture(). */
 void venc_jpeg_free(uint8_t *buf);
 
+/* Live-update MJPEG quality factor (1..99) on the running channel.
+ * Internally serialized via the same mutex as venc_jpeg_capture, so the
+ * SDK Set/Get sequence cannot interleave with a capture in progress.
+ * Returns 0 on success, -ENODEV if the snapshot subsystem is disabled,
+ * -ENOSYS if the backend has no set-quality hook, -EIO on SDK failure. */
+int venc_jpeg_set_quality(uint32_t q);
+
 /* HTTP handler for GET /api/v1/snapshot.jpg.  Returns image/jpeg on
  * success, application/json {ok:false,error:{...}} on failure. */
 int handle_snapshot_jpeg(int client_fd, const HttpRequest *req, void *ctx);
@@ -88,6 +95,12 @@ int venc_jpeg_backend_capture(uint8_t **out_buf, size_t *out_len,
 
 /* Backend-private: destroy MJPEG channel.  Called from venc_jpeg_shutdown. */
 void venc_jpeg_backend_shutdown(void);
+
+/* Backend-private: Get→modify→Set MJPEG channel quality on the running
+ * channel.  Called from venc_jpeg_set_quality under the module lock.
+ * Returns 0 on success, -EIO on SDK error, -ENOSYS when the backend
+ * does not implement live quality (host-test fallback). */
+int venc_jpeg_backend_set_quality(uint32_t q);
 
 #ifdef __cplusplus
 }

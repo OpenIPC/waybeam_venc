@@ -34,7 +34,7 @@ int venc_jpeg_init(const VencJpegConfig *cfg)
 	/* Clamp quality to a sane range; SDK MJPEG quality is roughly
 	 * MinQfactor/MaxQfactor on Star6E and a quality int on Maruko. */
 	if (g_cfg.quality == 0) g_cfg.quality = 80;
-	if (g_cfg.quality > 100) g_cfg.quality = 100;
+	if (g_cfg.quality > 99) g_cfg.quality = 99;
 	if (g_cfg.channel <= 0) g_cfg.channel = 7;
 
 	if (!g_cfg.enabled) {
@@ -87,6 +87,23 @@ void venc_jpeg_free(uint8_t *buf)
 	free(buf);
 }
 
+int venc_jpeg_set_quality(uint32_t q)
+{
+	if (q == 0) q = 1;
+	if (q > 99) q = 99;
+
+	pthread_mutex_lock(&g_jpeg_mutex);
+	if (!g_initialized || !g_cfg.enabled) {
+		pthread_mutex_unlock(&g_jpeg_mutex);
+		return -ENODEV;
+	}
+	int rc = venc_jpeg_backend_set_quality(q);
+	if (rc == 0)
+		g_cfg.quality = q;
+	pthread_mutex_unlock(&g_jpeg_mutex);
+	return rc;
+}
+
 int handle_snapshot_jpeg(int client_fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
@@ -135,3 +152,9 @@ __attribute__((weak)) int venc_jpeg_backend_capture(uint8_t **out_buf,
 }
 
 __attribute__((weak)) void venc_jpeg_backend_shutdown(void) { }
+
+__attribute__((weak)) int venc_jpeg_backend_set_quality(uint32_t q)
+{
+	(void)q;
+	return -ENOSYS;
+}

@@ -9,6 +9,7 @@
 #include "output_socket.h"
 #include "pipeline_common.h"
 #include "venc_config.h"
+#include "venc_jpeg.h"
 
 #include <dlfcn.h>
 #include <stdbool.h>
@@ -1111,6 +1112,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.query_audio_status = maruko_query_audio_status,
 	.apply_zoom = maruko_apply_zoom,
 	.apply_isp_bin = maruko_apply_isp_bin,
+	.apply_snapshot_quality = venc_jpeg_set_quality,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)

@@ -385,7 +385,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
 
 	FIELD(snapshot, enabled,   FT_BOOL,   MUT_RESTART),
-	FIELD(snapshot, quality,   FT_UINT,   MUT_RESTART),
+	FIELD(snapshot, quality,   FT_UINT,   MUT_LIVE),
 	FIELD(snapshot, channel,   FT_INT,    MUT_RESTART),
 	FIELD(snapshot, width,     FT_UINT,   MUT_RESTART),
 	FIELD(snapshot, height,    FT_UINT,   MUT_RESTART),
@@ -719,6 +719,13 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	    cfg->video0.scene_holdoff == 0 &&
 	    cfg->video0.scene_threshold > 0)
 		return "video0.scene_holdoff must be >= 1 when scene_threshold > 0";
+	if (strcmp(key, "snapshot.quality") == 0) {
+		/* JPEG q-factor range.  Backend clamps internally too, but
+		 * the validator gives a clean error response instead of a
+		 * silent clamp. */
+		if (cfg->snapshot.quality < 1 || cfg->snapshot.quality > 99)
+			return "snapshot.quality must be in range [1, 99]";
+	}
 	if (strcmp(key, "outgoing.max_payload_size") == 0) {
 		uint16_t v = cfg->outgoing.max_payload_size;
 		/* Lower bound keeps RTP/FU header overhead a small fraction of
@@ -753,6 +760,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"fpv.roi_steps",
 		"fpv.roi_center",
 		"outgoing.max_payload_size",
+		"snapshot.quality",
 	};
 	size_t i;
 
@@ -892,6 +900,7 @@ typedef enum {
 	LIVE_GROUP_MUTE,
 	LIVE_GROUP_ZOOM,
 	LIVE_GROUP_ISP_BIN,
+	LIVE_GROUP_SNAPSHOT_QUALITY,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1058,6 +1067,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_ZOOM;
 	if (strcmp(canonical_key, "isp.sensor_bin") == 0)
 		return LIVE_GROUP_ISP_BIN;
+	if (strcmp(canonical_key, "snapshot.quality") == 0)
+		return LIVE_GROUP_SNAPSHOT_QUALITY;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1089,6 +1100,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "video0.zoom_*";
 	case LIVE_GROUP_ISP_BIN:
 		return "isp.sensor_bin";
+	case LIVE_GROUP_SNAPSHOT_QUALITY:
+		return "snapshot.quality";
 	default:
 		return "unknown";
 	}
@@ -1241,6 +1254,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_zoom != NULL;
 	case LIVE_GROUP_ISP_BIN:
 		return g_cb->apply_isp_bin != NULL;
+	case LIVE_GROUP_SNAPSHOT_QUALITY:
+		return g_cb->apply_snapshot_quality != NULL;
 	default:
 		return 0;
 	}
@@ -1309,6 +1324,9 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 			snprintf(dst->isp.sensor_bin, sizeof(dst->isp.sensor_bin),
 				"%s", src->isp.sensor_bin);
 		}
+		break;
+	case LIVE_GROUP_SNAPSHOT_QUALITY:
+		dst->snapshot.quality = src->snapshot.quality;
 		break;
 	default:
 		break;
@@ -1410,6 +1428,8 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 			cfg->video0.zoom_x, cfg->video0.zoom_y);
 	case LIVE_GROUP_ISP_BIN:
 		return g_cb->apply_isp_bin(cfg->isp.sensor_bin);
+	case LIVE_GROUP_SNAPSHOT_QUALITY:
+		return g_cb->apply_snapshot_quality(cfg->snapshot.quality);
 	default:
 		return -2;
 	}

@@ -66,6 +66,14 @@ typedef struct {
 	 * last-loaded one), -1 on resolve/load error.  NULL when the backend
 	 * cannot reload bins without a full restart. */
 	int (*apply_isp_bin)(const char *path);
+	/* Live-update the MJPEG snapshot channel q-factor (1..99).  Hits
+	 * MI_VENC_SetChnAttr on the running snapshot channel — no pipeline
+	 * reinit, no buffer reallocation.  Returns 0 on success, -1 on
+	 * SDK error or if the snapshot subsystem is disabled.  Both Star6E
+	 * and Maruko register venc_jpeg_set_quality() as the implementation,
+	 * which dispatches to the per-backend venc_jpeg_backend_set_quality
+	 * hook (Get→modify→Set on the existing MJPEG channel). */
+	int (*apply_snapshot_quality)(uint32_t q);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

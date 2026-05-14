@@ -266,6 +266,39 @@ stop:
 	return rc;
 }
 
+int venc_jpeg_backend_set_quality(uint32_t q)
+{
+	if (!g_chn_created)
+		return -ENODEV;
+	if (!g_mi_venc.fnGetChnAttr || !g_mi_venc.fnSetChnAttr)
+		return -ENOSYS;
+	if (q == 0) q = 1;
+	if (q > 99) q = 99;
+
+	/* Get → modify quality → Set on the running channel.  The MJPEG
+	 * channel is currently parked (StopRecvPic) between captures, but
+	 * holding g_jpeg_mutex in the front end means we can't race a
+	 * capture in progress.  Rate mode is MJPEGFIXQP (= 9), and the
+	 * mjpgQp struct's `quality` field maps to MI_VENC_AttrMjpegFixQp_t's
+	 * u32Qfactor — see commit "MJPG snapshot quality wires through" for
+	 * the byte-layout discussion. */
+	i6c_venc_chn attr = {0};
+	if (g_mi_venc.fnGetChnAttr(JPEG_VENC_DEV, JPEG_VENC_CHN, &attr) != 0) {
+		fprintf(stderr,
+			"[jpeg-maruko] GetChnAttr(dev=%d,chn=%d) failed during "
+			"live quality update\n", JPEG_VENC_DEV, JPEG_VENC_CHN);
+		return -EIO;
+	}
+	attr.rate.mjpgQp.quality = q;
+	if (g_mi_venc.fnSetChnAttr(JPEG_VENC_DEV, JPEG_VENC_CHN, &attr) != 0) {
+		fprintf(stderr,
+			"[jpeg-maruko] SetChnAttr(q=%u) failed\n", q);
+		return -EIO;
+	}
+	g_quality = q;
+	return 0;
+}
+
 void venc_jpeg_backend_shutdown(void)
 {
 	if (g_started) {

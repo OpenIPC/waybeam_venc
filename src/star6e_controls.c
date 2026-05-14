@@ -8,6 +8,7 @@
 #include "star6e_iq.h"
 #include "star6e_output.h"
 #include "venc_api.h"
+#include "venc_jpeg.h"
 
 #include <dlfcn.h>
 #include <stdio.h>
@@ -1183,6 +1184,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.query_audio_status = query_audio_status,
 	.apply_zoom = apply_zoom,
 	.apply_isp_bin = apply_isp_bin,
+	.apply_snapshot_quality = venc_jpeg_set_quality,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)
