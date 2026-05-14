@@ -95,6 +95,79 @@ section) for the full table and Phase-2 brute-force-sweep plan.
 
 Captures: `bench_logs/manual_sensor_diff_20260514T093447Z/`
 
+## [0.10.11] - 2026-05-14
+
+Maruko snapshot follow-up: SIGHUP reinit hardening, MJPG quality
+actually applied, live-update `snapshot.quality`, and the
+Maruko-specific default config finally reaches the release tarball.
+
+- **`snapshot.quality` is MUT_LIVE.**  POST/GET `/api/v1/set?snapshot.quality=N`
+  applies instantly with no pipeline reinit — Get→modify→Set on
+  `MI_VENC_ChnAttr_t.rate.mjpgQp.quality` on the parked MJPG channel.
+  Frontend (`src/venc_jpeg.c`) serializes the live-set call under the
+  same module mutex as `venc_jpeg_capture`, so an in-flight snapshot
+  request cannot race the SDK Get/Set sequence.  Backend hooks added:
+  `venc_jpeg_backend_set_quality(uint32_t)` in both `star6e_jpeg.c`
+  and `maruko_jpeg.c`; weak `-ENOSYS` fallback in the common layer
+  keeps the host-test build link-clean.  Schema field flips from
+  `MUT_RESTART` to `MUT_LIVE` in `g_fields[]`; full LIVE-group wiring
+  through `venc_api.c` (key→group, name, supported, copy, apply) +
+  `apply_snapshot_quality` callback on `VencApplyCallbacks`.
+  Range validator: `[1, 99]` (SDK ceiling) at `validate_field_cfg`.
+  Front-end `venc_jpeg_init` clamp aligned to ≤99 (was 100) for
+  symmetric behaviour with live-set.
+  - Bench (Maruko 192.168.2.12 firstboot): q=20→118 KB, q=50→257 KB,
+    q=80→464 KB, q=99→2.03 MB across same pid, zero reinits.
+  - Bench (Star6E 192.168.1.13): q=20→51 KB, q=50→78 KB, q=80→154 KB,
+    q=99→261 KB across same pid, reinit count unchanged.
+
+- **MJPG quality actually wires through on Maruko** (was silently
+  ignored in 0.10.10).  Root cause: `attr.rate.mode` was set to
+  `I6C_VENC_RATEMODE_MJPGQP` (= 8), which Maruko firmware interprets
+  as `MJPEGVBR` in its UBR-shifted enum — the channel built fine but
+  `attr.rate.mjpgQp.quality` was discarded since VBR mode has no
+  quality field.  Fixed by adding `MARUKO_VENC_RC_MJPG_{CBR,VBR,FIXQP}`
+  = {7,8,9} to `include/maruko_bindings.h` (the firmware-accepted enum
+  values, distinct from the I6C SDK header's shifted layout) and
+  pointing `maruko_jpeg.c` at `MARUKO_VENC_RC_MJPG_FIXQP` (= 9).
+  DQT tables now scale correctly: q=99 → all-1's quantization,
+  q=20 → coarse quantization, byte sizes track expected.
+
+- **Maruko SIGHUP reinit no longer crashes on consecutive `kill -1`.**
+  Root cause: `maruko_load_isp_bin` calls
+  `MI_ISP_DisableUserspace3A` + post-load `CUS3A_Enable` hooks that
+  are "once per process lifetime" — re-entering them on the second
+  reinit segfaults inside the SDK with `Mutex is not initialized
+  before lock` from `libcam_os_wrapper.so`.  Fixed by splitting the
+  load path: cold boot keeps the full `maruko_load_isp_bin`; reinit
+  uses a new minimal variant that skips both CUS3A hooks (sufficient
+  because the kernel ISP module's state survives the in-process
+  teardown).  10 consecutive `killall -1 venc` cycles verified clean
+  on 192.168.2.12; pid 1894 stable, no SDK reset, no zombie state.
+
+- **Maruko default config reaches the release tarball.**  Two-part
+  fix.  First, `config/venc.default.maruko.json` gains the `snapshot`
+  block (was missing entirely — Maruko users had snapshot disabled
+  until they hand-edited the JSON, even though the schema and runtime
+  defaults were already in place).  Second, `.github/workflows/release.yml`
+  was copying `config/venc.default.json` for *both* backends when
+  staging the release archives, so the Maruko tarball's bundled
+  `venc.json` carried Star6E defaults (`sensor.unlockEnabled=true`,
+  no `snapshot` block).  Now picks the Maruko-specific template when
+  staging `venc-maruko.tar.gz`, falls back to the shared default for
+  Star6E.  Firstboot Maruko devices installed from the release tarball
+  now ship with `snapshot.enabled=true` and the right unlock policy.
+
+- **Firstboot deployment verified end-to-end on Maruko.**  Wiped
+  device (no `/usr/bin/venc`, no `/usr/lib/libmi_*.so`, no
+  `/etc/venc.json`); pushed binary + 14 MI libs + 10 sensor `.ko` +
+  3 ISP `.bin` + `json_cli` + the bundled `venc.json` in a single
+  bulk-push via `scripts/maruko_direct_deploy.sh full
+  --push-config config/venc.default.maruko.json`; rebooted; venc
+  came up clean at pid 720, IMX335 sensor module loaded, pipeline
+  configured at 1920×1080@60, `/api/v1/snapshot.jpg` worked first
+  request without manual config edits.
+
 ## [0.10.10] - 2026-05-14
 
 Maruko snapshot backend — closes the deferred follow-up from 0.10.9.

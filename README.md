@@ -267,6 +267,13 @@ Response is `Content-Type: image/jpeg`.  Failure modes:
   1500 ms (upstream stalled)
 - **500 snapshot_failed** — SDK GetStream or memory allocation error
 
+Defaults live in `venc.json` under `snapshot` (`enabled`, `quality`,
+`channel`, `width`, `height`).  `snapshot.quality` is **live-mutable**
+on both backends — `curl "http://<dev>/api/v1/set?snapshot.quality=40"`
+applies instantly with no pipeline reinit.  The remaining snapshot
+fields are restart-required (channel-attribute baked at
+`MI_VENC_CreateChn` time).
+
 #### GET /api/v1/version
 
 Returns version info.
