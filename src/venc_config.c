@@ -167,6 +167,15 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.zoom_x = 0.5;
 	cfg->video0.zoom_y = 0.5;
 
+	/* snapshot — MJPEG /api/v1/snapshot.jpg endpoint.  Defaults inherit
+	 * main-stream dimensions (width=0/height=0) so a fresh config gets a
+	 * snapshot at the same resolution as the live stream. */
+	cfg->snapshot.enabled = true;
+	cfg->snapshot.quality = 80;
+	cfg->snapshot.channel = 7;
+	cfg->snapshot.width   = 0;
+	cfg->snapshot.height  = 0;
+
 	/* debug */
 	cfg->debug.show_osd = false;
 }
@@ -434,6 +443,19 @@ static void load_record(const cJSON *root, VencConfigRecord *s)
 		json_get_string(obj, "server", s->server));
 }
 
+static void load_snapshot(const cJSON *root, VencConfigSnapshot *s)
+{
+	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "snapshot");
+	if (!obj) return;
+	s->enabled = json_get_bool(obj, "enabled", s->enabled);
+	s->quality = (uint32_t)json_get_int(obj, "quality", (int)s->quality);
+	if (s->quality < 1)   s->quality = 1;
+	if (s->quality > 100) s->quality = 100;
+	s->channel = json_get_int(obj, "channel", s->channel);
+	s->width   = (uint32_t)json_get_int(obj, "width",  (int)s->width);
+	s->height  = (uint32_t)json_get_int(obj, "height", (int)s->height);
+}
+
 static void load_fpv(const cJSON *root, VencConfigFpv *s)
 {
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "fpv");
@@ -490,6 +512,7 @@ int venc_config_load(const char *path, VencConfig *cfg)
 	load_audio(root, &cfg->audio);
 	load_imu(root, &cfg->imu);
 	load_record(root, &cfg->record);
+	load_snapshot(root, &cfg->snapshot);
 	{
 		const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "debug");
 		if (obj)
@@ -969,6 +992,17 @@ static void render_record(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_section_close(p, 1, is_last);
 }
 
+static void render_snapshot(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "snapshot");
+	pp_field_bool(p, 2, "enabled", cfg->snapshot.enabled,         0);
+	pp_field_uint(p, 2, "quality", cfg->snapshot.quality,         0);
+	pp_field_int(p,  2, "channel", cfg->snapshot.channel,         0);
+	pp_field_uint(p, 2, "width",   cfg->snapshot.width,           0);
+	pp_field_uint(p, 2, "height",  cfg->snapshot.height,          1);
+	pp_section_close(p, 1, is_last);
+}
+
 static void render_debug(PrettyBuf *p, const VencConfig *cfg, int is_last)
 {
 	pp_section_open(p, 1, "debug");
@@ -994,6 +1028,7 @@ static char *config_render_pretty(const VencConfig *cfg)
 	render_audio(&p,    cfg, 0);
 	render_imu(&p,      cfg, 0);
 	render_record(&p,   cfg, 0);
+	render_snapshot(&p, cfg, 0);
 	render_debug(&p,    cfg, 1);
 	pp_str(&p, "}");
 
@@ -1144,6 +1179,16 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(rec, "fps", cfg->record.fps);
 		cJSON_AddNumberToObject(rec, "gopSize", cfg->record.gop_size);
 		cJSON_AddStringToObject(rec, "server", cfg->record.server);
+	}
+
+	/* snapshot */
+	cJSON *snap = cJSON_AddObjectToObject(root, "snapshot");
+	if (snap) {
+		cJSON_AddBoolToObject(snap,   "enabled", cfg->snapshot.enabled);
+		cJSON_AddNumberToObject(snap, "quality", cfg->snapshot.quality);
+		cJSON_AddNumberToObject(snap, "channel", cfg->snapshot.channel);
+		cJSON_AddNumberToObject(snap, "width",   cfg->snapshot.width);
+		cJSON_AddNumberToObject(snap, "height",  cfg->snapshot.height);
 	}
 
 	/* debug */

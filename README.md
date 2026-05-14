@@ -70,6 +70,8 @@ make test-ci
 
 ## Deployment
 
+### Star6E (Infinity6E)
+
 Copy the binary to the target device:
 
 ```sh
@@ -81,6 +83,96 @@ For the current Star6E bench workflow, prefer the helper:
 ```sh
 scripts/star6e_direct_deploy.sh cycle
 ```
+
+### Maruko (Infinity6C)
+
+Maruko devices need more than just the `venc` binary because stock OpenIPC
+Infinity6C firmware does **not** ship MI vendor libraries, and bench devices
+also need matching sensor `.ko` modules and ISP `.bin` tuning blobs.
+
+The repo carries everything needed for a fresh deployment once a known-good
+device has been mirrored locally.  Pre-verified copies of the sensor `.ko`
+modules and ISP `.bin` blobs are vendored under `sensors/maruko/` and
+`iq-profiles/maruko-bin/` so the release tarball is a complete drop-in
+install (no separate "obtain these from your bench" step):
+
+| Repo location | Target path | Source |
+|---|---|---|
+| `vendor-libs/maruko/*.so`     | `/usr/lib/`                           | pulled from device, vendored |
+| `sensors/maruko/sensor_imx*_maruko.ko` | `/lib/modules/5.10.61/sigmastar/sensor_imx*_mipi.ko` | source-built via `make drivers-maruko`, vendored (staged → `_mipi.ko`) |
+| `iq-profiles/maruko-bin/*.bin`| `/etc/sensors/`                       | pulled from device |
+| `out/maruko/venc`             | `/usr/bin/venc`                       | `make build SOC_BUILD=maruko` |
+| `out/maruko/json_cli`         | `/usr/bin/json_cli`                   | `make json_cli SOC_BUILD=maruko` (vendored from `waybeam-hub/tools/`) |
+
+`push-libs` also creates two uClibc compat symlinks on the target —
+`/lib/ld-uClibc.so.1` and `/lib/libc.so.0`, both pointing to `/lib/libc.so`.
+The vendor blob `libcam_os_wrapper.so` has hardcoded NEEDED tags for these
+two names; stock OpenIPC musl firmware only ships `libc.so`, so a fresh
+firstboot device would otherwise segfault on first `venc` start.
+
+If you provision a device by hand instead of through `push-libs`, run
+this on the target once (idempotent):
+
+```sh
+ssh root@<device-ip> '
+    ln -sf libc.so /lib/ld-uClibc.so.1
+    ln -sf libc.so /lib/libc.so.0
+'
+```
+
+`json_cli` is required by `config-get` / `config-set` / `status` in the
+deploy script — `maruko-full` (and `cycle --with-json-cli`) installs it
+automatically.
+
+One-time: mirror the working bench (`192.168.2.12` by default) into the repo:
+
+```sh
+make maruko-pull HOST=root@192.168.2.12
+# or with finer control:
+scripts/maruko_pull_artifacts.sh libs drivers isp-bins info
+git status   # review and commit the cache that landed
+```
+
+Routine venc iteration (binary only):
+
+```sh
+make maruko-deploy HOST=root@<device-ip>
+# = scripts/maruko_direct_deploy.sh cycle
+```
+
+Fresh-device bring-up (binary + libs + uClibc symlinks + json_cli +
+drivers + ISP bins, drivers reboot):
+
+```sh
+make maruko-full HOST=root@<device-ip>
+# = scripts/maruko_direct_deploy.sh full
+```
+
+Selective pushes during debugging:
+
+```sh
+scripts/maruko_direct_deploy.sh push-libs           # libs + uClibc symlinks
+scripts/maruko_direct_deploy.sh push-json-cli       # /usr/bin/json_cli
+scripts/maruko_direct_deploy.sh push-drivers --reboot-after
+scripts/maruko_direct_deploy.sh push-isp-bin imx415
+```
+
+### Building Maruko sensor drivers from source
+
+`drivers/sensor_imx{335,415}_maruko.c` needs the Infinity6C 5.10.61 kernel
+source tree. The tree is part of the SigmaStar BSP and is not hosted by
+this repo, so you must supply it on the command line:
+
+```sh
+make drivers-maruko KSRC_MARUKO=/path/to/infinity6c-kernel
+```
+
+`make drivers-maruko` without `KSRC_MARUKO` fails with a clear error — it
+does not auto-download the kernel.
+
+If you do not have the kernel source, fall back to the prebuilt `.ko`
+pulled by `make maruko-pull` from a known-good device — the deploy script
+treats either source identically.
 
 It deploys `/usr/bin/venc`, uses the production `/etc/venc.json`, waits for
 HTTP readiness, and captures `/tmp/venc.log`.
@@ -152,6 +244,35 @@ port is 80 (configurable via `system.webPort`). Responses are JSON
 with an `{"ok": true/false, ...}` envelope.
 
 ### Endpoints
+
+#### GET /api/v1/snapshot.jpg
+
+Returns one JPEG frame from a dedicated MJPEG VENC channel tapped off
+the same VPE/SCL output port the main H.264/H.265 stream uses.  No
+parameters; quality defaults to 80, resolution matches the main stream.
+Captures are serialized through a module mutex (concurrent clients
+queue rather than collide), and the channel is created at pipeline
+start so each request only pays the StartRecvPic → GetStream round
+trip (~50–150 ms typical).
+
+```sh
+curl -o snapshot.jpg http://<device-ip>:<port>/api/v1/snapshot.jpg
+```
+
+Response is `Content-Type: image/jpeg`.  Failure modes:
+
+- **503 snapshot_disabled** — subsystem not initialised (pipeline not
+  up yet, or backend MJPEG channel-create failed during init)
+- **504 snapshot_timeout** — channel ran but no frame landed within
+  1500 ms (upstream stalled)
+- **500 snapshot_failed** — SDK GetStream or memory allocation error
+
+Defaults live in `venc.json` under `snapshot` (`enabled`, `quality`,
+`channel`, `width`, `height`).  `snapshot.quality` is **live-mutable**
+on both backends — `curl "http://<dev>/api/v1/set?snapshot.quality=40"`
+applies instantly with no pipeline reinit.  The remaining snapshot
+fields are restart-required (channel-attribute baked at
+`MI_VENC_CreateChn` time).
 
 #### GET /api/v1/version
 

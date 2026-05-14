@@ -1,5 +1,366 @@
 # History
 
+## Investigation - 2026-05-14 — **SOLVED**: IMX415 driver regression is a single missing register write
+
+**Root cause**: `drivers/sensor_imx415_maruko.c` does not write
+**`0x3032 = 0x01`** in any of its four init tables.  The stock OpenIPC
+`sensor_imx415_mipi.ko` does.  That is the entire dark-image regression.
+
+**Proof**: After a full 0x3000–0x4FFF (8192 reg) i2ctransfer sweep in both
+dark-venc and bright-venc states, exactly one register differs:
+
+```
+0x3032   dark=0x00   bright=0x01
+```
+
+**Smoking-gun experiment**: With venc running on the custom driver
+producing a dark image, executed `i2ctransfer -y 1 w3@0x1a 0x30 0x32 0x01`
+on the bench at 192.168.2.12.  User confirmed the image **immediately
+became bright** on the ground-station receiver.
+
+**Register identity**: `drivers/sensor_imx335_maruko.c:232` documents
+`0x3032` as `VMAX` (vertical period — controls frame timing).  On IMX415
+the same address appears to also be part of the VMAX/timing block.  The
+IMX415 init tables in `drivers/sensor_imx415_maruko.c` set `0x3031` (ADBIT)
+and `0x3033` (SYS_MODE) but leave `0x3032` unwritten, so it retains the
+sensor's power-on default of `0x00` — which causes the frame-period /
+exposure window to be wrong, producing the dark image.
+
+**Workaround the user has confirmed working** (boot stock first, then
+custom + venc) works because the stock driver writes `0x3032 = 0x01` and
+that value survives the soft reboot.
+
+**Fix applied** (one line per init table, four tables total):
+
+```c
+{ 0x3031, 0x00 }, // ADBIT (10bit)
+{ 0x3032, 0x01 }, // VMAX MSB — must be 0x01, default 0x00 produces dark image
+{ 0x3033, 0x05 }, // SYS_MODE (891Mbps)
+```
+
+Applied to all four `Sensor_*_init_table_*[]` arrays in
+`drivers/sensor_imx415_maruko.c`.  Rebuilt via
+`make drivers-maruko KSRC_MARUKO=<...>`:
+
+- New `sensors/maruko/sensor_imx415_maruko.ko` — md5 `bd582d87...` (was `c236ac34...`)
+- 4× `{ 0x3032, 0x01 }` patterns confirmed in the binary
+
+**Followup (IMX335) — resolved 2026-05-14**: user swapped to an IMX335
+sensor on the bench and confirmed bright image on firstboot with the
+unpatched custom `sensor_imx335_maruko.ko`.  As static analysis
+predicted, the IMX415 single-bit bug does not apply to IMX335 —
+`0x3032` on IMX335 is genuinely the VMAX high nibble and our driver
+already writes it correctly as `0x00` in all 5 init tables.  No action
+required.
+
+Captures + diffs: `bench_logs/manual_sensor_diff_20260514T093447Z/`
+
+## Investigation - 2026-05-14 — Maruko firstboot dark image is a custom-driver regression
+
+Manual session on bench 192.168.2.12 narrowed the long-standing "venc on
+firstboot is dark, majestic-first warms it up" symptom to a regression in
+our **custom-built `sensor_imx{335,415}_maruko.ko` kernel modules** (in
+`sensors/maruko/`).
+
+Findings, in order:
+
+- Stock `/rom` driver (25K, md5 `a33cfa52...`) + majestic = bright.
+- Custom overlay `_maruko.ko` (167K, md5 `c236ac34...`) + venc = dark.
+- Custom overlay `_maruko.ko` + majestic = **also dark** — confirmed by
+  the user.  This rules out the original "venc-vs-majestic init"
+  hypothesis: the bad actor is the .ko, not the streamer.
+- Restoring the stock driver via `rm /overlay/root/lib/modules/.../sensor_imx*_mipi.ko`
+  and rebooting brings the image back to normal — overlayfs reveals the
+  stock `/rom` copy.
+
+Register deltas (regscan curated 254 entries, banks 0x30–0x40) between
+dark-custom and bright-stock states: HMAX (`0x3024/0x3025`), BIN_MODE
+(`0x3050/0x3051`), and `0x3090` (IMX415 analog).  The custom .ko leaves
+all of these at firstboot defaults; the stock .ko writes them.
+
+Workaround the user has confirmed working:
+
+  stock .ko + majestic → soft reboot → custom .ko + venc → bright
+
+That last step is the surprise: with custom .ko in place, `venc` on a
+soft reboot still produces a bright image — yet only **one** scanned
+register (`0x3032`: 0x00 → 0x01) survived the reboot from the stock
+session.  All five HMAX/BIN_MODE/0x3090 registers reverted to dark-state
+values.  So the state that actually distinguishes dark-vs-bright lives
+**outside regscan's 254-entry range** — likely 0x4100+ (SHR), 0x5000+
+(calibration), 0x6000+ (VOUT/MIPI), or ISP-side state.
+
+See `documentation/MARUKO_FIRSTBOOT_DARK_IMAGE_TEST.md` (Findings
+section) for the full table and Phase-2 brute-force-sweep plan.
+
+Captures: `bench_logs/manual_sensor_diff_20260514T093447Z/`
+
+## [0.10.11] - 2026-05-14
+
+Maruko snapshot follow-up: SIGHUP reinit hardening, MJPG quality
+actually applied, live-update `snapshot.quality`, and the
+Maruko-specific default config finally reaches the release tarball.
+
+- **`snapshot.quality` is MUT_LIVE.**  POST/GET `/api/v1/set?snapshot.quality=N`
+  applies instantly with no pipeline reinit — Get→modify→Set on
+  `MI_VENC_ChnAttr_t.rate.mjpgQp.quality` on the parked MJPG channel.
+  Frontend (`src/venc_jpeg.c`) serializes the live-set call under the
+  same module mutex as `venc_jpeg_capture`, so an in-flight snapshot
+  request cannot race the SDK Get/Set sequence.  Backend hooks added:
+  `venc_jpeg_backend_set_quality(uint32_t)` in both `star6e_jpeg.c`
+  and `maruko_jpeg.c`; weak `-ENOSYS` fallback in the common layer
+  keeps the host-test build link-clean.  Schema field flips from
+  `MUT_RESTART` to `MUT_LIVE` in `g_fields[]`; full LIVE-group wiring
+  through `venc_api.c` (key→group, name, supported, copy, apply) +
+  `apply_snapshot_quality` callback on `VencApplyCallbacks`.
+  Range validator: `[1, 99]` (SDK ceiling) at `validate_field_cfg`.
+  Front-end `venc_jpeg_init` clamp aligned to ≤99 (was 100) for
+  symmetric behaviour with live-set.
+  - Bench (Maruko 192.168.2.12 firstboot): q=20→118 KB, q=50→257 KB,
+    q=80→464 KB, q=99→2.03 MB across same pid, zero reinits.
+  - Bench (Star6E 192.168.1.13): q=20→51 KB, q=50→78 KB, q=80→154 KB,
+    q=99→261 KB across same pid, reinit count unchanged.
+
+- **MJPG quality actually wires through on Maruko** (was silently
+  ignored in 0.10.10).  Root cause: `attr.rate.mode` was set to
+  `I6C_VENC_RATEMODE_MJPGQP` (= 8), which Maruko firmware interprets
+  as `MJPEGVBR` in its UBR-shifted enum — the channel built fine but
+  `attr.rate.mjpgQp.quality` was discarded since VBR mode has no
+  quality field.  Fixed by adding `MARUKO_VENC_RC_MJPG_{CBR,VBR,FIXQP}`
+  = {7,8,9} to `include/maruko_bindings.h` (the firmware-accepted enum
+  values, distinct from the I6C SDK header's shifted layout) and
+  pointing `maruko_jpeg.c` at `MARUKO_VENC_RC_MJPG_FIXQP` (= 9).
+  DQT tables now scale correctly: q=99 → all-1's quantization,
+  q=20 → coarse quantization, byte sizes track expected.
+
+- **Maruko SIGHUP reinit no longer crashes on consecutive `kill -1`.**
+  Root cause: `maruko_load_isp_bin` calls
+  `MI_ISP_DisableUserspace3A` + post-load `CUS3A_Enable` hooks that
+  are "once per process lifetime" — re-entering them on the second
+  reinit segfaults inside the SDK with `Mutex is not initialized
+  before lock` from `libcam_os_wrapper.so`.  Fixed by splitting the
+  load path: cold boot keeps the full `maruko_load_isp_bin`; reinit
+  uses a new minimal variant that skips both CUS3A hooks (sufficient
+  because the kernel ISP module's state survives the in-process
+  teardown).  10 consecutive `killall -1 venc` cycles verified clean
+  on 192.168.2.12; pid 1894 stable, no SDK reset, no zombie state.
+
+- **Maruko default config reaches the release tarball.**  Two-part
+  fix.  First, `config/venc.default.maruko.json` gains the `snapshot`
+  block (was missing entirely — Maruko users had snapshot disabled
+  until they hand-edited the JSON, even though the schema and runtime
+  defaults were already in place).  Second, `.github/workflows/release.yml`
+  was copying `config/venc.default.json` for *both* backends when
+  staging the release archives, so the Maruko tarball's bundled
+  `venc.json` carried Star6E defaults (`sensor.unlockEnabled=true`,
+  no `snapshot` block).  Now picks the Maruko-specific template when
+  staging `venc-maruko.tar.gz`, falls back to the shared default for
+  Star6E.  Firstboot Maruko devices installed from the release tarball
+  now ship with `snapshot.enabled=true` and the right unlock policy.
+
+- **Firstboot deployment verified end-to-end on Maruko.**  Wiped
+  device (no `/usr/bin/venc`, no `/usr/lib/libmi_*.so`, no
+  `/etc/venc.json`); pushed binary + 14 MI libs + 10 sensor `.ko` +
+  3 ISP `.bin` + `json_cli` + the bundled `venc.json` in a single
+  bulk-push via `scripts/maruko_direct_deploy.sh full
+  --push-config config/venc.default.maruko.json`; rebooted; venc
+  came up clean at pid 720, IMX335 sensor module loaded, pipeline
+  configured at 1920×1080@60, `/api/v1/snapshot.jpg` worked first
+  request without manual config edits.
+
+## [0.10.10] - 2026-05-14
+
+Maruko snapshot backend — closes the deferred follow-up from 0.10.9.
+`GET /api/v1/snapshot.jpg` now serves a real JPEG on Maruko (was
+`503 snapshot_disabled` in 0.10.9).  Star6E unchanged.
+
+- **Architecture** — dedicated MJPG VENC device 8 (`I6C_VENC_DEV_MJPG_0`)
+  channel 0, bound to a second SCL output port (SCL dev 0 chn 0 port 1)
+  via `MI_SYS_BindChnPort2` in `I6_SYS_LINK_FRAMEBASE` mode at 5 fps
+  destination rate.  Channel stays parked (`StopRecvPic`) between
+  requests; capture flips `StartRecvPic` on, polls `Query` for ready
+  packs, drains via `GetStream`, then parks again.  Same idle pattern
+  as Star6E (`src/star6e_jpeg.c`) — no encoder CPU when no snapshot
+  is in flight.
+- **Why a second SCL port** — Maruko's SCL output port 0 is held by
+  the main H.265 channel in `LINK_RING` mode (1:1, `0xA0092012` if
+  re-bound).  Port 1 is a fresh tap from the same SCL channel, so
+  no contention with the main stream.  Avoids the kthread-leak path
+  the earlier HW_RING fan-out attempt hit — `dev 8` only sees SCL,
+  never has any relationship to main `dev 0`, so failed-init teardown
+  is clean (no `[venc8_P0_MAIN]` orphan).
+- **Pipeline wiring** — `src/maruko_pipeline.c::configure_maruko_scl()`
+  configures + enables SCL port 1 (YUV420SP, no IFC compress, same
+  crop + output dims as port 0).  `bind_maruko_pipeline()` calls
+  `venc_jpeg_set_source(&ctx->scl_port1)` before `venc_jpeg_init`.
+  `maruko_pipeline_teardown_graph()` disables port 1 after
+  `venc_jpeg_shutdown()`.  Port-1 setup failures are non-fatal:
+  warning logged, snapshot returns `503` cleanly via the
+  `g_have_scl_port=0` path in `venc_jpeg_backend_init`.
+- **Bench verification (192.168.2.12, IMX415, 1920×1080@60)** — 10
+  rapid snapshots in 679 ms (~14 req/s sustained, all `HTTP 200`);
+  size 120–184 KB; mean Y ≈ 124 (bright, post-firstboot-fix); main
+  RTP stream to 192.168.2.20 unaffected during snapshot bursts; no
+  `[venc8_P0_MAIN]` kthread in `ps`.
+
+Snapshot config schema fields are now part of the on-disk JSON,
+fully wired through the standard 7-touch-point machinery:
+
+- **`venc.json` → `snapshot.{enabled,quality,channel,width,height}`**
+  with sensible defaults (`enabled=true`, `quality=80`, `channel=7`,
+  `width=0`/`height=0` = inherit main stream).  Read on pipeline init
+  via `MarukoBackendConfig::snapshot` (Maruko) and `VencConfig::snapshot`
+  directly (Star6E).
+- `/api/v1/get?snapshot.<field>` and `/api/v1/set?snapshot.<field>=<v>`
+  resolve through `g_fields[]` (all MUT_RESTART since the SDK channel
+  attrs are baked at `CreateChn` time).
+- `config/venc.default.json`, `pretty_print`, `cJSON` serializer, and
+  `MarukoBackendConfig` mirror all carry the new section — the
+  `layout_size_equal` round-trip test in `tests/test_venc_config.c`
+  protects against future drift.
+
+Star6E hardware bench validation is still deferred (no Star6E bench
+currently online).
+
+Caveat (pre-existing, not introduced here): rapid back-to-back
+`/api/v1/set?<MUT_RESTART_field>=...` requests within the reinit
+window can crash venc — same SIGHUP reinit race already tracked in
+`roadmaps/waybeam_venc.md` ("SIGHUP reinit stabilization — partial
+teardown works, ISP race outstanding").  A single quality / dims
+change settles cleanly; users should wait for `reinit_pending=true`
+to resolve before issuing another restart-tier `set`.
+
+## [0.10.9] - 2026-05-14
+
+JPEG snapshot HTTP endpoint on both backends.
+
+- **`GET /api/v1/snapshot.jpg`** — dedicated MJPEG VENC channel taps
+  the same VPE/SCL output port the main H.264/H.265 stream consumes.
+  Channel is created at pipeline-start, kept idle (StartRecvPic off)
+  between requests; each request flips StartRecvPic on, polls Query
+  for a ready pack, drains one JPEG frame via GetStream, then turns
+  StartRecvPic back off.  Captures are serialized through a module
+  mutex so concurrent HTTP clients queue rather than collide.
+  Response is `Content-Type: image/jpeg`; failure modes are
+  `503 snapshot_disabled` (subsystem not initialised),
+  `504 snapshot_timeout` (no frame within 1.5 s), or
+  `500 snapshot_failed` (SDK / alloc error).  Default quality 80.
+- **Star6E backend** (`src/star6e_jpeg.c`) — `I6_VENC_CODEC_MJPG` on
+  ch7, `I6_SYS_LINK_FRAMEBASE` bind to the pipeline's VPE port.
+  Star6E supports 1:N from a VPE output port, so the snapshot channel
+  binds alongside the main H.265 channel without contention.
+- **Maruko backend** (`src/maruko_jpeg.c`) — **deferred**.  Bench
+  investigation on 192.168.2.12 found two blockers:
+  (a) the Maruko SCL output port is 1:1 — binding it to the MJPG
+  channel after the main H.265 channel already holds it returns
+  `0xA0092012` ("SYS busy", same code documented in `maruko_pipeline.c`
+  line 2097 for the dual-stream path);
+  (b) an attempted workaround using cross-device VENC HW_RING fan-out
+  hit the SDK's teardown bug — failed init left an orphaned
+  `[venc8_P0_MAIN]` kernel thread that blocked the next `MI_SYS_Init`
+  indefinitely (HISTORY "venc_teardown_regression" pattern; recovered
+  via sysrq-b).  Two viable paths forward (out of scope for this PR):
+  configure a second SCL output port at pipeline init, or probe the
+  cross-device VENC bind before `CreateChn` so failure paths don't
+  leak kernel state.  Until then `src/maruko_jpeg.c` is a clean
+  `-ENOSYS` stub so `/api/v1/snapshot.jpg` serves 503 cleanly without
+  ever touching the SDK.
+- **HTTP plumbing** — new `httpd_send_binary()` helper in
+  `include/venc_httpd.h` for raw byte payloads with caller-supplied
+  `Content-Type`.  Used by the snapshot handler; reusable for any
+  future binary endpoint (PNG OSD overlay, IQ blob dumps, etc.).
+- **Tests** — `tests/test_venc_jpeg.c` (13 assertions): pre-init
+  capture refusal, NULL-arg rejection, `enabled=false` no-op init,
+  failed-backend → clean -ENODEV degradation, idempotent shutdown,
+  re-init after shutdown.  All run on the host test_runner because
+  the common layer's weak-symbol backend stubs make the module
+  exercisable without an SDK present.
+- **Pipeline lifecycle** — pipeline init calls
+  `venc_jpeg_set_source(vpe_port)` + `venc_jpeg_init(&cfg)` right
+  after the main VPE/SCL→VENC bind; pipeline teardown calls
+  `venc_jpeg_shutdown()` before the matching unbind (idempotent).
+  Failure of the snapshot init is non-fatal — the main stream still
+  comes up, the snapshot endpoint just serves 503.
+
+Defaults are hardcoded for this release: `quality=80`, `channel=7`
+(mapped to ch 0 on Maruko's MJPG_DEV), width/height inherited from
+the main stream.  A future release will surface `snapshot.{enabled,
+quality,width,height,channel}` in `venc.json`.
+
+## [0.10.8] - 2026-05-14
+
+Release tarball completeness — fixed three gaps that left a fresh
+device install incomplete after extracting `venc-maruko.tar.gz`:
+
+- **Sensor drivers shipped (Maruko).**  `sensors/maruko/sensor_imx{335,415}_maruko.ko`
+  are now vendored in the repo (source-built via `make drivers-maruko`,
+  ~320 KB total).  `make stage SOC_BUILD=maruko` renames them to
+  `_mipi.ko` for drop-in compatibility with stock OpenIPC kernel
+  module naming, and the release tarball ships them under
+  `drivers/`.  Previously the release was sensor-driver-free, so a
+  fresh-device install ended up running stock OpenIPC drivers
+  regardless of the modifications in `drivers/sensor_*.c`.  See
+  `sensors/maruko/README.md` for provenance.
+- **ISP tuning blobs shipped (Maruko).**  `iq-profiles/maruko-bin/imx{335,415,415_fpv_api}.bin`
+  are now vendored (~420 KB total), pulled from the verified bench
+  at 192.168.2.12.  Release tarball ships them under `isp-bins/` so
+  fresh devices have IQ tuning available without a manual
+  `/etc/sensors/` pull.  See `iq-profiles/maruko-bin/README.md`.
+- **regscan shipped (both backends).**  IMX335/IMX415 i2c register
+  dumper (vendored from `tipoman9/star6c_sensor`) now builds in CI
+  for both Star6E and Maruko and ships in both tarballs.  Read-only
+  diagnostic; used by `scripts/maruko_sensor_init_diff.sh` for
+  sensor-init investigations.
+
+CI verification step now hard-checks the new artifacts exist before
+upload, so a regression that drops them from the tarball will fail
+the build instead of silently shipping an incomplete release.
+
+Release-notes install snippet expanded to cover the new payloads
+(`cp drivers/*.ko /lib/modules/.../sigmastar/`, `cp isp-bins/*.bin
+/etc/sensors/`, `cp regscan /usr/bin/regscan`).
+
+## [0.10.7] - 2026-05-11
+
+Maruko deploy pipeline polish — fix four PR-review gaps and one
+build-cycle ergonomics issue surfaced during bench testing.
+
+- **Per-source object files + `-MMD -MP` dep tracking.**  The
+  top-level Makefile used a single monolithic CC invocation that
+  compiled and linked all 47 source files in one shot, so every
+  iteration of `make build SOC_BUILD=maruko` rebuilt everything from
+  scratch even for a one-line edit.  Split into `$(OBJ_DIR)/%.o`
+  pattern rules with auto-generated `.d` dep files.  Cold build
+  unchanged at ~3.3 s; touching one `.c` is now ~0.13 s (1 compile +
+  relink); a header change only rebuilds dependent objects.
+- **`push-drivers` no longer non-deterministic.**  When
+  `sensors/maruko/` contains both a source-built `sensor_imxNNN_maruko.ko`
+  (renamed to `_mipi.ko` on push) and a pulled-from-device blob
+  `sensor_imxNNN_mipi.ko`, the alphabetical glob ordering let the
+  pulled blob clobber the source-built rename.  `push_drivers` now
+  skips the pulled `_mipi.ko` when a `_maruko.ko` sibling exists, and
+  logs the skip count.
+- **uClibc compat symlinks pushed automatically.**  Stock OpenIPC
+  musl firmware ships `/lib/libc.so` only, but the vendor blob
+  `libcam_os_wrapper.so` has hardcoded NEEDED tags `ld-uClibc.so.1`
+  and `libc.so.0` in its `.dynamic` section (cannot be relinked — it
+  is a binary drop).  `push-libs` (and `cycle`/`full` when libs are
+  requested) now creates `ln -sf libc.so /lib/ld-uClibc.so.1` and
+  `ln -sf libc.so /lib/libc.so.0` after the library push.  Idempotent;
+  pristine firstboot devices no longer segfault on first `venc`
+  start.  `vendor-libs/maruko/README.md` updated — the previous claim
+  that `ld-uClibc.so.1` was "dead since v0.7.0" was wrong (only the
+  shim binary is dead; the NEEDED tag inside the wrapper is not).
+- **`json_cli` vendored from `waybeam-hub`.**  `scripts/maruko_direct_deploy.sh`'s
+  `config-get` / `config-set` / `status` paths all require
+  `/usr/bin/json_cli` on the target.  Previously the deploy script
+  assumed someone else had pushed it, which broke on firstboot.  Now
+  `tools/json_cli/{json_cli.c,jsmn.h}` ship in the repo (re-synced
+  from `../waybeam-hub/tools/`); `make json_cli SOC_BUILD=maruko`
+  builds `out/maruko/json_cli`; `scripts/maruko_direct_deploy.sh
+  push-json-cli` (and `cycle --with-json-cli` / `full`) installs it
+  to `/usr/bin/json_cli`.
+
 ## [0.10.6] - 2026-05-07
 
 `isp.sensor_bin` is now a live mutable field on both backends.
@@ -536,10 +897,9 @@ encode loop runs at ~117 fps, no kernel taint, OSD canvas mapped at
   `#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)` so
   Maruko binaries enter the proper Maruko branch.
 - **`debug_osd`: Maruko ABI branch (now active).**  Targets the
-  OpenIPC libmi_rgn.so v3 API as documented in
-  `Maruko_work_dir/SourceCode/project/release/include/mi_rgn.h` and
-  used by the official IPC demo at
-  `Maruko_work_dir/ipc_demo/maruko/common/osd/osd.cpp`:
+  OpenIPC libmi_rgn.so v3 API as documented in the SigmaStar
+  Infinity6C BSP headers (`mi_rgn.h`) and used by the vendor's
+  official IPC demo (`common/osd/osd.cpp`):
   `MI_RGN_Init(soc_id, palette*)` (palette as direct arg, not wrapped),
   3-arg `MI_RGN_Create(soc_id, handle, attr*)`, 4-arg
   `MI_RGN_AttachToChn(soc_id, handle, chnport*, param*)`, 64-bit
@@ -561,8 +921,7 @@ encode loop runs at ~117 fps, no kernel taint, OSD canvas mapped at
 Recipe cross-referenced with `waybeam-hub/src/rgn_backend_maruko.c`,
 which had already verified the dep preload + module-ID-34 pattern
 against the same kernel/lib pair (different `MI_RGN_OsdChnPortParam_t`
-trailing field — the Maruko SDK header in
-`Maruko_work_dir/SourceCode/project/release/include/mi_rgn_datatype.h`
+trailing field — the current SigmaStar Infinity6C BSP `mi_rgn_datatype.h`
 omits `stColorInvertAttr` that the hub's older vendored header
 includes; both work because the kernel reads only the union prefix).
 

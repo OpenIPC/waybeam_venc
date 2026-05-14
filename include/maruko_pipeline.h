@@ -45,7 +45,8 @@ typedef struct {
   MI_VENC_CHN venc_channel;
   MI_SYS_ChnPort_t vif_port;
   MI_SYS_ChnPort_t isp_port;
-  MI_SYS_ChnPort_t vpe_port;
+  MI_SYS_ChnPort_t vpe_port;       /* SCL chn 0 port 0 — feeds main VENC */
+  MI_SYS_ChnPort_t scl_port1;      /* SCL chn 0 port 1 — feeds MJPG snapshot VENC */
   MI_SYS_ChnPort_t venc_port;
   SensorSelectResult sensor;
   MarukoBackendConfig cfg;

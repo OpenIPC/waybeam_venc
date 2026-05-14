@@ -91,6 +91,13 @@
     "gopSize": 0.0,
     "server": ""
   },
+  "snapshot": {
+    "enabled": true,
+    "quality": 80,
+    "channel": 7,
+    "width": 0,
+    "height": 0
+  },
   "debug": {
     "showOsd": false
   }
