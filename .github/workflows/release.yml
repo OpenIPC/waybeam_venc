@@ -119,7 +119,13 @@ jobs:
             if [ -d "release/${backend}/isp-bins" ]; then
               mv "release/${backend}/isp-bins" "release/venc-${backend}/isp-bins"
             fi
-            cp config/venc.default.json "release/venc-${backend}/venc.json"
+            # Backend-specific default config; Maruko has its own template
+            # (sensor.unlockEnabled defaults differ between SoCs).
+            if [ "${backend}" = "maruko" ] && [ -f config/venc.default.maruko.json ]; then
+              cp config/venc.default.maruko.json "release/venc-${backend}/venc.json"
+            else
+              cp config/venc.default.json "release/venc-${backend}/venc.json"
+            fi
             chmod +x "release/venc-${backend}/venc"
             chmod +x "release/venc-${backend}/json_cli"
             chmod +x "release/venc-${backend}/regscan"
