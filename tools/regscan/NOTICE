@@ -1,0 +1,19 @@
+regscan.c vendored from:
+  https://github.com/tipoman9/star6c_sensor
+  src/regscan.c
+
+Upstream commit pulled: main branch as of 2026-05-14.
+
+The vendored copy is unmodified except for the header comment block
+documenting the file's role in waybeam_venc's Maruko sensor-init
+diagnostic.  Re-sync by overwriting tools/regscan/regscan.c with the
+upstream source, leaving only the header block intact.
+
+Used by:
+  scripts/maruko_sensor_init_diff.sh
+  documentation/MARUKO_FIRSTBOOT_DARK_IMAGE_TEST.md
+
+Built by:
+  make regscan SOC_BUILD=maruko  ->  out/maruko/regscan
+
+See the upstream repository for the original license terms.

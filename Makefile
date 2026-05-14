@@ -24,6 +24,7 @@ OUT_DIR := out/$(SOC_BUILD)
 OBJ_DIR := $(OUT_DIR)/obj
 TARGET := $(OUT_DIR)/venc
 JSON_CLI_TARGET := $(OUT_DIR)/json_cli
+REGSCAN_TARGET := $(OUT_DIR)/regscan
 TIMING_PROBE_TARGET := rtp_timing_probe
 TIMING_PROBE_SRC := tools/rtp_timing_probe.c
 
@@ -75,7 +76,7 @@ CFLAGS += $(COMMON_CFLAGS) $(SOC_CFLAGS) $(SOC_DEFS)
 LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
 
 .PHONY: help all build lint stage clean toolchain toolchain-maruko ksrc-maruko \
-        drivers-maruko maruko-pull maruko-deploy maruko-full json_cli \
+        drivers-maruko maruko-pull maruko-deploy maruko-full json_cli regscan \
         remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
         webui webui-check
@@ -95,6 +96,7 @@ help:
 	@echo "  make ksrc-maruko KSRC_MARUKO=/path/to/kernel  Validate Infinity6C kernel source tree"
 	@echo "  make drivers-maruko KSRC_MARUKO=/path/to/kernel  Build sensors/maruko/sensor_imx*_maruko.ko"
 	@echo "  make json_cli SOC_BUILD=maruko  Build out/<soc>/json_cli (vendored from waybeam-hub)"
+	@echo "  make regscan SOC_BUILD=maruko   Build out/<soc>/regscan (IMX335/IMX415 i2c register dumper)"
 	@echo "  make maruko-pull HOST=root@<ip>  Pull libs/drivers/isp-bins from a device"
 	@echo "  make maruko-deploy HOST=root@<ip>  Build + deploy venc (binary only) cycle"
 	@echo "  make maruko-full   HOST=root@<ip>  Full bring-up: binary + libs + drivers + ISP bins"
@@ -160,6 +162,18 @@ json_cli: $(JSON_CLI_TARGET)
 $(JSON_CLI_TARGET): tools/json_cli/json_cli.c tools/json_cli/jsmn.h
 	@mkdir -p $(@D)
 	$(CC) -Os -s -Wall -Wextra -std=c11 -D_GNU_SOURCE -Itools/json_cli -o $@ $< -lm
+
+# regscan — Sony IMX335/IMX415 sensor register dumper.  Vendored from
+# tipoman9/star6c_sensor; see tools/regscan/NOTICE.  Built with the SOC
+# toolchain so it can read /dev/i2c-* on the target alongside venc.
+# Used by scripts/maruko_sensor_init_diff.sh for firstboot/majestic/venc
+# register-state diffs.
+regscan: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
+regscan: $(REGSCAN_TARGET)
+
+$(REGSCAN_TARGET): tools/regscan/regscan.c
+	@mkdir -p $(@D)
+	$(CC) -Os -s -Wall -Wextra -std=c11 -D_GNU_SOURCE -o $@ $<
 
 stage: build
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
