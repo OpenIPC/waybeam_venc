@@ -9,7 +9,12 @@
 extern "C" {
 #endif
 
-#define VENC_CONFIG_DEFAULT_PATH "/etc/venc.json"
+/* Primary config path is /etc/waybeam.json.  If that file is absent at
+ * startup, venc_config_load() falls back to the legacy /etc/venc.json
+ * path so existing devices keep working through a rolling upgrade. */
+#define WAYBEAM_CONFIG_DEFAULT_PATH "/etc/waybeam.json"
+#define VENC_CONFIG_LEGACY_PATH    "/etc/venc.json"
+#define VENC_CONFIG_DEFAULT_PATH   WAYBEAM_CONFIG_DEFAULT_PATH
 #define VENC_CONFIG_STRING_MAX 256
 
 /* Upper bound on outgoing.max_payload_size in bytes. Validation enforces

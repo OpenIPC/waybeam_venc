@@ -34,7 +34,9 @@ jobs:
         run: make stage SOC_BUILD=star6e
       - name: Verify output
         run: |
-          test -x out/star6e/venc
+          test -x out/star6e/waybeam
+          # Compat symlink so existing deploy scripts still find /usr/bin/venc.
+          test -L out/star6e/venc
           test -x out/star6e/json_cli
           test -x out/star6e/regscan
       - name: Upload Star6E staged output
@@ -63,7 +65,9 @@ jobs:
         run: make stage SOC_BUILD=maruko
       - name: Verify output
         run: |
-          test -x out/maruko/venc
+          test -x out/maruko/waybeam
+          # Compat symlink so existing deploy scripts still find /usr/bin/venc.
+          test -L out/maruko/venc
           test -x out/maruko/json_cli
           test -x out/maruko/regscan
           # Vendored sensor .ko (renamed _maruko.ko → _mipi.ko by stage)
@@ -104,9 +108,15 @@ jobs:
 
       - name: Prepare release archives
         run: |
+          # Tarball file names ("venc-<backend>.tar.gz") and the internal
+          # directory ("venc-<backend>/") stay unchanged so existing
+          # release-URL clients keep working through the rename.  Inside
+          # the tarball the primary binary is now "waybeam"; the legacy
+          # "venc" name is shipped as a symlink for compat.
           for backend in star6e maruko; do
             mkdir -p "release/venc-${backend}"
-            mv "release/${backend}/venc"     "release/venc-${backend}/venc"
+            mv "release/${backend}/waybeam"  "release/venc-${backend}/waybeam"
+            (cd "release/venc-${backend}" && ln -sf waybeam venc)
             mv "release/${backend}/json_cli" "release/venc-${backend}/json_cli"
             mv "release/${backend}/regscan"  "release/venc-${backend}/regscan"
             # Maruko-only payloads: MI vendor libs, sensor .ko, ISP .bin.
@@ -120,13 +130,15 @@ jobs:
               mv "release/${backend}/isp-bins" "release/venc-${backend}/isp-bins"
             fi
             # Backend-specific default config; Maruko has its own template
-            # (sensor.unlockEnabled defaults differ between SoCs).
+            # (sensor.unlockEnabled defaults differ between SoCs).  The
+            # binary first looks for /etc/waybeam.json on the device, then
+            # falls back to /etc/venc.json — the legacy name is fine.
             if [ "${backend}" = "maruko" ] && [ -f config/venc.default.maruko.json ]; then
               cp config/venc.default.maruko.json "release/venc-${backend}/venc.json"
             else
               cp config/venc.default.json "release/venc-${backend}/venc.json"
             fi
-            chmod +x "release/venc-${backend}/venc"
+            chmod +x "release/venc-${backend}/waybeam"
             chmod +x "release/venc-${backend}/json_cli"
             chmod +x "release/venc-${backend}/regscan"
             tar -czf "release/venc-${backend}.tar.gz" -C release "venc-${backend}"
@@ -151,14 +163,20 @@ jobs:
 
             | File | Backend | SoC | Contents |
             |------|---------|-----|----------|
-            | `venc-star6e.tar.gz` | Star6E | SSC30KQ / SSC338Q (Infinity6E) | `venc` + `json_cli` + `regscan` + `venc.json` |
-            | `venc-maruko.tar.gz` | Maruko | SSC378QE (Infinity6C)         | `venc` + `json_cli` + `regscan` + `venc.json` + `lib/` (MI libs) + `drivers/` (sensor .ko) + `isp-bins/` (IQ tuning) |
+            | `venc-star6e.tar.gz` | Star6E | SSC30KQ / SSC338Q (Infinity6E) | `waybeam` (+ `venc` compat symlink) + `json_cli` + `regscan` + `venc.json` |
+            | `venc-maruko.tar.gz` | Maruko | SSC378QE (Infinity6C)         | `waybeam` (+ `venc` compat symlink) + `json_cli` + `regscan` + `venc.json` + `lib/` (MI libs) + `drivers/` (sensor .ko) + `isp-bins/` (IQ tuning) |
+
+            The tar file name is unchanged for compatibility with existing
+            release-URL automation.  Inside the tarball, the primary
+            binary is now `waybeam`; the `venc` name is preserved as a
+            symlink so older deploy scripts continue to work.
 
             **Bundled tools:**
 
             - `json_cli` — style-preserving JSON config get/set/del tool
               (vendored from `waybeam-hub/tools/`) used by deploy scripts and
-              on-device automation to read and patch `/etc/venc.json`.
+              on-device automation to read and patch `/etc/waybeam.json`
+              (or the legacy `/etc/venc.json`).
             - `regscan` — IMX335/IMX415 i2c register dumper for sensor-init
               diagnostics (vendored from `tipoman9/star6c_sensor`).  Read-only,
               safe to leave in `/usr/bin/`.
@@ -175,12 +193,17 @@ jobs:
             ## Install
 
             ```bash
-            # Both backends: binaries + default config
+            # Both backends: binaries + default config.  Install as
+            # /usr/bin/waybeam; the venc symlink in the tarball follows
+            # along so old scripts keep finding /usr/bin/venc.
             tar -xzf venc-<backend>.tar.gz -C /tmp
-            cp /tmp/venc-<backend>/venc      /usr/bin/venc
-            cp /tmp/venc-<backend>/json_cli  /usr/bin/json_cli
-            cp /tmp/venc-<backend>/regscan   /usr/bin/regscan
-            cp /tmp/venc-<backend>/venc.json /etc/venc.json
+            cp -P /tmp/venc-<backend>/waybeam /usr/bin/waybeam
+            cp -P /tmp/venc-<backend>/venc    /usr/bin/venc
+            cp    /tmp/venc-<backend>/json_cli /usr/bin/json_cli
+            cp    /tmp/venc-<backend>/regscan  /usr/bin/regscan
+            # New installs prefer /etc/waybeam.json; binaries also fall back
+            # to /etc/venc.json so existing devices upgrade in place.
+            cp /tmp/venc-<backend>/venc.json /etc/waybeam.json
 
             # Maruko only — stock OpenIPC Infinity6C firmware does not ship MI libs:
             cp /tmp/venc-maruko/lib/*.so     /usr/lib/

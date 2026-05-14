@@ -275,7 +275,7 @@ run_scenario_B() {
 	log "Scenario B — venc cold"
 	reboot_target
 	stop_streamers
-	remote_sh "(venc -c /etc/venc.json > /tmp/venc.log 2>&1 &); sleep ${SETTLE_SECS}"
+	remote_sh "(venc > /tmp/venc.log 2>&1 &); sleep ${SETTLE_SECS}"
 	dump_regs "${I2C_DEV}" "${OUT_DIR}/B_venc_cold.regs"
 	# venc default webPort 80 — read it from the config to be safe.
 	local vport
@@ -301,7 +301,7 @@ run_scenario_D() {
 	reboot_target
 	stop_streamers
 	remote_sh "(majestic --logfile /tmp/majestic.log >/dev/null 2>&1 &); sleep ${MAJESTIC_BRIEF_SECS}; killall majestic; sleep 1"
-	remote_sh "(venc -c /etc/venc.json > /tmp/venc.log 2>&1 &); sleep ${SETTLE_SECS}"
+	remote_sh "(venc > /tmp/venc.log 2>&1 &); sleep ${SETTLE_SECS}"
 	dump_regs "${I2C_DEV}" "${OUT_DIR}/D_majestic_then_venc.regs"
 	local vport
 	vport="$(remote_sh "grep -oE '\"webPort\"[^,}]+' /etc/venc.json | head -1 | grep -oE '[0-9]+' || echo 80")"

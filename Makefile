@@ -22,7 +22,11 @@ MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
 OUT_DIR := out/$(SOC_BUILD)
 OBJ_DIR := $(OUT_DIR)/obj
-TARGET := $(OUT_DIR)/venc
+TARGET := $(OUT_DIR)/waybeam
+# Compatibility symlink — keeps deploy scripts, init wrappers, and
+# release tooling that still refer to "venc" working while the rename
+# rolls out across consumers.
+COMPAT_LINK := $(OUT_DIR)/venc
 JSON_CLI_TARGET := $(OUT_DIR)/json_cli
 REGSCAN_TARGET := $(OUT_DIR)/regscan
 TIMING_PROBE_TARGET := rtp_timing_probe
@@ -111,7 +115,13 @@ help:
 all: build
 
 build: $(TOOLCHAIN_TARGET) check check-soc-stamp | $(OUT_DIR)
-build: $(TARGET)
+build: $(TARGET) $(COMPAT_LINK)
+
+# Maintain a relative symlink so deploy/install paths that still call
+# the binary "venc" keep working.  Always refreshed so a `make build`
+# after a manual delete restores it.
+$(COMPAT_LINK): $(TARGET)
+	@ln -sf $(notdir $(TARGET)) $@
 
 # Per-source object list — one .o per .c, deps tracked via .d files.
 # Maps both src/foo.c and lib/bar.c to $(OBJ_DIR)/src/foo.o, $(OBJ_DIR)/lib/bar.o.
@@ -326,8 +336,8 @@ remote-test:
 
 # ── Verification targets ──────────────────────────────────────────────
 
-STAR6E_BINS := out/star6e/venc
-MARUKO_BINS := out/maruko/venc
+STAR6E_BINS := out/star6e/waybeam
+MARUKO_BINS := out/maruko/waybeam
 
 webui:
 	python3 tools/build_webui.py

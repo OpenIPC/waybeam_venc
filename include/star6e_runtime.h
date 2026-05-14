@@ -4,15 +4,16 @@
 #include "backend.h"
 
 /* Comm names for child forks created by the Star6E runtime.  Both must
- * differ from "venc" — that is what is_another_venc_running() in main.c
- * matches against, and a duplicate match would abort SIGHUP-respawn with
- * "venc already running... exiting". */
-#define VENC_COMM_WATCHDOG  "venc-wd"
-#define VENC_COMM_RESPAWN   "venc-resp"
+ * differ from "waybeam" and "venc" — those are what
+ * is_another_waybeam_running() in main.c matches against, and a
+ * duplicate match would abort SIGHUP-respawn with the "already
+ * running" banner. */
+#define VENC_COMM_WATCHDOG  "waybeam-wd"
+#define VENC_COMM_RESPAWN   "waybeam-resp"
 
 /* Path constants for the SIGHUP-respawn flow. */
 #define VENC_SELF_EXE_PATH  "/proc/self/exe"
-#define VENC_LOG_PATH       "/tmp/venc.log"
+#define VENC_LOG_PATH       "/tmp/waybeam.log"
 
 /** Return the Star6E backend operations table. */
 const BackendOps *star6e_runtime_backend_ops(void);
