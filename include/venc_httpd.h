@@ -78,6 +78,12 @@ int httpd_send_html(int client_fd, int status_code, const char *html_str);
 int httpd_send_html_gz(int client_fd, int status_code,
 	const void *gz_data, int gz_len);
 
+/* Send a raw binary response with the caller-supplied Content-Type.
+ * Use for JPEG snapshots and other in-memory binary payloads.
+ * Returns 0 on success, -1 if headers or body failed to send. */
+int httpd_send_binary(int client_fd, int status_code,
+	const char *content_type, const void *data, int len);
+
 /* Send a JSON success envelope: {"ok":true,"data":{...}} */
 int httpd_send_ok(int client_fd, const char *data_json);
 

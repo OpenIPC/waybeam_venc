@@ -17,3 +17,6 @@ bench/
 
 # Sensor-init investigation captures (regscan dumps, snapshots, reports)
 bench_logs/
+
+# Stray gcc dep files in cwd (e.g. from one-shot multi-source builds)
+a-*.d

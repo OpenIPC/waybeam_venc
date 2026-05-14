@@ -12,6 +12,7 @@
 #include "sensor_select.h"
 #include "star6e_recorder.h"
 #include "venc_httpd.h"
+#include "venc_jpeg.h"
 #include "venc_webui.h"
 #include "cJSON.h"
 
@@ -2828,6 +2829,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	g_api_routes_registered = 1;
 	pthread_mutex_unlock(&g_cfg_mutex);
 
+	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/version",      handle_version, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config",       handle_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config.json",  handle_config, NULL);
