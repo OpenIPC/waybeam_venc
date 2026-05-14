@@ -45,12 +45,13 @@ Applied to all four `Sensor_*_init_table_*[]` arrays in
 - New `sensors/maruko/sensor_imx415_maruko.ko` — md5 `bd582d87...` (was `c236ac34...`)
 - 4× `{ 0x3032, 0x01 }` patterns confirmed in the binary
 
-**Followup (IMX335)**: same audit not yet done — `0x3032` on IMX335 is
-genuinely the VMAX-high nibble and we write it as `0x00` in all 5 init
-tables (which is the right value for typical VMAX < 16-bit).  Need to
-boot an IMX335 board with stock OpenIPC `sensor_imx335_mipi.ko` and run
-the same i2ctransfer sweep against our custom `_maruko.ko`-equipped board
-to confirm there's no analogous missing-write regression.
+**Followup (IMX335) — resolved 2026-05-14**: user swapped to an IMX335
+sensor on the bench and confirmed bright image on firstboot with the
+unpatched custom `sensor_imx335_maruko.ko`.  As static analysis
+predicted, the IMX415 single-bit bug does not apply to IMX335 —
+`0x3032` on IMX335 is genuinely the VMAX high nibble and our driver
+already writes it correctly as `0x00` in all 5 init tables.  No action
+required.
 
 Captures + diffs: `bench_logs/manual_sensor_diff_20260514T093447Z/`
 
