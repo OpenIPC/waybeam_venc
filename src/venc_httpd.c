@@ -160,6 +160,16 @@ int httpd_send_html_gz(int client_fd, int status_code,
 	return 0;
 }
 
+int httpd_send_binary(int client_fd, int status_code,
+	const char *content_type, const void *data, int len)
+{
+	if (!content_type || !data || len < 0)
+		return -1;
+	return send_response(client_fd, status_code,
+		status_text(status_code), content_type,
+		(const char *)data, len);
+}
+
 int httpd_send_ok(int client_fd, const char *data_json)
 {
 	char buf[2048];

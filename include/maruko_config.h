@@ -88,6 +88,10 @@ typedef struct {
 	double zoom_x;
 	double zoom_y;
 	MarukoBackendConfigRecord record;
+	/* MJPEG snapshot subsystem — mirror of VencConfigSnapshot.  Read by
+	 * bind_maruko_pipeline() to fill VencJpegConfig; width=0/height=0
+	 * inherits main stream dims. */
+	VencConfigSnapshot snapshot;
 } MarukoBackendConfig;
 
 /** Fill config with compiled-in defaults for Maruko backend. */

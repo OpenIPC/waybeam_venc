@@ -751,7 +751,7 @@ void star6e_runtime_respawn_after_exit(void)
 	 * any future flag (e.g. `-c <path>`) added without saving the parent's
 	 * argv into a static and replaying it here would silently disappear
 	 * across SIGHUP-respawn. */
-	char *args[] = { (char *)"venc", NULL };
+	char *args[] = { (char *)"waybeam", NULL };
 	execv(VENC_SELF_EXE_PATH, args);
 	/* exec failed — fall through and exit so init/operator notices */
 	_exit(127);
@@ -1129,13 +1129,15 @@ static void star6e_runner_teardown(void *opaque)
 	{
 		pid_t watchdog = fork();
 		if (watchdog == 0) {
-			/* Rename so /proc/<pid>/comm reads "venc-wd" instead of
-			 * "venc".  Required for SIGHUP-respawn flow: the new
-			 * venc spawned by star6e_runtime_respawn_after_exit()
-			 * runs is_another_venc_running() at startup; without
-			 * this rename the still-alive watchdog (kept around
-			 * to SIGKILL/sysrq-b a hung parent) reads as "venc"
-			 * and the respawn aborts with "venc already running". */
+			/* Rename so /proc/<pid>/comm reads "waybeam-wd"
+			 * instead of "waybeam".  Required for SIGHUP-respawn
+			 * flow: the new instance spawned by
+			 * star6e_runtime_respawn_after_exit() runs the
+			 * comm-based duplicate check at startup; without this
+			 * rename the still-alive watchdog (kept around to
+			 * SIGKILL/sysrq-b a hung parent) reads as "waybeam"
+			 * and the respawn aborts with the "already running"
+			 * banner. */
 			(void)prctl(PR_SET_NAME, VENC_COMM_WATCHDOG, 0, 0, 0);
 			/* Close inherited stdout — it may be a pipe from the
 			 * audio stdout filter.  Keeping it open prevents the

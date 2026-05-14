@@ -1,0 +1,6 @@
+# Star6E (Infinity6E) sensor kernel modules
+#
+# Pre-built drv_ms_cus_*_MIPI.ko ship here for reference and side-by-side
+# diffing. Stock OpenIPC Infinity6E firmware already includes these modules
+# under /lib/modules/.../sigmastar/ — they are not deployed by the Star6E
+# direct-deploy script.

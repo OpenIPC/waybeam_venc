@@ -1,0 +1,15 @@
+# Maruko sensor kernel modules
+#
+# Populated by either:
+#   scripts/maruko_pull_artifacts.sh drivers   (pull from a known-good device)
+#   make -C drivers sensor                     (build from drivers/*.c sources)
+#
+# Naming convention in this repo:
+#   sensor_imxNNN_maruko.ko     ← repo-side filename
+#
+# The deploy script (scripts/maruko_direct_deploy.sh push-drivers) renames
+# these to sensor_imxNNN_mipi.ko when installing under
+# /lib/modules/5.10.61/sigmastar/ on the target.
+#
+# drv_ms_cus_*.ko modules pulled from /lib/modules/5.10.61/sigmastar/ keep
+# their original filename.

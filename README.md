@@ -1,41 +1,62 @@
-![OpenIPC logo][logo]
+<p align="center">
+  <img src="docs/assets/waybeam_logo.png" alt="Waybeam" width="420">
+</p>
 
-# venc — Standalone Video Encoder & Streamer
+<h1 align="center">Waybeam — Vehicle Video Encoder</h1>
 
-Standalone H.265/H.264 video encoder and RTP streamer for SigmaStar
-Infinity6E (Star6E) and Infinity6C (Maruko) camera SoCs. Designed for
-low-latency FPV and IP camera applications with full runtime control
-via HTTP API.
+<p align="center">
+  <em>Standalone H.265/H.264 encoder &amp; RTP streamer for SigmaStar Infinity6E and Infinity6C camera SoCs.</em>
+</p>
+
+---
+
+Waybeam is the camera-side daemon for the Waybeam FPV ecosystem. It owns
+the ISP, sensor, and VENC channel on the vehicle, captures audio, streams
+RTP / compact UDP / Unix / SHM video to a ground station, optionally
+records to SD card, and exposes the whole pipeline through a single
+zero-restart HTTP API and a built-in web dashboard.
+
+Two SoC backends share one source tree:
+
+- **Star6E** — SigmaStar Infinity6E (SSC30KQ, SSC338Q).
+- **Maruko** — SigmaStar Infinity6C (SSC378QE).
+
+Both binaries are produced from the same `make build` invocation with
+different `SOC_BUILD=` flags. All MI vendor libraries are loaded via
+`dlopen` so the binary stays small and the Maruko bundle can ship its
+own copies of libs that stock OpenIPC Infinity6C firmware does not.
+
+> **Note on naming.** The product, binary, config file, init script,
+> and release tarball are all named `waybeam`. The GitHub repository
+> is still `waybeam_venc` for historical URL stability — that is the
+> only place the old name survives.
 
 ## Features
 
-- H.265 (HEVC) and H.264 encoding with CBR/VBR/AVBR/FIXQP rate control
-- RTP packetization with adaptive payload sizing
-- Compact UDP streaming mode (raw NAL units)
+- H.265 (HEVC) and H.264 encoding with CBR / VBR / AVBR / FIXQP rate control
+- RTP packetization with adaptive payload sizing; compact UDP raw-NAL mode
 - Built-in web dashboard at `/` for configuration, API docs, and IQ tuning
 - HTTP API for live parameter tuning without pipeline restart
-- ISP IQ parameter system: 60+ params with multi-field structs, export/import (both backends)
+- ISP IQ parameter system: 60+ params, multi-field structs, JSON export/import (both backends)
 - Custom 3A: built-in AE and AWB with configurable gain limits and convergence
-- ISP control: exposure, AWB mode, color temperature
 - ROI-based QP gradient for FPV center-priority encoding
-- Sensor FPS unlock for IMX415/IMX335 (up to 120fps)
+- Sensor FPS unlock for IMX415 / IMX335 (up to 120 fps)
 - Optional audio capture (Opus / G.711a / G.711µ / raw PCM) on both
   backends, RTP or compact UDP output, mute via live API
-- SD card recording: MPEG-TS mux (HEVC + audio in TS, PCM/A-law/µ-law/Opus
+- SD card recording: MPEG-TS mux (HEVC + audio in TS, PCM / A-law / µ-law / Opus
   alongside video), power-loss safe; raw `.hevc` available on Star6E
-- Gemini mode: dual VENC for concurrent stream + high-quality record
-  (both backends; Maruko via Phase 7 port, Star6E reference)
+- Gemini / dual-VENC: concurrent stream + high-quality record (both backends)
 - Adaptive recording bitrate: auto-reduces if SD card can't keep up
-- Dual-backend: Star6E and Maruko from shared codebase (dlopen for all MI libs)
 - Maruko-specific opt-in 3A throttle (`isp.aeMode="throttle"`) — saves
-  ~24% sys CPU at 120 fps with no visible AE quality loss
-- BMI270 IMU driver with frame-synced FIFO (both backends) — module
-  compiled in but disabled by default; ready for telemetry/sidecar
-  consumers
+  ~24 % sys CPU at 120 fps with no visible AE quality loss
+- BMI270 IMU driver with frame-synced FIFO (both backends) — compiled in,
+  disabled by default, ready for telemetry/sidecar consumers
+- Intra-refresh (GDR-style rolling stripe) for fast loss recovery on FPV links
+- Scene-change-triggered IDR (Star6E) for clean stream join under packet loss
 
 ## Build
 
-From repository root:
+From the repo root:
 
 ```sh
 # Star6E (Infinity6E)
@@ -49,17 +70,17 @@ The toolchain is auto-downloaded on first build. Each backend builds to
 its own output directory:
 
 ```
-out/star6e/venc    # Star6E binary
-out/maruko/venc    # Maruko binary
+out/star6e/waybeam   # Star6E binary
+out/maruko/waybeam   # Maruko binary
 ```
 
-Both backends can coexist — no clean needed between them.
+Both backends can coexist; no clean is needed when switching.
 
-Stage a deployable bundle with shared libraries:
+Stage a deployable bundle with vendored libraries:
 
 ```sh
 make stage SOC_BUILD=star6e
-# Output: out/star6e/venc + out/star6e/lib/*.so
+# Output: out/star6e/waybeam + out/star6e/lib/*.so (Maruko also stages drivers/ + isp-bins/)
 ```
 
 Run host tests:
@@ -70,38 +91,150 @@ make test-ci
 
 ## Deployment
 
+### Star6E (Infinity6E)
+
 Copy the binary to the target device:
 
 ```sh
-scp out/star6e/venc root@<device-ip>:/usr/bin/venc
+scp out/star6e/waybeam root@<device-ip>:/usr/bin/waybeam
 ```
 
-For the current Star6E bench workflow, prefer the helper:
+For the current Star6E bench workflow, prefer the helper — it stops
+any running daemon, deploys `/usr/bin/waybeam` and
+`/etc/init.d/S95waybeam`, backs up `/etc/waybeam.json`, then starts
+the daemon:
 
 ```sh
 scripts/star6e_direct_deploy.sh cycle
 ```
 
-It deploys `/usr/bin/venc`, uses the production `/etc/venc.json`, waits for
-HTTP readiness, and captures `/tmp/venc.log`.
+### Maruko (Infinity6C)
 
-The binary resolves shared libraries from `/usr/lib`. For staged bundles,
-set `LD_LIBRARY_PATH` to the lib directory.
+Maruko devices need more than just the binary because stock OpenIPC
+Infinity6C firmware does **not** ship MI vendor libraries, and bench
+devices also need matching sensor `.ko` modules and ISP `.bin` tuning
+blobs.
+
+The repo carries everything needed for a fresh deployment once a known-good
+device has been mirrored locally. Pre-verified copies of the sensor `.ko`
+modules and ISP `.bin` blobs are vendored under `sensors/maruko/` and
+`iq-profiles/maruko-bin/`:
+
+| Repo location | Target path | Source |
+|---|---|---|
+| `vendor-libs/maruko/*.so`     | `/usr/lib/`                           | pulled from device, vendored |
+| `sensors/maruko/sensor_imx*_maruko.ko` | `/lib/modules/5.10.61/sigmastar/sensor_imx*_mipi.ko` | source-built via `make drivers-maruko`, vendored (staged → `_mipi.ko`) |
+| `iq-profiles/maruko-bin/*.bin`| `/etc/sensors/`                       | pulled from device |
+| `out/maruko/waybeam`          | `/usr/bin/waybeam`                    | `make build SOC_BUILD=maruko` |
+| `out/maruko/json_cli`         | `/usr/bin/json_cli`                   | `make json_cli SOC_BUILD=maruko` (vendored from `waybeam-hub/tools/`) |
+
+`push-libs` also creates two uClibc compat symlinks on the target —
+`/lib/ld-uClibc.so.1` and `/lib/libc.so.0`, both pointing to
+`/lib/libc.so`. The vendor blob `libcam_os_wrapper.so` has hardcoded
+NEEDED tags for these two names; stock OpenIPC musl firmware only
+ships `libc.so`, so a fresh firstboot device would otherwise segfault
+on first start.
+
+If you provision a device by hand instead of through `push-libs`, run
+this on the target once (idempotent):
+
+```sh
+ssh root@<device-ip> '
+    ln -sf libc.so /lib/ld-uClibc.so.1
+    ln -sf libc.so /lib/libc.so.0
+'
+```
+
+`json_cli` is required by `config-get` / `config-set` / `status` in the
+deploy script — `maruko-full` (and `cycle --with-json-cli`) installs it
+automatically.
+
+One-time: mirror the working bench (`192.168.2.12` by default) into the repo:
+
+```sh
+make maruko-pull HOST=root@192.168.2.12
+# or with finer control:
+scripts/maruko_pull_artifacts.sh libs drivers isp-bins info
+git status   # review and commit the cache that landed
+```
+
+Routine iteration (binary only):
+
+```sh
+make maruko-deploy HOST=root@<device-ip>
+# = scripts/maruko_direct_deploy.sh cycle
+```
+
+Fresh-device bring-up (binary + libs + uClibc symlinks + json_cli +
+drivers + ISP bins, drivers reboot):
+
+```sh
+make maruko-full HOST=root@<device-ip>
+# = scripts/maruko_direct_deploy.sh full
+```
+
+Selective pushes during debugging:
+
+```sh
+scripts/maruko_direct_deploy.sh push-libs           # libs + uClibc symlinks
+scripts/maruko_direct_deploy.sh push-json-cli       # /usr/bin/json_cli
+scripts/maruko_direct_deploy.sh push-drivers --reboot-after
+scripts/maruko_direct_deploy.sh push-isp-bin imx415
+```
+
+### Building Maruko sensor drivers from source
+
+`drivers/sensor_imx{335,415}_maruko.c` needs the Infinity6C 5.10.61 kernel
+source tree. The tree is part of the SigmaStar BSP and is not hosted by
+this repo, so you must supply it on the command line:
+
+```sh
+make drivers-maruko KSRC_MARUKO=/path/to/infinity6c-kernel
+```
+
+`make drivers-maruko` without `KSRC_MARUKO` fails with a clear error — it
+does not auto-download the kernel. If you do not have the kernel source,
+fall back to the prebuilt `.ko` pulled by `make maruko-pull` from a
+known-good device.
 
 ## Configuration
 
-venc loads configuration from `/etc/venc.json` on startup. A default
-template is provided at `config/venc.default.json`.
+`waybeam` loads its configuration from a single fixed path on startup:
+
+```
+/etc/waybeam.json
+```
+
+There is no `-c` flag and no command-line override. If the file is
+absent the binary boots with compiled-in defaults and prints a notice
+to stderr; the HTTP API is still available and `/api/v1/restart`
+re-reads the file once it has been written.
+
+Default templates live in the repo:
+
+| Backend | Template path |
+|---|---|
+| Star6E (Infinity6E) | `config/waybeam.default.json` |
+| Maruko (Infinity6C) | `config/waybeam.default.maruko.json` |
+
+The release tarballs ship the matching template as `waybeam.json`
+inside `waybeam-<backend>.tar.gz`; copy it to `/etc/waybeam.json` on
+first install.
+
+### Schema
+
+Every section in the template is shown below. All fields are optional —
+omitted fields keep their compiled-in defaults.
 
 ```json
 {
-  "system": { "webPort": 80, "overclockLevel": 0, "verbose": false },
-  "sensor": {
+  "system":   { "webPort": 80, "overclockLevel": 0, "verbose": false },
+  "sensor":   {
     "index": -1, "mode": -1,
     "unlockEnabled": true, "unlockCmd": 35,
     "unlockReg": 12298, "unlockValue": 128, "unlockDir": 0
   },
-  "isp": {
+  "isp":      {
     "sensorBin": "",
     "legacyAe": true, "aeFps": 15,
     "aeMode": "native",
@@ -109,49 +242,119 @@ template is provided at `config/venc.default.json`.
     "awbMode": "auto", "awbCt": 5500,
     "keepAspect": true
   },
-  "image": { "mirror": false, "flip": false, "rotate": 0 },
-  "video0": {
+  "image":    { "mirror": false, "flip": false, "rotate": 0 },
+  "video0":   {
     "codec": "h265", "rcMode": "cbr", "fps": 30,
     "bitrate": 8192, "gopSize": 1.0,
-    "qpDelta": -4
+    "qpDelta": -4,
+    "sceneThreshold": 0, "sceneHoldoff": 2,
+    "intraRefreshMode": "off",
+    "intraRefreshLines": 0, "intraRefreshQp": 0,
+    "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5
   },
   "outgoing": {
     "enabled": false, "server": "", "streamMode": "rtp",
     "maxPayloadSize": 1400,
     "connectedUdp": true, "audioPort": 5601, "sidecarPort": 5602
   },
-  "fpv": {
+  "fpv":      {
     "roiEnabled": true, "roiQp": 0, "roiSteps": 2,
     "roiCenter": 0.25, "noiseLevel": 0
   },
-  "audio": {
+  "audio":    {
     "enabled": false, "sampleRate": 16000, "channels": 1,
     "codec": "g711a", "volume": 80, "mute": false
   },
-  "imu": {
+  "imu":      {
     "enabled": false, "i2cDevice": "/dev/i2c-1", "i2cAddr": "0x68",
     "sampleRateHz": 200, "gyroRangeDps": 1000,
     "calFile": "/etc/imu.cal", "calSamples": 400
   },
-  "record": {
+  "record":   {
     "enabled": false, "mode": "mirror", "dir": "/mnt/mmcblk0p1",
     "format": "ts", "maxSeconds": 300, "maxMB": 500,
     "bitrate": 0, "fps": 0, "gopSize": 0, "server": ""
-  }
+  },
+  "snapshot": {
+    "enabled": true, "quality": 80, "channel": 7,
+    "width": 0, "height": 0
+  },
+  "debug":    { "showOsd": false }
 }
 ```
 
+### Section reference
+
+- **`system`** — HTTP API port, CPU overclock level, verbose logging
+  toggle.
+- **`sensor`** — pad/mode selection (-1 = auto) plus the high-FPS
+  unlock register sequence (IMX415 defaults shown).
+- **`isp`** — ISP tuning bin path, AE source (legacy/custom 3A), gain
+  ceiling, AWB mode, aspect-preserving crop. `aeMode` is Maruko-only.
+- **`image`** — mirror / flip / rotate.
+- **`video0`** — codec, rate control, fps, resolution, bitrate, GOP,
+  per-section QP delta. Scene-change-triggered IDR (`sceneThreshold`,
+  `sceneHoldoff`) is Star6E-only. Intra-refresh and digital zoom are
+  both backends.
+- **`outgoing`** — destination URI (`udp://`, `unix://`, `shm://`),
+  stream mode (`rtp` / `compact`), payload sizing, optional dedicated
+  audio + sidecar UDP ports.
+- **`fpv`** — center-priority ROI bands + 3DNR level.
+- **`audio`** — `enabled`, sample rate, channels, codec, software
+  volume, live-mutable mute. Supports `pcm`, `g711a`, `g711u`, `opus`.
+- **`imu`** — BMI270 driver (disabled by default).
+- **`record`** — SD card recorder. `mode` is `off` / `mirror` /
+  `dual` / `dual-stream`; format is `ts` or `hevc` (Star6E only).
+- **`snapshot`** — JPEG snapshot channel served at
+  `/api/v1/snapshot.jpg`. `quality` is live-mutable; `channel`,
+  `width`, `height` are restart-required because they are baked at
+  `MI_VENC_CreateChn` time. `width=0` and `height=0` mean "match the
+  active main stream".
+- **`debug`** — overlay extra OSD rows (zoom, intra-refresh state,
+  recording status) on the encoded video.
+
+### Starting a stream
+
 Set `outgoing.enabled` to `true` and `outgoing.server` to
-`udp://<receiver_ip>:5600`, `unix://<abstract_name>`, or `shm://<ring_name>`
-to start streaming.
+`udp://<receiver_ip>:5600`, `unix://<abstract_name>`, or
+`shm://<ring_name>`.
 
 ## HTTP API
 
-All endpoints use **HTTP GET** (BusyBox wget compatible). The default
-port is 80 (configurable via `system.webPort`). Responses are JSON
-with an `{"ok": true/false, ...}` envelope.
+All endpoints use **HTTP GET** (BusyBox `wget` compatible). The default
+port is 80 (configurable via `system.webPort`). Responses are JSON with
+an `{"ok": true/false, ...}` envelope.
 
 ### Endpoints
+
+#### GET /api/v1/snapshot.jpg
+
+Returns one JPEG frame from a dedicated MJPEG VENC channel tapped off
+the same VPE/SCL output port the main H.264/H.265 stream uses. No
+parameters; quality defaults to 80, resolution matches the main stream.
+Captures are serialized through a module mutex (concurrent clients
+queue rather than collide), and the channel is created at pipeline
+start so each request only pays the StartRecvPic → GetStream round
+trip (~50–150 ms typical).
+
+```sh
+curl -o snapshot.jpg http://<device-ip>:<port>/api/v1/snapshot.jpg
+```
+
+Response is `Content-Type: image/jpeg`. Failure modes:
+
+- **503 snapshot_disabled** — subsystem not initialised (pipeline not
+  up yet, or backend MJPEG channel-create failed during init)
+- **504 snapshot_timeout** — channel ran but no frame landed within
+  1500 ms (upstream stalled)
+- **500 snapshot_failed** — SDK GetStream or memory allocation error
+
+Defaults live in `waybeam.json` under `snapshot` (`enabled`, `quality`,
+`channel`, `width`, `height`). `snapshot.quality` is **live-mutable**
+on both backends — `curl "http://<dev>/api/v1/set?snapshot.quality=40"`
+applies instantly with no pipeline reinit. The remaining snapshot
+fields are restart-required (channel-attribute baked at
+`MI_VENC_CreateChn` time).
 
 #### GET /api/v1/version
 
@@ -178,8 +381,8 @@ curl http://<device-ip>:<port>/api/v1/config
 Returns every field with its mutability (`live` or `restart_required`)
 and support status. Support is backend-specific; for example, Star6E
 reports `video0.scene_threshold` / `video0.scene_holdoff` as supported,
-while Maruko reports them as
-unsupported. Use this to discover which fields can be changed at runtime.
+while Maruko reports them as unsupported. Use this to discover which
+fields can be changed at runtime.
 
 ```sh
 curl http://<device-ip>:<port>/api/v1/capabilities
@@ -227,8 +430,8 @@ Returns HTTP 409 on validation failure (e.g., invalid AWB mode).
 
 #### GET /api/v1/restart
 
-Trigger a full pipeline reinit. Reloads `/etc/venc.json` and restarts
-the camera pipeline without exiting the process.
+Trigger a full pipeline reinit. Reloads `/etc/waybeam.json` and
+restarts the camera pipeline without exiting the process.
 
 ```sh
 curl http://<device-ip>:<port>/api/v1/restart
@@ -317,7 +520,7 @@ curl "http://<device-ip>:<port>/api/v1/dual/idr"
 #### GET /api/v1/audio/status
 
 Live snapshot of the audio capture/encode pipeline (lib loaded, capture
-running, codec, rate, channels, Opus initialization).  Both backends.
+running, codec, rate, channels, Opus initialization). Both backends.
 See [HTTP_API_CONTRACT.md](documentation/HTTP_API_CONTRACT.md) for full
 field reference.
 
@@ -327,9 +530,9 @@ curl http://<device-ip>:<port>/api/v1/audio/status
 
 #### GET /api/v1/transport/status
 
-Live observability for the active video transport (UDP / Unix /
-SHM): fill percentage, backpressure flag, lifetime drop counters.
-Used by the WebUI status bar and external link controllers.
+Live observability for the active video transport (UDP / Unix / SHM):
+fill percentage, backpressure flag, lifetime drop counters. Used by the
+WebUI status bar and external link controllers.
 
 ```sh
 curl http://<device-ip>:<port>/api/v1/transport/status
@@ -347,7 +550,7 @@ curl http://<device-ip>:<port>/api/v1/idr/stats
 #### GET /api/v1/modes
 
 Sensor pad and resolution mode introspection — populates the WebUI
-sensor-mode dropdown.  Reports the currently-active selection plus every
+sensor-mode dropdown. Reports the currently-active selection plus every
 mode the SDK enumerates.
 
 ```sh
@@ -386,11 +589,11 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 | `isp.sensor_bin` | string | live | ISP tuning binary path (empty = auto-detect /etc/sensors/&lt;sensor&gt;.bin) |
 | `isp.legacy_ae` | bool | restart | Use ISP internal AE instead of custom 3A (Star6E) |
 | `isp.ae_fps` | uint | restart | Custom 3A processing rate in Hz (default 15) |
-| `isp.ae_mode` | string | restart | Maruko-only: `"native"` (default, SDK runs AE/AWB at sensor rate) or `"throttle"` (no-op AE adaptor + 15 Hz manual AE; saves ~24% sys CPU at 120 fps).  Alias: `isp.aeMode`. |
+| `isp.ae_mode` | string | restart | Maruko-only: `"native"` (default, SDK runs AE/AWB at sensor rate) or `"throttle"` (no-op AE adaptor + 15 Hz manual AE; saves ~24% sys CPU at 120 fps). Alias: `isp.aeMode`. |
 | `isp.gain_max` | uint | live | AE max ISP gain ceiling (0 = use ISP bin default) |
 | `isp.awb_mode` | string | live | `"auto"` or `"ct_manual"` |
 | `isp.awb_ct` | uint | live | Color temperature in K (for ct_manual) |
-| `isp.keep_aspect` | bool | restart | When `true` (default), VIF/SCL crop preserves sensor AR; `false` lets downstream stretch.  Star6E + Maruko (Phase 1, v0.9.9). |
+| `isp.keep_aspect` | bool | restart | When `true` (default), VIF/SCL crop preserves sensor AR; `false` lets downstream stretch. Star6E + Maruko (Phase 1, v0.9.9). |
 
 #### Image
 
@@ -444,16 +647,13 @@ curl "http://<device>/api/v1/set?video0.zoomX=0.25&video0.zoomY=0.75"
 curl "http://<device>/api/v1/set?video0.zoomPct=0.0"
 ```
 
-When `debug.showOsd=true` and zoom is active, the overlay adds rows after
-existing OSD stats:
+When `debug.showOsd=true` and zoom is active, the overlay adds rows
+after existing OSD stats:
 
 ```
 zoom  2.00x 960x540
 crop  960x540+480+270
 ```
-
-`zoom` shows magnification and encoded resolution. `crop` shows the source
-crop size and placement within the sensor/precrop surface.
 
 #### Adaptive Encoder Control (Star6E + Maruko)
 
@@ -478,37 +678,20 @@ Typical usage:
   controller needs per-frame `frame_type`, `complexity`, `scene_change`,
   `idr_inserted`, and `frames_since_idr` telemetry on the sidecar.
 
-Current Star6E IMX335 bench starting point:
-
-```json
-"video0": {
-  "sceneThreshold": 150,
-  "sceneHoldoff": 2
-}
-```
-
-Tuning notes:
-- `sceneThreshold` is a frame-size-spike ratio scaled by `100`, so
-  `150` means roughly "trigger near a 1.5x spike over the rolling baseline".
-  Raise to reduce false positives, lower to increase sensitivity.
-- Keep `sceneChangeHoldoff=2` unless threshold changes alone cannot suppress
-  false positives. Raising holdoff reduces responsiveness faster than raising
-  threshold does.
-
 Codec note:
 - Star6E with `outgoing.stream_mode="rtp"` requires `video0.codec="h265"`.
 - Maruko accepts both `h264` and `h265`.
 
 #### Intra Refresh (Star6E + Maruko)
 
-GDR-style rolling stripe: a configurable number of MB/LCU rows in each P-frame
-are intra-coded so a decoder that joins mid-stream — or recovers from a packet
-loss burst — can resync without waiting for the next IDR. Layered over normal
-GOP-based IDRs (Majestic-style belt-and-suspenders).
+GDR-style rolling stripe: a configurable number of MB/LCU rows in each
+P-frame are intra-coded so a decoder that joins mid-stream — or recovers
+from a packet loss burst — can resync without waiting for the next IDR.
+Layered over normal GOP-based IDRs.
 
-Single mode knob picks intent (self-heal target window); GOP, lines, and QP
-all derive from the mode. Per-field overrides remain available for power
-users — non-zero overrides win.
+Single mode knob picks intent (self-heal target window); GOP, lines, and
+QP all derive from the mode. Per-field overrides remain available for
+power users — non-zero overrides win.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
@@ -528,125 +711,23 @@ Mode targets (self-heal window from packet loss to fully-refreshed picture):
 | `balanced` | 500 ms | general FPV (recommended starting point) |
 | `robust` | 1000 ms | lossy long-range, high packet loss |
 
-Stripe QP defaults (codec-aware, lower = better quality + more bitrate cost):
-
-| Mode | H.265 QP | H.264 QP |
-|------|----------|----------|
-| `fast` | 36 | 33 |
-| `balanced` | 32 | 29 |
-| `robust` | 28 | 25 |
-
-Robust runs the lowest QP because lossy links want the cleanest possible
-recovery anchor; fast runs the highest because clean links can absorb minor
-stripe banding without artifacts. Override with `intraRefreshQp` (1–51).
-
-When a mode is active the encoder computes:
-
-```
-total_rows     = ceil(height / lcu_h)            // lcu_h: 32 H.265, 16 H.264
-refresh_frames = round(fps * target_ms / 1000)
-auto_lines     = ceil(total_rows / refresh_frames)
-auto_gop       = ceil(total_rows / effective_lines)   // one IDR per GDR pass
-```
-
-Auto-GOP overrides `gop_size` so each IDR aligns with one full GDR pass —
-no half-cycles, no cycle without a hard recovery anchor. Setting an explicit
-`gopSize > 0` suppresses auto-GOP and keeps the user value (logged at boot).
-
-#### Precomputed values @ 60 fps H.265
-
-For other framerates: `gop_sec` scales as `60 / fps`. Lines stays the same
-unless `refresh_frames` rounds differently — at 30 fps `fast` doubles its
-window, at 120 fps it halves.
-
-| Resolution | total_rows | mode | lines | gop frames | gop sec | qp |
-|---|---:|---|---:|---:|---:|---:|
-| 1280×720 | 23 | fast | 3 | 8 | 0.133 | 36 |
-| 1280×720 | 23 | balanced | 1 | 23 | 0.383 | 32 |
-| 1280×720 | 23 | robust | 1 | 23 | 0.383 ⚠ | 28 |
-| 1456×816 | 26 | fast | 3 | 9 | 0.150 | 36 |
-| 1456×816 | 26 | balanced | 1 | 26 | 0.433 | 32 |
-| 1456×816 | 26 | robust | 1 | 26 | 0.433 ⚠ | 28 |
-| 1920×1080 | 34 | fast | 4 | 9 | 0.150 | 36 |
-| 1920×1080 | 34 | balanced | 2 | 17 | 0.283 | 32 |
-| 1920×1080 | 34 | robust | 1 | 34 | 0.567 | 28 |
-| 2560×1440 | 45 | fast | 5 | 9 | 0.150 | 36 |
-| 2560×1440 | 45 | balanced | 2 | 23 | 0.383 | 32 |
-| 2560×1440 | 45 | robust | 1 | 45 | 0.750 | 28 |
-| 3840×2160 | 68 | fast | 8 | 9 | 0.150 | 36 |
-| 3840×2160 | 68 | balanced | 3 | 23 | 0.383 | 32 |
-| 3840×2160 | 68 | robust | 2 | 34 | 0.567 | 28 |
-
-⚠ At 720p and below, `robust` and `balanced` collapse to identical numbers
-because `total_rows` is small enough that even balanced refreshes in 1
-line per P-frame. The mode label still ships through (recorded in status
-endpoint) but the encoder behavior is identical.
-
-H.264 doubles `total_rows` (lcu_h = 16 → 720p has 45 rows, 1080p has 68
-rows) so lines and gop scale up roughly 2×, but the gop seconds match the
-H.265 column closely.
-
 Quick start — one HTTP call:
 
 ```bash
-curl -X POST 'http://<device>/api/v1/intra/mode?mode=balanced'
+curl "http://<device>/api/v1/set?video0.intraRefreshMode=balanced"
 ```
-
-This sets the mode, clears any per-field overrides, persists, and reinits
-the encoder. Equivalent to editing the config JSON and triggering reload.
 
 Notes:
 - Budget +20–30 % bitrate when enabling refresh; intra-coded rows compress
   worse than inter-coded ones.
 - Refresh is applied to ch0 only. The dual-VENC recorder (ch1) is
   intentionally skipped — TS containers expect IDRs at GOP boundaries.
-- Explicit `intraRefreshLines` greater than the picture's LCU-row count
-  are clamped (with a `[venc] WARNING`) to avoid SDK underflow.
 - Both backends use the identical `MI_VENC_IntraRefresh_t` layout
   (`bEnable`, `u32RefreshLineNum`, `u32ReqIQp`); the Maruko symbol takes
   `(MI_VENC_DEV, MI_VENC_CHN, *cfg)` while Star6E takes `(MI_VENC_CHN, *cfg)`.
 - Maruko: `MI_VENC_SetIntraRefresh` is treated as an optional symbol — the
   loader logs a warning if `dlsym` misses on older firmware drops, and the
   pipeline falls back to plain GOP-based IDRs (`mi_supported=false`).
-
-Status endpoint:
-
-```bash
-curl http://<device>/api/v1/intra/status
-# { "ok":true, "data":{
-#     "mode": "balanced",
-#     "active": true,
-#     "mi_supported": true,
-#     "apply_ok": true,
-#     "target_ms": 500,
-#     "total_rows": 34,
-#     "lines": { "requested": 0,    "effective": 2,    "clamped": false },
-#     "qp":    { "requested": 0,    "effective": 32 },
-#     "gop":   { "explicit_sec": 0.0, "effective_sec": 0.283, "auto": true }
-# }}
-```
-
-Boot log (from stderr):
-
-```
-[venc] intraRefresh: mode=balanced lines/P=2 qp=32 gop=0.28s (auto)
-```
-
-When `debug.showOsd=true` and a mode is active, two extra OSD rows render
-the live values. If zoom is also active, zoom rows are appended below them
-instead of replacing the intra rows:
-
-```
-intra balanced L2 q32
-gop   0.28s auto
-zoom  2.00x 960x540
-crop  960x540+480+270
-```
-
-`intra` shows mode, effective stripe lines per P-frame, and effective QP.
-`gop` shows the IDR period in seconds and whether it came from auto or an
-explicit `gopSize` override. `zoom` shows magnification and encoded
-resolution; `crop` shows source placement.
 
 #### Outgoing (Streaming)
 
@@ -660,11 +741,11 @@ resolution; `crop` shows source placement.
 | `outgoing.audio_port` | uint16 | restart | `0` = shared video destination; nonzero = dedicated audio port. With `unix://`, dedicated audio is sent to `127.0.0.1:<audioPort>` |
 | `outgoing.sidecar_port` | uint16 | restart | RTP timing sidecar port (0 = disabled) |
 
-`unix://` uses Linux abstract Unix datagram sockets and is available in both
-`rtp` and `compact` mode. On Star6E, `audioPort=0` piggybacks on the same
-active video destination for both `udp://` and `unix://`. `shm://` remains
-RTP-only; it cannot share audio, but a nonzero `audioPort` still uses a
-dedicated local UDP audio destination.
+`unix://` uses Linux abstract Unix datagram sockets and is available in
+both `rtp` and `compact` mode. On Star6E, `audioPort=0` piggybacks on the
+same active video destination for both `udp://` and `unix://`. `shm://`
+remains RTP-only; it cannot share audio, but a nonzero `audioPort` still
+uses a dedicated local UDP audio destination.
 
 #### FPV
 
@@ -683,41 +764,82 @@ dedicated local UDP audio destination.
 | `audio.mute` | bool | live | Mute/unmute audio output |
 
 Audio configuration (enabled, sample rate, channels, codec, volume) is
-set in `/etc/venc.json` only and requires a process restart to change.
+set in `/etc/waybeam.json` only and requires a process restart to change.
 
 Supported codecs: `"pcm"` (raw 16-bit, big-endian L16 per RFC 3551),
-`"g711a"` (A-law), `"g711u"` (µ-law), `"opus"` (requires `libopus.so` at
-runtime; falls back to PCM with a warning if the library or encoder is
-unavailable).
+`"g711a"` (A-law), `"g711u"` (µ-law), `"opus"` (requires `libopus.so`
+at runtime; falls back to PCM with a warning if the library or encoder
+is unavailable).
 
-**RTP payload types:** When streaming in RTP mode, venc uses standard static
-payload types when the sample rate matches the RFC 3551 standard:
+**RTP payload types:** When streaming in RTP mode, Waybeam uses standard
+static payload types when the sample rate matches the RFC 3551 standard:
 
 | Codec | Sample rate | RTP PT | Notes |
 |-------|-------------|--------|-------|
 | `g711u` | 8000 | 0 (PCMU) | RFC 3551 standard |
 | `g711a` | 8000 | 8 (PCMA) | RFC 3551 standard |
-| `g711u` | non-8kHz | 112 | Dynamic, Waybeam convention |
-| `g711a` | non-8kHz | 113 | Dynamic, Waybeam convention |
+| `g711u` | non-8 kHz | 112 | Dynamic, Waybeam convention |
+| `g711a` | non-8 kHz | 113 | Dynamic, Waybeam convention |
 | `pcm` | 44100 | 11 (L16 mono) | RFC 3551 standard |
 | `pcm` | other | 110 | Dynamic PCM |
 | `opus` | any | 98 | Dynamic, majestic-compatible (RFC 7587) |
 
-Sample rate range: 8000–48000 Hz (clamped by config parser). For Opus the
-recommended sample rate is 48000 Hz (native Opus clock, no resampling);
-the RTP clock is fixed at 48 kHz per RFC 7587 regardless of capture rate.
-For voice-only FPV audio, 16 kHz G.711a remains a low-latency choice.
+Sample rate range: 8000–48000 Hz (clamped by config parser). For Opus
+the recommended sample rate is 48000 Hz (native Opus clock, no
+resampling); the RTP clock is fixed at 48 kHz per RFC 7587 regardless
+of capture rate. For voice-only FPV audio, 16 kHz G.711a remains a
+low-latency choice.
 
 **Frame timing:** Each RTP packet carries one 20 ms frame. The RTP
 timestamp advances by `sample_rate / 50` samples for PCM/G.711, and by
 960 (the 48 kHz nominal Opus tick) for Opus.
 
-**Receiving Opus:**
+**Receiving Opus with GStreamer:**
+
+The minimal one-liner that the README used to suggest had two recurring
+problems on real receivers — out-of-order UDP packets confused
+`rtpopusdepay`, and the default sink could not consume the Opus 48 kHz
+mono stream directly. Use this expanded pipeline:
 
 ```bash
-gst-launch-1.0 udpsrc port=5601 \
-    caps="application/x-rtp,media=audio,payload=98,clock-rate=48000,encoding-name=OPUS" \
-  ! rtpopusdepay ! opusdec ! audioconvert ! autoaudiosink
+gst-launch-1.0 -v \
+  udpsrc port=5601 \
+    caps="application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS,payload=98,channels=1" \
+  ! rtpjitterbuffer latency=40 \
+  ! rtpopusdepay \
+  ! opusdec plc=true \
+  ! audioconvert \
+  ! audioresample \
+  ! autoaudiosink sync=false
+```
+
+Key adjustments versus the older one-liner:
+- `rtpjitterbuffer latency=40` is required — `rtpopusdepay` discards
+  out-of-order packets on its own, which clicks/drops audio on lossy
+  wireless links.
+- `channels=1` matches the capture default; add it explicitly so
+  versions of GStreamer that do not infer it from the encoded stream
+  still negotiate.
+- `audioresample` after `audioconvert` lets the chosen audio sink pick
+  any rate (PulseAudio on a laptop will not always accept 48 kHz mono).
+- `sync=false` on the sink avoids dropped frames at startup before
+  the RTP clock has stabilised. Remove it once you have wallclock
+  sync wired (`ntp-sync-parameters` / `clock-sync`).
+
+For stereo capture (`audio.channels=2` in config) set `channels=2`
+in caps. For PT-mismatched senders, replace `payload=98` with whatever
+the sender reports in `/api/v1/audio/status`.
+
+To dump RTP audio to a file instead of a sink:
+
+```bash
+gst-launch-1.0 \
+  udpsrc port=5601 \
+    caps="application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS,payload=98,channels=1" \
+  ! rtpjitterbuffer latency=40 \
+  ! rtpopusdepay \
+  ! oggmux \
+  ! filesink location=audio.ogg
 ```
 
 #### Recording
@@ -736,44 +858,19 @@ gst-launch-1.0 udpsrc port=5601 \
 | `record.server` | string | restart | Dual-stream: second RTP destination URI |
 
 Backend support:
-- **Star6E** — full feature set: `mirror`/`dual`/`dual-stream` modes, both
-  `ts` and `hevc` formats, HTTP-driven start/stop via
+- **Star6E** — full feature set: `mirror`/`dual`/`dual-stream` modes,
+  both `ts` and `hevc` formats, HTTP-driven start/stop via
   `/api/v1/record/start|stop`, adaptive bitrate while SD-bound.
 - **Maruko (Phase 6, v0.9.14)** — `mirror` and `dual` modes wired,
-  `ts` format only, **config-driven only**:  set `record.enabled=true`
-  + `record.mode=...` in `/etc/venc.json` and reload.  HTTP
-  `/api/v1/record/start|stop` returns `501 not_implemented` on Maruko
-  (Phase 6.5 backlog: wire the runtime poll loop and
-  `record_status_callback`).  Audio is interleaved into the TS file
-  whenever Phase 5 audio capture is active (`audio.enabled=true`).
+  `ts` format only, **config-driven only**: set `record.enabled=true`
+  + `record.mode=...` in `/etc/waybeam.json` and reload. HTTP
+  `/api/v1/record/start|stop` returns `501 not_implemented` on Maruko.
+  Audio is interleaved into the TS file whenever Phase 5 audio
+  capture is active (`audio.enabled=true`).
 
-Recording can also be controlled at runtime via the HTTP API. In dual/dual-stream
-modes, the secondary channel parameters can be adjusted live via `/api/v1/dual/set`.
-
-**HTTP `/api/v1/record/start|stop` behavior vs configured `record.mode`:**
-
-`/api/v1/record/start` always writes ch0 (the live encoded stream) to disk in
-the configured `record.format` — it cannot change the pipeline topology, only
-open or close a recording file. Whether that even runs depends on whether a
-dedicated recording thread already owns the recorder:
-
-| `record.enabled` | `record.mode`   | Auto-start at boot             | Dashboard Start / `/record/start` |
-|------------------|-----------------|--------------------------------|-----------------------------------|
-| false            | any             | no                             | starts ch0 mirror, `record.format` respected |
-| true             | `off`           | no                             | starts ch0 mirror, `record.format` respected |
-| true             | `mirror`        | yes (ch0 → disk)               | restarts ch0 mirror               |
-| true             | `dual`          | yes (ch1 → disk, dedicated)    | **silently ignored** — ch1 thread owns the recorder |
-| true             | `dual-stream`   | no (ch1 → RTP via `record.server`) | **silently ignored** — ch1 is streamed, not recorded |
-
-The "silently ignored" rows exist because `ps->dual` is non-NULL only when
-`record.enabled=true && mode ∈ {dual, dual-stream}`; the runtime loop
-explicitly skips the HTTP start/stop poll in that case to avoid racing the
-dedicated recording thread.  The dashboard Recordings tab detects this
-configuration and disables the Start/Stop buttons with a reason note.
-
-File rotation (`record.max_seconds`, `record.max_mb`) applies equally to
-config-started and HTTP-started recordings — both use the same `ts_recorder`
-/ `recorder` object.
+Recording can also be controlled at runtime via the HTTP API. In
+dual/dual-stream modes, the secondary channel parameters can be
+adjusted live via `/api/v1/dual/set`.
 
 #### IMU (both backends, POC consumer)
 
@@ -782,8 +879,8 @@ config-started and HTTP-started recordings — both use the same `ts_recorder`
 | `imu.enabled` | bool | restart | Enable BMI270 IMU driver |
 | `imu.i2c_device` | string | restart | I2C device path |
 | `imu.i2c_addr` | uint8 | restart | I2C address (decimal or hex string, e.g. `104` or `"0x68"`) |
-| `imu.sample_rate_hz` | int | restart | ODR in Hz (25-1600).  Alias: `imu.sampleRateHz`. |
-| `imu.gyro_range_dps` | int | restart | Gyro range in ±dps.  Alias: `imu.gyroRangeDps`. |
+| `imu.sample_rate_hz` | int | restart | ODR in Hz (25-1600). Alias: `imu.sampleRateHz`. |
+| `imu.gyro_range_dps` | int | restart | Gyro range in ±dps. Alias: `imu.gyroRangeDps`. |
 | `imu.cal_file` | string | restart | Calibration file path |
 | `imu.cal_samples` | int | restart | Auto-bias samples at startup |
 
@@ -803,7 +900,7 @@ curl "http://<device-ip>:<port>/api/v1/set?outgoing.server=udp://<receiver-ip>:5
 curl "http://<device-ip>:<port>/api/v1/set?outgoing.enabled=true"
 ```
 
-**Switch to 720p at 90fps with lower bitrate:**
+**Switch to 720p at 90 fps with lower bitrate:**
 
 ```sh
 curl "http://<device-ip>:<port>/api/v1/set?video0.size=1280x720"
@@ -811,7 +908,7 @@ curl "http://<device-ip>:<port>/api/v1/set?video0.fps=90"
 curl "http://<device-ip>:<port>/api/v1/set?video0.bitrate=4096"
 ```
 
-**Manual white balance at 6500K:**
+**Manual white balance at 6500 K:**
 
 ```sh
 curl "http://<device-ip>:<port>/api/v1/set?isp.awb_mode=ct_manual"
@@ -847,26 +944,27 @@ curl "http://<device-ip>:<port>/api/v1/record/stop"
 
 ## SD Card Recording
 
-venc records HEVC video with PCM audio to SD card in MPEG-TS format.
+Waybeam records HEVC video with PCM audio to SD card in MPEG-TS format.
 Recording runs concurrently with RTP streaming at minimal CPU overhead
-(1-4% additional load measured across 30-120fps at 4-22 Mbps).
+(1–4 % additional load measured across 30–120 fps at 4–22 Mbps).
 
 Key properties:
 - **Power-loss safe** — MPEG-TS requires no finalization; partial files
   are playable up to the last written packet.
 - **Gemini mode** — dual VENC channels for independent stream and record
-  quality. Stream at 30fps 4 Mbps over WiFi while recording at 120fps
+  quality. Stream at 30 fps 4 Mbps over WiFi while recording at 120 fps
   20 Mbps to SD card. Four modes: off, mirror, dual, dual-stream.
 - **Recording thread** — dedicated pthread drains the secondary encoder
-  channel at full speed, with adaptive bitrate reduction (10%/s) if the
-  SD card can't keep up.
-- **File rotation** — splits at IDR keyframe boundaries by time (default
-  5 minutes) or size (default 500 MB). Each segment is independently
-  playable.
-- **Disk safety** — periodic free-space checks with automatic stop when
-  below 50 MB. Handles ENOSPC gracefully.
-- **Audio interleaving** — raw 16-bit PCM from the hardware audio input
-  is muxed alongside HEVC video in the TS container.
+  channel at full speed, with adaptive bitrate reduction (10 %/s) if
+  the SD card can't keep up.
+- **File rotation** — splits at IDR keyframe boundaries by time
+  (default 5 minutes) or size (default 500 MB). Each segment is
+  independently playable.
+- **Disk safety** — periodic free-space checks with automatic stop
+  when below 50 MB. Handles ENOSPC gracefully.
+- **Audio interleaving** — raw 16-bit PCM, Opus, A-law, or µ-law from
+  the hardware audio input is muxed alongside HEVC video in the TS
+  container.
 - **Live API control** — `/api/v1/dual/set` for runtime bitrate/GOP
   changes on the secondary channel.
 
@@ -877,9 +975,9 @@ must be pre-mounted at the configured directory (OpenIPC auto-mounts to
 Verify recordings with:
 
 ```sh
-ffprobe recording.ts          # check streams and format
-ffmpeg -i recording.ts -f null -   # full decode test
-ffplay recording.ts           # play directly
+ffprobe recording.ts                # check streams and format
+ffmpeg -i recording.ts -f null -    # full decode test
+ffplay recording.ts                 # play directly
 ```
 
 See `documentation/SD_CARD_RECORDING.md` for the full guide including
@@ -887,13 +985,12 @@ performance benchmarks, limitations, and architecture details.
 
 ## RTP Timing Sidecar
 
-An optional out-of-band UDP channel that sends per-frame timing metadata
-alongside the RTP video stream. Set `outgoing.sidecarPort=0` to disable it.
+An optional out-of-band UDP channel that sends per-frame timing
+metadata alongside the RTP video stream. Set `outgoing.sidecarPort=0`
+to disable it.
 
-### Purpose
-
-When enabled, the sidecar provides frame-level diagnostics for the entire
-sender-side pipeline:
+When enabled, the sidecar provides frame-level diagnostics for the
+entire sender-side pipeline:
 
 ```
 capture_us → [encode] → frame_ready_us → [packetise+send] → last_pkt_send_us
@@ -901,133 +998,18 @@ capture_us → [encode] → frame_ready_us → [packetise+send] → last_pkt_sen
                                                         recv_last_us (probe)
 ```
 
-This enables measurement of:
-- **Encode duration** — time from sensor capture to encoder output
-- **Send spread** — time to packetise and hand all RTP packets to the kernel
-- **One-way latency** — frame-ready on venc to first-packet-received on ground
-  (requires clock synchronisation)
-- **Frame intervals** — jitter and regularity of both sender and receiver clocks
-- **RTP packet counts and gaps** — per-frame packet accounting
-- **Encoded frame size / type / QP** — when Star6E scene detection is active
-- **Scene detection state** — complexity, scene-change flag, IDR decision, frames-since-IDR
+This enables measurement of encode duration, send spread, one-way
+latency, frame interval jitter, RTP packet counts and gaps, and
+optionally — when Star6E adaptive encoder control is active — per-frame
+size, QP, complexity, scene-change flag, IDR decision, and
+frames-since-IDR.
 
-### Enabling
-
-Set the sidecar port in the configuration:
-
-```sh
-curl "http://<device-ip>:<port>/api/v1/set?outgoing.sidecar_port=6666"
-```
-
-Or in `/etc/venc.json`:
-
-```json
-"outgoing": { "sidecarPort": 6666 }
-```
-
-A pipeline restart is required after changing this setting. The sidecar
-socket is silent until a probe subscribes — zero network overhead when no
-probe is connected.
-
-When the sidecar is disabled (port 0), no socket is created and there is
-no runtime overhead.
-
-### Wire Protocol
-
-The sidecar uses a simple binary UDP protocol:
-
-| Message | Direction | Size | Purpose |
-|---------|-----------|------|---------|
-| SUBSCRIBE | probe -> venc | 8 B | Start/refresh metadata subscription |
-| FRAME | venc -> probe | 52 B base, 64 B with trailer | Per-frame timing + RTP sequence info, plus optional encoder telemetry |
-| SYNC_REQ | probe -> venc | 16 B | NTP-style clock offset request |
-| SYNC_RESP | venc -> probe | 32 B | Clock offset response (t1, t2, t3) |
-
-All messages share a common 6-byte header: 4-byte magic (`0x52545053` =
-"RTPS"), 1-byte version, 1-byte message type. Fields are network byte order.
-
-Subscription expires after 5 seconds without any probe message. Both
-SUBSCRIBE and SYNC_REQ refresh the expiry timer.
-
-When Star6E adaptive encoder control is enabled, `FRAME` appends a 12-byte
-trailer carrying `frame_size_bytes`, `frame_type`, `qp`, `complexity`,
-`scene_change`, `idr_inserted`, and `frames_since_idr`.
-Maruko and timing-only Star6E runs keep sending the original 52-byte frame.
-
-Link-control / FEC usage:
-- RTP video keeps using `outgoing.server` as usual.
-- Set `outgoing.sidecarPort` to expose sidecar metadata on a separate UDP port.
-- Base timing fields are available whenever the sidecar is enabled.
-- The extra encoder trailer requires Star6E with `video0.scene_threshold>0`.
-- The sender tracks one active sidecar subscriber at a time; the most recent
-  probe or consumer to subscribe receives the frame metadata.
-
-### Reference Probe
-
-A host-native reference probe is included at `tools/rtp_timing_probe.c`.
-It listens for RTP on one port and communicates with the venc sidecar on
-another, correlating frames by (SSRC, RTP timestamp).
-
-Build (no cross-compiler needed):
-
-```sh
-make rtp_timing_probe
-```
-
-Usage:
-
-```sh
-./rtp_timing_probe --venc-ip <device-ip> [--rtp-port 5600] [--sidecar-port 6666] [--stats]
-```
-
-Without `--stats`, the probe outputs tab-separated frame records to stdout
-(one line per frame) suitable for piping to analysis tools. The TSV includes
-columns for all timing fields, sequence numbers, gaps, intervals, estimated
-latency, and optional encoder-feedback fields when the sidecar trailer is
-present. For timing-only frames, the encoder-feedback columns print `-`.
-
-With `--stats`, a summary is printed to stderr on exit:
-
-```
-=== Timing Probe Summary ===
-
-Duration:             20.0 s
-Frames:               936 (46.8 fps)
-RTP packets:          8484 (9.1 avg/frame)
-RTP gaps:             0
-
---- Send spread (frame_ready -> last_pkt_send) ---
-  Mean:    294 us
-  P50:     265 us
-  P95:     331 us
-  P99:     1710 us
-
---- Encode duration (capture -> frame_ready) ---
-  Mean:    4254 us
-
---- Clock sync ---
-  Samples:  8
-  Best RTT: 347 us
-```
-
-The probe uses burst-then-coast clock synchronisation: 8 fast samples at
-200 ms intervals, then one sample every 10 seconds. Only the sample with
-the lowest RTT is used for offset estimation.
-
-### Sidecar Overhead
-
-At 90 fps with an active subscriber:
-- **venc -> probe**: ~90 frame packets/s (52 B each) + sync responses
-- **probe -> venc**: ~0.5 subscribe/s + ~0.1 sync/s
-- **Bandwidth**: ~40 kbps total (both directions)
-- **CPU**: single `poll()` per frame + one `sendto()` per frame
-
-When no probe is subscribed, the sidecar socket exists but no packets
-are sent.
+See `include/rtp_sidecar.h` and `tools/rtp_timing_probe.c` for the
+full wire protocol and reference probe.
 
 ## Sensor Unlock
 
-IMX415 and IMX335 sensors support high-FPS modes (90/120fps) via a
+IMX415 and IMX335 sensors support high-FPS modes (90/120 fps) via a
 register unlock sequence applied before pipeline initialization. This
 is enabled by default (`sensor.unlock_enabled=true`) with preset values
 for IMX415.
@@ -1040,9 +1022,10 @@ See `documentation/SENSOR_UNLOCK_IMX415_IMX335.md` for register details.
 
 ## Sensor Driver Sources
 
-Full sensor driver source code is available in the `sensors-src/` submodule
-(from [OpenIPC/sensors](https://github.com/OpenIPC/sensors)). This includes
-drivers for IMX335, IMX415, GC4653, and other SigmaStar Infinity6E sensors.
+Full sensor driver source code is available in the `sensors-src/`
+submodule (from [OpenIPC/sensors](https://github.com/OpenIPC/sensors)).
+This includes drivers for IMX335, IMX415, GC4653, and other SigmaStar
+Infinity6E sensors.
 
 ```sh
 # Fetch the sensor sources (not cloned by default)
@@ -1052,7 +1035,8 @@ git submodule update --init sensors-src
 ls sensors-src/sigmastar/infinity6e/sensor/
 ```
 
-Pre-built kernel modules (`.ko`) for IMX335 and IMX415 remain in `sensors/`.
+Pre-built kernel modules (`.ko`) for IMX335 and IMX415 remain in
+`sensors/`.
 
 ### Maruko IMX335 Sensor Modes
 
@@ -1061,58 +1045,19 @@ Custom Maruko driver in `drivers/sensor_imx335_maruko.c` (built via
 
 | Mode | Resolution | Max FPS | Verified | Init table |
 |------|-----------|---------|----------|------------|
-| 0 | 1920x1080 | 60 | 59fps | Star6E 120fps windowed |
-| 1 | 1920x1080 | 90 | 89fps | Star6E 120fps windowed |
+| 0 | 1920x1080 | 60 | 59 fps | Star6E 120 fps windowed |
+| 1 | 1920x1080 | 90 | 89 fps | Star6E 120 fps windowed |
 
 Deploy: `scp sensor_imx335_maruko.ko root@device:/lib/modules/5.10.61/sigmastar/sensor_imx335_mipi.ko`
 
 The driver uses no-op `pCus_poweroff` (sensor stays powered from boot)
-and a VTS 120% cap to prevent AE from dropping FPS in low light.
-A delayed MI\_SNR\_SetFps kick after ~1s fixes cold-boot FPS lock.
-
-## Deployment Testing
-
-For the current Star6E bench, use the direct helper against the production
-`/etc/venc.json` workflow:
-
-```sh
-./scripts/star6e_direct_deploy.sh cycle
-./scripts/star6e_direct_deploy.sh status
-```
-
-This deploys `/usr/bin/venc`, waits for the HTTP API, and captures
-`/tmp/venc.log`.
-
-Use `remote_test.sh` for bounded CLI runs such as sensor-mode discovery,
-max-FPS sweeps, and dedicated test binaries:
-
-```sh
-./scripts/remote_test.sh --help
-```
-
-Run the API test suite against a live device after `venc` is already running:
-
-```sh
-./scripts/api_test_suite.sh 192.168.1.13 80
-```
-
-Verify the single-instance pidfile + flock gate by trying to launch a second
-`venc` while one is already running on the device:
-
-```sh
-./scripts/test_pidfile_lock.sh root@192.168.1.13
-```
-
-The second launch must exit with rc=1 and the "venc already running" banner;
-the first instance must remain alive.
-
-Scene-change IDR control is configured through `video0.scene_threshold` in
-`/etc/venc.json`. Leave `video0.scene_threshold=0` for baseline behavior.
+and a VTS 120 % cap to prevent AE from dropping FPS in low light.
+A delayed `MI_SNR_SetFps` kick after ~1 s fixes cold-boot FPS lock.
 
 ## Web Dashboard
 
-venc includes a built-in web dashboard served at the root URL (`/`). Open
-`http://<device-ip>/` in any browser to access it.
+Waybeam includes a built-in web dashboard served at the root URL
+(`/`). Open `http://<device-ip>/` in any browser to access it.
 
 ### Settings Tab
 
@@ -1130,27 +1075,16 @@ Debug) with:
 
 ### API Reference Tab
 
-Documentation for all HTTP endpoints with descriptions and example responses,
-grouped by category: Configuration, Encoder Control, ISP & Image Quality,
-Recording, and Dual-Stream.
+Documentation for all HTTP endpoints with descriptions and example
+responses, grouped by category: Configuration, Encoder Control, ISP &
+Image Quality, Recording, and Dual-Stream.
 
 ### Image Quality Tab
 
 Direct access to 62 SigmaStar ISP parameters organized by category.
-
-**Parameter Categories** — expandable sections with clickable parameter chips.
-Multi-field parameters (colortrans, obc, demosaic, false_color, crosstalk,
-r2y, wdr_curve_adv) show sub-field chips for individual field access.
-
-**Expanded Editor** — click a multi-field parameter to open an inline form
-with all sub-fields pre-filled from live ISP values. Array fields (e.g.,
-colortrans 3x3 matrix) render as editable grids. Changed fields highlight
-and Apply All writes only the modified fields.
-
-**Export / Import** — save all IQ parameters as a timestamped JSON file,
-or import a previously saved file to restore tuning. Partial imports are
-supported — only the parameters present in the JSON are applied, leaving
-others untouched.
+Multi-field parameters render as inline forms; arrays render as
+editable grids. Export the full IQ state as a timestamped JSON file
+and import it back to restore tuning. Partial imports are supported.
 
 ```sh
 # Export current IQ state
@@ -1159,57 +1093,42 @@ curl http://<device>/api/v1/iq > my_tuning.json
 # Import (full or partial)
 curl -X POST -H "Content-Type: application/json" \
   -d @my_tuning.json http://<device>/api/v1/iq/import
-
-# Partial import example — only set specific params
-echo '{"lightness":{"value":75},"demosaic":{"fields":{"dir_thrd":30}}}' | \
-  curl -X POST -H "Content-Type: application/json" -d @- http://<device>/api/v1/iq/import
 ```
-
-### IQ Dot-Notation API
 
 Multi-field parameters support dot-notation for individual field access:
 
 ```sh
-# Set a single field
 curl "http://<device>/api/v1/iq/set?colortrans.y_ofst=200"
-
-# Set an array field (comma-separated)
 curl "http://<device>/api/v1/iq/set?colortrans.matrix=23,45,9,1005,987,56,56,977,1015"
-
-# Query shows all fields
-curl http://<device>/api/v1/iq
-# Returns: "colortrans":{"enabled":true,"value":200,"fields":{"y_ofst":200,"u_ofst":0,"v_ofst":0,"matrix":[23,45,...]}}
 ```
 
-Legacy single-value set (`?colortrans=200`) still works for backward compatibility.
+Legacy single-value set (`?colortrans=200`) still works for backward
+compatibility.
 
 ### Status Bar
 
-The top telemetry bar shows version, backend type, live FPS (auto-refreshes
-every 2s), recording status indicator, and an Export Config button to
-download the full configuration as JSON.
+The top telemetry bar shows version, backend type, live FPS
+(auto-refreshes every 2 s), recording status indicator, and an Export
+Config button to download the full configuration as JSON.
 
 ## IMU (BMI270 gyro module)
 
 The BMI270 driver is compiled into the binary on both backends but
-disabled by default (`imu.enabled = false`).  When enabled, it samples
+disabled by default (`imu.enabled = false`). When enabled, it samples
 gyro+accel via the hardware FIFO at 200 Hz, drains per video frame, and
 hands samples to a caller-supplied push callback.
 
 The previous EIS consumer (`gyroglide` crop-based stabilization) was
 removed in 0.8.0 — see `HISTORY.md` for the rationale and
 `documentation/EIS_INTEGRATION_PLAN.md` for what a future replacement
-(LDC-warp Phase C) would look like.  The push callback in both
-`star6e_pipeline.c` and `maruko_pipeline.c` is currently a stub that
-discards samples; a future telemetry export, sidecar gcsv logging, or
-an HTTP `/api/v1/imu` peek would slot in there.
+(LDC-warp Phase C) would look like.
 
-**Maruko ordering caveat.**  On Maruko, IMU init must run **before**
+**Maruko ordering caveat.** On Maruko, IMU init must run **before**
 `MI_VENC_StartRecvPic` (i.e. before `bind_maruko_pipeline()`) because
-the auto-bias loop blocks the main thread for ~2 s.  Empirically,
+the auto-bias loop blocks the main thread for ~2 s. Empirically,
 blocking the main thread for 2 s after `StartRecvPic` leaves the VENC
 fd in a state where `poll()` never returns POLLIN and the stream loop
-never progresses.  Star6E does not exhibit this — IMU init can stay
+never progresses. Star6E does not exhibit this — IMU init can stay
 post-VENC there.
 
 To enable the IMU for development:
@@ -1228,8 +1147,45 @@ To enable the IMU for development:
 }
 ```
 
-Restart venc.  The 2-second auto-calibration runs at startup — hold the
-board still during it.  With no consumer wired up, samples are
-discarded after the per-frame drain (~negligible CPU).
+Restart Waybeam. The 2-second auto-calibration runs at startup — hold
+the board still during it.
 
-[logo]: https://openipc.org/assets/openipc-logo-black.svg
+## Inspiration & Credits
+
+Waybeam exists because of prior OpenIPC work. Two upstream projects
+made it possible to start from a working baseline instead of a blank
+page; we owe them direct credit:
+
+- [**OpenIPC/divinus**](https://github.com/OpenIPC/divinus) — the
+  reference reverse-engineered camera firmware for SigmaStar SoCs.
+  We borrowed the SigmaStar MI API struct layouts (`MI_SYS`, `MI_SNR`,
+  `MI_VIF`, `MI_VPE`, `MI_VENC`, `MI_RGN`) needed to talk to the
+  vendor `.so` libraries without an SDK header, plus the
+  IMX415/IMX335 sensor-unlock register sequences for high-FPS modes.
+- [**OpenIPC/research / venc**](https://github.com/OpenIPC/research/tree/master/venc)
+  — early standalone-encoder research, source of the initial `dlopen`
+  approach to load MI libs at runtime and the first sketch of the
+  VENC channel lifecycle. Both projects are MIT-licensed (as is this
+  one), so reuse is explicitly allowed.
+
+### Code provenance — current state
+
+We did a recent line-by-line accounting against the v0.3.0 import and
+the two upstream projects. Across the current ~37 kLoC of `src/` +
+`include/`:
+
+| Source | Approx share | Where it lives today |
+|---|---:|---|
+| OpenIPC/divinus | **~3 %** | `include/sigmastar_types.h` MI ABI structs/enums; IMX sensor unlock register tables in `sensor_select.c`. |
+| OpenIPC/research/venc | **~5 %** | Initial `dlopen` symbol loader pattern; first sketch of the Star6E VENC channel start/stop loop, now substantially refactored. |
+| New to Waybeam | **~92 %** | Maruko backend (entire); dual-backend pipeline architecture; HTTP API + WebUI; ISP/IQ system; custom 3A; recording (MPEG-TS mux, dual VENC, adaptive bitrate); RTP timing sidecar; intra-refresh; scene detection; snapshot channel; IMU driver + ring; SIGHUP-respawn handoff; audio capture (Opus/G.711/PCM RTP + TS). |
+
+Both upstream projects are MIT licensed (so is Waybeam) — reuse is
+explicit and welcome.  The numbers above are a transparent inventory,
+not a disclaimer.  If you find a line or pattern that traces back
+specifically and we missed crediting it, please open an issue and
+we'll fix the attribution.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

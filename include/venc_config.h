@@ -9,7 +9,10 @@
 extern "C" {
 #endif
 
-#define VENC_CONFIG_DEFAULT_PATH "/etc/venc.json"
+/* Single fixed config path.  No CLI override, no legacy fallback —
+ * deploy tooling is responsible for placing the file at
+ * /etc/waybeam.json before launch. */
+#define VENC_CONFIG_DEFAULT_PATH "/etc/waybeam.json"
 #define VENC_CONFIG_STRING_MAX 256
 
 /* Upper bound on outgoing.max_payload_size in bytes. Validation enforces
@@ -149,6 +152,14 @@ typedef struct {
 	bool show_osd;
 } VencConfigDebug;
 
+typedef struct {
+	bool enabled;       /* false → snapshot subsystem skipped entirely */
+	uint32_t quality;   /* 1..100 MJPEG q-factor; clamped (0 → default 80) */
+	int channel;        /* SDK VENC channel hint (Star6E ch7; ignored on Maruko which uses dedicated dev 8) */
+	uint32_t width;     /* 0 → inherit from main stream */
+	uint32_t height;    /* 0 → inherit from main stream */
+} VencConfigSnapshot;
+
 /* ── Top-level config ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -162,6 +173,7 @@ typedef struct {
 	VencConfigAudio audio;
 	VencConfigImu imu;
 	VencConfigRecord record;
+	VencConfigSnapshot snapshot;
 	VencConfigDebug debug;
 } VencConfig;
 

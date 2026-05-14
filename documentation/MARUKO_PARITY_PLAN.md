@@ -183,7 +183,8 @@ new "thread starts a long bring-up before VENC starts" feature):**
   doesn't silently re-introduce the stall.
 
 **Verified on 192.168.2.12** (OpenIPC SSC378QE / IMX415, BMI270):
-`json_cli -s 'imu.enabled=true'` followed by `venc -c /etc/venc.json`,
+`json_cli -s 'imu.enabled=true'` followed by `waybeam` (config path
+fixed to `/etc/waybeam.json`),
 9 s capture, 1963 IMU samples, 0 errors, encoder steady at 118 fps,
 no warnings during teardown.
 

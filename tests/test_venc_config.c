@@ -453,7 +453,7 @@ static int test_sample_config_file(void)
 
 	/* Load the shipped sample config relative to the test binary's
 	 * expected working directory (repo root) */
-	int ret = venc_config_load("config/venc.default.json", &cfg);
+	int ret = venc_config_load("config/waybeam.default.json", &cfg);
 	CHECK("sample_load_ok", ret == 0);
 	if (ret != 0) return failures;
 
@@ -581,7 +581,7 @@ static int test_audio_roundtrip(void)
 	return failures;
 }
 
-/* Self-policing round-trip: load config/venc.default.json, save it via
+/* Self-policing round-trip: load config/waybeam.default.json, save it via
  * venc_config_save (which uses the hand-rolled pretty printer), and assert
  * the saved bytes are byte-equal to the original.  Any future config field
  * added to the struct/parser/serializer but missing from the printer (or
@@ -592,7 +592,7 @@ static int test_save_layout_byte_equal(void)
 	VencConfig cfg;
 	venc_config_defaults(&cfg);
 
-	const char *src_path = "config/venc.default.json";
+	const char *src_path = "config/waybeam.default.json";
 	int ret = venc_config_load(src_path, &cfg);
 	CHECK("layout_load_default_ok", ret == 0);
 	if (ret != 0) return failures;
@@ -665,7 +665,7 @@ static int test_save_layout_populated_round_trip(void)
 	VencConfig cfg;
 	venc_config_defaults(&cfg);
 
-	int ret = venc_config_load("config/venc.default.json", &cfg);
+	int ret = venc_config_load("config/waybeam.default.json", &cfg);
 	CHECK("layout_populated_load_default_ok", ret == 0);
 	if (ret != 0) return failures;
 

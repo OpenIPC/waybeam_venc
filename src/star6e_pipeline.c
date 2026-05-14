@@ -10,6 +10,7 @@
 #include "isp_runtime.h"
 #include "pipeline_common.h"
 #include "venc_api.h"
+#include "venc_jpeg.h"
 
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -1383,6 +1384,23 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	state->bound_vpe_venc = 1;
 	MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
 
+	/* Bring up the JPEG snapshot subsystem on the same VPE source port the
+	 * main channel just bound to.  Failure is non-fatal — /api/v1/snapshot.jpg
+	 * just serves 503 if init fails.  Config from venc.json snapshot.*
+	 * section; width=0/height=0 inherits main stream dimensions. */
+	{
+		venc_jpeg_set_source(&state->vpe_port);
+		const VencConfigSnapshot *snap = &vcfg->snapshot;
+		VencJpegConfig jcfg = {
+			.width   = snap->width  ? snap->width  : state->image_width,
+			.height  = snap->height ? snap->height : state->image_height,
+			.quality = snap->quality,
+			.channel = snap->channel,
+			.enabled = snap->enabled,
+		};
+		(void)venc_jpeg_init(&jcfg);
+	}
+
 	if (star6e_output_init(&state->output, &pconf->output_setup) != 0) {
 		star6e_output_teardown(&state->output);
 		MI_SYS_UnBindChnPort(&state->vpe_port, &state->venc_port);
@@ -1599,6 +1617,12 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 		state->dual->rec_started = 0;
 		printf("> Dual recording thread joined\n");
 	}
+
+	/* Tear down JPEG snapshot channel first — it's bound to the same
+	 * VPE port we're about to unbind, and its UnBindChnPort/DestroyChn
+	 * must run while the SDK still holds a consistent view of the VPE
+	 * source.  Idempotent; safe even if init was skipped or failed. */
+	venc_jpeg_shutdown();
 
 	/* Unbind VPE→VENC.  Safe now — no concurrent consumers calling
 	 * GetStream, so the kernel unbind won't deadlock. */

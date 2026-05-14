@@ -262,6 +262,7 @@ const static I2C_ARRAY Sensor_2m_90fps_init_table_4lane_linear[] = {
     { 0x3028, 0x6D }, // HMAX
     { 0x3029, 0x01 }, //
     { 0x3031, 0x00 }, // ADBIT (10bit)
+    { 0x3032, 0x01 }, // VMAX MSB — must be 0x01, default 0x00 produces dark image
     { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
     { 0x3050, 0x08 }, // SHR0[19:0]
     { 0x30C1, 0x00 }, // XVS_DRV[1:0]
@@ -378,6 +379,7 @@ const static I2C_ARRAY Sensor_1m_120fps_init_table_4lane_linear[] = {
     { 0x3028, 0x6D }, // HMAX
     { 0x3029, 0x01 }, //
     { 0x3031, 0x00 }, // ADBIT (10bit)
+    { 0x3032, 0x01 }, // VMAX MSB — must be 0x01, default 0x00 produces dark image
     { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
     { 0x3040, 0xD4 }, // PIX_HST
     { 0x3041, 0x01 }, //
@@ -753,6 +755,7 @@ const static I2C_ARRAY Sensor_nobinned_base_init_table[] = {
     { 0x3028, 0x4C }, // HMAX = 1100 = 0x044C
     { 0x3029, 0x04 },
     { 0x3031, 0x00 }, // ADBIT = 10-bit ADC
+    { 0x3032, 0x01 }, // VMAX MSB — must be 0x01, default 0x00 produces dark image
     { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
     { 0x3050, 0x08 }, // SHR0
     { 0x30C1, 0x00 },
@@ -887,6 +890,7 @@ const static I2C_ARRAY Sensor_1080p_binned_init_table_4lane_linear[] = {
     { 0x3028, 0x6D }, // HMAX (same as 120fps)
     { 0x3029, 0x01 },
     { 0x3031, 0x00 }, // ADBIT
+    { 0x3032, 0x01 }, // VMAX MSB — must be 0x01, default 0x00 produces dark image
     { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
     { 0x3040, 0x0C }, // PIX_HST = 12 = 0x000C (centered 3840 in 3864)
     { 0x3041, 0x00 },

@@ -29,8 +29,8 @@ Original ten libs (2026-04-22): pulled from a known-good Maruko test device
 (SSC378QE @ 192.168.2.12) overlay partition (`/overlay/root/usr/lib/`).
 
 Audio additions (2026-05-02, v0.9.15): `libmi_ai.so` and `libmi_ao.so` pulled
-from the SDK source tree
-(`Maruko_work_dir/SourceCode/.../i6c/ipc/common/uclibc/9.1.0/mi_libs/dynamic/`).
+from the SigmaStar Infinity6C BSP SDK source tree
+(`i6c/ipc/common/uclibc/9.1.0/mi_libs/dynamic/`).
 Vermagic / runtime-verified against the same SSC378QE bench: kernel-side audio
 support is already compiled into the unified `mi.ko` (2.1 MB module) on the
 firmware in use, so no kmod insmod is required — only the userspace lib is
@@ -45,8 +45,24 @@ MD5s are recorded in `MD5SUMS` alongside this README.
 - `libmi_vpe.so` — Maruko uses SCL for scaling; VPE is Star6E-only.
 - `libopus.so` — bench already ships it at `/usr/lib/libopus.so.0.8.0`; the
   audio backend `dlopen`s the system copy at runtime.
-- `libmaruko_uclibc_shim.so` / `ld-uClibc.so.1` — dead since v0.7.0. `venc`,
-  `waybeam_hub`, and `majestic` are all musl-linked now.
+- `libmaruko_uclibc_shim.so` — dead since v0.7.0. `venc`, `waybeam_hub`,
+  and `majestic` are all musl-linked now.
+
+## uClibc compat symlinks (still required)
+
+`libcam_os_wrapper.so` has hardcoded NEEDED tags `ld-uClibc.so.1` and
+`libc.so.0` in its `.dynamic` section — vendor blob, cannot be relinked.
+On stock OpenIPC musl firmware (which ships only `/lib/libc.so`), the
+dynamic loader fails when `libcam_os_wrapper.so` is loaded unless these
+two symlinks exist:
+
+```sh
+ln -sf libc.so /lib/ld-uClibc.so.1
+ln -sf libc.so /lib/libc.so.0
+```
+
+`scripts/maruko_direct_deploy.sh push-libs` creates them automatically;
+add them by hand on any device prepared outside that script.
 
 ## Star6E does not use this directory
 

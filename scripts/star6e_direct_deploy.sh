@@ -2,11 +2,13 @@
 set -euo pipefail
 
 HOST="${HOST:-root@192.168.1.13}"
-LOCAL_BIN="out/star6e/venc"
-REMOTE_BIN="/usr/bin/venc"
-CONFIG_PATH="/etc/venc.json"
-LOG_PATH="/tmp/venc.log"
-LATEST_BACKUP_PATH="/tmp/venc.json.bak.latest"
+LOCAL_BIN="out/star6e/waybeam"
+REMOTE_BIN="/usr/bin/waybeam"
+CONFIG_PATH="/etc/waybeam.json"
+LOG_PATH="/tmp/waybeam.log"
+LATEST_BACKUP_PATH="/tmp/waybeam.json.bak.latest"
+INIT_SCRIPT_LOCAL="init.d/S95waybeam"
+INIT_SCRIPT_REMOTE="/etc/init.d/S95waybeam"
 WAIT_SECS=20
 TAIL_LINES=120
 HTTP_PORT="${HTTP_PORT:-}"
@@ -22,18 +24,18 @@ usage() {
 	cat <<'EOF'
 Usage: scripts/star6e_direct_deploy.sh [options] [command] [args]
 
-Direct Star6E deploy-and-test helper for current /etc/venc.json workflow.
+Direct Star6E deploy-and-test helper for /etc/waybeam.json workflow.
 Defaults to host root@192.168.1.13.
 
 Commands:
-  cycle                 Build, backup config, stop venc, deploy, start, wait, status
+  cycle                 Build, backup config, stop waybeam, deploy, start, wait, status
   build                 Build local Star6E binary only
-  backup-config         Copy /etc/venc.json to a timestamped backup on target
-  restore-config [SRC]  Restore /etc/venc.json from SRC or latest backup
-  deploy                Copy local binary to /usr/bin/venc on target
-  stop                  Stop running venc
-  start                 Start venc as a daemon and log to /tmp/venc.log
-  reload                Send SIGHUP to running venc
+  backup-config         Copy /etc/waybeam.json to a timestamped backup on target
+  restore-config [SRC]  Restore /etc/waybeam.json from SRC or latest backup
+  deploy                Copy local binary to /usr/bin/waybeam on target
+  stop                  Stop running waybeam
+  start                 Start waybeam as a daemon and log to /tmp/waybeam.log
+  reload                Send SIGHUP to running waybeam
   wait-http             Poll /api/v1/version until HTTP is ready
   status                Show process/config summary, version, AE, and recent log
   config-get PATH       Read a JSON config path with json_cli
@@ -41,10 +43,10 @@ Commands:
 
 Options:
   --host HOST           SSH target (default: root@192.168.1.13)
-  --local-bin PATH      Local binary path (default: out/star6e/venc)
-  --remote-bin PATH     Remote install path (default: /usr/bin/venc)
-  --config-path PATH    Remote config path (default: /etc/venc.json)
-  --log-path PATH       Remote log path (default: /tmp/venc.log)
+  --local-bin PATH      Local binary path (default: out/star6e/waybeam)
+  --remote-bin PATH     Remote install path (default: /usr/bin/waybeam)
+  --config-path PATH    Remote config path (default: /etc/waybeam.json)
+  --log-path PATH       Remote log path (default: /tmp/waybeam.log)
   --backup-path PATH    Explicit remote backup path for backup/restore
   --http-port PORT      Override HTTP port; otherwise read from config
   --wait-secs SECS      HTTP wait timeout in seconds (default: 20)
@@ -155,7 +157,7 @@ create_backup() {
 		target="${BACKUP_PATH}"
 	else
 		stamp="$(date +%Y%m%d-%H%M%S)"
-		target="/tmp/venc.json.bak.${stamp}"
+		target="/tmp/waybeam.json.bak.${stamp}"
 	fi
 
 	remote_sh "cp $(printf '%q' "${CONFIG_PATH}") $(printf '%q' "${target}") && cp $(printf '%q' "${CONFIG_PATH}") $(printf '%q' "${LATEST_BACKUP_PATH}")"
@@ -169,9 +171,34 @@ restore_backup() {
 	log "Restored ${CONFIG_PATH} from ${source}"
 }
 
+# Provision /etc/waybeam.json from the bundled Star6E default only when
+# the target has no config (fresh firstboot device). Never overwrites an
+# existing config — users with customized configs are preserved.
+provision_default_config_if_missing() {
+	local default_cfg="${ROOT_DIR}/config/waybeam.default.json"
+	if [[ ! -f "${default_cfg}" ]]; then
+		log "WARN: default config ${default_cfg} not found — skipping fresh-device provisioning"
+		return 0
+	fi
+	if remote_capture "[ -f $(printf '%q' "${CONFIG_PATH}") ] && echo PRESENT || echo ABSENT" | grep -q PRESENT; then
+		return 0
+	fi
+	log "No ${CONFIG_PATH} on device — provisioning default from $(basename "${default_cfg}")"
+	ssh -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "cat > $(printf '%q' "${CONFIG_PATH}")" < "${default_cfg}"
+}
+
 stop_venc() {
-	log "Stopping venc..."
-	remote_capture "killall venc 2>/dev/null || true; sleep 2; ps w | grep -E '(^|/)venc( |$)' | grep -v grep || true" >/dev/null
+	log "Stopping waybeam..."
+	remote_capture "killall waybeam 2>/dev/null; sleep 2; ps w | grep -E '(^|/)waybeam( |\$)' | grep -v grep || true" >/dev/null
+}
+
+deploy_init_script() {
+	local local_path="${INIT_SCRIPT_LOCAL}"
+	if [[ "${local_path}" != /* ]]; then local_path="${ROOT_DIR}/${local_path}"; fi
+	[[ -f "${local_path}" ]] || die "init script missing: ${local_path}"
+	log "Deploying ${local_path} -> ${HOST}:${INIT_SCRIPT_REMOTE}"
+	ssh -o BatchMode=yes -o ConnectTimeout=5 "${HOST}" "cat > $(printf '%q' "${INIT_SCRIPT_REMOTE}")" < "${local_path}"
+	remote_sh "chmod 0755 $(printf '%q' "${INIT_SCRIPT_REMOTE}")"
 }
 
 deploy_binary() {
@@ -185,7 +212,7 @@ deploy_binary() {
 }
 
 start_venc() {
-	log "Starting venc with log ${LOG_PATH}"
+	log "Starting waybeam with log ${LOG_PATH}"
 	remote_sh "
 		if command -v setsid >/dev/null 2>&1; then
 			setsid $(printf '%q' "${REMOTE_BIN}") >$(printf '%q' "${LOG_PATH}") 2>&1 </dev/null &
@@ -196,8 +223,8 @@ start_venc() {
 }
 
 reload_venc() {
-	log "Sending SIGHUP to venc..."
-	remote_sh "killall -HUP venc"
+	log "Sending SIGHUP to waybeam..."
+	remote_sh "killall -HUP waybeam"
 }
 
 wait_http() {
@@ -224,7 +251,7 @@ show_status() {
 	port="$(detect_http_port)"
 
 	log "Process"
-	remote_capture "ps w | grep -E '(^|/)venc( |$)' | grep -v grep || true"
+	remote_capture "ps w | grep -E '(^|/)waybeam( |\$)' | grep -v grep || true"
 
 	log "Config summary"
 	printf 'webPort=%s\n' "$(config_value .system.webPort 80)"
@@ -273,14 +300,18 @@ run_cycle() {
 		log "Skipping build"
 	fi
 
+	stop_venc
+
+	provision_default_config_if_missing
+
 	if [[ "${SKIP_BACKUP}" -eq 0 ]]; then
 		create_backup
 	else
 		log "Skipping config backup"
 	fi
 
-	stop_venc
 	deploy_binary
+	deploy_init_script
 	start_venc
 	wait_http
 	show_status
@@ -363,6 +394,7 @@ case "${COMMAND}" in
 		;;
 	deploy)
 		deploy_binary
+		deploy_init_script
 		;;
 	stop)
 		stop_venc
