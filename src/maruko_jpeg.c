@@ -208,7 +208,12 @@ int venc_jpeg_backend_capture(uint8_t **out_buf, size_t *out_len,
 	}
 
 	uint32_t n = stat.curPacks;
-	if (n > MAX_PACKS) n = MAX_PACKS;
+	if (n > MAX_PACKS) {
+		fprintf(stderr, "[jpeg-maruko] WARN: %u packs > max %d, "
+			"JPEG may be truncated\n",
+			(unsigned)stat.curPacks, MAX_PACKS);
+		n = MAX_PACKS;
+	}
 	stream.count  = n;
 	stream.packet = packs;
 

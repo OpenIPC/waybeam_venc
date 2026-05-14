@@ -142,31 +142,43 @@ Maruko-specific default config finally reaches the release tarball.
   load path: cold boot keeps the full `maruko_load_isp_bin`; reinit
   uses a new minimal variant that skips both CUS3A hooks (sufficient
   because the kernel ISP module's state survives the in-process
-  teardown).  10 consecutive `killall -1 venc` cycles verified clean
+  teardown).  10 consecutive `killall -1 waybeam` cycles verified clean
   on 192.168.2.12; pid 1894 stable, no SDK reset, no zombie state.
 
 - **Maruko default config reaches the release tarball.**  Two-part
-  fix.  First, `config/venc.default.maruko.json` gains the `snapshot`
+  fix.  First, `config/waybeam.default.maruko.json` gains the `snapshot`
   block (was missing entirely — Maruko users had snapshot disabled
   until they hand-edited the JSON, even though the schema and runtime
   defaults were already in place).  Second, `.github/workflows/release.yml`
-  was copying `config/venc.default.json` for *both* backends when
+  was copying `config/waybeam.default.json` for *both* backends when
   staging the release archives, so the Maruko tarball's bundled
-  `venc.json` carried Star6E defaults (`sensor.unlockEnabled=true`,
+  `waybeam.json` carried Star6E defaults (`sensor.unlockEnabled=true`,
   no `snapshot` block).  Now picks the Maruko-specific template when
-  staging `venc-maruko.tar.gz`, falls back to the shared default for
+  staging `waybeam-maruko.tar.gz`, falls back to the shared default for
   Star6E.  Firstboot Maruko devices installed from the release tarball
   now ship with `snapshot.enabled=true` and the right unlock policy.
 
 - **Firstboot deployment verified end-to-end on Maruko.**  Wiped
-  device (no `/usr/bin/venc`, no `/usr/lib/libmi_*.so`, no
-  `/etc/venc.json`); pushed binary + 14 MI libs + 10 sensor `.ko` +
-  3 ISP `.bin` + `json_cli` + the bundled `venc.json` in a single
+  device (no `/usr/bin/waybeam`, no `/usr/lib/libmi_*.so`, no
+  `/etc/waybeam.json`); pushed binary + 14 MI libs + 10 sensor `.ko` +
+  3 ISP `.bin` + `json_cli` + the bundled `waybeam.json` in a single
   bulk-push via `scripts/maruko_direct_deploy.sh full
-  --push-config config/venc.default.maruko.json`; rebooted; venc
+  --push-config config/waybeam.default.maruko.json`; rebooted; waybeam
   came up clean at pid 720, IMX335 sensor module loaded, pipeline
   configured at 1920×1080@60, `/api/v1/snapshot.jpg` worked first
   request without manual config edits.
+
+- **Rebrand `venc` → `waybeam`.**  Binary path `/usr/bin/venc` →
+  `/usr/bin/waybeam`, config `/etc/venc.json` → `/etc/waybeam.json`,
+  log `/tmp/venc.log` → `/tmp/waybeam.log`, init script
+  `/etc/init.d/S95venc` → `/etc/init.d/S95waybeam`, process comm
+  pinned via `prctl(PR_SET_NAME, "waybeam")` with helpers
+  `waybeam-resp` / `waybeam-wd`.  Release tarballs renamed
+  `waybeam-<backend>.tar.gz` with `S95waybeam` bundled in both.
+  No legacy fallback in the binary; deploy scripts auto-migrate
+  legacy `/etc/venc.json` → `/etc/waybeam.json` and clean up the
+  rest.  Filename references above already use the post-rebrand
+  paths to match the current tree.
 
 ## [0.10.10] - 2026-05-14
 

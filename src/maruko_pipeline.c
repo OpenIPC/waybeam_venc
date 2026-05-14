@@ -1154,7 +1154,7 @@ static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
 		return 0;
 	}
 	if (!g_mi_venc.fnSetIntraRefresh) {
-		fprintf(stderr, "[venc] WARNING: intraRefreshMode=%s requested "
+		fprintf(stderr, "[waybeam] WARNING: intraRefreshMode=%s requested "
 			"but libmi_venc.so does not export "
 			"MI_VENC_SetIntraRefresh\n", name);
 		pthread_mutex_lock(&g_intra_status_mutex);
@@ -1163,11 +1163,11 @@ static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
 		return -1;
 	}
 	if (ir.lines_clamped) {
-		fprintf(stderr, "[venc] WARNING: intraRefreshLines exceeds picture "
+		fprintf(stderr, "[waybeam] WARNING: intraRefreshLines exceeds picture "
 			"LCU rows=%u, clamped\n", ir.total_rows);
 	}
 	if (ir.gop_overridden) {
-		fprintf(stderr, "[venc] intra auto-GOP suppressed: explicit "
+		fprintf(stderr, "[waybeam] intra auto-GOP suppressed: explicit "
 			"gopSize=%.2fs\n", snap.explicit_gop_sec);
 	}
 
@@ -1177,7 +1177,7 @@ static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	ir_sdk.u32ReqIQp = ir.req_iqp;
 
 	if (maruko_mi_venc_set_intra_refresh(dev, chn, &ir_sdk) != 0) {
-		fprintf(stderr, "[venc] ERROR: MI_VENC_SetIntraRefresh(dev=%d, "
+		fprintf(stderr, "[waybeam] ERROR: MI_VENC_SetIntraRefresh(dev=%d, "
 			"chn=%d, lines=%u, qp=%u) failed\n", dev, chn,
 			ir_sdk.u32RefreshLineNum, ir_sdk.u32ReqIQp);
 		pthread_mutex_lock(&g_intra_status_mutex);
@@ -1190,7 +1190,7 @@ static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	pthread_mutex_lock(&g_intra_status_mutex);
 	g_intra_status = snap;
 	pthread_mutex_unlock(&g_intra_status_mutex);
-	fprintf(stderr, "[venc] intraRefresh: mode=%s dev=%d chn=%d lines/P=%u "
+	fprintf(stderr, "[waybeam] intraRefresh: mode=%s dev=%d chn=%d lines/P=%u "
 		"qp=%u gop=%.2fs (%s)\n", name, dev, chn, ir_sdk.u32RefreshLineNum,
 		ir_sdk.u32ReqIQp, snap.effective_gop_sec,
 		snap.gop_auto ? "auto" : "explicit");

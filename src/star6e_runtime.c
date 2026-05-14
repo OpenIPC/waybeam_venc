@@ -127,7 +127,7 @@ static void scl_preset_emergency(void)
 {
 	static const char path[] = "/sys/devices/virtual/mstar/mscl/clk";
 	static const char val[] = "384000000\n";
-	static const char msg[] = "[venc] Emergency SCL preset written\n";
+	static const char msg[] = "[waybeam] Emergency SCL preset written\n";
 	int fd = open(path, O_WRONLY);
 
 	if (fd >= 0) {

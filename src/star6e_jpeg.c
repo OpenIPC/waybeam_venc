@@ -165,7 +165,12 @@ int venc_jpeg_backend_capture(uint8_t **out_buf, size_t *out_len,
 	}
 
 	uint32_t n = stat.curPacks;
-	if (n > MAX_PACKS_PER_JPEG) n = MAX_PACKS_PER_JPEG;
+	if (n > MAX_PACKS_PER_JPEG) {
+		fprintf(stderr, "[jpeg-star6e] WARN: %u packs > max %d, "
+			"JPEG may be truncated\n",
+			(unsigned)stat.curPacks, MAX_PACKS_PER_JPEG);
+		n = MAX_PACKS_PER_JPEG;
+	}
 	stream.count = n;
 	stream.packet = packs;
 
@@ -259,4 +264,5 @@ void venc_jpeg_backend_shutdown(void)
 		g_chn_created = 0;
 	}
 	g_chn = -1;
+	g_have_vpe_port = 0;
 }
