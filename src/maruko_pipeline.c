@@ -21,6 +21,7 @@
 #include "stream_metrics.h"
 #include "venc_api.h"
 #include "venc_httpd.h"
+#include "venc_jpeg.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -1569,6 +1570,23 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->venc_port, 1, 3);
 
+	/* Bring up the JPEG snapshot subsystem on the same SCL source port
+	 * the main channel just bound to.  Failure is non-fatal — the
+	 * /api/v1/snapshot.jpg endpoint serves 503 if init fails.  Width/
+	 * height inherit the main stream dimensions; quality + channel are
+	 * hardcoded defaults until Phase 4 surfaces them in the config. */
+	{
+		venc_jpeg_set_source(&ctx->vpe_port);
+		VencJpegConfig jcfg = {
+			.width   = out_w,
+			.height  = out_h,
+			.quality = 80,
+			.channel = 7,
+			.enabled = true,
+		};
+		(void)venc_jpeg_init(&jcfg);
+	}
+
 	/* ISP bin: resolve every configure (so SIGHUP / `/api/v1/restart`
 	 * changes to `isp.sensorBin` and the auto-detect fallback are picked
 	 * up on reinit), but skip the actual reload when the resolved path
@@ -3077,6 +3095,9 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		ctx->debug_osd = NULL;
 	}
 	maruko_output_teardown(&ctx->output);
+	/* Tear down JPEG snapshot subsystem first — its MJPG VENC channel
+	 * is bound to the SCL port we're about to unbind.  Idempotent. */
+	venc_jpeg_shutdown();
 	if (ctx->bound_vpe_venc) {
 		(void)MI_SYS_UnBindChnPort(&ctx->vpe_port, &ctx->venc_port);
 		ctx->bound_vpe_venc = 0;
