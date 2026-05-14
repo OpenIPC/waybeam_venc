@@ -1,5 +1,99 @@
 # History
 
+## Investigation - 2026-05-14 — **SOLVED**: IMX415 driver regression is a single missing register write
+
+**Root cause**: `drivers/sensor_imx415_maruko.c` does not write
+**`0x3032 = 0x01`** in any of its four init tables.  The stock OpenIPC
+`sensor_imx415_mipi.ko` does.  That is the entire dark-image regression.
+
+**Proof**: After a full 0x3000–0x4FFF (8192 reg) i2ctransfer sweep in both
+dark-venc and bright-venc states, exactly one register differs:
+
+```
+0x3032   dark=0x00   bright=0x01
+```
+
+**Smoking-gun experiment**: With venc running on the custom driver
+producing a dark image, executed `i2ctransfer -y 1 w3@0x1a 0x30 0x32 0x01`
+on the bench at 192.168.2.12.  User confirmed the image **immediately
+became bright** on the ground-station receiver.
+
+**Register identity**: `drivers/sensor_imx335_maruko.c:232` documents
+`0x3032` as `VMAX` (vertical period — controls frame timing).  On IMX415
+the same address appears to also be part of the VMAX/timing block.  The
+IMX415 init tables in `drivers/sensor_imx415_maruko.c` set `0x3031` (ADBIT)
+and `0x3033` (SYS_MODE) but leave `0x3032` unwritten, so it retains the
+sensor's power-on default of `0x00` — which causes the frame-period /
+exposure window to be wrong, producing the dark image.
+
+**Workaround the user has confirmed working** (boot stock first, then
+custom + venc) works because the stock driver writes `0x3032 = 0x01` and
+that value survives the soft reboot.
+
+**Fix applied** (one line per init table, four tables total):
+
+```c
+{ 0x3031, 0x00 }, // ADBIT (10bit)
+{ 0x3032, 0x01 }, // VMAX MSB — must be 0x01, default 0x00 produces dark image
+{ 0x3033, 0x05 }, // SYS_MODE (891Mbps)
+```
+
+Applied to all four `Sensor_*_init_table_*[]` arrays in
+`drivers/sensor_imx415_maruko.c`.  Rebuilt via
+`make drivers-maruko KSRC_MARUKO=<...>`:
+
+- New `sensors/maruko/sensor_imx415_maruko.ko` — md5 `bd582d87...` (was `c236ac34...`)
+- 4× `{ 0x3032, 0x01 }` patterns confirmed in the binary
+
+**Followup (IMX335)**: same audit not yet done — `0x3032` on IMX335 is
+genuinely the VMAX-high nibble and we write it as `0x00` in all 5 init
+tables (which is the right value for typical VMAX < 16-bit).  Need to
+boot an IMX335 board with stock OpenIPC `sensor_imx335_mipi.ko` and run
+the same i2ctransfer sweep against our custom `_maruko.ko`-equipped board
+to confirm there's no analogous missing-write regression.
+
+Captures + diffs: `bench_logs/manual_sensor_diff_20260514T093447Z/`
+
+## Investigation - 2026-05-14 — Maruko firstboot dark image is a custom-driver regression
+
+Manual session on bench 192.168.2.12 narrowed the long-standing "venc on
+firstboot is dark, majestic-first warms it up" symptom to a regression in
+our **custom-built `sensor_imx{335,415}_maruko.ko` kernel modules** (in
+`sensors/maruko/`).
+
+Findings, in order:
+
+- Stock `/rom` driver (25K, md5 `a33cfa52...`) + majestic = bright.
+- Custom overlay `_maruko.ko` (167K, md5 `c236ac34...`) + venc = dark.
+- Custom overlay `_maruko.ko` + majestic = **also dark** — confirmed by
+  the user.  This rules out the original "venc-vs-majestic init"
+  hypothesis: the bad actor is the .ko, not the streamer.
+- Restoring the stock driver via `rm /overlay/root/lib/modules/.../sensor_imx*_mipi.ko`
+  and rebooting brings the image back to normal — overlayfs reveals the
+  stock `/rom` copy.
+
+Register deltas (regscan curated 254 entries, banks 0x30–0x40) between
+dark-custom and bright-stock states: HMAX (`0x3024/0x3025`), BIN_MODE
+(`0x3050/0x3051`), and `0x3090` (IMX415 analog).  The custom .ko leaves
+all of these at firstboot defaults; the stock .ko writes them.
+
+Workaround the user has confirmed working:
+
+  stock .ko + majestic → soft reboot → custom .ko + venc → bright
+
+That last step is the surprise: with custom .ko in place, `venc` on a
+soft reboot still produces a bright image — yet only **one** scanned
+register (`0x3032`: 0x00 → 0x01) survived the reboot from the stock
+session.  All five HMAX/BIN_MODE/0x3090 registers reverted to dark-state
+values.  So the state that actually distinguishes dark-vs-bright lives
+**outside regscan's 254-entry range** — likely 0x4100+ (SHR), 0x5000+
+(calibration), 0x6000+ (VOUT/MIPI), or ISP-side state.
+
+See `documentation/MARUKO_FIRSTBOOT_DARK_IMAGE_TEST.md` (Findings
+section) for the full table and Phase-2 brute-force-sweep plan.
+
+Captures: `bench_logs/manual_sensor_diff_20260514T093447Z/`
+
 ## [0.10.9] - 2026-05-14
 
 JPEG snapshot HTTP endpoint on both backends.

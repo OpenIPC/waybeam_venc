@@ -33,6 +33,7 @@ WITH_ISP_BINS=0
 WITH_JSON_CLI=0
 REBOOT_AFTER_DRIVERS=0
 BACKUP_PATH=""
+PUSH_CONFIG_FILE=""
 COMMAND="cycle"
 COMMAND_ARGS=()
 
@@ -94,6 +95,7 @@ Options:
   --with-isp-bins       cycle: also push ISP .bin blobs
   --with-json-cli       cycle: also push out/maruko/json_cli (built if missing)
   --reboot-after        push-drivers: reboot after install
+  --push-config FILE    full: also push FILE to remote /etc/venc.json
   --help                Show this help
 
 Examples:
@@ -427,22 +429,121 @@ run_full() {
 	WITH_JSON_CLI=1
 	# Drivers need a reboot before the next venc start can pick them up.
 	REBOOT_AFTER_DRIVERS=1
-	build_maruko
+	if [[ "${SKIP_BUILD}" -eq 0 ]]; then
+		build_maruko
+	else
+		log "SKIP_BUILD=1 — using existing ${LOCAL_BIN}"
+	fi
 	require_local_bin
+	[[ -f "${JSON_CLI_LOCAL}" ]] || make -C "${ROOT_DIR}" json_cli SOC_BUILD=maruko >/dev/null
 	create_backup || true
 	stop_venc
-	deploy_binary
-	push_libs
-	push_json_cli
-	push_isp_bin
-	push_drivers     # last — reboots the device
+	bulk_push_all
+	if [[ -n "${PUSH_CONFIG_FILE}" ]]; then
+		[[ -f "${PUSH_CONFIG_FILE}" ]] || die "config file not found: ${PUSH_CONFIG_FILE}"
+		log "Pushing ${PUSH_CONFIG_FILE} -> ${HOST}:${CONFIG_PATH}"
+		push_stream "${PUSH_CONFIG_FILE}" "${CONFIG_PATH}"
+	fi
+	log "Rebooting target to load new kernel modules..."
+	remote_sh "reboot" || true
 	log "Device rebooting; not waiting for HTTP. Re-run 'cycle' or 'status' once it returns."
 }
 
+# Bulk push: venc binary + json_cli + MI vendor libs + sensor .ko + ISP .bin
+# in a single tar | ssh pipe.  Single SSH handshake → ~10× faster than the
+# per-file scp loop (verified 2026-05-14: 14 libs + 10 .ko + 3 bins + 2
+# binaries dropped from ~60s to ~7s on the bench at 192.168.2.12).
+#
+# Driver renaming (sensor_<name>_maruko.ko → sensor_<name>_mipi.ko, with
+# pulled _mipi.ko skipped when a source-built _maruko.ko sibling exists)
+# happens at staging time, not on the remote, so the extract is a plain
+# `tar -xf -` into /.  Uses `cp` (not `install`) on the remote — busybox
+# does not ship `install`.
+bulk_push_all() {
+	[[ -d "${LIBS_DIR}" ]] || die "missing ${LIBS_DIR} — run scripts/maruko_pull_artifacts.sh first"
+	[[ -d "${KO_DIR}" ]] || die "missing ${KO_DIR} — run scripts/maruko_pull_artifacts.sh first"
+	[[ -d "${ISP_BIN_DIR}" ]] || die "missing ${ISP_BIN_DIR} — run scripts/maruko_pull_artifacts.sh first"
+
+	local stage
+	stage="$(mktemp -d "${TMPDIR:-/tmp}/maruko_deploy.XXXXXX")"
+	trap "rm -rf '${stage}'" RETURN
+
+	mkdir -p \
+		"${stage}/usr/bin" \
+		"${stage}/usr/lib" \
+		"${stage}${REMOTE_KO_DIR}" \
+		"${stage}${REMOTE_ISP_BIN_DIR}"
+
+	# venc binary + json_cli
+	cp "${LOCAL_BIN}" "${stage}/usr/bin/venc"
+	chmod 0755 "${stage}/usr/bin/venc"
+	cp "${JSON_CLI_LOCAL}" "${stage}/usr/bin/json_cli"
+	chmod 0755 "${stage}/usr/bin/json_cli"
+
+	# MI vendor libs
+	local libcount=0 f base
+	shopt -s nullglob
+	for f in "${LIBS_DIR}"/*.so; do
+		base="$(basename "${f}")"
+		cp "${f}" "${stage}/usr/lib/${base}"
+		libcount=$((libcount + 1))
+	done
+
+	# Sensor .ko — source-built _maruko.ko renamed to _mipi.ko;
+	# pulled _mipi.ko skipped when source-built sibling exists.
+	local kocount=0 skipped=0 remote sibling
+	for f in "${KO_DIR}"/*.ko; do
+		base="$(basename "${f}")"
+		case "${base}" in
+			sensor_*_maruko.ko)
+				remote="${base%_maruko.ko}_mipi.ko"
+				;;
+			sensor_*_mipi.ko)
+				sibling="${KO_DIR}/${base%_mipi.ko}_maruko.ko"
+				if [[ -f "${sibling}" ]]; then
+					skipped=$((skipped + 1))
+					continue
+				fi
+				remote="${base}"
+				;;
+			*)
+				remote="${base}"
+				;;
+		esac
+		cp "${f}" "${stage}${REMOTE_KO_DIR}/${remote}"
+		kocount=$((kocount + 1))
+	done
+
+	# ISP bins
+	local bincount=0
+	for f in "${ISP_BIN_DIR}"/*.bin; do
+		base="$(basename "${f}")"
+		cp "${f}" "${stage}${REMOTE_ISP_BIN_DIR}/${base}"
+		bincount=$((bincount + 1))
+	done
+	shopt -u nullglob
+
+	log "Bulk pushing: venc + json_cli + ${libcount} libs + ${kocount} .ko + ${bincount} ISP bins (single ssh)"
+	(cd "${stage}" && tar -cf - .) | \
+		ssh -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "tar -xf - -C /"
+
+	# uClibc compat symlinks (idempotent — same as push_libs)
+	remote_sh "
+		cd /lib &&
+		[ -e ld-uClibc.so.1 ] || ln -sf libc.so ld-uClibc.so.1
+		[ -e libc.so.0 ] || ln -sf libc.so libc.so.0
+		ldconfig 2>/dev/null || true
+	"
+	if [[ "${skipped}" -gt 0 ]]; then
+		log "Pushed: venc + json_cli + ${libcount} libs + ${kocount} .ko (${skipped} pulled _mipi.ko skipped for source-built sibling) + ${bincount} ISP bins"
+	else
+		log "Pushed: venc + json_cli + ${libcount} libs + ${kocount} .ko + ${bincount} ISP bins"
+	fi
+}
+
+POSITIONAL=()
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-		cycle|full|build|backup-config|restore-config|deploy|push-libs|push-drivers|push-isp-bin|push-json-cli|stop|start|reload|reboot|wait-http|status|config-get|config-set)
-			COMMAND="$1"; shift; COMMAND_ARGS=("$@"); break ;;
 		--host)              HOST="$2"; shift 2 ;;
 		--local-bin)         LOCAL_BIN="$2"; shift 2 ;;
 		--remote-bin)        REMOTE_BIN="$2"; shift 2 ;;
@@ -459,10 +560,25 @@ while [[ $# -gt 0 ]]; do
 		--with-isp-bins)     WITH_ISP_BINS=1; shift ;;
 		--with-json-cli)     WITH_JSON_CLI=1; shift ;;
 		--reboot-after)      REBOOT_AFTER_DRIVERS=1; shift ;;
+		--push-config)       PUSH_CONFIG_FILE="$2"; shift 2 ;;
 		--help|-h)           usage; exit 0 ;;
-		*)                   die "unknown option or command: $1" ;;
+		--*)                 die "unknown option: $1" ;;
+		*)                   POSITIONAL+=("$1"); shift ;;
 	esac
 done
+
+# Positional args: first is COMMAND, rest are COMMAND_ARGS.  Parsing options
+# in any order (not strictly before the command) is what the user expects
+# from `scripts/... full --skip-build --push-config FILE` — the prior
+# `break`-on-command parser silently swallowed those.
+if [[ "${#POSITIONAL[@]}" -gt 0 ]]; then
+	COMMAND="${POSITIONAL[0]}"
+	COMMAND_ARGS=("${POSITIONAL[@]:1}")
+fi
+case "${COMMAND}" in
+	cycle|full|build|backup-config|restore-config|deploy|push-libs|push-drivers|push-isp-bin|push-json-cli|stop|start|reload|reboot|wait-http|status|config-get|config-set) ;;
+	*) die "unknown command: ${COMMAND}" ;;
+esac
 
 case "${COMMAND}" in
 	cycle)          run_cycle ;;

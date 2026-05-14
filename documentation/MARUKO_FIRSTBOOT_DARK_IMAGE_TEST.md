@@ -156,3 +156,80 @@ because a reboot lost state that majestic had injected).
 | `Makefile` (`regscan` target)              | Cross-compile via `make regscan SOC_BUILD=maruko`                          |
 | `scripts/maruko_sensor_init_diff.sh`       | Four-scenario test orchestrator (this plan in script form)                 |
 | `documentation/MARUKO_FIRSTBOOT_DARK_IMAGE_TEST.md` | This document                                                     |
+
+## Findings (2026-05-14 manual session, bench 192.168.2.12)
+
+### Hypothesis revised — it's a driver regression
+
+The original hypothesis ("majestic writes registers venc doesn't") turned
+out to be partially right but for the wrong reason.  After a manual
+step-by-step session on the bench, the real cause is that the **custom-built
+`sensor_imx{335,415}_maruko.ko` drivers we ship in `sensors/maruko/` produce
+dark images both under `venc` and `majestic`** — confirmed by the user
+seeing `majestic` also dark when running on the custom .ko.
+
+Restoring the stock OpenIPC `/rom/lib/modules/.../sensor_imx415_mipi.ko`
+(25K, md5 `a33cfa52...`) by deleting the overlay copy and rebooting brings
+the image back to normal.
+
+### Three captures from the manual session
+
+Output dir: `bench_logs/manual_sensor_diff_20260514T093447Z/`
+
+| Capture | Driver | Streamer | Image |
+|---|---|---|---|
+| `B_venc_dark.regs` | custom `_maruko.ko` (167K) | venc | dark |
+| `M_majestic_stock_bright.regs` | stock `/rom` (25K) | majestic | bright |
+| `B2_venc_after_stock.regs` | custom `_maruko.ko` (back via overlay) | venc | **bright** |
+
+### Register deltas (all within regscan's 254-entry curated list)
+
+| Reg | B (custom+venc dark) | M (stock+majestic bright) | B2 (custom+venc bright after stock boot) | Meaning |
+|---|---|---|---|---|
+| 0x3024 | 0x48 | 0xE8 | 0x48 | HMAX low |
+| 0x3025 | 0x0D | 0x0B | 0x0D | HMAX high (3400 vs 3048) |
+| 0x3032 | 0x00 | 0x00 | **0x01** | **only reg that survived stock→custom reboot** |
+| 0x3050 | 0x11 | 0x08 | 0x11 | BIN_MODE — H-binning bit clear in stock |
+| 0x3051 | 0x02 | 0x00 | 0x02 | BIN_MODE high byte |
+| 0x3090 | 0x3C | 0xB5 | 0x3C | IMX415 analog/gain area |
+
+### The startling result
+
+`B` and `B2` are byte-identical across all 254 scanned registers **except
+for `0x3032`** — yet `B` produces a dark image and `B2` produces a bright
+one.  This means the state that distinguishes dark-vs-bright **lives
+outside regscan's address range** (which covers banks 0x30–0x40 with a
+curated set of names).  Likely candidates: 0x4100+ (SHR, exposure),
+0x5000+ (calibration), 0x6000+ (VOUT/MIPI), or ISP-side state on a
+different I2C node.
+
+### Working sequence (workaround)
+
+The user has confirmed this recipe produces a bright image on every reboot:
+
+1. Boot with stock `_mipi.ko` (delete `/overlay/root/lib/modules/.../sensor_imx*_mipi.ko`)
+2. Run `majestic` briefly (sensor gets correctly initialised)
+3. `reboot` — soft reboot, sensor power is NOT cycled
+4. Deploy custom `_maruko.ko` back into the overlay
+5. `reboot` — auto-starts `venc` → bright
+
+This is not a fix, but it lets the bench function while the underlying
+.ko regression is investigated.
+
+### Next-step plan (Phase 2 — brute-force I2C sweep)
+
+The 254-entry regscan misses the registers that actually matter.  To find
+them:
+
+1. Dump the full 0x3000–0x7FFF address range via `i2ctransfer` in the
+   current bright state (one byte per register, ~20k reads).
+2. Power-cycle the bench (hard reset — soft reboot preserves the warmup
+   state).  Verify image is dark.
+3. Dump the full range again.
+4. Diff the two dumps.  The non-`0x3032` differences are the real
+   "warmup state" that the stock driver puts the sensor into and that
+   the custom driver leaves at defaults.
+
+Phase 3 — port those register writes into `drivers/sensor_imx415_maruko.c`,
+rebuild the .ko, and re-run scenario B.  Image should come up bright on
+fresh boot.
