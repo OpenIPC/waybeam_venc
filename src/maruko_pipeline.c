@@ -1659,7 +1659,25 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			ctx->sensor.plane.sensName,
 			isp_bin_resolved, sizeof(isp_bin_resolved)) &&
 		    strcmp(isp_bin_resolved, g_last_isp_bin_path) != 0) {
-			ret = maruko_load_isp_bin(isp_bin_resolved);
+			/* Cold boot vs. SIGHUP reinit dispatch.  The full
+			 * loader runs three vendor hooks: disable_userspace3a
+			 * → load_bin → post_load CUS3A_Enable(0,0,{1,0,0})
+			 * + CUS3A_Enable(0,0,{1,1,0}).  CUS3A_Enable can
+			 * only run once per process lifetime — a second call
+			 * trips "WARNING: Mutex is not initialized before
+			 * lock" inside libmi_isp and segfaults during the
+			 * next IQ access.  The `if (!g_mi_isp_initialized)`
+			 * block below protects the bare maruko_enable_cus3a()
+			 * call, but does NOT cover the post_load hook reached
+			 * via maruko_load_isp_bin.  On reinit the IQ/CUS3A
+			 * framework from the previous lifecycle is still
+			 * resident — we only need to re-load the bin bytes
+			 * (same path the live `isp.sensorBin` reload takes
+			 * via maruko_pipeline_load_isp_bin_live). */
+			if (g_mi_isp_initialized)
+				ret = maruko_load_isp_bin_minimal(isp_bin_resolved);
+			else
+				ret = maruko_load_isp_bin(isp_bin_resolved);
 			if (ret != 0)
 				return -1;
 			snprintf(g_last_isp_bin_path,
