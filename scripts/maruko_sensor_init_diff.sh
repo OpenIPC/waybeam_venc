@@ -188,11 +188,11 @@ dump_regs() {
 snapshot_and_brightness() {
 	# snapshot_and_brightness <port> <path> <out_jpg> <brightness_file>
 	#
-	# NB: venc currently has no JPEG snapshot endpoint, so for venc scenarios
-	# this writes "endpoint_unavailable" and leaves the .jpg empty.  Majestic
-	# exposes /snapshot.jpg so that path works.  A future venc /api/v1/snapshot
-	# would let this function produce a brightness verdict on venc too — until
-	# then, eyeball the live stream (udp:5600) or compare reg diffs only.
+	# venc exposes /api/v1/snapshot.jpg from v0.10.9 onward (MJPEG VENC
+	# channel tapped off the main pipeline).  Majestic uses /snapshot.jpg.
+	# Pre-0.10.9 venc returns 404 here; the script records that case as
+	# "endpoint_unavailable (HTTP 404)" and the report flags the scenario
+	# as eyeball-only.
 	local port="$1" path="$2" out_jpg="$3" out_brightness="$4"
 	local ip http_code
 	ip="$(target_ip)"

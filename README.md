@@ -245,6 +245,28 @@ with an `{"ok": true/false, ...}` envelope.
 
 ### Endpoints
 
+#### GET /api/v1/snapshot.jpg
+
+Returns one JPEG frame from a dedicated MJPEG VENC channel tapped off
+the same VPE/SCL output port the main H.264/H.265 stream uses.  No
+parameters; quality defaults to 80, resolution matches the main stream.
+Captures are serialized through a module mutex (concurrent clients
+queue rather than collide), and the channel is created at pipeline
+start so each request only pays the StartRecvPic → GetStream round
+trip (~50–150 ms typical).
+
+```sh
+curl -o snapshot.jpg http://<device-ip>:<port>/api/v1/snapshot.jpg
+```
+
+Response is `Content-Type: image/jpeg`.  Failure modes:
+
+- **503 snapshot_disabled** — subsystem not initialised (pipeline not
+  up yet, or backend MJPEG channel-create failed during init)
+- **504 snapshot_timeout** — channel ran but no frame landed within
+  1500 ms (upstream stalled)
+- **500 snapshot_failed** — SDK GetStream or memory allocation error
+
 #### GET /api/v1/version
 
 Returns version info.

@@ -1,5 +1,51 @@
 # History
 
+## [0.10.9] - 2026-05-14
+
+JPEG snapshot HTTP endpoint on both backends.
+
+- **`GET /api/v1/snapshot.jpg`** — dedicated MJPEG VENC channel taps
+  the same VPE/SCL output port the main H.264/H.265 stream consumes.
+  Channel is created at pipeline-start, kept idle (StartRecvPic off)
+  between requests; each request flips StartRecvPic on, polls Query
+  for a ready pack, drains one JPEG frame via GetStream, then turns
+  StartRecvPic back off.  Captures are serialized through a module
+  mutex so concurrent HTTP clients queue rather than collide.
+  Response is `Content-Type: image/jpeg`; failure modes are
+  `503 snapshot_disabled` (subsystem not initialised),
+  `504 snapshot_timeout` (no frame within 1.5 s), or
+  `500 snapshot_failed` (SDK / alloc error).  Default quality 80.
+- **Star6E backend** (`src/star6e_jpeg.c`) — `I6_VENC_CODEC_MJPG` on
+  ch7, `I6_SYS_LINK_FRAMEBASE` bind to the pipeline's VPE port.
+  Star6E supports 1:N from a VPE output port, so the snapshot channel
+  binds alongside the main H.265 channel without contention.
+- **Maruko backend** (`src/maruko_jpeg.c`) — `I6C_VENC_CODEC_MJPG` on
+  a dedicated VENC device (`I6C_VENC_DEV_MJPG_0` = 8), separate from
+  the H.26x device 0 that the main stream uses.
+  `I6_SYS_LINK_RING` bind from the pipeline's SCL port.  Same source
+  config (`I6C_VENC_SRC_CONF_RING_DMA`) as the main channel.
+- **HTTP plumbing** — new `httpd_send_binary()` helper in
+  `include/venc_httpd.h` for raw byte payloads with caller-supplied
+  `Content-Type`.  Used by the snapshot handler; reusable for any
+  future binary endpoint (PNG OSD overlay, IQ blob dumps, etc.).
+- **Tests** — `tests/test_venc_jpeg.c` (13 assertions): pre-init
+  capture refusal, NULL-arg rejection, `enabled=false` no-op init,
+  failed-backend → clean -ENODEV degradation, idempotent shutdown,
+  re-init after shutdown.  All run on the host test_runner because
+  the common layer's weak-symbol backend stubs make the module
+  exercisable without an SDK present.
+- **Pipeline lifecycle** — pipeline init calls
+  `venc_jpeg_set_source(vpe_port)` + `venc_jpeg_init(&cfg)` right
+  after the main VPE/SCL→VENC bind; pipeline teardown calls
+  `venc_jpeg_shutdown()` before the matching unbind (idempotent).
+  Failure of the snapshot init is non-fatal — the main stream still
+  comes up, the snapshot endpoint just serves 503.
+
+Defaults are hardcoded for this release: `quality=80`, `channel=7`
+(mapped to ch 0 on Maruko's MJPG_DEV), width/height inherited from
+the main stream.  A future release will surface `snapshot.{enabled,
+quality,width,height,channel}` in `venc.json`.
+
 ## [0.10.8] - 2026-05-14
 
 Release tarball completeness — fixed three gaps that left a fresh
