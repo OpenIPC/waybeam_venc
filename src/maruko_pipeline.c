@@ -68,6 +68,10 @@ static int g_mi_isp_dev_created = 0;
 static int g_mi_scl_dev_created = 0;
 static int g_mi_isp_chn_created = 0;
 static int g_mi_scl_chn_created = 0;
+/* SCL channel 0 port 1 — second tap from the SCL channel for the MJPEG
+ * snapshot backend.  Configured + enabled in configure_maruko_scl, bound
+ * to MJPG VENC dev 8 by venc_jpeg_backend_init (src/maruko_jpeg.c). */
+static int g_mi_scl_port1_enabled = 0;
 
 static int maruko_config_dev_ring_pool(i6c_sys_mod module, MI_U32 device,
 	MI_U16 max_width, MI_U16 max_height, MI_U16 ring_line)
@@ -643,6 +647,52 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 		goto fail;
 	}
 	port = 1;
+
+	/* SCL port 1 — second tap from the same SCL channel, dedicated to
+	 * the MJPEG snapshot backend (src/maruko_jpeg.c).  Same crop and
+	 * output dims as port 0 so snapshots match the live stream framing;
+	 * pixFmt YUV420SP with no IFC compress because the MJPG VENC
+	 * channel reads raw YUV, not IFC-compressed tiles.  Bind happens
+	 * later in venc_jpeg_backend_init via BindChnPort2 FRAMEBASE @
+	 * 5 fps so this port only sees a trickle of frames between
+	 * snapshot requests.
+	 *
+	 * Port-1 failures are non-fatal: we log a warning, leave
+	 * g_mi_scl_port1_enabled=0, and the snapshot endpoint will return
+	 * 503 (venc_jpeg_backend_init() detects no source registered). */
+	if (!g_mi_scl_port1_enabled) {
+		i6c_scl_port scl_port1;
+		memset(&scl_port1, 0, sizeof(scl_port1));
+		if (precrop) {
+			scl_port1.crop.x = precrop->x;
+			scl_port1.crop.y = precrop->y;
+			scl_port1.crop.width = precrop->w;
+			scl_port1.crop.height = precrop->h;
+		}
+		scl_port1.output.width = (unsigned short)out_width;
+		scl_port1.output.height = (unsigned short)out_height;
+		scl_port1.pixFmt = I6_PIXFMT_YUV420SP;
+		scl_port1.compress = 0; /* raw — MJPG VENC won't take IFC */
+		MI_S32 p1_ret = g_mi_scl.fnSetPortConfig(0, 0, 1, &scl_port1);
+		if (p1_ret != 0) {
+			fprintf(stderr,
+				"WARNING: [maruko] SCL port-1 SetPortConfig failed %d "
+				"(snapshot disabled)\n", p1_ret);
+		} else {
+			p1_ret = g_mi_scl.fnEnablePort(0, 0, 1);
+			if (p1_ret != 0) {
+				fprintf(stderr,
+					"WARNING: [maruko] SCL port-1 EnablePort failed %d "
+					"(snapshot disabled)\n", p1_ret);
+			} else {
+				g_mi_scl_port1_enabled = 1;
+				printf("> [maruko] SCL port 1 (snapshot): out(%ux%u) "
+					"fmt=%d compress=%d\n",
+					out_width, out_height,
+					scl_port1.pixFmt, scl_port1.compress);
+			}
+		}
+	}
 
 	if (precrop)
 		venc_api_set_active_precrop(precrop->x, precrop->y,
@@ -1513,6 +1563,10 @@ static void assign_maruko_ports(MarukoBackendContext *ctx,
 		.module = I6_SYS_MOD_SCL, .device = 0,
 		.channel = 0, .port = 0,
 	};
+	ctx->scl_port1 = (MI_SYS_ChnPort_t){
+		.module = I6_SYS_MOD_SCL, .device = 0,
+		.channel = 0, .port = 1,
+	};
 	ctx->venc_port = (MI_SYS_ChnPort_t){
 		.module = I6_SYS_MOD_VENC, .device = venc_device,
 		.channel = ctx->venc_channel, .port = 0,
@@ -1570,16 +1624,21 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->venc_port, 1, 3);
 
-	/* JPEG snapshot backend on Maruko is deferred (see src/maruko_jpeg.c
-	 * header for the bench investigation).  We still call venc_jpeg_init
-	 * so the endpoint registers and serves a clean 503 to clients; the
-	 * stub backend_init returns -ENOSYS without touching the SDK. */
+	/* JPEG snapshot backend on Maruko: dedicated MJPG VENC dev 8 chn 0
+	 * bound to SCL chn 0 port 1 in FRAMEBASE mode (see src/maruko_jpeg.c).
+	 * If SCL port-1 setup failed earlier (warning logged), backend_init
+	 * detects no source registered and returns -ENODEV → snapshot endpoint
+	 * cleanly serves 503.  Snapshot inherits main stream dimensions for now;
+	 * dedicated snapshot.{width,height} config fields are a planned
+	 * follow-up. */
+	if (g_mi_scl_port1_enabled)
+		venc_jpeg_set_source(&ctx->scl_port1);
 	{
 		VencJpegConfig jcfg = {
 			.width   = out_w,
 			.height  = out_h,
 			.quality = 80,
-			.channel = 7,
+			.channel = 0,   /* MJPG VENC dev 8 chn 0 (set in backend) */
 			.enabled = true,
 		};
 		(void)venc_jpeg_init(&jcfg);
@@ -3094,8 +3153,12 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	}
 	maruko_output_teardown(&ctx->output);
 	/* Tear down JPEG snapshot subsystem first — its MJPG VENC channel
-	 * is bound to the SCL port we're about to unbind.  Idempotent. */
+	 * is bound to the SCL port we're about to disable.  Idempotent. */
 	venc_jpeg_shutdown();
+	if (g_mi_scl_port1_enabled) {
+		(void)g_mi_scl.fnDisablePort(0, 0, 1);
+		g_mi_scl_port1_enabled = 0;
+	}
 	if (ctx->bound_vpe_venc) {
 		(void)MI_SYS_UnBindChnPort(&ctx->vpe_port, &ctx->venc_port);
 		ctx->bound_vpe_venc = 0;

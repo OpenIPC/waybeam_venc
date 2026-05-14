@@ -95,6 +95,47 @@ section) for the full table and Phase-2 brute-force-sweep plan.
 
 Captures: `bench_logs/manual_sensor_diff_20260514T093447Z/`
 
+## [0.10.10] - 2026-05-14
+
+Maruko snapshot backend — closes the deferred follow-up from 0.10.9.
+`GET /api/v1/snapshot.jpg` now serves a real JPEG on Maruko (was
+`503 snapshot_disabled` in 0.10.9).  Star6E unchanged.
+
+- **Architecture** — dedicated MJPG VENC device 8 (`I6C_VENC_DEV_MJPG_0`)
+  channel 0, bound to a second SCL output port (SCL dev 0 chn 0 port 1)
+  via `MI_SYS_BindChnPort2` in `I6_SYS_LINK_FRAMEBASE` mode at 5 fps
+  destination rate.  Channel stays parked (`StopRecvPic`) between
+  requests; capture flips `StartRecvPic` on, polls `Query` for ready
+  packs, drains via `GetStream`, then parks again.  Same idle pattern
+  as Star6E (`src/star6e_jpeg.c`) — no encoder CPU when no snapshot
+  is in flight.
+- **Why a second SCL port** — Maruko's SCL output port 0 is held by
+  the main H.265 channel in `LINK_RING` mode (1:1, `0xA0092012` if
+  re-bound).  Port 1 is a fresh tap from the same SCL channel, so
+  no contention with the main stream.  Avoids the kthread-leak path
+  the earlier HW_RING fan-out attempt hit — `dev 8` only sees SCL,
+  never has any relationship to main `dev 0`, so failed-init teardown
+  is clean (no `[venc8_P0_MAIN]` orphan).
+- **Pipeline wiring** — `src/maruko_pipeline.c::configure_maruko_scl()`
+  configures + enables SCL port 1 (YUV420SP, no IFC compress, same
+  crop + output dims as port 0).  `bind_maruko_pipeline()` calls
+  `venc_jpeg_set_source(&ctx->scl_port1)` before `venc_jpeg_init`.
+  `maruko_pipeline_teardown_graph()` disables port 1 after
+  `venc_jpeg_shutdown()`.  Port-1 setup failures are non-fatal:
+  warning logged, snapshot returns `503` cleanly via the
+  `g_have_scl_port=0` path in `venc_jpeg_backend_init`.
+- **Bench verification (192.168.2.12, IMX415, 1920×1080@60)** — 10
+  rapid snapshots in 679 ms (~14 req/s sustained, all `HTTP 200`);
+  size 120–184 KB; mean Y ≈ 124 (bright, post-firstboot-fix); main
+  RTP stream to 192.168.2.20 unaffected during snapshot bursts; no
+  `[venc8_P0_MAIN]` kthread in `ps`.
+
+Snapshot config schema fields (`snapshot.{enabled,quality,channel,
+width,height}` in `venc.json`) remain on the deferred-followups list —
+the backend currently inherits main-stream dims and a hardcoded
+`quality=80`.  Star6E hardware bench validation is still deferred
+(no Star6E bench currently online).
+
 ## [0.10.9] - 2026-05-14
 
 JPEG snapshot HTTP endpoint on both backends.
