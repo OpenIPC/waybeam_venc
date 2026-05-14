@@ -19,11 +19,22 @@ JPEG snapshot HTTP endpoint on both backends.
   ch7, `I6_SYS_LINK_FRAMEBASE` bind to the pipeline's VPE port.
   Star6E supports 1:N from a VPE output port, so the snapshot channel
   binds alongside the main H.265 channel without contention.
-- **Maruko backend** (`src/maruko_jpeg.c`) — `I6C_VENC_CODEC_MJPG` on
-  a dedicated VENC device (`I6C_VENC_DEV_MJPG_0` = 8), separate from
-  the H.26x device 0 that the main stream uses.
-  `I6_SYS_LINK_RING` bind from the pipeline's SCL port.  Same source
-  config (`I6C_VENC_SRC_CONF_RING_DMA`) as the main channel.
+- **Maruko backend** (`src/maruko_jpeg.c`) — **deferred**.  Bench
+  investigation on 192.168.2.12 found two blockers:
+  (a) the Maruko SCL output port is 1:1 — binding it to the MJPG
+  channel after the main H.265 channel already holds it returns
+  `0xA0092012` ("SYS busy", same code documented in `maruko_pipeline.c`
+  line 2097 for the dual-stream path);
+  (b) an attempted workaround using cross-device VENC HW_RING fan-out
+  hit the SDK's teardown bug — failed init left an orphaned
+  `[venc8_P0_MAIN]` kernel thread that blocked the next `MI_SYS_Init`
+  indefinitely (HISTORY "venc_teardown_regression" pattern; recovered
+  via sysrq-b).  Two viable paths forward (out of scope for this PR):
+  configure a second SCL output port at pipeline init, or probe the
+  cross-device VENC bind before `CreateChn` so failure paths don't
+  leak kernel state.  Until then `src/maruko_jpeg.c` is a clean
+  `-ENOSYS` stub so `/api/v1/snapshot.jpg` serves 503 cleanly without
+  ever touching the SDK.
 - **HTTP plumbing** — new `httpd_send_binary()` helper in
   `include/venc_httpd.h` for raw byte payloads with caller-supplied
   `Content-Type`.  Used by the snapshot handler; reusable for any

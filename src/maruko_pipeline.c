@@ -1570,13 +1570,11 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->venc_port, 1, 3);
 
-	/* Bring up the JPEG snapshot subsystem on the same SCL source port
-	 * the main channel just bound to.  Failure is non-fatal — the
-	 * /api/v1/snapshot.jpg endpoint serves 503 if init fails.  Width/
-	 * height inherit the main stream dimensions; quality + channel are
-	 * hardcoded defaults until Phase 4 surfaces them in the config. */
+	/* JPEG snapshot backend on Maruko is deferred (see src/maruko_jpeg.c
+	 * header for the bench investigation).  We still call venc_jpeg_init
+	 * so the endpoint registers and serves a clean 503 to clients; the
+	 * stub backend_init returns -ENOSYS without touching the SDK. */
 	{
-		venc_jpeg_set_source(&ctx->vpe_port);
 		VencJpegConfig jcfg = {
 			.width   = out_w,
 			.height  = out_h,
