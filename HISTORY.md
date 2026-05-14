@@ -1,5 +1,38 @@
 # History
 
+## [0.10.8] - 2026-05-14
+
+Release tarball completeness — fixed three gaps that left a fresh
+device install incomplete after extracting `venc-maruko.tar.gz`:
+
+- **Sensor drivers shipped (Maruko).**  `sensors/maruko/sensor_imx{335,415}_maruko.ko`
+  are now vendored in the repo (source-built via `make drivers-maruko`,
+  ~320 KB total).  `make stage SOC_BUILD=maruko` renames them to
+  `_mipi.ko` for drop-in compatibility with stock OpenIPC kernel
+  module naming, and the release tarball ships them under
+  `drivers/`.  Previously the release was sensor-driver-free, so a
+  fresh-device install ended up running stock OpenIPC drivers
+  regardless of the modifications in `drivers/sensor_*.c`.  See
+  `sensors/maruko/README.md` for provenance.
+- **ISP tuning blobs shipped (Maruko).**  `iq-profiles/maruko-bin/imx{335,415,415_fpv_api}.bin`
+  are now vendored (~420 KB total), pulled from the verified bench
+  at 192.168.2.12.  Release tarball ships them under `isp-bins/` so
+  fresh devices have IQ tuning available without a manual
+  `/etc/sensors/` pull.  See `iq-profiles/maruko-bin/README.md`.
+- **regscan shipped (both backends).**  IMX335/IMX415 i2c register
+  dumper (vendored from `tipoman9/star6c_sensor`) now builds in CI
+  for both Star6E and Maruko and ships in both tarballs.  Read-only
+  diagnostic; used by `scripts/maruko_sensor_init_diff.sh` for
+  sensor-init investigations.
+
+CI verification step now hard-checks the new artifacts exist before
+upload, so a regression that drops them from the tarball will fail
+the build instead of silently shipping an incomplete release.
+
+Release-notes install snippet expanded to cover the new payloads
+(`cp drivers/*.ko /lib/modules/.../sigmastar/`, `cp isp-bins/*.bin
+/etc/sensors/`, `cp regscan /usr/bin/regscan`).
+
 ## [0.10.7] - 2026-05-11
 
 Maruko deploy pipeline polish — fix four PR-review gaps and one

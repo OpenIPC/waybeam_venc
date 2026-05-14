@@ -179,10 +179,15 @@ stage: build
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
 	@if [ -n "$(DRV)" ]; then cp -f $(DRV)/*.so $(OUT_DIR)/lib/; fi
 	@if [ -n "$(DRV_EXTRA)" ]; then cp -f "$(DRV_EXTRA)"/*.so $(OUT_DIR)/lib/; fi
-	@# Maruko-only: also stage sensor .ko and ISP .bin if cached locally.
+	@# Maruko-only: also stage sensor .ko (renamed _maruko.ko → _mipi.ko for
+	@# drop-in install over stock OpenIPC names) and ISP .bin if cached locally.
 	@if [ "$(SOC_BUILD)" = "maruko" ]; then \
-		if ls sensors/maruko/*.ko >/dev/null 2>&1; then \
-			mkdir -p $(OUT_DIR)/drivers; cp -f sensors/maruko/*.ko $(OUT_DIR)/drivers/; \
+		if ls sensors/maruko/sensor_*_maruko.ko >/dev/null 2>&1; then \
+			mkdir -p $(OUT_DIR)/drivers; \
+			for f in sensors/maruko/sensor_*_maruko.ko; do \
+				base="$$(basename "$$f" _maruko.ko)"; \
+				cp -f "$$f" "$(OUT_DIR)/drivers/$${base}_mipi.ko"; \
+			done; \
 		fi; \
 		if ls iq-profiles/maruko-bin/*.bin >/dev/null 2>&1; then \
 			mkdir -p $(OUT_DIR)/isp-bins; cp -f iq-profiles/maruko-bin/*.bin $(OUT_DIR)/isp-bins/; \

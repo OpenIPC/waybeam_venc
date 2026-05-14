@@ -91,12 +91,15 @@ Infinity6C firmware does **not** ship MI vendor libraries, and bench devices
 also need matching sensor `.ko` modules and ISP `.bin` tuning blobs.
 
 The repo carries everything needed for a fresh deployment once a known-good
-device has been mirrored locally:
+device has been mirrored locally.  Pre-verified copies of the sensor `.ko`
+modules and ISP `.bin` blobs are vendored under `sensors/maruko/` and
+`iq-profiles/maruko-bin/` so the release tarball is a complete drop-in
+install (no separate "obtain these from your bench" step):
 
 | Repo location | Target path | Source |
 |---|---|---|
-| `vendor-libs/maruko/*.so`     | `/usr/lib/`                           | pulled from device |
-| `sensors/maruko/*.ko`         | `/lib/modules/5.10.61/sigmastar/`     | pulled or built via `make drivers-maruko` |
+| `vendor-libs/maruko/*.so`     | `/usr/lib/`                           | pulled from device, vendored |
+| `sensors/maruko/sensor_imx*_maruko.ko` | `/lib/modules/5.10.61/sigmastar/sensor_imx*_mipi.ko` | source-built via `make drivers-maruko`, vendored (staged → `_mipi.ko`) |
 | `iq-profiles/maruko-bin/*.bin`| `/etc/sensors/`                       | pulled from device |
 | `out/maruko/venc`             | `/usr/bin/venc`                       | `make build SOC_BUILD=maruko` |
 | `out/maruko/json_cli`         | `/usr/bin/json_cli`                   | `make json_cli SOC_BUILD=maruko` (vendored from `waybeam-hub/tools/`) |
