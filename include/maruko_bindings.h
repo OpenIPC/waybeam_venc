@@ -89,12 +89,15 @@ typedef int (*maruko_isp_disable_userspace3a_fn_t)(MI_U32 dev_id, MI_U32 channel
  * The UBR layout inserts extra UBR slots for H264/H265, shifting all H265
  * modes up by 1.  These are the values the firmware actually accepts. */
 enum {
-	MARUKO_VENC_RC_H264_CBR  = 1,   /* UBR_H264CBR  */
-	MARUKO_VENC_RC_H264_VBR  = 2,   /* UBR_H264VBR  */
-	MARUKO_VENC_RC_H264_AVBR = 6,   /* UBR_H264AVBR */
-	MARUKO_VENC_RC_H265_CBR  = 10,  /* UBR_H265CBR  */
-	MARUKO_VENC_RC_H265_VBR  = 11,  /* UBR_H265VBR  */
-	MARUKO_VENC_RC_H265_AVBR = 14,  /* UBR_H265AVBR */
+	MARUKO_VENC_RC_H264_CBR    = 1,   /* UBR_H264CBR    */
+	MARUKO_VENC_RC_H264_VBR    = 2,   /* UBR_H264VBR    */
+	MARUKO_VENC_RC_H264_AVBR   = 6,   /* UBR_H264AVBR   */
+	MARUKO_VENC_RC_MJPG_CBR    = 7,   /* UBR_MJPEGCBR   */
+	MARUKO_VENC_RC_MJPG_VBR    = 8,   /* UBR_MJPEGVBR   */
+	MARUKO_VENC_RC_MJPG_FIXQP  = 9,   /* UBR_MJPEGFIXQP */
+	MARUKO_VENC_RC_H265_CBR    = 10,  /* UBR_H265CBR    */
+	MARUKO_VENC_RC_H265_VBR    = 11,  /* UBR_H265VBR    */
+	MARUKO_VENC_RC_H265_AVBR   = 14,  /* UBR_H265AVBR   */
 };
 
 #endif

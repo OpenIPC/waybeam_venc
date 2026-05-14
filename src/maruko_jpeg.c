@@ -103,7 +103,17 @@ int venc_jpeg_backend_init(const VencJpegConfig *cfg)
 	attr.attrib.mjpg.width     = w;
 	attr.attrib.mjpg.height    = h;
 
-	attr.rate.mode             = I6C_VENC_RATEMODE_MJPGQP;
+	/* Rate mode is the UBR-layout MJPEGFIXQP (= 9), NOT the
+	 * I6C_VENC_RATEMODE_MJPGQP enum value (= 8).  Maruko firmware
+	 * uses the UBR-shifted enum where 8 = MJPEGVBR — passing 8 here
+	 * silently creates a VBR channel, and the quality field is then
+	 * ignored (since VBR's struct doesn't have one).  The MjpegFixQp
+	 * SDK struct layout matches our i6c_venc_rate_mjpgqp by accident
+	 * (fpsNum/fpsDen/quality maps to u32SrcFrmRateNum/Den/Qfactor),
+	 * so the existing fields below are byte-correct once the mode
+	 * value is right.  See maruko_bindings.h MARUKO_VENC_RC_MJPG_*
+	 * for the firmware enum and the H264/H265 precedent. */
+	attr.rate.mode             = MARUKO_VENC_RC_MJPG_FIXQP;
 	attr.rate.mjpgQp.fpsNum    = 5;
 	attr.rate.mjpgQp.fpsDen    = 1;
 	attr.rate.mjpgQp.quality   = q;
