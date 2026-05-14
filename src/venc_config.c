@@ -449,8 +449,8 @@ static void load_snapshot(const cJSON *root, VencConfigSnapshot *s)
 	if (!obj) return;
 	s->enabled = json_get_bool(obj, "enabled", s->enabled);
 	s->quality = (uint32_t)json_get_int(obj, "quality", (int)s->quality);
-	if (s->quality < 1)   s->quality = 1;
-	if (s->quality > 100) s->quality = 100;
+	if (s->quality < 1)  s->quality = 1;
+	if (s->quality > 99) s->quality = 99;
 	s->channel = json_get_int(obj, "channel", s->channel);
 	s->width   = (uint32_t)json_get_int(obj, "width",  (int)s->width);
 	s->height  = (uint32_t)json_get_int(obj, "height", (int)s->height);
