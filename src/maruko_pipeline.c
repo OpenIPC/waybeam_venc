@@ -1628,18 +1628,19 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	 * bound to SCL chn 0 port 1 in FRAMEBASE mode (see src/maruko_jpeg.c).
 	 * If SCL port-1 setup failed earlier (warning logged), backend_init
 	 * detects no source registered and returns -ENODEV → snapshot endpoint
-	 * cleanly serves 503.  Snapshot inherits main stream dimensions for now;
-	 * dedicated snapshot.{width,height} config fields are a planned
-	 * follow-up. */
+	 * cleanly serves 503.  Config from venc.json snapshot.* section;
+	 * width=0/height=0 inherits main stream dims; quality/channel/enabled
+	 * round-trip through /api/v1/get|set. */
 	if (g_mi_scl_port1_enabled)
 		venc_jpeg_set_source(&ctx->scl_port1);
 	{
+		const VencConfigSnapshot *snap = &ctx->cfg.snapshot;
 		VencJpegConfig jcfg = {
-			.width   = out_w,
-			.height  = out_h,
-			.quality = 80,
-			.channel = 0,   /* MJPG VENC dev 8 chn 0 (set in backend) */
-			.enabled = true,
+			.width   = snap->width  ? snap->width  : out_w,
+			.height  = snap->height ? snap->height : out_h,
+			.quality = snap->quality,
+			.channel = snap->channel,
+			.enabled = snap->enabled,
 		};
 		(void)venc_jpeg_init(&jcfg);
 	}

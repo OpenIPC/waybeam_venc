@@ -130,11 +130,32 @@ Maruko snapshot backend — closes the deferred follow-up from 0.10.9.
   RTP stream to 192.168.2.20 unaffected during snapshot bursts; no
   `[venc8_P0_MAIN]` kthread in `ps`.
 
-Snapshot config schema fields (`snapshot.{enabled,quality,channel,
-width,height}` in `venc.json`) remain on the deferred-followups list —
-the backend currently inherits main-stream dims and a hardcoded
-`quality=80`.  Star6E hardware bench validation is still deferred
-(no Star6E bench currently online).
+Snapshot config schema fields are now part of the on-disk JSON,
+fully wired through the standard 7-touch-point machinery:
+
+- **`venc.json` → `snapshot.{enabled,quality,channel,width,height}`**
+  with sensible defaults (`enabled=true`, `quality=80`, `channel=7`,
+  `width=0`/`height=0` = inherit main stream).  Read on pipeline init
+  via `MarukoBackendConfig::snapshot` (Maruko) and `VencConfig::snapshot`
+  directly (Star6E).
+- `/api/v1/get?snapshot.<field>` and `/api/v1/set?snapshot.<field>=<v>`
+  resolve through `g_fields[]` (all MUT_RESTART since the SDK channel
+  attrs are baked at `CreateChn` time).
+- `config/venc.default.json`, `pretty_print`, `cJSON` serializer, and
+  `MarukoBackendConfig` mirror all carry the new section — the
+  `layout_size_equal` round-trip test in `tests/test_venc_config.c`
+  protects against future drift.
+
+Star6E hardware bench validation is still deferred (no Star6E bench
+currently online).
+
+Caveat (pre-existing, not introduced here): rapid back-to-back
+`/api/v1/set?<MUT_RESTART_field>=...` requests within the reinit
+window can crash venc — same SIGHUP reinit race already tracked in
+`roadmaps/waybeam_venc.md` ("SIGHUP reinit stabilization — partial
+teardown works, ISP race outstanding").  A single quality / dims
+change settles cleanly; users should wait for `reinit_pending=true`
+to resolve before issuing another restart-tier `set`.
 
 ## [0.10.9] - 2026-05-14
 

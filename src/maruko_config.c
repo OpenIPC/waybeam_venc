@@ -52,6 +52,12 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	snprintf(cfg->record.format, sizeof(cfg->record.format), "%s", "ts");
 	cfg->record.max_seconds = 300;
 	cfg->record.max_mb = 500;
+
+	cfg->snapshot.enabled = true;
+	cfg->snapshot.quality = 80;
+	cfg->snapshot.channel = 7;
+	cfg->snapshot.width   = 0;
+	cfg->snapshot.height  = 0;
 }
 
 int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
@@ -145,6 +151,8 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->record.max_seconds = vcfg->record.max_seconds;
 	cfg->record.max_mb = vcfg->record.max_mb;
 	cfg->record.frame_lost = vcfg->video0.frame_lost ? 1 : 0;
+
+	cfg->snapshot = vcfg->snapshot;
 
 	return 0;
 }

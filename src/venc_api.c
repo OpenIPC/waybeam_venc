@@ -383,6 +383,12 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, fps,         FT_UINT,   MUT_RESTART),
 	FIELD(record, gop_size,    FT_DOUBLE, MUT_RESTART),
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
+
+	FIELD(snapshot, enabled,   FT_BOOL,   MUT_RESTART),
+	FIELD(snapshot, quality,   FT_UINT,   MUT_RESTART),
+	FIELD(snapshot, channel,   FT_INT,    MUT_RESTART),
+	FIELD(snapshot, width,     FT_UINT,   MUT_RESTART),
+	FIELD(snapshot, height,    FT_UINT,   MUT_RESTART),
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD(video0, intra_refresh_mode,   FT_STRING, MUT_RESTART),

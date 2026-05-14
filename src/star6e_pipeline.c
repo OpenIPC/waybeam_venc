@@ -1386,17 +1386,17 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 
 	/* Bring up the JPEG snapshot subsystem on the same VPE source port the
 	 * main channel just bound to.  Failure is non-fatal — /api/v1/snapshot.jpg
-	 * just serves 503 if init fails.  Width/height inherit the main stream
-	 * dimensions; quality + channel are hardcoded defaults until Phase 4
-	 * exposes them in the config schema. */
+	 * just serves 503 if init fails.  Config from venc.json snapshot.*
+	 * section; width=0/height=0 inherits main stream dimensions. */
 	{
 		venc_jpeg_set_source(&state->vpe_port);
+		const VencConfigSnapshot *snap = &vcfg->snapshot;
 		VencJpegConfig jcfg = {
-			.width   = state->image_width,
-			.height  = state->image_height,
-			.quality = 80,
-			.channel = 7,
-			.enabled = true,
+			.width   = snap->width  ? snap->width  : state->image_width,
+			.height  = snap->height ? snap->height : state->image_height,
+			.quality = snap->quality,
+			.channel = snap->channel,
+			.enabled = snap->enabled,
 		};
 		(void)venc_jpeg_init(&jcfg);
 	}
