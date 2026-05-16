@@ -40,7 +40,9 @@ static int test_defaults(void)
 
 	CHECK("defaults_sensor_index", cfg.sensor.index == -1);
 	CHECK("defaults_sensor_mode", cfg.sensor.mode == -1);
-	CHECK("defaults_unlock_enabled", cfg.sensor.unlock_enabled == true);
+	/* unlock_* retired from user surface but still drives the
+	 * IMX415/IMX335 cold-boot register hook unconditionally. */
+	CHECK("defaults_unlock_enabled_on", cfg.sensor.unlock_enabled == true);
 	CHECK("defaults_unlock_cmd", cfg.sensor.unlock_cmd == 0x23);
 	CHECK("defaults_unlock_reg", cfg.sensor.unlock_reg == 0x300a);
 	CHECK("defaults_unlock_value", cfg.sensor.unlock_value == 0x80);
@@ -48,7 +50,6 @@ static int test_defaults(void)
 	CHECK("defaults_mirror", cfg.image.mirror == false);
 	CHECK("defaults_flip", cfg.image.flip == false);
 
-	CHECK("defaults_codec", strcmp(cfg.video0.codec, "h265") == 0);
 	CHECK("defaults_rc_mode", strcmp(cfg.video0.rc_mode, "cbr") == 0);
 	CHECK("defaults_fps", cfg.video0.fps == 60);
 	CHECK("defaults_width_auto", cfg.video0.width == 0);
@@ -80,6 +81,111 @@ static int test_defaults(void)
 	CHECK("defaults_scene_threshold_off", cfg.video0.scene_threshold == 0);
 	CHECK("defaults_scene_holdoff", cfg.video0.scene_holdoff == 2);
 
+	CHECK("defaults_ref_base_off", cfg.video0.ref_base == 0);
+	CHECK("defaults_ref_enhance", cfg.video0.ref_enhance == 0);
+	CHECK("defaults_ref_pred_on", cfg.video0.ref_pred == true);
+	CHECK("defaults_resilience_off", strcmp(cfg.video0.resilience, "off") == 0);
+
+	return failures;
+}
+
+/* Resilience preset is the sole driver of intra-refresh, SVC-T, and
+ * (for named presets) gop_size.  "off" preserves the user's gopSize. */
+static int test_resilience_preset_expansion(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	char path[] = "/tmp/venc_resilience_test_XXXXXX";
+	int fd = mkstemp(path);
+	CHECK("resilience_mkstemp_ok", fd >= 0);
+	if (fd < 0) return failures;
+
+	struct {
+		const char *name;
+		const char *ir;
+		uint8_t    b;
+		uint8_t    e;
+		double     gop;
+	} cases[] = {
+		{ "rescue",    "off",      0, 0, 0.25 }, /* IDR-spam, lowest recovery latency */
+		{ "quality",   "off",      0, 0, 4.0 },
+		{ "sprint",    "fast",     0, 0, 0.5 },  /* intra + aggressive IDR */
+		{ "racing",    "fast",     0, 0, 2.0 },
+		{ "endurance", "balanced", 0, 0, 2.0 },  /* OSD-safe */
+		{ "patrol",    "balanced", 0, 0, 4.0 },  /* OSD-safe + long GOP */
+		{ "rally",     "fast",     1, 1, 2.0 },  /* light refPred (OSD-unsafe) */
+		{ "range",     "balanced", 1, 4, 2.0 },  /* heavy refPred (OSD-unsafe) */
+		{ "fpv",       "robust",   1, 4, 2.0 },  /* heaviest refPred (OSD-unsafe) */
+	};
+	for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) {
+		/* User's gopSize=7.5 must be discarded by any named preset. */
+		char json[160];
+		snprintf(json, sizeof(json),
+			"{\"video0\":{\"resilience\":\"%s\",\"gopSize\":7.5}}",
+			cases[i].name);
+		FILE *f = fopen(path, "w");
+		if (!f) { close(fd); unlink(path); return failures; }
+		fputs(json, f);
+		fclose(f);
+
+		venc_config_defaults(&cfg);
+		int rc = venc_config_load(path, &cfg);
+		CHECK("resilience_load_ok", rc == 0);
+		CHECK("resilience_preset_stored",
+			strcmp(cfg.video0.resilience, cases[i].name) == 0);
+		CHECK("resilience_preset_intra_refresh",
+			strcmp(cfg.video0.intra_refresh_mode, cases[i].ir) == 0);
+		CHECK("resilience_preset_ref_base",
+			cfg.video0.ref_base == cases[i].b);
+		CHECK("resilience_preset_ref_enhance",
+			cfg.video0.ref_enhance == cases[i].e);
+		CHECK("resilience_preset_overrides_gop",
+			cfg.video0.gop_size == cases[i].gop);
+	}
+
+	/* off mode preserves the user's gopSize. */
+	{
+		const char *json =
+			"{\"video0\":{\"resilience\":\"off\",\"gopSize\":3.25}}";
+		FILE *f = fopen(path, "w");
+		if (!f) { close(fd); unlink(path); return failures; }
+		fputs(json, f);
+		fclose(f);
+
+		venc_config_defaults(&cfg);
+		int rc = venc_config_load(path, &cfg);
+		CHECK("resilience_off_load_ok", rc == 0);
+		CHECK("resilience_off_stored",
+			strcmp(cfg.video0.resilience, "off") == 0);
+		CHECK("resilience_off_keeps_user_gop",
+			cfg.video0.gop_size == 3.25);
+		CHECK("resilience_off_intra_off",
+			strcmp(cfg.video0.intra_refresh_mode, "off") == 0);
+		CHECK("resilience_off_ref_base_zero", cfg.video0.ref_base == 0);
+	}
+
+	/* Unknown preset falls back to off with the user's gopSize honoured. */
+	{
+		const char *json =
+			"{\"video0\":{\"resilience\":\"bogus\",\"gopSize\":2.0}}";
+		FILE *f = fopen(path, "w");
+		if (!f) { close(fd); unlink(path); return failures; }
+		fputs(json, f);
+		fclose(f);
+
+		venc_config_defaults(&cfg);
+		int rc = venc_config_load(path, &cfg);
+		CHECK("resilience_unknown_load_ok", rc == 0);
+		CHECK("resilience_unknown_falls_back_to_off",
+			strcmp(cfg.video0.resilience, "off") == 0);
+		CHECK("resilience_unknown_intra_off",
+			strcmp(cfg.video0.intra_refresh_mode, "off") == 0);
+		CHECK("resilience_unknown_keeps_user_gop",
+			cfg.video0.gop_size == 2.0);
+	}
+
+	close(fd);
+	unlink(path);
 	return failures;
 }
 
@@ -89,10 +195,15 @@ static int test_load_full_json(void)
 	const char *json =
 		"{"
 		"  \"system\": { \"webPort\": 8080, \"overclockLevel\": 1, \"verbose\": true },"
+		/* unlockEnabled/Cmd/Reg/Value/Dir are retired in 0.10.13 —
+		 * parser must silently drop them.  Setting unlockEnabled=false
+		 * here proves migration: the JSON value is ignored and the
+		 * always-on default (true) drives the cold-boot register hook. */
 		"  \"sensor\": { \"index\": 2, \"mode\": 3, \"unlockEnabled\": false },"
 		"  \"isp\": { \"sensorBin\": \"/etc/sensors/imx415.bin\" },"
 		"  \"image\": { \"mirror\": true, \"flip\": true },"
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
+		/* "codec" above is intentionally legacy — parser must silently drop it. */
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
 		"    \"frameLost\": false, \"zoomPct\": 0.5, \"zoomX\": 0.25, \"zoomY\": 0.75 },"
 		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false },"
@@ -115,11 +226,11 @@ static int test_load_full_json(void)
 	CHECK("load_verbose", cfg.system.verbose == true);
 	CHECK("load_sensor_index", cfg.sensor.index == 2);
 	CHECK("load_sensor_mode", cfg.sensor.mode == 3);
-	CHECK("load_unlock_off", cfg.sensor.unlock_enabled == false);
+	CHECK("load_unlock_legacy_ignored",
+		cfg.sensor.unlock_enabled == true);   /* JSON had false; default wins */
 	CHECK("load_isp_bin", strcmp(cfg.isp.sensor_bin, "/etc/sensors/imx415.bin") == 0);
 	CHECK("load_mirror", cfg.image.mirror == true);
 	CHECK("load_flip", cfg.image.flip == true);
-	CHECK("load_codec", strcmp(cfg.video0.codec, "h264") == 0);
 	CHECK("load_rc", strcmp(cfg.video0.rc_mode, "vbr") == 0);
 	CHECK("load_fps", cfg.video0.fps == 90);
 	CHECK("load_width", cfg.video0.width == 1280);
@@ -164,7 +275,6 @@ static int test_load_partial_json(void)
 	CHECK("partial_fps_set", cfg.video0.fps == 120);
 	/* All other fields retain defaults */
 	CHECK("partial_bitrate_default", cfg.video0.bitrate == 8192);
-	CHECK("partial_codec_default", strcmp(cfg.video0.codec, "h265") == 0);
 	CHECK("partial_web_port_default", cfg.system.web_port == 80);
 
 	return failures;
@@ -297,7 +407,6 @@ static int test_roundtrip(void)
 	CHECK("roundtrip_zoom_x", cfg2.video0.zoom_x == 0.25);
 	CHECK("roundtrip_zoom_y", cfg2.video0.zoom_y == 0.75);
 	/* Unchanged fields preserved */
-	CHECK("roundtrip_codec", strcmp(cfg2.video0.codec, "h265") == 0);
 	CHECK("roundtrip_gop", cfg2.video0.gop_size == 1.0);
 
 	return failures;
@@ -458,7 +567,6 @@ static int test_sample_config_file(void)
 	if (ret != 0) return failures;
 
 	CHECK("sample_fps_30", cfg.video0.fps == 60);
-	CHECK("sample_codec_h265", strcmp(cfg.video0.codec, "h265") == 0);
 	CHECK("sample_enabled", cfg.outgoing.enabled == false);
 	CHECK("sample_server", strcmp(cfg.outgoing.server, "") == 0);
 	CHECK("sample_stream_mode", strcmp(cfg.outgoing.stream_mode, "rtp") == 0);
@@ -785,5 +893,6 @@ int test_venc_config(void)
 	failures += test_audio_roundtrip();
 	failures += test_save_layout_byte_equal();
 	failures += test_save_layout_populated_round_trip();
+	failures += test_resilience_preset_expansion();
 	return failures;
 }

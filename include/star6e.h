@@ -479,6 +479,17 @@ typedef struct {
 _Static_assert(sizeof(MI_VENC_IntraRefresh_t) == 12,
 	"MI_VENC_IntraRefresh_t layout changed — verify SDK match");
 
+/* Reference frame structure (SVC-T temporal hierarchical reference) —
+ * identical layout on star6e and maruko (mi_venc_datatype.h:600).  Function
+ * arity again differs (maruko adds VeDev). */
+typedef struct {
+	MI_U32  u32Base;
+	MI_U32  u32Enhance;
+	MI_BOOL bEnablePred;
+} MI_VENC_ParamRef_t;
+_Static_assert(sizeof(MI_VENC_ParamRef_t) == 12,
+	"MI_VENC_ParamRef_t layout changed — verify SDK match");
+
 /* MI_VENC ----------------------------------------------------------------- */
 #if defined(PLATFORM_MARUKO)
 #define MI_VENC_CreateChn(chn, attr)  g_mi_venc.fnCreateChn(0, (chn), (attr))
@@ -523,6 +534,12 @@ _Static_assert(sizeof(MI_VENC_IntraRefresh_t) == 12,
 #define MI_VENC_GetIntraRefresh(chn, cfg) \
 	(g_mi_venc.fnGetIntraRefresh ? \
 		g_mi_venc.fnGetIntraRefresh((chn), (cfg)) : -1)
+#define MI_VENC_SetRefParam(chn, p) \
+	(g_mi_venc.fnSetRefParam ? \
+		g_mi_venc.fnSetRefParam((chn), (p)) : -1)
+#define MI_VENC_GetRefParam(chn, p) \
+	(g_mi_venc.fnGetRefParam ? \
+		g_mi_venc.fnGetRefParam((chn), (p)) : -1)
 #else
 MI_S32 MI_VENC_CreateChn(MI_VENC_CHN chn, MI_VENC_ChnAttr_t* attr);
 MI_S32 MI_VENC_DestroyChn(MI_VENC_CHN chn);
@@ -544,6 +561,8 @@ MI_S32 MI_VENC_GetRoiCfg(MI_VENC_CHN chn, MI_U32 idx, MI_VENC_RoiCfg_t *cfg);
 MI_S32 MI_VENC_SetFrameLostStrategy(MI_VENC_CHN chn, MI_VENC_ParamFrameLost_t *p);
 MI_S32 MI_VENC_GetFrameLostStrategy(MI_VENC_CHN chn, MI_VENC_ParamFrameLost_t *p);
 MI_S32 MI_VENC_GetChnDevid(MI_VENC_CHN chn, MI_U32* device_id);
+MI_S32 MI_VENC_SetRefParam(MI_VENC_CHN chn, MI_VENC_ParamRef_t *p);
+MI_S32 MI_VENC_GetRefParam(MI_VENC_CHN chn, MI_VENC_ParamRef_t *p);
 #endif
 
 #ifdef __cplusplus

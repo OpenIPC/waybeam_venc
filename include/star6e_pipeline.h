@@ -172,4 +172,19 @@ typedef struct {
 
 void star6e_pipeline_intra_refresh_status(Star6eIntraRefreshStatus *out);
 
+/* Snapshot of refPred (SVC-T) state at the most recent pipeline_start.
+ * Populated by star6e_pipeline_pre_start_apply_ref_pred() — `active` is
+ * true only when the resilience preset requested refBase>0 AND the
+ * SDK SetRefParam call succeeded. */
+typedef struct {
+	int      active;
+	int      mi_supported;
+	int      apply_ok;
+	uint32_t base;
+	uint32_t enhance;
+	int      pred;
+} Star6eRefPredStatus;
+
+void star6e_pipeline_ref_pred_status(Star6eRefPredStatus *out);
+
 #endif /* STAR6E_PIPELINE_H */

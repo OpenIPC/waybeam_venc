@@ -157,7 +157,6 @@ derive_alt_server() {
 
 capture_baseline() {
 	snapshot_field BASE_VIDEO0_BITRATE video0.bitrate
-	snapshot_field BASE_VIDEO0_CODEC video0.codec
 	snapshot_field BASE_VIDEO0_FPS video0.fps
 	snapshot_field BASE_VIDEO0_GOP_SIZE video0.gop_size
 	snapshot_field BASE_VIDEO0_QP_DELTA video0.qp_delta
@@ -508,14 +507,10 @@ assert_get "system.verbose" bool
 # Sensor
 assert_get "sensor.index" int
 assert_get "sensor.mode" int
-assert_get "sensor.unlock_enabled" bool
-assert_get "sensor.unlock_cmd" uint
-assert_get "sensor.unlock_reg" uint
-assert_get "sensor.unlock_value" uint
-assert_get "sensor.unlock_dir" int
 
 # ISP
 assert_get "isp.sensor_bin" string
+assert_get "isp.ae_engine" string
 assert_get "isp.exposure" uint
 assert_get "isp.awb_mode" string
 assert_get "isp.awb_ct" uint
@@ -526,7 +521,6 @@ assert_get "image.flip" bool
 assert_get "image.rotate" int
 
 # Video0
-assert_get "video0.codec" string
 assert_get "video0.rc_mode" string
 assert_get "video0.fps" uint
 assert_get "video0.size" size
@@ -534,6 +528,7 @@ assert_get "video0.bitrate" uint
 assert_get "video0.gop_size" double
 assert_get "video0.qp_delta" int
 assert_get "video0.frame_lost" bool
+assert_get "video0.resilience" string
 # Outgoing
 assert_get "outgoing.enabled" bool
 assert_get "outgoing.server" string
@@ -766,12 +761,9 @@ assert_set_fail "fpv.roi_center" "42"
 assert_value_is "fpv.roi_steps" "${BASE_FPV_ROI_STEPS}" "VERIFY roi_steps unchanged after rejected values"
 assert_value_is "fpv.roi_center" "${BASE_FPV_ROI_CENTER}" "VERIFY roi_center unchanged after rejected values"
 
-if [[ "${backend}" == "\"star6e\"" && "${BASE_OUTGOING_STREAM_MODE}" != "compact" ]]; then
-	assert_set_fail "video0.codec" "h264" "Star6E RTP rejects h264 codec"
-	assert_value_is "video0.codec" "\"${BASE_VIDEO0_CODEC}\"" "VERIFY codec unchanged after rejected h264"
-else
-	skip "Star6E RTP rejects h264 codec" "not Star6E RTP mode"
-fi
+# video0.codec was retired in 0.10.12 — schema rejects it as unknown_field
+# regardless of backend or stream mode.
+assert_set_fail "video0.codec" "h264" "Retired video0.codec is rejected as unknown field"
 
 # Unknown route
 resp="$(curl -sf --max-time 3 "${BASE}/api/v1/nonexistent" 2>/dev/null)" || resp="error"

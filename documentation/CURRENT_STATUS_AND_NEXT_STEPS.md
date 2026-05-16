@@ -25,7 +25,7 @@
 - Custom 3A thread for Star6E (replaces AE cadence):
   - Dedicated 15 Hz thread handles AE (proportional controller) and AWB (grey-world).
   - Pauses ISP internal AE, disables CUS3A AWB callback — full 3A control.
-  - Default mode; set `isp.legacyAe=true` to revert to ISP AE + handoff.
+  - Opt-in via `isp.aeEngine="custom"`; default `"sdk"` uses the ISP firmware AE.
   - Configurable: target luma, convergence rate, gain ceiling, processing rate.
   - Details: `documentation/AE_AWB_CPU_TUNING.md`
 - Live reinit and resolution switching without process restart (v0.3.2):

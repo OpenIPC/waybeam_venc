@@ -9,6 +9,7 @@
 #include "star6e_ts_recorder.h"
 #include "venc_api.h"
 #include "venc_config.h"
+#include "venc_respawn.h"
 #include "venc_httpd.h"
 
 #include <stdio.h>
@@ -114,111 +115,44 @@ static int maruko_runner_init(void *opaque)
 	return 0;
 }
 
-static int maruko_reinit_pipeline(MarukoRunnerContext *ctx)
-{
-	MarukoBackendContext *backend = &ctx->backend;
-	bool reinit_pending;
-	int sys_initialized;
-	int ret;
-
-	/* Save current sensor state — live sensor mode changes are not
-	 * supported (the ISP hangs).  We force the same mode after
-	 * config reload so find_best_mode() cannot pick a different one. */
-	int prev_pad = (int)backend->sensor.pad_id;
-	int prev_mode = backend->sensor.mode_index;
-	uint32_t prev_max_fps = backend->sensor.mode.maxFps;
-
-	reinit_pending = venc_api_get_reinit();
-	venc_api_clear_reinit();
-
-	if (reinit_pending) {
-		VencConfig tmp_cfg;
-		printf("> [maruko] reinit: reloading config from disk\n");
-		venc_config_defaults(&tmp_cfg);
-		if (venc_config_load(VENC_CONFIG_DEFAULT_PATH, &tmp_cfg) != 0) {
-			/* Parse or validation failure — keep the prior in-memory
-			 * config so the daemon stays on a known-good state instead
-			 * of running with a partially-loaded mix of defaults and
-			 * disk values. */
-			fprintf(stderr,
-				"> [maruko] config reload failed, keeping prior in-memory config\n");
-		} else {
-			ctx->vcfg = tmp_cfg;
-		}
-	}
-
-	/* Lock sensor to the mode that was running before teardown.
-	 * Switching sensor modes on a live reinit hangs the ISP. */
-	ctx->vcfg.sensor.index = prev_pad;
-	ctx->vcfg.sensor.mode = prev_mode;
-	if (prev_max_fps > 0 && ctx->vcfg.video0.fps > prev_max_fps) {
-		printf("> [maruko] Reinit: clamping FPS %u -> %u "
-			"(sensor mode change not supported during reinit)\n",
-			ctx->vcfg.video0.fps, prev_max_fps);
-		ctx->vcfg.video0.fps = prev_max_fps;
-	}
-
-	if (maruko_config_from_venc(&ctx->vcfg, &backend->cfg) != 0)
-		return -1;
-
-	/* Preserve MI_SYS state across reinit — MI_SYS_Init is only
-	 * called once and MI_SYS_Exit only on final shutdown. */
-	sys_initialized = backend->system_initialized;
-	g_maruko_running = 1;
-	backend->output.socket_handle = -1;
-	backend->venc_channel = 0;
-	backend->system_initialized = sys_initialized;
-
-	if (!sys_initialized) {
-		ret = maruko_pipeline_init(backend);
-		if (ret != 0)
-			return ret;
-	}
-
-	ret = maruko_pipeline_configure_graph(backend);
-	if (ret != 0)
-		return ret;
-
-	maruko_bind_controls(ctx);
-	maruko_reset_scene(backend);
-	if (ctx->vcfg.video0.qp_delta != 0 &&
-	    maruko_controls_callbacks()->apply_qp_delta) {
-		maruko_controls_callbacks()->apply_qp_delta(
-			ctx->vcfg.video0.qp_delta);
-	}
-	return 0;
-}
-
 static int maruko_runner_run(void *opaque)
 {
 	MarukoRunnerContext *ctx = opaque;
-	int result;
+	int result = maruko_pipeline_run(&ctx->backend);
 
-	for (;;) {
-		result = maruko_pipeline_run(&ctx->backend);
-		if (result != 1)
-			break;
+	if (result != 1)
+		return result;
 
-		/* Pause HTTP dispatch for the entire teardown + reinit window.
-		 * Vendor SDK handles (ISP/SCL/VENC channels, audio capture,
-		 * output socket) are destroyed and recreated inside; new HTTP
-		 * requests during the window receive 503 immediately instead
-		 * of blocking on a stale dispatch.  pause() drains any handler
-		 * already in flight before returning, so SDK state is safe to
-		 * tear down once it returns. */
-		venc_httpd_pause();
-		printf("> [maruko] reinit: tearing down pipeline graph\n");
-		maruko_pipeline_teardown_graph(&ctx->backend);
+	/* Pause HTTP dispatch for the entire teardown + respawn
+	 * window.  pause() drains any handler already in flight
+	 * before returning; subsequent requests get 503 until the
+	 * fresh respawn child accepts again. */
+	venc_httpd_pause();
 
-		if (maruko_reinit_pipeline(ctx) != 0) {
-			venc_httpd_resume();
-			result = -1;
-			break;
-		}
-		venc_httpd_resume();
-	}
-
-	return result;
+	/* Maruko always respawns on reinit.  Empirical evidence
+	 * (2026-05-15 bench, S1 sweep): in-process reinit can
+	 * page-fault inside MI_SYS_IMPL_FlushInputPortTasks during
+	 * teardown of ANY MUT_RESTART transition — observed on
+	 * patrol→quality (ref_*=0 throughout, only intra mode
+	 * changed).  The page fault zombies the process and
+	 * requires a physical reboot to clear.
+	 *
+	 * Trading ~2 s of additional latency (fork+exec respawn vs
+	 * in-process reconfigure) for elimination of the zombie
+	 * regime is unambiguously the right call.  Star6E's
+	 * star6e_runtime_handle_reinit() already does this; Maruko
+	 * now matches.
+	 *
+	 * teardown_graph() is deliberately NOT called here — the
+	 * backend->teardown callback (maruko_runner_teardown ->
+	 * maruko_pipeline_teardown) will run it once, cleanly, from
+	 * main() after the run loop exits.  Tearing down twice
+	 * (once here, once from backend->teardown) is what
+	 * zombied the process on the first attempt at this fix. */
+	venc_respawn_request();
+	printf("> [maruko] respawn requested, "
+		"exiting run loop for fork+exec\n");
+	return 0;
 }
 
 static void maruko_runner_teardown(void *opaque)

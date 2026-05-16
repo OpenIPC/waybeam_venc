@@ -171,26 +171,16 @@ restore_backup() {
 	log "Restored ${CONFIG_PATH} from ${source}"
 }
 
-# Provision /etc/waybeam.json on devices that don't yet have one.  Two
-# entry paths:
-#   1. Upgrade from a venc-era device — /etc/venc.json exists.  Rename
-#      it (preserving operator customizations) and clean up the rest of
-#      the legacy install so the next reboot doesn't double-start.
-#   2. Fresh firstboot — neither path exists.  Write the bundled
-#      Star6E default.
-# Existing /etc/waybeam.json is left untouched.
+# Provision /etc/waybeam.json from the bundled Star6E default only when
+# the target has no config (fresh firstboot device). Never overwrites an
+# existing config — users with customized configs are preserved.
 provision_default_config_if_missing() {
 	local default_cfg="${ROOT_DIR}/config/waybeam.default.json"
-	if remote_capture "[ -f $(printf '%q' "${CONFIG_PATH}") ] && echo PRESENT || echo ABSENT" | grep -q PRESENT; then
-		return 0
-	fi
-	if remote_capture "[ -f /etc/venc.json ] && echo PRESENT || echo ABSENT" | grep -q PRESENT; then
-		log "Migrating legacy /etc/venc.json -> ${CONFIG_PATH} (preserving customizations)"
-		ssh -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "mv /etc/venc.json $(printf '%q' "${CONFIG_PATH}") && rm -f /etc/init.d/S95venc /usr/bin/venc /tmp/venc.log"
-		return 0
-	fi
 	if [[ ! -f "${default_cfg}" ]]; then
 		log "WARN: default config ${default_cfg} not found — skipping fresh-device provisioning"
+		return 0
+	fi
+	if remote_capture "[ -f $(printf '%q' "${CONFIG_PATH}") ] && echo PRESENT || echo ABSENT" | grep -q PRESENT; then
 		return 0
 	fi
 	log "No ${CONFIG_PATH} on device — provisioning default from $(basename "${default_cfg}")"

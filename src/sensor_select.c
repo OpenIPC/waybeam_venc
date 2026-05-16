@@ -83,11 +83,15 @@ static int unlock_pre_set_mode(MI_SNR_PAD_ID_e pad, int mode_index, void *ctx)
 	MI_S32 ret = MI_SNR_CustFunction(pad, cfg->cmd_id,
 		(MI_U32)sizeof(payload), &payload, cfg->dir);
 	if (ret != 0) {
+		/* Non-fatal: the unlock hook targets IMX415/IMX335 cmd 0x23.
+		 * Other sensor drivers may reject the cmd_id — warn and let
+		 * the pipeline continue.  Matches the on_fps_retry behaviour. */
 		fprintf(stderr, "WARNING: sensor unlock failed at pre-setres "
-			"(pad %d, cmd=0x%08x, reg=0x%04x, value=0x%04x, dir=%d) -> %d\n",
+			"(pad %d, cmd=0x%08x, reg=0x%04x, value=0x%04x, dir=%d) -> %d "
+			"(non-fatal; continuing without unlock)\n",
 			pad, (unsigned)cfg->cmd_id, cfg->reg, cfg->value,
 			cfg->dir, ret);
-		return ret;
+		return 0;
 	}
 
 	printf("> Sensor unlock applied at pre-setres "

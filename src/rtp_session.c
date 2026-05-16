@@ -40,5 +40,8 @@ uint32_t rtp_session_frame_ticks(uint32_t sensor_fps)
 
 uint8_t rtp_session_payload_type(PAYLOAD_TYPE_E codec)
 {
-	return codec == PT_H265 ? 97 : 96;
+	/* HEVC is the only supported codec since 0.10.12.  H.264 PT (96)
+	 * branch removed; codec arg kept for callsite stability. */
+	(void)codec;
+	return 97;
 }

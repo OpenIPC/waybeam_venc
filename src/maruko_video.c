@@ -199,16 +199,9 @@ static size_t maruko_send_frame_rtp(const i6c_venc_strm *stream,
 
 	if (!stream || !output || !rtp)
 		return 0;
-	if (codec != PT_H265) {
-		static int warned;
-		if (!warned) {
-			fprintf(stderr,
-				"WARNING: Maruko RTP output supports H.265 only; "
-				"requested codec %d ignored\n", (int)codec);
-			warned = 1;
-		}
-		return 0;
-	}
+	/* HEVC is the only supported codec since 0.10.12 — defensive
+	 * non-PT_H265 branch removed. */
+	(void)codec;
 
 	/* Open sendmmsg batch for UDP; no-op for SHM. */
 	maruko_output_begin_frame(output);

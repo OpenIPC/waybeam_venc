@@ -1,5 +1,13 @@
 # AE Porting Minimal Delta From 99301fe
 
+> **Note (0.10.13):** This porting plan predates the AE engine
+> unification.  The `isp.aeMode` config key referenced below was merged
+> with Star6E's `isp.legacyAe` into a single `isp.aeEngine` selector
+> (`"sdk"` | `"custom"`) — see `AE_AWB_CPU_TUNING.md` for the current
+> contract.  When applying this delta, map `aeMode="throttle"` →
+> `aeEngine="custom"` and `aeMode="native"` → `aeEngine="sdk"`; the
+> rest of the porting steps still apply.
+
 This file describes the minimum functional changes needed to take the repo at
 upstream commit `99301fe` and reproduce the current working AE behavior:
 

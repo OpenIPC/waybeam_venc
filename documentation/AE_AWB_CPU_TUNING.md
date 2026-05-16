@@ -3,12 +3,17 @@
 This document describes the 3A (AE/AWB) processing strategy in the standalone
 `venc` encoder.
 
-## Supervisory AE Thread (Star6E, opt-in via `legacyAe: false`)
+## Supervisory AE Thread (opt-in via `isp.aeEngine: "custom"`)
 
-Star6E can run a lightweight supervisory thread that enforces FPV constraints
-(gain cap, shutter cap) while letting the ISP's proven internal AE handle
-actual exposure convergence.  Enable it by setting `"legacyAe": false` in
-the config.
+The unified `isp.aeEngine` selector chooses between SDK-managed AE and
+userspace cus3a:
+
+| `aeEngine` | Star6E                          | Maruko                                |
+|------------|---------------------------------|----------------------------------------|
+| `"sdk"` (default) | ISP firmware AE drives the sensor (no supervisory thread) | NATIVE AE algo runs inside `3A_Proc_0` at sensor rate |
+| `"custom"` | Lightweight supervisory thread enforces gain/shutter caps; ISP's internal AE still drives convergence | No-op AE adaptor replaces NATIVE algo + supervisory `SetAeParam` thread at `aeFps` Hz (~24% CPU saving at 120fps) |
+
+Enable userspace AE by setting `"aeEngine": "custom"` in the config.
 
 ### How It Works
 
@@ -38,12 +43,12 @@ thread via direct ISP AWB API calls.
 
 ### Configuration
 
-All settings are in the `isp` section of `/etc/venc.json`:
+All settings are in the `isp` section of `/etc/waybeam.json`:
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `legacyAe` | `true` | Set `false` to use supervisory AE thread |
-| `aeFps` | `15` | Monitoring rate in Hz |
+| `aeEngine` | `"sdk"` | Set `"custom"` to use the supervisory AE thread |
+| `aeFps` | `15` | Monitoring rate in Hz (used when `aeEngine="custom"`) |
 | `gainMax` | `0` | Max sensor gain cap (0 = use ISP bin default) |
 
 Shutter cap is auto-derived from sensor FPS (`1000000 / fps`) and can be
@@ -53,7 +58,7 @@ Example — enable supervisory AE with gain cap:
 ```json
 {
   "isp": {
-    "legacyAe": false,
+    "aeEngine": "custom",
     "aeFps": 15,
     "gainMax": 10000
   }
@@ -98,9 +103,9 @@ NORMAL state is the only thing that actually drives the sensor.
 `MI_ISP_AE_SetExposureLimit()` is the only working API for influencing exposure
 — it modifies the bounds the ISP's internal AE operates within.
 
-## Legacy AE Mode (default)
+## SDK AE Mode (default)
 
-The default AE mode uses the ISP's internal auto-exposure:
+The default mode (`aeEngine="sdk"`) uses the ISP's internal auto-exposure:
 
 1. CUS3A is enabled (1,1,1) at startup
 2. After 1 second, CUS3A is disabled (0,0,0) — the "handoff"
@@ -108,7 +113,7 @@ The default AE mode uses the ISP's internal auto-exposure:
 4. AWB runs via the ISP's internal callbacks at frame rate
 
 In this mode the supervisory thread is not started and has zero overhead.
-Set `"legacyAe": false` to switch to the supervisory thread.
+Set `"aeEngine": "custom"` to switch to the supervisory thread.
 
 ## Maruko Backend
 

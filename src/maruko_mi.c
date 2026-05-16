@@ -267,6 +267,10 @@ static int i6c_venc_load(maruko_venc_impl *venc)
 		int (*)(int, int, void *), "MI_VENC_SetIntraRefresh");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetIntraRefresh,
 		int (*)(int, int, void *), "MI_VENC_GetIntraRefresh");
+	LOAD_SYM(venc, "libmi_venc.so", fnSetRefParam,
+		int (*)(int, int, void *), "MI_VENC_SetRefParam");
+	LOAD_SYM(venc, "libmi_venc.so", fnGetRefParam,
+		int (*)(int, int, void *), "MI_VENC_GetRefParam");
 
 	if (!venc->fnCreateDev || !venc->fnDestroyDev ||
 	    !venc->fnCreateChn || !venc->fnDestroyChn ||

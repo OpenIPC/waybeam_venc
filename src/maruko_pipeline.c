@@ -1087,8 +1087,9 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 }
 
 /* IntraRefresh status snapshot — populated by
- * maruko_pipeline_apply_intra_refresh() at every pipeline_start, cleared by
- * maruko_stop_venc().  Read by venc_api's /api/v1/intra/status handler. */
+ * maruko_pipeline_apply_intra_refresh() at every pipeline_start, cleared
+ * by the VENC destroy step of teardown_graph.  Read by venc_api's
+ * /api/v1/intra/status handler. */
 static MarukoIntraRefreshStatus g_intra_status;
 static pthread_mutex_t g_intra_status_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1111,7 +1112,8 @@ static IntraRefreshMode maruko_intra_refresh_derive(
 	memset(out_ir, 0, sizeof(*out_ir));
 	if (cfg) {
 		mode = intra_refresh_parse_mode(cfg->intra_refresh_mode);
-		intra_refresh_compute(mode, height, fps, codec == PT_H265,
+		(void)codec; /* H.265 only */
+		intra_refresh_compute(mode, height, fps,
 			cfg->intra_refresh_lines, cfg->intra_refresh_qp,
 			cfg->gop_size_sec, out_ir);
 	}
@@ -1197,6 +1199,64 @@ static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	return 0;
 }
 
+static MarukoRefPredStatus g_ref_pred_status;
+static pthread_mutex_t g_ref_pred_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void maruko_pipeline_ref_pred_status(MarukoRefPredStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	*out = g_ref_pred_status;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+}
+
+static int maruko_apply_ref_pred(MI_VENC_DEV dev, MI_VENC_CHN chn,
+	const MarukoBackendConfig *cfg)
+{
+	MI_VENC_ParamRef_t ref;
+	MarukoRefPredStatus snap;
+
+	memset(&snap, 0, sizeof(snap));
+	snap.mi_supported = g_mi_venc.fnSetRefParam ? 1 : 0;
+	if (cfg) {
+		snap.base    = cfg->ref_base;
+		snap.enhance = cfg->ref_enhance;
+		snap.pred    = cfg->ref_pred ? 1 : 0;
+	}
+
+	if (!cfg || cfg->ref_base == 0)
+		goto publish;
+	if (!g_mi_venc.fnSetRefParam) {
+		fprintf(stderr, "[waybeam] WARNING: refBase=%u requested but "
+			"libmi_venc.so does not export MI_VENC_SetRefParam\n",
+			cfg->ref_base);
+		goto publish;
+	}
+
+	memset(&ref, 0, sizeof(ref));
+	ref.u32Base     = cfg->ref_base;
+	ref.u32Enhance  = cfg->ref_enhance ? cfg->ref_enhance : 1;
+	ref.bEnablePred = cfg->ref_pred ? 1 : 0;
+
+	if (maruko_mi_venc_set_ref_param(dev, chn, &ref) != 0) {
+		fprintf(stderr, "[waybeam] ERROR: MI_VENC_SetRefParam(dev=%d, "
+			"chn=%d, base=%u, enhance=%u, pred=%u) failed\n", dev, chn,
+			ref.u32Base, ref.u32Enhance, ref.bEnablePred);
+		goto publish;
+	}
+	snap.apply_ok = 1;
+	snap.active   = 1;
+	fprintf(stderr, "[waybeam] refPred: dev=%d chn=%d base=%u enhance=%u "
+		"pred=%u (applied)\n", dev, chn, ref.u32Base, ref.u32Enhance,
+		ref.bEnablePred);
+publish:
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	g_ref_pred_status = snap;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+	return snap.active ? 0 : (cfg && cfg->ref_base > 0 ? -1 : 0);
+}
+
 static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	uint32_t width, uint32_t height, uint32_t framerate,
 	MI_VENC_DEV venc_dev, MI_VENC_CHN *chn, int *dev_created)
@@ -1264,6 +1324,11 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 			" failed %d\n", ret);
 	}
 
+	/* SVC-T reference pyramid (refPred) — Star6E SDK testing showed the
+	 * call silently no-ops if invoked after StartRecvPic.  Apply here
+	 * between CreateChn and StartRecvPic for both backends. */
+	(void)maruko_apply_ref_pred(venc_dev, *chn, cfg);
+
 	ret = maruko_mi_venc_start_recv(venc_dev, *chn);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -1304,6 +1369,7 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	 * pipeline (matches Star6E behavior). */
 	(void)maruko_apply_intra_refresh(venc_dev, *chn, cfg, height,
 		framerate, cfg->rc_codec);
+	/* refPred is applied earlier (pre-StartRecvPic); see comment above. */
 
 	/* Phase 7 dual-VENC SDK probe (debug-only, env-gated).
 	 *
@@ -1355,23 +1421,6 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	}
 
 	return 0;
-}
-
-static void maruko_stop_venc(MI_VENC_DEV venc_dev, MI_VENC_CHN chn,
-	int destroy_dev)
-{
-	(void)maruko_mi_venc_stop_recv(venc_dev, chn);
-	(void)maruko_mi_venc_destroy_chn(venc_dev, chn);
-	if (destroy_dev)
-		(void)maruko_mi_venc_destroy_dev(venc_dev);
-
-	/* Clear IntraRefresh status snapshot — the channel is gone, so
-	 * /api/v1/intra/status should not keep reporting enabled=true
-	 * until the next pipeline_start runs. */
-	pthread_mutex_lock(&g_intra_status_mutex);
-	memset(&g_intra_status, 0, sizeof(g_intra_status));
-	pthread_mutex_unlock(&g_intra_status_mutex);
-	maruko_pipeline_clear_zoom_status();
 }
 
 static void maruko_sysfs_write(const char *path, const char *value)
@@ -2820,6 +2869,67 @@ static void maruko_pipeline_log_verbose_frame(MarukoBackendContext *ctx,
  * → optional sidecar trailer + verbose log.  Mirrors
  * star6e_runtime_process_stream().  Returns: -1 fatal, 0 ok, 1 retry
  * outer loop. */
+/* HEVC NAL type / SDK eRefType constants — mirror star6e_runtime.c.
+ * SigmaStar i6c VENC firmware has the same gap as i6e: it computes the
+ * SVC-T pyramid and labels each frame's eRefType correctly, but writes
+ * every NAL as TRAIL_R (type 1).  Generic HEVC decoders need TRAIL_N
+ * (type 0) to know which frames are non-reference. */
+#define HEVC_NAL_TRAIL_N 0
+#define HEVC_NAL_TRAIL_R 1
+#define MARUKO_REFTYPE_ENHANCE_P_NOTFORREF 4
+
+static size_t maruko_nal_header_idx(const uint8_t *buf, size_t len)
+{
+	size_t i = 0;
+	while (i < len && buf[i] == 0) i++;
+	if (i < len && buf[i] == 0x01) i++;
+	return i < len ? i : len;
+}
+
+static void maruko_patch_pack_to_trail_n(i6c_venc_pack *pack)
+{
+	if (!pack || !pack->data || pack->length == 0)
+		return;
+	if (pack->packNum > 0) {
+		const unsigned int info_cap = (unsigned int)(sizeof(pack->packetInfo) /
+			sizeof(pack->packetInfo[0]));
+		unsigned int n = pack->packNum > info_cap ? info_cap : pack->packNum;
+		unsigned int k;
+		for (k = 0; k < n; ++k) {
+			unsigned int off = pack->packetInfo[k].offset;
+			unsigned int nlen = pack->packetInfo[k].length;
+			if (off >= pack->length || nlen == 0 ||
+			    off + nlen > pack->length)
+				continue;
+			size_t hdr = maruko_nal_header_idx(pack->data + off, nlen);
+			if (hdr >= nlen) continue;
+			if (pack->data[off + hdr] == 0x02) {
+				pack->data[off + hdr] = 0x00;
+			}
+		}
+		return;
+	}
+	if (pack->offset >= pack->length)
+		return;
+	{
+		unsigned int off = pack->offset;
+		unsigned int nlen = pack->length - off;
+		size_t hdr = maruko_nal_header_idx(pack->data + off, nlen);
+		if (hdr >= nlen) return;
+		if (pack->data[off + hdr] == 0x02) {
+			pack->data[off + hdr] = 0x00;
+		}
+	}
+}
+
+static void maruko_patch_stream_to_trail_n(i6c_venc_strm *s)
+{
+	unsigned int i;
+	if (!s || !s->packet) return;
+	for (i = 0; i < s->count; i++)
+		maruko_patch_pack_to_trail_n(&s->packet[i]);
+}
+
 static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	MarukoStreamRuntime *rt, const i6c_venc_stat *stat)
 {
@@ -2856,6 +2966,17 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		fprintf(stderr,
 			"ERROR: [maruko] MI_VENC_GetStream failed %d\n", ret);
 		return -1;
+	}
+
+	/* refPred error-resilience marking — rewrite TRAIL_R → TRAIL_N for
+	 * frames the SDK marked as ENHANCE_P_NOTFORREF.  i6c shares this
+	 * encoder-firmware gap with i6e (Star6E): the pyramid logic is
+	 * correct internally but every NAL is emitted as TRAIL_R, leaving
+	 * generic decoders unable to identify non-reference frames.  See
+	 * star6e_runtime.c for the matching helper. */
+	if (ctx->cfg.ref_base > 0 &&
+	    stream.h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF) {
+		maruko_patch_stream_to_trail_n(&stream);
 	}
 
 	++rt->frame_counter;
@@ -2899,7 +3020,22 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		{
 			int osd_row = 2;
 			MarukoIntraRefreshStatus ir;
+			MarukoRefPredStatus      rp;
 			maruko_pipeline_intra_refresh_status(&ir);
+			maruko_pipeline_ref_pred_status(&rp);
+			if (ctx->cfg.resilience[0] &&
+			    strcmp(ctx->cfg.resilience, "off") != 0) {
+				if (rp.active) {
+					debug_osd_text(ctx->debug_osd, osd_row++,
+						"res", "%s rp=%u/%u",
+						ctx->cfg.resilience,
+						rp.base, rp.enhance);
+				} else {
+					debug_osd_text(ctx->debug_osd, osd_row++,
+						"res", "%s",
+						ctx->cfg.resilience);
+				}
+			}
 			if (ir.active) {
 				debug_osd_text(ctx->debug_osd, osd_row++, "intra",
 					"%s L%u q%u",
@@ -3178,32 +3314,71 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		(void)g_mi_scl.fnDisablePort(0, 0, 1);
 		g_mi_scl_port1_enabled = 0;
 	}
+
+	/* MI teardown order mirrors Star6E (proven over many reinit
+	 * cycles).  The critical invariant: each consumer must be
+	 * stopped — or at least StopRecvPic'd — BEFORE its input port
+	 * is unbound.  The previous order tore down every UnBind first
+	 * and only then stopped VENC/VPE/VIF; this triggered a page
+	 * fault inside MI_SYS_IMPL_FlushInputPortTasks because the
+	 * kernel SDK was still flushing buffered frames into a port the
+	 * userspace side had just ripped out.  Empirically zombie'd the
+	 * process on ~14% of resilience reinits (S1 bench 2026-05-15).
+	 *
+	 * Sequence:
+	 *   1. VENC StopRecvPic (soft pause, lets buffered frames flow
+	 *      out one last time).
+	 *   2. Unbind VPE→VENC.
+	 *   3. Destroy VENC channel.
+	 *   4. Stop VPE channels (drains VPE's own buffer queue).
+	 *   5. Unbind ISP→VPE.
+	 *   6. Stop VIF.
+	 *   7. Unbind VIF→ISP.
+	 *   8. Sensor disable. */
+	if (ctx->venc_started)
+		(void)maruko_mi_venc_stop_recv(ctx->venc_device,
+			ctx->venc_channel);
+
 	if (ctx->bound_vpe_venc) {
 		(void)MI_SYS_UnBindChnPort(&ctx->vpe_port, &ctx->venc_port);
 		ctx->bound_vpe_venc = 0;
 	}
-	if (ctx->bound_isp_vpe) {
-		(void)MI_SYS_UnBindChnPort(&ctx->isp_port, &ctx->vpe_port);
-		ctx->bound_isp_vpe = 0;
-	}
-	if (ctx->bound_vif_vpe) {
-		(void)MI_SYS_UnBindChnPort(&ctx->vif_port, &ctx->isp_port);
-		ctx->bound_vif_vpe = 0;
-	}
+
 	if (ctx->venc_started) {
-		maruko_stop_venc(ctx->venc_device, ctx->venc_channel,
-			ctx->venc_dev_created);
+		(void)maruko_mi_venc_destroy_chn(ctx->venc_device,
+			ctx->venc_channel);
+		if (ctx->venc_dev_created)
+			(void)maruko_mi_venc_destroy_dev(ctx->venc_device);
 		ctx->venc_started = 0;
 		ctx->venc_dev_created = 0;
+
+		/* Clear IntraRefresh status — the channel is gone. */
+		pthread_mutex_lock(&g_intra_status_mutex);
+		memset(&g_intra_status, 0, sizeof(g_intra_status));
+		pthread_mutex_unlock(&g_intra_status_mutex);
+		maruko_pipeline_clear_zoom_status();
 	}
+
 	if (ctx->vpe_started) {
 		maruko_stop_vpe_channels();
 		ctx->vpe_started = 0;
 	}
+
+	if (ctx->bound_isp_vpe) {
+		(void)MI_SYS_UnBindChnPort(&ctx->isp_port, &ctx->vpe_port);
+		ctx->bound_isp_vpe = 0;
+	}
+
 	if (ctx->vif_started) {
 		maruko_stop_vif();
 		ctx->vif_started = 0;
 	}
+
+	if (ctx->bound_vif_vpe) {
+		(void)MI_SYS_UnBindChnPort(&ctx->vif_port, &ctx->isp_port);
+		ctx->bound_vif_vpe = 0;
+	}
+
 	if (ctx->sensor_enabled) {
 		(void)MI_SNR_Disable(ctx->sensor.pad_id);
 		ctx->sensor_enabled = 0;

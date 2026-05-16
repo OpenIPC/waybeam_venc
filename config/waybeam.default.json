@@ -6,17 +6,11 @@
   },
   "sensor": {
     "index": -1,
-    "mode": -1,
-    "unlockEnabled": true,
-    "unlockCmd": 35,
-    "unlockReg": 12298,
-    "unlockValue": 128,
-    "unlockDir": 0
+    "mode": -1
   },
   "isp": {
     "sensorBin": "",
-    "legacyAe": true,
-    "aeMode": "native",
+    "aeEngine": "sdk",
     "aeFps": 15,
     "gainMax": 0,
     "awbMode": "auto",
@@ -29,7 +23,6 @@
     "rotate": 0
   },
   "video0": {
-    "codec": "h265",
     "rcMode": "cbr",
     "fps": 60,
     "size": "auto",
@@ -39,9 +32,7 @@
     "frameLost": true,
     "sceneThreshold": 0,
     "sceneHoldoff": 2,
-    "intraRefreshMode": "off",
-    "intraRefreshLines": 0,
-    "intraRefreshQp": 0,
+    "resilience": "off",
     "zoomPct": 0.0,
     "zoomX": 0.5,
     "zoomY": 0.5

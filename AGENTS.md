@@ -70,15 +70,15 @@ When connected devices are available, run targeted deployment tests after
 **Operational Defaults → Deployment Targets** are tested; blank rows are
 skipped automatically.
 
-For `venc` on the current Star6E bench (`root@192.168.1.13` / imx335), prefer
+For `waybeam` on the current Star6E bench (`root@192.168.1.13` / imx335), prefer
 the direct JSON-config helper first:
 
 ```bash
 scripts/star6e_direct_deploy.sh cycle
 ```
 
-This validates the production `/etc/venc.json` path, daemon startup, HTTP API,
-and `/tmp/venc.log` capture.
+This validates the production `/etc/waybeam.json` path, daemon startup, HTTP API,
+and `/tmp/waybeam.log` capture.
 
 Use `make remote-test` for bounded CLI validation:
 
@@ -93,21 +93,21 @@ failures.
 
 ```
 # 1) List sensor modes
-make remote-test ARGS='--host root@<HOST> --soc-build <backend> --run-bin venc -- --list-sensor-modes --sensor-index <idx> [--isp-bin <path>]'
+make remote-test ARGS='--host root@<HOST> --soc-build <backend> --run-bin waybeam -- --list-sensor-modes --sensor-index <idx> [--isp-bin <path>]'
 
 # 2) Test each mode at its max FPS (repeat for every mode reported above)
-make remote-test ARGS='--host root@<HOST> --soc-build <backend> --run-bin venc -- --sensor-index <idx> --sensor-mode <M> -f <MAX_FPS> [--isp-bin <path>]'
+make remote-test ARGS='--host root@<HOST> --soc-build <backend> --run-bin waybeam -- --sensor-index <idx> --sensor-mode <M> -f <MAX_FPS> [--isp-bin <path>]'
 ```
 
 **Example** — Star6E / imx335 at `192.168.1.13`, where `--list-sensor-modes`
 reports modes 0 (30fps), 1 (60fps), 2 (90fps), and 3 (120fps):
 
 ```
-make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin venc -- --list-sensor-modes --sensor-index 0'
-make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin venc -- --sensor-index 0 --sensor-mode 0 -f 30'
-make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin venc -- --sensor-index 0 --sensor-mode 1 -f 60'
-make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin venc -- --sensor-index 0 --sensor-mode 2 -f 90'
-make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin venc -- --sensor-index 0 --sensor-mode 3 -f 120'
+make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin waybeam -- --list-sensor-modes --sensor-index 0'
+make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin waybeam -- --sensor-index 0 --sensor-mode 0 -f 30'
+make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin waybeam -- --sensor-index 0 --sensor-mode 1 -f 60'
+make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin waybeam -- --sensor-index 0 --sensor-mode 2 -f 90'
+make remote-test ARGS='--host root@192.168.1.13 --soc-build star6e --run-bin waybeam -- --sensor-index 0 --sensor-mode 3 -f 120'
 ```
 
 Substitute `<HOST>`, `<backend>`, `<idx>`, and `--isp-bin` from the
@@ -148,7 +148,7 @@ When `--json-summary` is passed, `remote_test.sh` emits a single JSON line
 after all output. This is the preferred way for agents to consume results:
 
 ```json
-{"status":"success","exit_code":0,"device_alive":true,"dmesg_hits":0,"duration_sec":12,"run_bin":"venc","soc_build":"star6e","host":"root@192.168.1.13"}
+{"status":"success","exit_code":0,"device_alive":true,"dmesg_hits":0,"duration_sec":12,"run_bin":"waybeam","soc_build":"star6e","host":"root@192.168.1.13"}
 ```
 
 | Field | Type | Description |
@@ -181,7 +181,7 @@ Typical fast iteration cycle:
 # First run: full build + deploy
 make remote-test ARGS='--json-summary --host root@192.168.1.13 -- --sensor-index 0 -f 30'
 
-# After editing venc source: rebuild locally, deploy the binary
+# After editing source: rebuild locally, deploy the binary
 make build SOC_BUILD=star6e
 make remote-test ARGS='--json-summary --skip-build --host root@192.168.1.13 -- --sensor-index 0 -f 30'
 
@@ -214,28 +214,28 @@ Run deployment test with --json-summary
 ## JSON Config Deploy & Test (Preferred)
 
 The preferred method for interactive testing uses the device's production
-JSON config (`/etc/venc.json`) and the HTTP API. This tests the actual
+JSON config (`/etc/waybeam.json`) and the HTTP API. This tests the actual
 runtime path including config parsing, pipeline init, and API controls.
 
-**Important:** The venc binary always loads `/etc/venc.json` — this path
+**Important:** The waybeam binary always loads `/etc/waybeam.json` — this path
 is hardcoded. There is no `-c` flag to override it at runtime.
 
 **Important:** Always use the `json_cli` binary on the target for JSON config
 edits. Do NOT use `sed` — it is unreliable on nested JSON (wrong key matches,
 encoding issues). `json_cli` is the only safe tool for modifying
-`/etc/venc.json` on the device.
+`/etc/waybeam.json` on the device.
 
 ```bash
 # Set a field (dot-path, updates in-place)
-ssh root@<HOST> "json_cli -s .audio.codec '\"opus\"' -i /etc/venc.json"
-ssh root@<HOST> "json_cli -s .audio.enabled true -i /etc/venc.json"
-ssh root@<HOST> "json_cli -s .audio.sampleRate 48000 -i /etc/venc.json"
+ssh root@<HOST> "json_cli -s .audio.codec '\"opus\"' -i /etc/waybeam.json"
+ssh root@<HOST> "json_cli -s .audio.enabled true -i /etc/waybeam.json"
+ssh root@<HOST> "json_cli -s .audio.sampleRate 48000 -i /etc/waybeam.json"
 
 # Read a field
-ssh root@<HOST> "json_cli -g .audio.codec --raw -i /etc/venc.json"
+ssh root@<HOST> "json_cli -g .audio.codec --raw -i /etc/waybeam.json"
 
 # Verify the full audio section after edits
-ssh root@<HOST> "json_cli -g .audio -i /etc/venc.json"
+ssh root@<HOST> "json_cli -g .audio -i /etc/waybeam.json"
 ```
 
 Path syntax: `.field`, `.nested.field`, `.array[0]`. String values must be
@@ -250,7 +250,7 @@ For the current Star6E bench (`root@192.168.1.13`), prefer the helper script:
 scripts/star6e_direct_deploy.sh cycle
 ```
 
-It wraps the production `/etc/venc.json` flow: config backup, `/usr/bin/venc`
+It wraps the production `/etc/waybeam.json` flow: config backup, `/usr/bin/waybeam`
 deploy, daemon start, HTTP readiness wait, endpoint checks, and log capture.
 
 ```bash
@@ -258,24 +258,24 @@ deploy, daemon start, HTTP readiness wait, endpoint checks, and log capture.
 make build SOC_BUILD=star6e
 
 # 2. Stop running instance
-ssh root@<HOST> "killall venc; sleep 2"
+ssh root@<HOST> "killall waybeam; sleep 2"
 
 # 3. Deploy binary
-scp -O out/star6e/venc root@<HOST>:/usr/bin/venc
+scp -O out/star6e/waybeam root@<HOST>:/usr/bin/waybeam
 
 # 4. (Optional) Modify config — always use json_cli, never sed
-ssh root@<HOST> "json_cli -s .legacyAe false -i /etc/venc.json"
-ssh root@<HOST> "json_cli -s .system.verbose true -i /etc/venc.json"
+ssh root@<HOST> "json_cli -s .isp.aeEngine '\"custom\"' -i /etc/waybeam.json"
+ssh root@<HOST> "json_cli -s .system.verbose true -i /etc/waybeam.json"
 
-# 5. Start venc as daemon with log capture
-ssh root@<HOST> "nohup venc > /tmp/venc.log 2>&1 &"
+# 5. Start waybeam as a daemon with log capture
+ssh root@<HOST> "nohup waybeam > /tmp/waybeam.log 2>&1 &"
 
 # 6. Wait for pipeline init (~10s), then query
 sleep 10
 ssh root@<HOST> "wget -q -O- http://127.0.0.1/api/v1/ae"
 
 # 7. Check startup log
-ssh root@<HOST> "cat /tmp/venc.log"
+ssh root@<HOST> "cat /tmp/waybeam.log"
 
 # 8. Live API controls
 ssh root@<HOST> "wget -q -O- 'http://127.0.0.1/api/v1/set?isp.gainMax=10000'"
@@ -285,12 +285,12 @@ ssh root@<HOST> "wget -q -O- 'http://127.0.0.1/api/v1/set?isp.exposure=3'"
 ssh root@<HOST> "wget -q -O- http://127.0.0.1/api/v1/ae"
 
 # 10. Check for specific log patterns
-ssh root@<HOST> "grep 'limits updated' /tmp/venc.log"
+ssh root@<HOST> "grep 'limits updated' /tmp/waybeam.log"
 
 # 11. Cleanup — restore config and stop
-ssh root@<HOST> "json_cli -s .legacyAe true -i /etc/venc.json"
-ssh root@<HOST> "json_cli -s .system.verbose false -i /etc/venc.json"
-ssh root@<HOST> "killall venc"
+ssh root@<HOST> "json_cli -s .isp.aeEngine '\"sdk\"' -i /etc/waybeam.json"
+ssh root@<HOST> "json_cli -s .system.verbose false -i /etc/waybeam.json"
+ssh root@<HOST> "killall waybeam"
 ```
 
 ### Key endpoints for verification
@@ -305,11 +305,11 @@ ssh root@<HOST> "killall venc"
 
 ### Why this method over remote-test
 
-- Tests the **production config path** (`/etc/venc.json` parsing, not CLI args)
+- Tests the **production config path** (`/etc/waybeam.json` parsing, not CLI args)
 - Validates **HTTP API** integration end-to-end
 - Supports **live parameter changes** without restart
-- Log persists in `/tmp/venc.log` for post-mortem analysis
-- Binary stays deployed in `/usr/bin/venc` for manual re-runs
+- Log persists in `/tmp/waybeam.log` for post-mortem analysis
+- Binary stays deployed in `/usr/bin/waybeam` for manual re-runs
 
 The `make remote-test` workflow (below) is still useful for automated sensor
 mode sweeps and CI, but JSON config deploy-and-test is the preferred method
@@ -469,7 +469,7 @@ The config system spans three layers that MUST stay in sync:
    Regenerate the embedded blob deterministically with `make webui`
    (or `python3 tools/build_webui.py`).  CI runs `make webui-check` via
    `make verify` to catch drift between source and embedded blob.
-4. **Default config file** (`config/venc.default.json`) — reference config
+4. **Default config file** (`config/waybeam.default.json`) — reference config
    showing all available options with sensible defaults.
 
 When adding or removing a config field, update ALL of the following in the same PR:
@@ -482,7 +482,7 @@ When adding or removing a config field, update ALL of the following in the same 
   `venc_config_save`. `cJSON_Print` is no longer used for disk writes
   because it normalised away the canonical layout
 - Add the key to the appropriate `SECTIONS[]` entry in `web/dashboard.html`
-- Add the key with its default value to `config/venc.default.json` in the
+- Add the key with its default value to `config/waybeam.default.json` in the
   unified layout (one key per line, 2-space indent, `": "` separator,
   integral doubles end in `.0`). The `test_save_layout_byte_equal` test
   enforces that printer output matches the default file byte-for-byte —
@@ -539,8 +539,8 @@ reference). Key rules summarized here:
 
 | Command | Description |
 |---------|-------------|
-| `make build` | Build Star6E backend (default) → `out/star6e/venc` |
-| `make build SOC_BUILD=maruko` | Build Maruko backend → `out/maruko/venc` |
+| `make build` | Build Star6E backend (default) → `out/star6e/waybeam` |
+| `make build SOC_BUILD=maruko` | Build Maruko backend → `out/maruko/waybeam` |
 | `make lint` | Fast warning check (compile with `-Wall -Werror`, no link) |
 | `make lint SOC_BUILD=maruko` | Lint Maruko backend |
 | `make stage` | Build + stage runtime bundle in `out/<soc>/` |
@@ -548,19 +548,19 @@ reference). Key rules summarized here:
 | `make verify` | Build both backends + verify binaries (Maruko first, Star6E last) |
 | `make pre-pr` | Full pre-PR checklist |
 | `make remote-test ARGS='...'` | Run bounded remote CLI/test-binary workflow |
-| `scripts/star6e_direct_deploy.sh cycle` | Preferred Star6E `venc` deploy + HTTP smoke test |
+| `scripts/star6e_direct_deploy.sh cycle` | Preferred Star6E `waybeam` deploy + HTTP smoke test |
 
 ### Output Layout
 
 Each backend builds to its own directory under `out/`:
 
 ```
-out/star6e/venc                  ← Star6E binary
-out/maruko/venc                  ← Maruko binary
+out/star6e/waybeam                  ← Star6E binary
+out/maruko/waybeam                  ← Maruko binary
 ```
 
 Both backends can coexist — `make verify` builds both without cleaning
-between them.  `make build` (default) always produces `out/star6e/venc`.
+between them.  `make build` (default) always produces `out/star6e/waybeam`.
 
 ## Mistakes to Avoid
 
@@ -578,7 +578,7 @@ between them.  `make build` (default) always produces `out/star6e/venc`.
   current approach fails, diagnose why before changing course.
 - Do NOT add or remove a config field without updating every layer: C
   struct/parser, API field+alias tables, the `render_<section>` pretty
-  printer in `src/venc_config.c`, WebUI SECTIONS, and `config/venc.default.json`.
+  printer in `src/venc_config.c`, WebUI SECTIONS, and `config/waybeam.default.json`.
   See **Config / WebUI / API Sync Rules** above.
 
 ## Codex delegation

@@ -73,7 +73,13 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->system.overclock_level = 1;
 	cfg->system.verbose = false;
 
-	/* sensor */
+	/* sensor.  The unlock_* fields drive the IMX415/IMX335 high-FPS
+	 * register hook (`MI_SNR_CustFunction(pad, cmd_id=0x23, reg=0x300a,
+	 * value=0x80, dir=0)`) — required on cold boot for both sensors,
+	 * otherwise `MI_SNR_SetFps(pad, 120)` returns -1608835041 and the
+	 * sensor falls back to 30 fps.  Retired from the user-facing JSON
+	 * schema in 0.10.13; the call now fires unconditionally at every
+	 * pipeline start. */
 	cfg->sensor.index = -1;
 	cfg->sensor.mode = -1;
 	cfg->sensor.unlock_enabled = true;
@@ -82,8 +88,10 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->sensor.unlock_value = 0x80;
 	cfg->sensor.unlock_dir = 0;
 
-	/* isp */
+	/* isp.  ae_engine drives both per-backend struct fields; defaults
+	 * to "sdk" (Star6E legacy_ae=true / Maruko ae_mode="native"). */
 	cfg->isp.sensor_bin[0] = '\0';
+	safe_strcpy(cfg->isp.ae_engine, sizeof(cfg->isp.ae_engine), "sdk");
 	cfg->isp.legacy_ae = true;
 	safe_strcpy(cfg->isp.ae_mode, sizeof(cfg->isp.ae_mode), "native");
 	cfg->isp.ae_fps = 15;
@@ -96,8 +104,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->image.flip = false;
 	cfg->image.rotate = 0;
 
-	/* video0 */
-	safe_strcpy(cfg->video0.codec, sizeof(cfg->video0.codec), "h265");
+	/* video0 — codec is hardcoded H.265, see VencConfigVideo doc */
 	safe_strcpy(cfg->video0.rc_mode, sizeof(cfg->video0.rc_mode), "cbr");
 	cfg->video0.fps = 60;
 	cfg->video0.width = 0;
@@ -161,6 +168,15 @@ void venc_config_defaults(VencConfig *cfg)
 		sizeof(cfg->video0.intra_refresh_mode), "off");
 	cfg->video0.intra_refresh_lines = 0;
 	cfg->video0.intra_refresh_qp = 0;
+
+	/* SVC-T reference (video0) — disabled by default; opt-in via refBase>0 */
+	cfg->video0.ref_base = 0;
+	cfg->video0.ref_enhance = 0;
+	cfg->video0.ref_pred = true;
+
+	/* Resilience preset (video0) — off = granular fields drive */
+	safe_strcpy(cfg->video0.resilience,
+		sizeof(cfg->video0.resilience), "off");
 
 	/* digital zoom (video0) — disabled by default */
 	cfg->video0.zoom_pct = 0.0;
@@ -227,13 +243,38 @@ static void load_sensor(const cJSON *root, VencConfigSensor *s)
 	if (!obj) return;
 	s->index = json_get_int(obj, "index", s->index);
 	s->mode = json_get_int(obj, "mode", s->mode);
-	s->unlock_enabled = json_get_bool(obj, "unlockEnabled", s->unlock_enabled);
-	s->unlock_cmd = (uint32_t)json_get_int(obj, "unlockCmd", (int)s->unlock_cmd);
-	s->unlock_reg = (uint16_t)json_get_int(obj, "unlockReg", (int)s->unlock_reg);
-	s->unlock_value = (uint16_t)json_get_int(obj, "unlockValue", (int)s->unlock_value);
-	s->unlock_dir = json_get_int(obj, "unlockDir", s->unlock_dir);
-	if (s->unlock_dir < 0) s->unlock_dir = 0;
-	if (s->unlock_dir > 1) s->unlock_dir = 1;
+	/* unlock* keys retired in 0.10.13 — legacy IMX415 high-FPS hook;
+	 * silently ignored on read so existing configs migrate cleanly. */
+}
+
+/* ae_engine → per-backend struct field expansion.
+ *
+ * Star6E:
+ *   "sdk"    → legacy_ae=true   (ISP firmware AE; skip start_custom_ae)
+ *   "custom" → legacy_ae=false  (start_custom_ae spins cus3a)
+ *
+ * Maruko:
+ *   "sdk"    → ae_mode="native"   (SDK runs AE at sensor rate)
+ *   "custom" → ae_mode="throttle" (no-op adaptor + supervisory thread)
+ *
+ * Unknown values fall back to "sdk".  Returns 0 on recognised value,
+ * -1 if `name` is unrecognised (caller warns and falls back). */
+static int apply_ae_engine(const char *name, VencConfigIsp *s)
+{
+	const char *want = (!name || !*name) ? "sdk" : name;
+	if (strcmp(want, "sdk") == 0) {
+		safe_strcpy(s->ae_engine, sizeof(s->ae_engine), "sdk");
+		s->legacy_ae = true;
+		safe_strcpy(s->ae_mode, sizeof(s->ae_mode), "native");
+		return 0;
+	}
+	if (strcmp(want, "custom") == 0) {
+		safe_strcpy(s->ae_engine, sizeof(s->ae_engine), "custom");
+		s->legacy_ae = false;
+		safe_strcpy(s->ae_mode, sizeof(s->ae_mode), "throttle");
+		return 0;
+	}
+	return -1;
 }
 
 static void load_isp(const cJSON *root, VencConfigIsp *s)
@@ -242,9 +283,20 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 	if (!obj) return;
 	safe_strcpy(s->sensor_bin, sizeof(s->sensor_bin),
 		json_get_string(obj, "sensorBin", s->sensor_bin));
-	s->legacy_ae = json_get_bool(obj, "legacyAe", s->legacy_ae);
-	safe_strcpy(s->ae_mode, sizeof(s->ae_mode),
-		json_get_string(obj, "aeMode", s->ae_mode));
+	/* ae_engine is the sole AE selector.  Legacy `legacyAe` /
+	 * `aeMode` keys are silently dropped on load — existing configs
+	 * migrate to the ae_engine default ("sdk") which matches the
+	 * historical legacyAe=true / aeMode="native" defaults. */
+	{
+		const char *engine = json_get_string(obj, "aeEngine",
+			s->ae_engine);
+		if (apply_ae_engine(engine, s) != 0) {
+			fprintf(stderr, "[config] WARNING: unknown isp.aeEngine "
+				"'%s' (use sdk|custom) — falling back to sdk\n",
+				engine);
+			(void)apply_ae_engine("sdk", s);
+		}
+	}
 	s->ae_fps = (uint32_t)json_get_int(obj, "aeFps", (int)s->ae_fps);
 	s->gain_max = (uint32_t)json_get_int(obj, "gainMax", (int)s->gain_max);
 	safe_strcpy(s->awb_mode, sizeof(s->awb_mode),
@@ -288,13 +340,101 @@ static int parse_resolution(const char *str, uint32_t *w, uint32_t *h)
 	return -1;
 }
 
+/* Resilience preset → field expansion.
+ *
+ * The 2x2 matrix is:                                              .
+ *                  | Best efficiency      | Most resilient        .
+ *   ---------------+----------------------+------------------     .
+ *   Fast recovery  | racing               | fpv (drone FPV)       .
+ *   Slow recovery  | quality              | range                 .
+ *
+ * Named presets set intra_refresh_*, ref_*, AND gop_size, so picking a
+ * preset fully determines all recovery / GOP behaviour.  Only `off`
+ * leaves gop_size untouched — that mode is the escape hatch where the
+ * user's `gopSize` field drives.
+ *
+ * Returns 0 on success ("off" or recognised preset), or -1 if `name`
+ * is unrecognised (caller should warn and fall back to "off"). */
+int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v)
+{
+	struct preset {
+		const char *name;
+		const char *intra;
+		uint8_t ref_base;
+		uint8_t ref_enhance;
+		double gop_sec;           /* 0 = preserve caller's gop_size */
+	};
+	/* Resilience preset table.
+	 *
+	 * Stripe-only recovery (no IDR needed) requires the effective
+	 * wavefront to fit inside the GOP.  Effective wavefront is
+	 *   nominal_wavefront × (ref_enhance + 1)
+	 * because the TRAIL_N rewrite drops `ref_enhance` of every
+	 * `(ref_enhance + 1)` frames from the decoder's reference list.
+	 *
+	 * OSD-safe column: presets with `ref_enhance > 0` (SVC-T) leave
+	 * persistent chroma artefacts in static high-contrast overlays
+	 * (OSD text).  Confirmed by bench testing: even `rally` (1:1
+	 * SVC-T) shows green smear over the OSD area that won't clear
+	 * via stripes — only via IDR.  Root cause: chroma stays in
+	 * skip mode for static-content MBs, and intra-refresh stripes
+	 * landing in TRAIL_N frames don't propagate the chroma fix
+	 * into the DPB.  SDK exposes no force-intra-MB knob to fix it
+	 * (ROI is delta-QP only, doesn't override skip-mode for
+	 * zero-residual blocks).  See README.md for full discussion.
+	 *
+	 *   preset      nominal   enh  GOP    eff.wave  OSD-safe?
+	 *   ─────────────────────────────────────────────────────
+	 *   off         off       0    user   -         yes (no refresh)
+	 *   rescue      off       0    0.25s  -         yes (IDR-spam, lowest latency)
+	 *   quality     off       0    4.0s   -         yes (IDR-based)
+	 *   sprint      150ms     0    0.5s   150ms     yes (intra+short GOP)
+	 *   racing      150ms     0    2.0s   150ms     yes
+	 *   endurance   500ms     0    2.0s   500ms     yes
+	 *   patrol      500ms     0    4.0s   500ms     yes
+	 *   rally       150ms     1    2.0s   300ms     no  (light refPred)
+	 *   range       500ms     4    2.0s   2500ms    no  (heavy refPred)
+	 *   fpv        1000ms     4    2.0s   5000ms    no  (heaviest refPred)
+	 */
+	static const struct preset table[] = {
+		{ "off",        "off",      0, 0, 0.0 },   /* gopSize honoured */
+		{ "rescue",     "off",      0, 0, 0.25 },  /* IDR-spam, ~35% bitrate to IDRs */
+		{ "quality",    "off",      0, 0, 4.0 },
+		{ "sprint",     "fast",     0, 0, 0.5 },   /* intra-refresh + aggressive IDR */
+		{ "racing",     "fast",     0, 0, 2.0 },
+		{ "endurance",  "balanced", 0, 0, 2.0 },
+		{ "patrol",     "balanced", 0, 0, 4.0 },
+		{ "rally",      "fast",     1, 1, 2.0 },
+		{ "range",      "balanced", 1, 4, 2.0 },
+		{ "fpv",        "robust",   1, 4, 2.0 },
+	};
+
+	const char *want = (!name || !*name) ? "off" : name;
+	for (size_t i = 0; i < sizeof(table)/sizeof(table[0]); ++i) {
+		if (strcmp(want, table[i].name) != 0)
+			continue;
+		safe_strcpy(v->intra_refresh_mode,
+			sizeof(v->intra_refresh_mode), table[i].intra);
+		v->intra_refresh_lines = 0;
+		v->intra_refresh_qp = 0;
+		v->ref_base = table[i].ref_base;
+		v->ref_enhance = table[i].ref_enhance;
+		v->ref_pred = true;
+		if (table[i].gop_sec > 0.0)
+			v->gop_size = table[i].gop_sec;
+		return 0;
+	}
+	return -1;
+}
+
 static void load_video0(const cJSON *root, VencConfigVideo *v)
 {
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "video0");
 	if (!obj) return;
 
-	safe_strcpy(v->codec, sizeof(v->codec),
-		json_get_string(obj, "codec", v->codec));
+	/* "codec" is silently ignored — H.265 is hardcoded.  Existing
+	 * configs that set codec="h264" load cleanly; the value is
+	 * dropped and HEVC is used. */
 	safe_strcpy(v->rc_mode, sizeof(v->rc_mode),
 		json_get_string(obj, "rcMode", v->rc_mode));
 	v->fps = (uint32_t)json_get_int(obj, "fps", (int)v->fps);
@@ -326,18 +466,22 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		(int)v->scene_holdoff);
 	if (v->scene_holdoff < 1 && v->scene_threshold > 0) v->scene_holdoff = 1;
 
+	/* Resilience preset is the sole driver of intra-refresh + SVC-T
+	 * (refPred).  For named presets it also overrides gop_size; only
+	 * "off" preserves the user's gopSize value above.  Unknown values
+	 * fall back to "off". */
 	{
-		const char *m = json_get_string(obj, "intraRefreshMode",
-			v->intra_refresh_mode);
-		IntraRefreshMode parsed = intra_refresh_parse_mode(m);
-		safe_strcpy(v->intra_refresh_mode, sizeof(v->intra_refresh_mode),
-			intra_refresh_mode_name(parsed));
+		const char *rname = json_get_string(obj, "resilience",
+			v->resilience);
+		safe_strcpy(v->resilience, sizeof(v->resilience), rname);
+		if (venc_config_apply_resilience_preset(v->resilience, v) != 0) {
+			fprintf(stderr, "[config] WARNING: unknown video0.resilience "
+				"'%s' (use off|quality|racing|range|fpv) — falling "
+				"back to off\n", v->resilience);
+			safe_strcpy(v->resilience, sizeof(v->resilience), "off");
+			(void)venc_config_apply_resilience_preset("off", v);
+		}
 	}
-	v->intra_refresh_lines = (uint16_t)json_get_int(obj, "intraRefreshLines",
-		(int)v->intra_refresh_lines);
-	v->intra_refresh_qp = (uint8_t)json_get_int(obj, "intraRefreshQp",
-		(int)v->intra_refresh_qp);
-	if (v->intra_refresh_qp > 51) v->intra_refresh_qp = 51;
 
 	v->zoom_pct = json_get_double(obj, "zoomPct", v->zoom_pct);
 	v->zoom_x   = json_get_double(obj, "zoomX",   v->zoom_x);
@@ -449,8 +593,8 @@ static void load_snapshot(const cJSON *root, VencConfigSnapshot *s)
 	if (!obj) return;
 	s->enabled = json_get_bool(obj, "enabled", s->enabled);
 	s->quality = (uint32_t)json_get_int(obj, "quality", (int)s->quality);
-	if (s->quality < 1)  s->quality = 1;
-	if (s->quality > 99) s->quality = 99;
+	if (s->quality < 1)   s->quality = 1;
+	if (s->quality > 100) s->quality = 100;
 	s->channel = json_get_int(obj, "channel", s->channel);
 	s->width   = (uint32_t)json_get_int(obj, "width",  (int)s->width);
 	s->height  = (uint32_t)json_get_int(obj, "height", (int)s->height);
@@ -863,12 +1007,7 @@ static void render_sensor(PrettyBuf *p, const VencConfig *cfg, int is_last)
 {
 	pp_section_open(p, 1, "sensor");
 	pp_field_int(p,    2, "index",          cfg->sensor.index,          0);
-	pp_field_int(p,    2, "mode",           cfg->sensor.mode,           0);
-	pp_field_bool(p,   2, "unlockEnabled",  cfg->sensor.unlock_enabled, 0);
-	pp_field_uint(p,   2, "unlockCmd",      cfg->sensor.unlock_cmd,     0);
-	pp_field_uint(p,   2, "unlockReg",      cfg->sensor.unlock_reg,     0);
-	pp_field_uint(p,   2, "unlockValue",    cfg->sensor.unlock_value,   0);
-	pp_field_int(p,    2, "unlockDir",      cfg->sensor.unlock_dir,     1);
+	pp_field_int(p,    2, "mode",           cfg->sensor.mode,           1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -876,8 +1015,7 @@ static void render_isp(PrettyBuf *p, const VencConfig *cfg, int is_last)
 {
 	pp_section_open(p, 1, "isp");
 	pp_field_string(p, 2, "sensorBin",  cfg->isp.sensor_bin,  0);
-	pp_field_bool(p,   2, "legacyAe",   cfg->isp.legacy_ae,   0);
-	pp_field_string(p, 2, "aeMode",     cfg->isp.ae_mode,     0);
+	pp_field_string(p, 2, "aeEngine",   cfg->isp.ae_engine,   0);
 	pp_field_uint(p,   2, "aeFps",      cfg->isp.ae_fps,      0);
 	pp_field_uint(p,   2, "gainMax",    cfg->isp.gain_max,    0);
 	pp_field_string(p, 2, "awbMode",    cfg->isp.awb_mode,    0);
@@ -898,7 +1036,6 @@ static void render_image(PrettyBuf *p, const VencConfig *cfg, int is_last)
 static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 {
 	pp_section_open(p, 1, "video0");
-	pp_field_string(p, 2, "codec",  cfg->video0.codec,  0);
 	pp_field_string(p, 2, "rcMode", cfg->video0.rc_mode, 0);
 	pp_field_uint(p,   2, "fps",    cfg->video0.fps,    0);
 	if (cfg->video0.width > 0 && cfg->video0.height > 0) {
@@ -915,9 +1052,7 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_bool(p,   2, "frameLost",      cfg->video0.frame_lost,      0);
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
-	pp_field_string(p, 2, "intraRefreshMode", cfg->video0.intra_refresh_mode, 0);
-	pp_field_uint(p,   2, "intraRefreshLines", cfg->video0.intra_refresh_lines, 0);
-	pp_field_uint(p,   2, "intraRefreshQp",    cfg->video0.intra_refresh_qp,    0);
+	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
 	pp_field_double(p, 2, "zoomPct",           cfg->video0.zoom_pct,            0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
 	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              1);
@@ -1060,19 +1195,13 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	if (snr) {
 		cJSON_AddNumberToObject(snr, "index", cfg->sensor.index);
 		cJSON_AddNumberToObject(snr, "mode", cfg->sensor.mode);
-		cJSON_AddBoolToObject(snr, "unlockEnabled", cfg->sensor.unlock_enabled);
-		cJSON_AddNumberToObject(snr, "unlockCmd", cfg->sensor.unlock_cmd);
-		cJSON_AddNumberToObject(snr, "unlockReg", cfg->sensor.unlock_reg);
-		cJSON_AddNumberToObject(snr, "unlockValue", cfg->sensor.unlock_value);
-		cJSON_AddNumberToObject(snr, "unlockDir", cfg->sensor.unlock_dir);
 	}
 
 	/* isp */
 	cJSON *isp = cJSON_AddObjectToObject(root, "isp");
 	if (isp) {
 		cJSON_AddStringToObject(isp, "sensorBin", cfg->isp.sensor_bin);
-		cJSON_AddBoolToObject(isp, "legacyAe", cfg->isp.legacy_ae);
-		cJSON_AddStringToObject(isp, "aeMode", cfg->isp.ae_mode);
+		cJSON_AddStringToObject(isp, "aeEngine", cfg->isp.ae_engine);
 		cJSON_AddNumberToObject(isp, "aeFps", cfg->isp.ae_fps);
 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);
 		cJSON_AddStringToObject(isp, "awbMode", cfg->isp.awb_mode);
@@ -1091,7 +1220,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	/* video0 */
 	cJSON *vid = cJSON_AddObjectToObject(root, "video0");
 	if (vid) {
-		cJSON_AddStringToObject(vid, "codec", cfg->video0.codec);
 		cJSON_AddStringToObject(vid, "rcMode", cfg->video0.rc_mode);
 		cJSON_AddNumberToObject(vid, "fps", cfg->video0.fps);
 		if (cfg->video0.width > 0 && cfg->video0.height > 0) {
@@ -1108,12 +1236,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(vid, "frameLost", cfg->video0.frame_lost);
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
-		cJSON_AddStringToObject(vid, "intraRefreshMode",
-			cfg->video0.intra_refresh_mode);
-		cJSON_AddNumberToObject(vid, "intraRefreshLines",
-			cfg->video0.intra_refresh_lines);
-		cJSON_AddNumberToObject(vid, "intraRefreshQp",
-			cfg->video0.intra_refresh_qp);
+		cJSON_AddStringToObject(vid, "resilience", cfg->video0.resilience);
 		cJSON_AddNumberToObject(vid, "zoomPct", cfg->video0.zoom_pct);
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);

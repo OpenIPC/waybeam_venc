@@ -34,7 +34,7 @@ VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
 # LDFLAGS only (it's a link-time strip flag; not valid during -c).
 COMMON_CFLAGS := -Os -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VERSION=\"$(VENC_VERSION)\" -D_GNU_SOURCE -MMD -MP
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c lib/cJSON.c
-HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c
+HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_respawn.c
 MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c
 RECORDER_SRC := src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c
@@ -98,11 +98,11 @@ help:
 	@echo "  make json_cli SOC_BUILD=maruko  Build out/<soc>/json_cli (vendored from waybeam-hub)"
 	@echo "  make regscan SOC_BUILD=maruko   Build out/<soc>/regscan (IMX335/IMX415 i2c register dumper)"
 	@echo "  make maruko-pull HOST=root@<ip>  Pull libs/drivers/isp-bins from a device"
-	@echo "  make maruko-deploy HOST=root@<ip>  Build + deploy waybeam (binary only) cycle"
+	@echo "  make maruko-deploy HOST=root@<ip>  Build + deploy venc (binary only) cycle"
 	@echo "  make maruko-full   HOST=root@<ip>  Full bring-up: binary + libs + drivers + ISP bins"
 	@echo "  make remote-test Run bounded remote CLI/test-binary workflow (pass ARGS='...')"
-	@echo "  scripts/star6e_direct_deploy.sh cycle  Preferred Star6E waybeam deploy+HTTP smoke test"
-	@echo "  scripts/maruko_direct_deploy.sh cycle  Preferred Maruko waybeam deploy+HTTP smoke test"
+	@echo "  scripts/star6e_direct_deploy.sh cycle  Preferred Star6E venc deploy+HTTP smoke test"
+	@echo "  scripts/maruko_direct_deploy.sh cycle  Preferred Maruko venc deploy+HTTP smoke test"
 	@echo "  make verify      Build both backends and verify binaries exist"
 	@echo "  make pre-pr      Full pre-PR checklist (version, changelog, build)"
 	@echo "  make webui       Regenerate src/venc_webui.c from web/dashboard.html"
@@ -154,8 +154,8 @@ $(TIMING_PROBE_TARGET): $(TIMING_PROBE_SRC) include/rtp_sidecar.h
 	$(HOST_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE -Iinclude $(TIMING_PROBE_SRC) -lm -o $@
 
 # json_cli — vendored from waybeam-hub (tools/json_cli/{json_cli.c,jsmn.h}).
-# Cross-compiled with the SOC's toolchain so the same binary that runs waybeam
-# can also read/patch /etc/waybeam.json on the target.
+# Cross-compiled with the SOC's toolchain so the same binary that runs venc
+# can also read/patch /etc/venc.json on the target.
 json_cli: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
 json_cli: $(JSON_CLI_TARGET)
 
@@ -165,8 +165,8 @@ $(JSON_CLI_TARGET): tools/json_cli/json_cli.c tools/json_cli/jsmn.h
 
 # regscan — Sony IMX335/IMX415 sensor register dumper.  Vendored from
 # tipoman9/star6c_sensor; see tools/regscan/NOTICE.  Built with the SOC
-# toolchain so it can read /dev/i2c-* on the target alongside waybeam.
-# Used by scripts/maruko_sensor_init_diff.sh for firstboot/majestic/waybeam
+# toolchain so it can read /dev/i2c-* on the target alongside venc.
+# Used by scripts/maruko_sensor_init_diff.sh for firstboot/majestic/venc
 # register-state diffs.
 regscan: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
 regscan: $(REGSCAN_TARGET)

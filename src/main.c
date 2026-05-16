@@ -6,9 +6,7 @@
 #include <unistd.h>
 
 #include "backend.h"
-#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)
-#include "star6e_runtime.h"
-#endif
+#include "venc_respawn.h"
 
 /* Single-instance gate.  We walk /proc and reject startup if any
  * other userspace process has comm "waybeam".  An earlier flock-based
@@ -117,14 +115,13 @@ int main(int argc, char* argv[])
 	printf("> SoC backend build: %s\n", backend->name);
 	int rc = backend_execute(backend);
 
-#if defined(PLATFORM_STAR6E) && !defined(PLATFORM_MARUKO)
-	/* SIGHUP / /api/v1/restart on Star6E exits cleanly here and forks
-	 * a successor process for true cold restart.  See
-	 * star6e_runtime_respawn_after_exit() for the rationale —
-	 * in-process MI_SYS_Exit + MI_SYS_Init is broken on this BSP. */
-	if (star6e_runtime_respawn_pending())
-		star6e_runtime_respawn_after_exit();
-#endif
+	/* SIGHUP / /api/v1/restart / resilience ref_* delta exits cleanly
+	 * here and forks a successor process for a true cold restart.
+	 * Shared between both backends — both BSPs have the same
+	 * limitation: in-process MI_SYS_Exit + MI_SYS_Init does not yield
+	 * a clean kernel state.  See include/venc_respawn.h. */
+	if (venc_respawn_pending())
+		venc_respawn_after_exit();
 
 	return rc;
 }

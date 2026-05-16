@@ -46,10 +46,24 @@ typedef struct {
 
 typedef struct {
 	char sensor_bin[VENC_CONFIG_STRING_MAX];
-	bool legacy_ae;        /* true = use legacy ISP AE + handoff instead of custom AE */
-	char ae_mode[16];      /* Maruko only: "native" (SDK runs AE/AWB at sensor
-	                        * rate, default) or "throttle" (no-op AE adaptor +
-	                        * 15 Hz manual SetAeParam, ~24% lower CPU). */
+	/* Unified AE engine selector — replaces the per-backend
+	 * `legacy_ae` (Star6E) + `ae_mode` (Maruko) pair.  Two values:
+	 *   "sdk"    — SDK firmware runs AE.  Star6E: skip start_custom_ae
+	 *              and let the ISP bin's AE drive (legacy_ae=true).
+	 *              Maruko: NATIVE AE algo runs inside 3A_Proc_0 at
+	 *              sensor rate (ae_mode="native").
+	 *   "custom" — userspace cus3a takes over.  Star6E: start_custom_ae
+	 *              spins the supervisory thread (legacy_ae=false).
+	 *              Maruko: no-op AE adaptor + supervisory SetAeParam
+	 *              thread at ae_fps Hz (ae_mode="throttle").
+	 *
+	 * The parser keeps the per-backend `legacy_ae` + `ae_mode` struct
+	 * fields populated from this selector so existing call sites in
+	 * star6e_runtime.c, star6e_pipeline.c, and maruko_pipeline.c need
+	 * no change.  Unknown values fall back to "sdk". */
+	char ae_engine[8];     /* "sdk" (default) | "custom" */
+	bool legacy_ae;        /* derived from ae_engine (Star6E call sites) */
+	char ae_mode[16];      /* derived from ae_engine (Maruko call sites) */
 	uint32_t ae_fps;       /* custom AE rate in Hz (default 15) */
 	uint32_t gain_max;     /* max sensor gain (0 = use ISP bin default) */
 	char awb_mode[16];     /* "auto" or "ct_manual" */
@@ -68,7 +82,9 @@ typedef struct {
 } VencConfigImage;
 
 typedef struct {
-	char codec[16];        /* "h264" or "h265" */
+	/* Video codec is always H.265 — the encoder, RTP path, intra-refresh
+	 * scheduler, and SVC-T refPred all assume HEVC.  H.264 was retired
+	 * with the resilience-preset consolidation. */
 	char rc_mode[16];      /* "cbr", "vbr", "avbr", "qvbr" */
 	uint32_t fps;
 	uint32_t width;
@@ -79,9 +95,27 @@ typedef struct {
 	bool frame_lost;           /* enable frame-lost safety net */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
+	/* Derived from `resilience` preset only.  Not part of the JSON
+	 * schema or HTTP API — written exclusively by
+	 * apply_resilience_preset() at load time.  Do not parse from JSON,
+	 * do not register in g_fields[].  Pipeline code reads these to
+	 * drive MI_VENC_SetIntraRefresh / MI_VENC_SetRefParam. */
 	char intra_refresh_mode[16]; /* "off" | "fast" | "balanced" | "robust" */
-	uint16_t intra_refresh_lines; /* MB/LCU rows refreshed per P-frame; 0 = mode auto */
-	uint8_t intra_refresh_qp;  /* I-MB QP override for stripe; 0 = codec default (48 H.265 / 45 H.264) */
+	uint16_t intra_refresh_lines; /* CTU rows refreshed per P-frame */
+	uint8_t intra_refresh_qp;  /* I-CTU QP override for stripe */
+	uint8_t ref_base;          /* SVC-T base-layer period; 0 = off */
+	uint8_t ref_enhance;       /* SVC-T enhance-layer ratio */
+	bool ref_pred;             /* SVC-T enhance→base prediction */
+	/* Resilience preset — sole user-facing knob for intra-refresh +
+	 * SVC-T refPred + GOP.  Recognised values: "off", "quality",
+	 * "racing", "range", "fpv".  Every recognised value (including
+	 * "off") overwrites the granular intra_refresh_* and ref_*
+	 * fields with the preset's expansion; named presets additionally
+	 * override gop_size, while "off" preserves the user's gopSize
+	 * and disables both intra-refresh and refPred.  Unknown values
+	 * fall back to "off".  See apply_resilience_preset() in
+	 * src/venc_config.c for the canonical table. */
+	char resilience[16];
 	/* Approach-C digital zoom: zoom_pct shrinks BOTH the input crop and
 	 * the encoded output dim — SCL runs 1:1, no upscale, no bandwidth
 	 * pressure.  The receiver sees the smaller resolution in SPS/PPS.
@@ -212,6 +246,16 @@ char *venc_config_to_json_string(const VencConfig *cfg);
 /* Save current config to a JSON file at path.
  * Returns 0 on success, -1 on write error. */
 int venc_config_save(const char *path, const VencConfig *cfg);
+
+/* Expand a resilience preset name into the derived intra_refresh_*, ref_*,
+ * and (for named presets) gop_size fields of `v`.  Mirrors what the disk
+ * loader does in load_video0() — exposed so the HTTP-API can evaluate the
+ * delta a preset change *would* produce before deciding whether to take
+ * the live-reinit path or the reboot-required path.
+ *
+ * Returns 0 on success ("off" or recognised preset), or -1 if `name` is
+ * not recognised (caller should warn / fall back to "off"). */
+int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v);
 
 #ifdef __cplusplus
 }

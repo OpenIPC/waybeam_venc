@@ -34,7 +34,7 @@ several places (see "Surprises vs docs" below).
 | ~~Audio capture (MI_AI)~~ | ~~`star6e_audio.c` 738 lines~~ | **Closed in v0.9.15** — full Phase 5 port: vendor `libmi_ai.so` / `libmi_ao.so`, new `maruko_ai_impl` shim, new `src/maruko_audio.c` against the i6c `Open/AttachIf/EnableChnGroup/Read/ReleaseData` API.  Shared `audio_codec.{c,h}` helper hosts Opus / G.711 / stdout-filter for both backends.  Maruko TS files automatically gain audio PMT when capture is active. | — |
 | ~~TS recording (mirror + dual)~~ | ~~`star6e_ts_recorder.c` 421 + `ts_mux.c` 430~~ | **Closed in v0.9.14** — promoted recorder sources to shared `RECORDER_SRC`, added `src/maruko_ts_recorder.c` adapter for `i6c_venc_strm`, wired `mode="mirror"` (chn 0) and `mode="dual"` (chn 1). Raw `.hevc` mode + HTTP record start/stop deferred to Phase 6.5. | — |
 | Dual VENC (Gemini mode) | `star6e_pipeline.c:1335-1426`, `star6e_runtime.c:528-555` | None | High — needs SDK probe |
-| 3A perf throttle | n/a (Star6E has cus3a; Maruko's NATIVE 3A_Proc_0 spends ~60% CPU at 120 fps) | **Closed in v0.9.12 (PR #83)** — opt-in `isp.aeMode="throttle"` swaps SDK NATIVE AE for a no-op AE adaptor + 15 Hz manual `SetAeParam`; saves ~24% sys CPU at 120 fps. Default `"native"` preserves existing behaviour. | — |
+| 3A perf throttle | n/a (Star6E has cus3a; Maruko's NATIVE 3A_Proc_0 spends ~60% CPU at 120 fps) | **Closed in v0.9.12 (PR #83)** — opt-in `isp.aeMode="throttle"` swaps SDK NATIVE AE for a no-op AE adaptor + 15 Hz manual `SetAeParam`; saves ~24% sys CPU at 120 fps. Default `"native"` preserves existing behaviour.  **Renamed in 0.10.13:** `isp.aeMode` was unified with Star6E's `isp.legacyAe` into `isp.aeEngine` (`"custom"` = the throttle path, `"sdk"` = native). | — |
 
 ### N/A on Maruko (SDK-limited)
 
@@ -360,8 +360,9 @@ NATIVE path. Saves ~24% sys CPU at 120 fps on Cortex-A7 (60% → 36% sys);
 IQ knobs still respond instantly because `MI_ISP_EnableUserspace3A`
 keeps the IQ→HW pump alive.
 
-- Opt-in via config field `isp.aeMode = "throttle"`; default
-  `"native"` preserves existing behaviour and gives a safety hatch if a
+- Opt-in via config field `isp.aeEngine = "custom"` (was
+  `isp.aeMode = "throttle"` before the 0.10.13 unification); default
+  `"sdk"` preserves existing behaviour and gives a safety hatch if a
   different sensor / firmware breaks the no-op adaptor.
 - Verified on 192.168.2.12: `native` ~50% CPU, `throttle` ~36% CPU at
   120 fps.

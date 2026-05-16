@@ -43,6 +43,10 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s", "native");
 	snprintf(cfg->intra_refresh_mode, sizeof(cfg->intra_refresh_mode),
 		"%s", "off");
+	cfg->ref_base = 0;
+	cfg->ref_enhance = 0;
+	cfg->ref_pred = 1;
+	snprintf(cfg->resilience, sizeof(cfg->resilience), "%s", "off");
 	memset(&cfg->imu, 0, sizeof(cfg->imu));
 	memset(&cfg->audio, 0, sizeof(cfg->audio));
 	cfg->audio_port = 5601;
@@ -91,7 +95,7 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 		(strcmp(vcfg->outgoing.stream_mode, "compact") == 0) ?
 		MARUKO_STREAM_COMPACT : MARUKO_STREAM_RTP;
 
-	if (codec_config_resolve_codec_rc(vcfg->video0.codec, vcfg->video0.rc_mode,
+	if (codec_config_resolve_codec_rc(vcfg->video0.rc_mode,
 	    &cfg->rc_codec, &cfg->rc_mode) != 0) {
 		return -1;
 	}
@@ -119,6 +123,11 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 		vcfg->video0.intra_refresh_mode);
 	cfg->intra_refresh_lines = vcfg->video0.intra_refresh_lines;
 	cfg->intra_refresh_qp = vcfg->video0.intra_refresh_qp;
+	cfg->ref_base = vcfg->video0.ref_base;
+	cfg->ref_enhance = vcfg->video0.ref_enhance;
+	cfg->ref_pred = vcfg->video0.ref_pred ? 1 : 0;
+	snprintf(cfg->resilience, sizeof(cfg->resilience), "%s",
+		vcfg->video0.resilience);
 	cfg->gop_size_sec = vcfg->video0.gop_size;
 	cfg->zoom_pct = vcfg->video0.zoom_pct;
 	cfg->zoom_x   = vcfg->video0.zoom_x;

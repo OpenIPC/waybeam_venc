@@ -40,15 +40,14 @@ typedef struct {
 IntraRefreshMode intra_refresh_parse_mode(const char *s);
 const char      *intra_refresh_mode_name(IntraRefreshMode m);
 
-/* Compute derived parameters. `is_h265` selects LCU size (32 for H.265,
- * 16 for H.264) and codec-default QP (48 for H.265, 45 for H.264).
+/* Compute derived parameters for H.265 (CTU=32).
  * `override_lines==0` means "use mode auto", `override_qp==0` means
  * "use codec default", `explicit_gop_sec>0` suppresses auto-GOP.
  *
  * Always populates `*out`; for OFF mode all fields are zero. */
 void intra_refresh_compute(
 	IntraRefreshMode mode,
-	uint32_t height, uint32_t fps, int is_h265,
+	uint32_t height, uint32_t fps,
 	uint32_t override_lines,
 	uint32_t override_qp,
 	double   explicit_gop_sec,

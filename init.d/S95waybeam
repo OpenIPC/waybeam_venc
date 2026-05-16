@@ -17,14 +17,6 @@ still_running() {
     pidof "$DAEMON" "$RESPAWN" "$WATCHDOG" >/dev/null 2>&1
 }
 
-# Narrower check: only the main daemon comm.  start()'s post-launch poll
-# uses this so an orphan "$RESPAWN" helper can't mask a failed start —
-# if the new waybeam loses the /proc-walk duplicate-instance check and
-# exits, this returns false even when the orphan is still alive.
-main_running() {
-    pidof "$DAEMON" >/dev/null 2>&1
-}
-
 wait_exit() {
     # Wait up to 15 seconds for the daemon (and any orphan helper) to
     # fully exit.
@@ -50,13 +42,12 @@ start() {
     # Confirm the daemon survived the /proc-walk duplicate-instance
     # gate.  If an orphan respawn child is still alive it will reject
     # us with "waybeam already running... exiting" and the bg launch
-    # discards that exit status — poll for the main comm specifically
-    # so a lost race surfaces as FAILED instead of silently leaving
-    # the old binary running.
+    # discards that exit status — poll briefly so a lost race surfaces
+    # as FAILED instead of silently leaving the old binary running.
     i=0
     while [ $i -lt 10 ]; do
         sleep 0.3
-        main_running && { echo "OK"; return 0; }
+        still_running && { echo "OK"; return 0; }
         i=$((i + 1))
     done
     echo "FAILED (lost duplicate-instance check or crashed at init — see $LOG_PATH)"

@@ -298,6 +298,10 @@ static int i6e_venc_load(star6e_venc_impl *venc)
 		int (*)(int, void *), "MI_VENC_SetIntraRefresh");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetIntraRefresh,
 		int (*)(int, void *), "MI_VENC_GetIntraRefresh");
+	LOAD_SYM(venc, "libmi_venc.so", fnSetRefParam,
+		int (*)(int, void *), "MI_VENC_SetRefParam");
+	LOAD_SYM(venc, "libmi_venc.so", fnGetRefParam,
+		int (*)(int, void *), "MI_VENC_GetRefParam");
 
 	if (!venc->fnCreateChn || !venc->fnDestroyChn ||
 	    !venc->fnStartRecvPic || !venc->fnStopRecvPic ||

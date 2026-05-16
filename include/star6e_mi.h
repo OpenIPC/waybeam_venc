@@ -98,6 +98,8 @@ typedef struct {
 	/* Optional — may be NULL on older libmi_venc.so builds. */
 	int (*fnSetIntraRefresh)(int chn, void *cfg);
 	int (*fnGetIntraRefresh)(int chn, void *cfg);
+	int (*fnSetRefParam)(int chn, void *p);
+	int (*fnGetRefParam)(int chn, void *p);
 } star6e_venc_impl;
 
 /* Global instances — defined in star6e_mi.c.

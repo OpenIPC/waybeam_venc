@@ -63,13 +63,13 @@ jobs:
         run: make build
       - name: Verify outputs
         run: |
-          test -x out/star6e/waybeam
+          test -x out/star6e/venc
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: star6e-standalone-binaries
           path: |
-            out/star6e/waybeam
+            out/star6e/venc
 
   build-maruko:
     runs-on: ubuntu-latest
@@ -81,9 +81,9 @@ jobs:
       - name: Build Maruko binary
         run: make build SOC_BUILD=maruko
       - name: Verify output
-        run: test -x out/maruko/waybeam
+        run: test -x out/maruko/venc
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: maruko-binary
-          path: out/maruko/waybeam
+          path: out/maruko/venc

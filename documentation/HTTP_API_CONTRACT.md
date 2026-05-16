@@ -100,10 +100,10 @@ Response `200`:
   "data": {
     "config": {
       "system": { "webPort": 80, "overclockLevel": 2, "verbose": false },
-      "sensor": { "index": -1, "mode": -1, "unlockEnabled": true, "..." : "..." },
-      "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
+      "sensor": { "index": -1, "mode": -1 },
+      "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "frameLost": true, "sceneThreshold": 0, "sceneHoldoff": 2, "intraRefreshMode": "off", "intraRefreshLines": 0, "intraRefreshQp": 0, "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5 },
+      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "frameLost": true, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5 },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -142,13 +142,10 @@ Response `200`:
       "video0.fps": { "mutability": "live", "supported": true },
       "video0.gop_size": { "mutability": "live", "supported": true },
       "video0.qp_delta": { "mutability": "live", "supported": true },
-      "video0.codec": { "mutability": "restart_required", "supported": true },
       "video0.size": { "mutability": "restart_required", "supported": true },
       "video0.scene_threshold": { "mutability": "restart_required", "supported": true },
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
-      "video0.intra_refresh_mode": { "mutability": "restart_required", "supported": true },
-      "video0.intra_refresh_lines": { "mutability": "restart_required", "supported": true },
-      "video0.intra_refresh_qp": { "mutability": "restart_required", "supported": true },
+      "video0.resilience": { "mutability": "restart_required", "supported": true },
       "video0.zoom_pct": { "mutability": "restart_required", "supported": true },
       "video0.zoom_x": { "mutability": "live", "supported": true },
       "video0.zoom_y": { "mutability": "live", "supported": true },
@@ -183,11 +180,11 @@ Read a single config field. The field name is the query parameter key (no value 
 # Read current bitrate
 curl "http://<device-ip>/api/v1/get?video0.bitrate"
 
-# Read current codec
-curl "http://<device-ip>/api/v1/get?video0.codec"
-
 # Read current qpDelta
 curl "http://<device-ip>/api/v1/get?video0.qp_delta"
+
+# Read current resilience preset
+curl "http://<device-ip>/api/v1/get?video0.resilience"
 
 # Read a string field
 curl "http://<device-ip>/api/v1/get?isp.sensor_bin"
@@ -198,7 +195,7 @@ Response `200`:
 {"ok":true,"data":{"field":"video0.bitrate","value":8192}}
 ```
 ```json
-{"ok":true,"data":{"field":"video0.codec","value":"h265"}}
+{"ok":true,"data":{"field":"video0.resilience","value":"off"}}
 ```
 ```json
 {"ok":true,"data":{"field":"video0.qp_delta","value":0}}
@@ -325,14 +322,17 @@ curl "http://<device-ip>/api/v1/set?video0.sceneHoldoff=2"
 **Validation errors** — some values are rejected before being applied:
 
 ```bash
-# Attempt to switch Star6E RTP mode to h264
+# Attempt to set the retired video0.codec field
 curl "http://<device-ip>/api/v1/set?video0.codec=h264"
 ```
 
-Error `409`:
+Error `404`:
 ```json
-{"ok":false,"error":{"code":"validation_failed","message":"star6e RTP mode currently supports h265 only"}}
+{"ok":false,"error":{"code":"not_found","message":"unknown config field"}}
 ```
+
+Video codec is hardcoded H.265; the field was retired with the
+resilience-preset consolidation (see HISTORY 0.10.12).
 
 Error `501` — apply callback not available:
 ```json
@@ -1229,9 +1229,11 @@ Behavior:
    returning. `/api/v1/defaults` persists compiled defaults. `/api/v1/restart`
    reloads the on-disk config and does not synthesize new changes by itself.
 
-2. **Codec restriction is backend-specific.** Star6E RTP mode requires
-   `video0.codec=h265`, so attempting to set `video0.codec=h264` there returns
-   a `409` error. Maruko accepts both `h264` and `h265`.
+2. **Video codec is hardcoded H.265.** The `video0.codec` field was
+   retired in 0.10.12. Setting it via `/api/v1/set` returns `404`
+   `unknown config field`. Legacy configs containing
+   `"codec": "h264"` or `"h265"` load cleanly — the key is ignored
+   and HEVC is used unconditionally.
 
 3. **BusyBox compatibility.** All endpoints use `GET` method so they work with
    BusyBox `wget` (which only supports GET):
@@ -1264,10 +1266,10 @@ divergence is listed.  As of `contract_version: 0.10.1`:
 | `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
 | `/api/v1/transport/status` | yes | yes | SHM-ring fields are shown when `outgoing.server=shm://`; otherwise the UDP/Unix subset. |
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
-| `video0.codec=h264` | rejected with 409 | accepted | Star6E RTP mode is HEVC-only on this build. |
+| `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
 | `video0.zoom_pct` / `zoom_x` / `zoom_y` | yes | yes | `zoom_pct` requires reinit; `zoom_x/y` are live pan controls. |
-| `isp.aeMode` ("native" / "throttle") | accepted but no-op | applied | Maruko-only opt-in; switching modes mid-run requires a process restart.  Default `"native"` on both backends. |
+| `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
 
 ## Change Log (Contract)
 - `0.10.1`:

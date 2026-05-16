@@ -15,6 +15,7 @@
 #include "venc_api.h"
 #include "venc_config.h"
 #include "venc_httpd.h"
+#include "venc_respawn.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -79,7 +80,80 @@ static uint32_t star6e_scene_frame_size(const MI_VENC_Stream_t *s)
 	return t;
 }
 
-static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s, int codec)
+/* HEVC NAL types relevant for non-reference rewriting */
+#define HEVC_NAL_TRAIL_N 0
+#define HEVC_NAL_TRAIL_R 1
+#define SS_REFTYPE_ENHANCE_P_NOTFORREF 4
+
+/* Locate the NAL header byte 0 inside a payload buffer that may or may not
+ * begin with a start-code prefix (00 00 01 / 00 00 00 01).  Returns the
+ * index of NAL byte 0, or len on failure. */
+static size_t star6e_nal_header_idx(const uint8_t *buf, size_t len)
+{
+	size_t i = 0;
+	while (i < len && buf[i] == 0) i++;
+	if (i < len && buf[i] == 0x01) i++;
+	return i < len ? i : len;
+}
+
+/* If a NAL is TRAIL_R (type 1) and the SDK marked this frame as
+ * ENHANCE_P_NOTFORREF, rewrite the NAL header to TRAIL_N (type 0).
+ *
+ * Byte 0 bit layout: forbidden_zero(1) | nal_unit_type(6) | layer_id_msb(1)
+ *   TRAIL_R = 0x02   (type=1, layer_msb=0)
+ *   TRAIL_N = 0x00   (type=0, layer_msb=0)
+ *
+ * No-op if NAL layer_id_msb != 0 (we only touch single-layer streams), if
+ * the NAL is anything other than TRAIL_R, or if no slice NALs are present
+ * in the pack (we never touch VPS/SPS/PPS — those are nal_type >= 32 and
+ * fail the TRAIL_R check). */
+static void star6e_patch_pack_to_trail_n(MI_VENC_Pack_t *pack)
+{
+	if (!pack || !pack->data || pack->length == 0)
+		return;
+	if (pack->packNum > 0) {
+		const unsigned int info_cap = (unsigned int)(sizeof(pack->packetInfo) /
+			sizeof(pack->packetInfo[0]));
+		unsigned int n = pack->packNum > info_cap ? info_cap : pack->packNum;
+		unsigned int k;
+		for (k = 0; k < n; ++k) {
+			MI_U32 off = pack->packetInfo[k].offset;
+			MI_U32 nlen = pack->packetInfo[k].length;
+			if (off >= pack->length || nlen == 0 ||
+			    off + nlen > pack->length)
+				continue;
+			size_t hdr = star6e_nal_header_idx(pack->data + off, nlen);
+			if (hdr >= nlen) continue;
+			if (pack->data[off + hdr] == 0x02) {
+				pack->data[off + hdr] = 0x00;
+			}
+		}
+		return;
+	}
+	/* packNum == 0: single NAL */
+	if (pack->offset >= pack->length)
+		return;
+	{
+		MI_U32 off = pack->offset;
+		MI_U32 nlen = pack->length - off;
+		size_t hdr = star6e_nal_header_idx(pack->data + off, nlen);
+		if (hdr >= nlen) return;
+		if (pack->data[off + hdr] == 0x02) {
+			pack->data[off + hdr] = 0x00;
+		}
+	}
+}
+
+static void star6e_patch_stream_to_trail_n(MI_VENC_Stream_t *s)
+{
+	unsigned int i;
+	if (!s || !s->packet) return;
+	for (i = 0; i < s->count; i++)
+		star6e_patch_pack_to_trail_n(&s->packet[i]);
+}
+
+/* HEVC-only since 0.10.12: IDR_W_RADL = nal_type 19. */
+static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s)
 {
 	unsigned int i;
 	if (!s || !s->packet) return 0;
@@ -88,14 +162,11 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s, int codec)
 		unsigned int k, n = p->packNum > 8 ? 8 : p->packNum;
 		if (n > 0) {
 			for (k = 0; k < n; k++) {
-				if (codec == 0 && p->packetInfo[k].packType.h264Nalu == 5)
-					return 1;
-				if (codec != 0 && p->packetInfo[k].packType.h265Nalu == 19)
+				if (p->packetInfo[k].packType.h265Nalu == 19)
 					return 1;
 			}
 		} else {
-			if (codec == 0 && p->naluType.h264Nalu == 5) return 1;
-			if (codec != 0 && p->naluType.h265Nalu == 19) return 1;
+			if (p->naluType.h265Nalu == 19) return 1;
 		}
 	}
 	return 0;
@@ -625,142 +696,11 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
  * MI_DEVICE_Open hangs and VIF "layout type 2 bindmode 4 not sync err"
  * after one or two cycles.  Empirically verified on imx335 @ 192.168.1.13.
  *
- * The only reliable cold restart is a *new PID*.  Approach: handle_reinit
- * sets a flag; main exits cleanly via the normal teardown path; the
- * backend's last act before main returns is to fork a child, parent
- * exits, child execv's a fresh venc.  Forking AFTER teardown is critical
- * — if we forked before, the child would inherit MI device fds and the
- * kernel's per-pid cleanup wouldn't fully fire when the parent calls
- * MI_SYS_Exit.  Bench-validated against 12 consecutive cross-mode sensor
- * SIGHUPs (rounds 0→1→2→3 ×3) with no degradation. */
-
-static int g_respawn_after_exit = 0;
-
-void star6e_runtime_respawn_after_exit(void)
-{
-	/* Capture our PID BEFORE fork.  The child cannot use getppid()
-	 * to learn it: by the time the child first runs, the parent may
-	 * already have exited (we are about to return into main, which
-	 * exits immediately), so the child gets reparented to init/
-	 * subreaper and getppid() returns 1.  COW inheritance carries
-	 * this static across fork verbatim. */
-	pid_t parent_pid = getpid();
-	pid_t child = fork();
-
-	if (child < 0) {
-		fprintf(stderr,
-			"ERROR: fork() for respawn failed: %s — process exiting\n",
-			strerror(errno));
-		return;
-	}
-
-	if (child > 0) {
-		fprintf(stderr,
-			"> Respawning: parent %d → child %d\n",
-			(int)getpid(), (int)child);
-		return;
-	}
-
-	(void)prctl(PR_SET_NAME, VENC_COMM_RESPAWN, 0, 0, 0);
-
-	/* Wait for the parent to ACTUALLY exit before we exec.  The previous
-	 * heuristic (getppid() != 1) is unreliable under procd / systemd /
-	 * any process that calls PR_SET_CHILD_SUBREAPER: when the parent
-	 * dies, we reparent to the subreaper instead of init, so getppid()
-	 * never reaches 1 and the loop times out while the parent is still
-	 * alive — the new image then runs while the old SDK state is
-	 * still owned by the dying parent.
-	 *
-	 * Polling kill(parent_pid, 0) for ESRCH is the authoritative test:
-	 * it reports the actual death of that specific PID regardless of
-	 * who the new parent is.  Cap raised to 30 s because MI_SYS_Exit
-	 * can stall in D-state on Star6E during teardown (observed: ~9
-	 * load-avg with the pipeline draining).  On timeout, abort the
-	 * exec rather than racing live SDK state — silently losing the
-	 * SIGHUP is better than two venc's stomping on each other. */
-	int waited_ms = 0;
-	const int wait_cap_ms = 30 * 1000;
-	while (waited_ms < wait_cap_ms) {
-		if (kill(parent_pid, 0) == -1 && errno == ESRCH)
-			break;
-		usleep(100 * 1000);
-		waited_ms += 100;
-	}
-	fprintf(stderr,
-		"> Respawn child: parent pid %d gone after %d ms, proceeding to exec\n",
-		(int)parent_pid, waited_ms);
-	if (waited_ms >= wait_cap_ms) {
-		/* stderr is unbuffered and still wired to the parent's log
-		 * sink at this point — emit before the dup2 swap so the
-		 * message lands in the same /tmp/venc.log tail an operator
-		 * will check. */
-		fprintf(stderr,
-			"ERROR: respawn child timed out after %d s waiting "
-			"for parent pid %d to exit — aborting exec to avoid "
-			"racing live SDK state.  Parent likely stuck in "
-			"MI_SYS teardown; reboot may be required.\n",
-			wait_cap_ms / 1000, (int)parent_pid);
-		_exit(1);
-	}
-
-	sigset_t empty;
-	sigemptyset(&empty);
-	sigprocmask(SIG_SETMASK, &empty, NULL);
-
-	/* Re-route stdout/stderr to /tmp/venc.log in append mode so the
-	 * pre-respawn tail stays available for diagnosis.  If dup2 fails
-	 * (e.g. fd table exhaustion from a leaked descriptor we missed in
-	 * teardown) bail before execv — running blind would lose any panic
-	 * output the fresh venc emits. */
-	int log = open(VENC_LOG_PATH,
-		O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-	if (log >= 0) {
-		if (dup2(log, STDOUT_FILENO) < 0 ||
-		    dup2(log, STDERR_FILENO) < 0)
-			_exit(127);
-		if (log > 2)
-			close(log);
-	}
-
-	/* Scrub all non-stdio fds before execv: the SigmaStar SDK opens
-	 * /dev/mi_poll (and a few other internal fds) without CLOEXEC, and
-	 * MI_SYS_Exit does not release every one of them.  Without this
-	 * scrub, every respawn cycle leaks 1+ mi_poll fds; a long-running
-	 * device hits the per-process fd cap eventually.  Source-level
-	 * O_CLOEXEC on our own opens (sockets, pipes, recorder, IMU,
-	 * config, /dev/null) is still in effect and makes this loop a
-	 * narrow safety net rather than the primary defence. */
-	{
-		DIR *d = opendir("/proc/self/fd");
-		if (d) {
-			int dfd_keep = dirfd(d);
-			struct dirent *e;
-			while ((e = readdir(d)) != NULL) {
-				if (!isdigit((unsigned char)e->d_name[0]))
-					continue;
-				int fd = atoi(e->d_name);
-				if (fd <= STDERR_FILENO || fd == dfd_keep)
-					continue;
-				close(fd);
-			}
-			closedir(d);
-		}
-	}
-
-	/* argv is intentionally minimal — main.c currently ignores argv, so
-	 * any future flag (e.g. `-c <path>`) added without saving the parent's
-	 * argv into a static and replaying it here would silently disappear
-	 * across SIGHUP-respawn. */
-	char *args[] = { (char *)"waybeam", NULL };
-	execv(VENC_SELF_EXE_PATH, args);
-	/* exec failed — fall through and exit so init/operator notices */
-	_exit(127);
-}
-
-int star6e_runtime_respawn_pending(void)
-{
-	return g_respawn_after_exit;
-}
+ * The only reliable cold restart is a *new PID*.  The fork+exec
+ * machinery lives in src/venc_respawn.c (shared with Maruko); the
+ * Star6E runtime just calls venc_respawn_request() in its reinit
+ * handler.  Bench-validated against 12 consecutive cross-mode
+ * sensor SIGHUPs (rounds 0→1→2→3 ×3) with no degradation. */
 
 static int star6e_runtime_handle_reinit(int *handled)
 {
@@ -777,7 +717,7 @@ static int star6e_runtime_handle_reinit(int *handled)
 	/* Mark for respawn after teardown, then exit the run loop.
 	 * main() will execute backend->teardown (clean MI_SYS_Exit) then
 	 * fork+exec the successor process from a clean state. */
-	g_respawn_after_exit = 1;
+	venc_respawn_request();
 	g_running = 0;
 	return 0;
 }
@@ -839,11 +779,23 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		return ret;
 	}
 
+	/* refPred error-resilience marking — rewrite TRAIL_R → TRAIL_N for
+	 * frames the SDK marked as ENHANCE_P_NOTFORREF.  The encoder's own
+	 * SVC-T pyramid logic determines which frames are non-reference; we
+	 * just propagate that designation into the bitstream so generic
+	 * receivers can safely drop those NALs without cascade.
+	 *
+	 * Only active when refPred is enabled (ref_base > 0) — otherwise the
+	 * encoder produces a flat single-ref stream and every frame matters. */
+	if (vcfg->video0.ref_base > 0 &&
+	    stream.h265Info.refType == SS_REFTYPE_ENHANCE_P_NOTFORREF) {
+		star6e_patch_stream_to_trail_n(&stream);
+	}
+
 	{
 		RtpSidecarEncInfo enc_info;
-		int codec = (strcmp(vcfg->video0.codec, "h264") == 0) ? 0 : 1;
 		uint32_t frame_size = star6e_scene_frame_size(&stream);
-		uint8_t is_idr = star6e_scene_is_idr(&stream, codec);
+		uint8_t is_idr = star6e_scene_is_idr(&stream);
 
 		scene_update(&ctx->scene, frame_size, is_idr,
 			star6e_scene_request_idr, &ps->venc_channel);
@@ -984,7 +936,25 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		{
 			int osd_row = 2;
 			Star6eIntraRefreshStatus ir;
+			Star6eRefPredStatus      rp;
 			star6e_pipeline_intra_refresh_status(&ir);
+			star6e_pipeline_ref_pred_status(&rp);
+			/* Resilience banner: only render when the preset is set
+			 * to something other than "off" — keeps the OSD compact
+			 * when no resilience features are active. */
+			if (vcfg->video0.resilience[0] &&
+			    strcmp(vcfg->video0.resilience, "off") != 0) {
+				if (rp.active) {
+					debug_osd_text(ps->debug_osd, osd_row++,
+						"res", "%s rp=%u/%u",
+						vcfg->video0.resilience,
+						rp.base, rp.enhance);
+				} else {
+					debug_osd_text(ps->debug_osd, osd_row++,
+						"res", "%s",
+						vcfg->video0.resilience);
+				}
+			}
 			if (ir.active) {
 				debug_osd_text(ps->debug_osd, osd_row++, "intra",
 					"%s L%u q%u",

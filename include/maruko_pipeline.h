@@ -162,4 +162,17 @@ typedef struct {
 
 void maruko_pipeline_intra_refresh_status(MarukoIntraRefreshStatus *out);
 
+/* Mirror of Star6eRefPredStatus — refPred state at most recent pipeline
+ * apply.  Populated by maruko_apply_ref_pred(). */
+typedef struct {
+	int      active;
+	int      mi_supported;
+	int      apply_ok;
+	uint32_t base;
+	uint32_t enhance;
+	int      pred;
+} MarukoRefPredStatus;
+
+void maruko_pipeline_ref_pred_status(MarukoRefPredStatus *out);
+
 #endif /* MARUKO_PIPELINE_H */

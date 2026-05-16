@@ -314,11 +314,6 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(sensor, index,           FT_INT,    MUT_RESTART),
 	FIELD(sensor, mode,            FT_INT,    MUT_RESTART),
-	FIELD(sensor, unlock_enabled,  FT_BOOL,   MUT_RESTART),
-	FIELD(sensor, unlock_cmd,      FT_UINT,   MUT_RESTART),
-	FIELD(sensor, unlock_reg,      FT_UINT16, MUT_RESTART),
-	FIELD(sensor, unlock_value,    FT_UINT16, MUT_RESTART),
-	FIELD(sensor, unlock_dir,      FT_INT,    MUT_RESTART),
 
 	FIELD(isp, sensor_bin,         FT_STRING, MUT_LIVE),
 	FIELD(isp, gain_max,           FT_UINT,   MUT_LIVE),
@@ -329,7 +324,6 @@ static const FieldDesc g_fields[] = {
 	FIELD(image, flip,             FT_BOOL,   MUT_RESTART),
 	FIELD(image, rotate,           FT_INT,    MUT_RESTART),
 
-	FIELD(video0, codec,           FT_STRING, MUT_RESTART),
 	FIELD(video0, rc_mode,         FT_STRING, MUT_RESTART),
 	FIELD(video0, fps,             FT_UINT,   MUT_LIVE),
 	{ "video0.size", FT_SIZE, MUT_RESTART,
@@ -347,9 +341,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, audio_port,        FT_UINT16, MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
 
-	FIELD(isp, legacy_ae,      FT_BOOL,   MUT_RESTART),
+	FIELD(isp, ae_engine,      FT_STRING, MUT_RESTART),
 	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
-	FIELD(isp, ae_mode,        FT_STRING, MUT_RESTART),
 	FIELD(isp, keep_aspect,    FT_BOOL,   MUT_RESTART),
 
 	FIELD(audio, enabled,      FT_BOOL,   MUT_RESTART),
@@ -391,9 +384,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(snapshot, height,    FT_UINT,   MUT_RESTART),
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
-	FIELD(video0, intra_refresh_mode,   FT_STRING, MUT_RESTART),
-	FIELD(video0, intra_refresh_lines,  FT_UINT16, MUT_RESTART),
-	FIELD(video0, intra_refresh_qp,     FT_UINT8,  MUT_RESTART),
+	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
 	/* zoom_pct shrinks the encoded resolution to the crop dim (no SCL
 	 * upscale, no bandwidth pressure) — that requires resizing the VPE
 	 * port and VENC channel, hence MUT_RESTART.  zoom_x/y stay live for
@@ -423,11 +414,6 @@ typedef struct {
 static const FieldAlias g_field_aliases[] = {
 	{ "system.webPort", "system.web_port" },
 	{ "system.overclockLevel", "system.overclock_level" },
-	{ "sensor.unlockEnabled", "sensor.unlock_enabled" },
-	{ "sensor.unlockCmd", "sensor.unlock_cmd" },
-	{ "sensor.unlockReg", "sensor.unlock_reg" },
-	{ "sensor.unlockValue", "sensor.unlock_value" },
-	{ "sensor.unlockDir", "sensor.unlock_dir" },
 	{ "isp.sensorBin", "isp.sensor_bin" },
 	{ "isp.gainMax", "isp.gain_max" },
 	{ "isp.awbMode", "isp.awb_mode" },
@@ -443,9 +429,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "fpv.roiSteps", "fpv.roi_steps" },
 	{ "fpv.roiCenter", "fpv.roi_center" },
 	{ "fpv.noiseLevel", "fpv.noise_level" },
-	{ "isp.legacyAe", "isp.legacy_ae" },
+	{ "isp.aeEngine", "isp.ae_engine" },
 	{ "isp.aeFps", "isp.ae_fps" },
-	{ "isp.aeMode", "isp.ae_mode" },
 	{ "isp.keepAspect", "isp.keep_aspect" },
 	{ "audio.sampleRate", "audio.sample_rate" },
 	{ "imu.i2cDevice", "imu.i2c_device" },
@@ -459,9 +444,6 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.gopSize", "record.gop_size" },
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
-	{ "video0.intraRefreshMode", "video0.intra_refresh_mode" },
-	{ "video0.intraRefreshLines", "video0.intra_refresh_lines" },
-	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
 	{ "video0.zoomPct", "video0.zoom_pct" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
@@ -650,6 +632,11 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		    strcmp(cfg->isp.awb_mode, "ct_manual") != 0)
 			return "awb_mode must be 'auto' or 'ct_manual'";
 	}
+	if (strcmp(key, "isp.ae_engine") == 0) {
+		if (strcmp(cfg->isp.ae_engine, "sdk") != 0 &&
+		    strcmp(cfg->isp.ae_engine, "custom") != 0)
+			return "ae_engine must be 'sdk' or 'custom'";
+	}
 	if (strcmp(key, "isp.sensor_bin") == 0) {
 		/* Empty string opts into the /etc/sensors/<sensor>.bin fallback;
 		 * a non-empty path must point at a readable file or the live
@@ -778,26 +765,14 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 /* ── Config validation ───────────────────────────────────────────────── */
 
 /* Check config consistency after a field change.  Returns NULL if valid,
- * or a static error message string if invalid. */
-static int config_codec_is_h265(const VencConfig *cfg)
-{
-	return cfg &&
-		(strcmp(cfg->video0.codec, "h265") == 0 ||
-		 strcmp(cfg->video0.codec, "265") == 0);
-}
-
+ * or a static error message string if invalid.  Video codec is hardcoded
+ * H.265, so the historical star6e/H.264 RTP gate is no longer required. */
 static const char *validate_backend_config(const char *backend_name,
 	const VencConfig *cfg)
 {
+	(void)backend_name;
 	if (!cfg)
 		return "invalid config state";
-
-	if (backend_name && strcmp(backend_name, "star6e") == 0 &&
-	    strcmp(cfg->outgoing.stream_mode, "compact") != 0 &&
-	    !config_codec_is_h265(cfg)) {
-		return "star6e RTP mode currently supports h265 only";
-	}
-
 	return NULL;
 }
 
@@ -1794,12 +1769,30 @@ static void init_single_set_param(SetQueryParam *param, const char *key,
 	param->field = field;
 }
 
+/* Rapid-SET protection: after a successful resilience SET, the
+ * pipeline runner pauses HTTP and tears down for respawn.  Any
+ * subsequent SET arriving before HTTP resumes gets HTTP 503
+ * `paused` from venc_httpd, which is the de-facto rate limit on
+ * both backends.  Per-process static-timer rate limit (5 s window
+ * once attempted) was removed during S7 bench validation because:
+ *
+ *   (a) The static resets on every respawn — so even if it fired,
+ *       the next SET in a new process would not see the prior
+ *       timestamp.
+ *   (b) The window where the static could be consulted is the few
+ *       milliseconds between SET completion and HTTP pause —
+ *       narrower than network/SSH latency in practice.
+ *
+ * If a stricter rate limit is required, persist the timestamp to
+ * /tmp/waybeam_resilience.ts and check on entry. */
+
 static int process_restart_set_query(const SetQueryParam *param,
 	int *status_code, char **response_json)
 {
 	VencConfig new_cfg;
 	char *jval;
 	int rc;
+	int needs_respawn = 0;
 
 	if (!param || !status_code || !response_json)
 		return -1;
@@ -1813,15 +1806,81 @@ static int process_restart_set_query(const SetQueryParam *param,
 		return rc > 0 ? 0 : rc;
 	}
 
+	/* Detect a resilience preset change.  stage_params_into_cfg() only
+	 * copied the new preset *name* into new_cfg; the derived
+	 * intra_refresh_* / ref_* / gop_size fields still hold the *old*
+	 * preset's expansion.  Expand the new preset into new_cfg now so
+	 * downstream code (and the diff log below) sees both old and new
+	 * derived state side-by-side.
+	 *
+	 * Phase 0 instrumentation: log the field-level delta produced by
+	 * the preset change.  This is the data we need to decide whether a
+	 * given resilience SET needs the full reinit / reboot path or can
+	 * be applied via lighter machinery (Phase 1+). */
+	if (strcmp(g_cfg->video0.resilience, new_cfg.video0.resilience) != 0) {
+		const VencConfigVideo old_v = g_cfg->video0;
+
+		(void)venc_config_apply_resilience_preset(
+			new_cfg.video0.resilience, &new_cfg.video0);
+
+		/* Classify the delta:
+		 *
+		 *   ref_* changed     The SVC-T reference pyramid is bound
+		 *                     to the VENC channel at creation and
+		 *                     cannot be reconfigured by any
+		 *                     documented MI SDK call.  Route via
+		 *                     process-level respawn (fork+exec a
+		 *                     fresh waybeam after clean teardown):
+		 *                     a new VENC channel binds the new
+		 *                     pyramid at creation.
+		 *
+		 *   intra/gop only    Honoured by the in-process reinit
+		 *                     path (reload from disk, re-expand
+		 *                     preset, teardown+reconfigure
+		 *                     pipeline).  Same path every other
+		 *                     MUT_RESTART field uses. */
+		if (old_v.ref_base != new_cfg.video0.ref_base ||
+		    old_v.ref_enhance != new_cfg.video0.ref_enhance ||
+		    old_v.ref_pred != new_cfg.video0.ref_pred)
+			needs_respawn = 1;
+
+		fprintf(stderr,
+			"[waybeam] resilience-diff: '%s' -> '%s'  "
+			"intra=%s->%s ref_base=%u->%u ref_enhance=%u->%u "
+			"ref_pred=%d->%d gop=%.3fs->%.3fs  path=%s\n",
+			old_v.resilience, new_cfg.video0.resilience,
+			old_v.intra_refresh_mode,
+			new_cfg.video0.intra_refresh_mode,
+			(unsigned)old_v.ref_base,
+			(unsigned)new_cfg.video0.ref_base,
+			(unsigned)old_v.ref_enhance,
+			(unsigned)new_cfg.video0.ref_enhance,
+			(int)old_v.ref_pred,
+			(int)new_cfg.video0.ref_pred,
+			old_v.gop_size, new_cfg.video0.gop_size,
+			needs_respawn ? "respawn" : "live-reinit");
+	}
+
+	/* Commit g_cfg in memory and persist to disk for both paths.
+	 * For respawn, the fresh process will reload from disk anyway,
+	 * but committing in-memory keeps /status / GET responses
+	 * coherent with the SET that just succeeded. */
 	*g_cfg = new_cfg;
 	jval = field_to_json_value_from_cfg(&new_cfg, param->field);
 	pthread_mutex_unlock(&g_cfg_mutex);
-	/* Persist to disk so the change survives restart/crash.  The reinit
-	 * uses the in-memory snapshot we just committed; the on-disk copy now
-	 * matches.  Failure is logged by the helper — leave as void since the
-	 * reinit is still the right next step even if persistence stalled. */
 	(void)venc_api_save_config_to_disk(&new_cfg);
+
+	/* Both classifications enqueue the same in-process signal: drop
+	 * out of the stream loop.  Each backend's runner then decides
+	 * what to do (Star6E and Maruko both currently always respawn on
+	 * reinit; the `path=` label above is forward-looking — it tells
+	 * an operator *why* this transition needs the slower path).  Do
+	 * not branch routing on needs_respawn yet — if a future change
+	 * re-enables in-process reconfigure for intra-only deltas, that
+	 * lives in the runner, not the HTTP path. */
+	(void)needs_respawn;
 	venc_api_request_reinit();
+
 	if (!jval) {
 		*status_code = 500;
 		return make_error_json("internal_error", "out of memory",
@@ -1829,7 +1888,8 @@ static int process_restart_set_query(const SetQueryParam *param,
 	}
 
 	*status_code = 200;
-	rc = make_single_set_success_json(param->key, jval, 1, response_json);
+	rc = make_single_set_success_json(param->key, jval,
+		1 /* reinit_pending */, response_json);
 	free(jval);
 	return rc;
 }
@@ -2746,50 +2806,101 @@ static int handle_intra_status(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_json(fd, 200, buf);
 }
 
-static int handle_intra_mode(int fd, const HttpRequest *req, void *ctx)
+/* Combined view of the resilience preset and its applied feature state.
+ * Returns: preset name, intra-refresh runtime state, refPred runtime
+ * state, effective GOP — everything needed to verify a preset took. */
+static int handle_resilience_status(int fd, const HttpRequest *req, void *ctx)
 {
-	char mode_arg[16];
-	IntraRefreshMode mode;
-	const char *name;
-	VencConfig snapshot;
-	int save_rc;
-	char buf[256];
+	char preset[16] = "off";
+	char intra_mode[16] = "off";
+	int  intra_active = 0, intra_supported = 0, intra_apply_ok = 0;
+	uint32_t intra_lines = 0, intra_qp = 0;
+	int  rp_active = 0, rp_supported = 0, rp_apply_ok = 0;
+	uint32_t rp_base = 0, rp_enhance = 0;
+	int  rp_pred = 0;
+	double gop_sec = 0.0;
+	int    gop_auto = 0;
+	char buf[640];
 
-	(void)ctx;
-	if (httpd_query_param(req, "mode", mode_arg, sizeof(mode_arg)) != 0
-		|| mode_arg[0] == '\0')
-		return httpd_send_error(fd, 400, "missing_mode",
-			"Query param 'mode' is required");
-
-	mode = intra_refresh_parse_mode(mode_arg);
-	name = intra_refresh_mode_name(mode);
-	if (mode == INTRA_MODE_OFF && strcasecmp(mode_arg, "off") != 0)
-		return httpd_send_error(fd, 400, "invalid_mode",
-			"mode must be one of: off, fast, balanced, robust");
+	(void)req; (void)ctx;
 
 	pthread_mutex_lock(&g_cfg_mutex);
-	if (!g_cfg) {
-		pthread_mutex_unlock(&g_cfg_mutex);
-		return httpd_send_error(fd, 500, "internal_error",
-			"config not registered");
+	if (g_cfg) {
+		snprintf(preset, sizeof(preset), "%s",
+			g_cfg->video0.resilience);
+		gop_sec = g_cfg->video0.gop_size;
 	}
-	snprintf(g_cfg->video0.intra_refresh_mode,
-		sizeof(g_cfg->video0.intra_refresh_mode), "%s", name);
-	/* Clear per-field overrides so the mode's defaults take effect. */
-	g_cfg->video0.intra_refresh_lines = 0;
-	g_cfg->video0.intra_refresh_qp = 0;
-	snapshot = *g_cfg;
 	pthread_mutex_unlock(&g_cfg_mutex);
 
-	save_rc = venc_api_save_config_to_disk(&snapshot);
-	venc_api_request_reinit();
+#if HAVE_BACKEND_STAR6E
+	{
+		Star6eIntraRefreshStatus st;
+		Star6eRefPredStatus      rp;
+		star6e_pipeline_intra_refresh_status(&st);
+		star6e_pipeline_ref_pred_status(&rp);
+		snprintf(intra_mode, sizeof(intra_mode), "%s",
+			st.mode_name[0] ? st.mode_name : "off");
+		intra_active    = st.active;
+		intra_supported = st.mi_supported;
+		intra_apply_ok  = st.apply_ok;
+		intra_lines     = st.effective_lines_per_p;
+		intra_qp        = st.effective_qp;
+		gop_auto        = st.gop_auto;
+		rp_active       = rp.active;
+		rp_supported    = rp.mi_supported;
+		rp_apply_ok     = rp.apply_ok;
+		rp_base         = rp.base;
+		rp_enhance      = rp.enhance;
+		rp_pred         = rp.pred;
+	}
+#elif HAVE_BACKEND_MARUKO
+	{
+		MarukoIntraRefreshStatus st;
+		MarukoRefPredStatus      rp;
+		maruko_pipeline_intra_refresh_status(&st);
+		maruko_pipeline_ref_pred_status(&rp);
+		snprintf(intra_mode, sizeof(intra_mode), "%s",
+			st.mode_name[0] ? st.mode_name : "off");
+		intra_active    = st.active;
+		intra_supported = st.mi_supported;
+		intra_apply_ok  = st.apply_ok;
+		intra_lines     = st.effective_lines_per_p;
+		intra_qp        = st.effective_qp;
+		gop_auto        = st.gop_auto;
+		rp_active       = rp.active;
+		rp_supported    = rp.mi_supported;
+		rp_apply_ok     = rp.apply_ok;
+		rp_base         = rp.base;
+		rp_enhance      = rp.enhance;
+		rp_pred         = rp.pred;
+	}
+#endif
 
 	snprintf(buf, sizeof(buf),
-		"{\"ok\":true,\"data\":{\"mode\":\"%s\",\"saved\":%s,"
-		"\"reinit\":true}}",
-		name, save_rc == 0 ? "true" : "false");
+		"{\"ok\":true,\"data\":{"
+		"\"preset\":\"%s\","
+		"\"intra\":{\"mode\":\"%s\",\"active\":%s,"
+			"\"mi_supported\":%s,\"apply_ok\":%s,"
+			"\"effective_lines\":%u,\"effective_qp\":%u},"
+		"\"refPred\":{\"active\":%s,\"mi_supported\":%s,"
+			"\"apply_ok\":%s,\"base\":%u,\"enhance\":%u,\"pred\":%s},"
+		"\"gop\":{\"effective_sec\":%.3f,\"auto\":%s}"
+		"}}",
+		preset, intra_mode,
+		intra_active ? "true" : "false",
+		intra_supported ? "true" : "false",
+		intra_apply_ok ? "true" : "false",
+		intra_lines, intra_qp,
+		rp_active ? "true" : "false",
+		rp_supported ? "true" : "false",
+		rp_apply_ok ? "true" : "false",
+		rp_base, rp_enhance,
+		rp_pred ? "true" : "false",
+		gop_sec,
+		gop_auto ? "true" : "false");
 	return httpd_send_json(fd, 200, buf);
 }
+
 #endif
 
 static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
@@ -2885,8 +2996,8 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
 #if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
 	r |= venc_httpd_route("GET", "/api/v1/intra/status", handle_intra_status, NULL);
-	r |= venc_httpd_route("POST", "/api/v1/intra/mode",  handle_intra_mode, NULL);
-	r |= venc_httpd_route("GET",  "/api/v1/intra/mode",  handle_intra_mode, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/resilience/status",
+		handle_resilience_status, NULL);
 #endif
 	r |= venc_webui_register();
 	if (r != 0) {

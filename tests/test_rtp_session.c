@@ -10,10 +10,12 @@ static int test_rtp_session_helpers(void)
 		rtp_session_frame_ticks(0) == 3000);
 	CHECK("rtp session frame ticks 60",
 		rtp_session_frame_ticks(60) == 1500);
+	/* HEVC is the only supported codec since 0.10.12; payload type
+	 * is unconditionally 97 regardless of the (vestigial) codec arg. */
 	CHECK("rtp session payload h265",
 		rtp_session_payload_type(PT_H265) == 97);
-	CHECK("rtp session payload h264",
-		rtp_session_payload_type(PT_H264) == 96);
+	CHECK("rtp session payload always 97",
+		rtp_session_payload_type(PT_H264) == 97);
 	return failures;
 }
 

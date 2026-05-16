@@ -707,30 +707,10 @@ static int test_live_set_rejects_out_of_range_roi_values(void)
 	return failures;
 }
 
-static int test_restart_set_accepts_maruko_h264_config(void)
-{
-	int failures = 0;
-	VencConfig cfg;
-	int status = 0;
-	char response[1024];
-
-	venc_config_defaults(&cfg);
-	strcpy(cfg.video0.codec, "h264");
-
-	CHECK("maruko restart h264 rc",
-		apply_set_query_http(&cfg, "maruko", NULL,
-			"video0.size=1280x720", &status, response,
-			sizeof(response)) == 0);
-	CHECK("maruko restart h264 status", status == 200);
-	CHECK("maruko restart width updated", cfg.video0.width == 1280);
-	CHECK("maruko restart height updated", cfg.video0.height == 720);
-	CHECK("maruko restart response reinit",
-		strstr(response, "\"reinit_pending\":true") != NULL);
-
-	return failures;
-}
-
-static int test_restart_set_rejects_star6e_h264_rtp(void)
+/* H.265-only: video0.codec was retired with the resilience-preset
+ * consolidation.  Legacy clients setting `video0.codec=h264` must now
+ * receive a clean 404 rather than silent acceptance. */
+static int test_restart_set_rejects_legacy_codec_field(void)
 {
 	int failures = 0;
 	VencConfig cfg;
@@ -739,38 +719,13 @@ static int test_restart_set_rejects_star6e_h264_rtp(void)
 
 	venc_config_defaults(&cfg);
 
-	CHECK("star6e restart h264 rc",
+	CHECK("legacy codec rc",
 		apply_set_query_http(&cfg, "star6e", NULL,
 			"video0.codec=h264", &status, response,
 			sizeof(response)) == 0);
-	CHECK("star6e restart h264 status", status == 409);
-	CHECK("star6e restart h264 unchanged",
-		strcmp(cfg.video0.codec, "h265") == 0);
-	CHECK("star6e restart h264 error",
-		strstr(response, "star6e RTP mode currently supports h265 only") != NULL);
-
-	return failures;
-}
-
-static int test_restart_set_accepts_star6e_h264_compact(void)
-{
-	int failures = 0;
-	VencConfig cfg;
-	int status = 0;
-	char response[1024];
-
-	venc_config_defaults(&cfg);
-	strcpy(cfg.outgoing.stream_mode, "compact");
-
-	CHECK("star6e compact h264 rc",
-		apply_set_query_http(&cfg, "star6e", NULL,
-			"video0.codec=h264", &status, response,
-			sizeof(response)) == 0);
-	CHECK("star6e compact h264 status", status == 200);
-	CHECK("star6e compact h264 updated",
-		strcmp(cfg.video0.codec, "h264") == 0);
-	CHECK("star6e compact h264 response reinit",
-		strstr(response, "\"reinit_pending\":true") != NULL);
+	CHECK("legacy codec status", status == 404);
+	CHECK("legacy codec error",
+		strstr(response, "unknown config field") != NULL);
 
 	return failures;
 }
@@ -1172,9 +1127,7 @@ int test_venc_api(void)
 	failures += test_live_set_isp_bin_dispatches_callback();
 	failures += test_live_set_isp_bin_rejects_unreadable_path();
 	failures += test_live_set_isp_bin_no_callback_returns_501();
-	failures += test_restart_set_accepts_maruko_h264_config();
-	failures += test_restart_set_rejects_star6e_h264_rtp();
-	failures += test_restart_set_accepts_star6e_h264_compact();
+	failures += test_restart_set_rejects_legacy_codec_field();
 	failures += test_single_set_url_decodes_outgoing_server();
 	failures += test_multi_set_url_decodes_values();
 	failures += test_set_rejects_malformed_percent_escape();

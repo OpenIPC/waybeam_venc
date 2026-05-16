@@ -1,5 +1,278 @@
 # History
 
+## [0.10.16] - 2026-05-15
+
+Two new OSD-safe resilience presets for ultra-low recovery latency:
+
+- `rescue` — 0.25 s GOP, no intra-refresh, no SVC-T.  Pure IDR-spam
+  fallback.  ~35–40 % of the bitstream is IDR data, but the recovery
+  floor is the lowest of any preset (next IDR is never more than
+  250 ms away).  Useful as a spec-compliant baseline when
+  A/B-debugging whether an intra-refresh preset is misbehaving in
+  the field.
+- `sprint` — 0.5 s GOP + `fast` (150 ms) intra-refresh, no SVC-T.
+  Combines the stripe-recovery of `racing` with a guaranteed IDR
+  floor every 500 ms.  ~20–25 % IDR overhead.  Pick over `racing`
+  when you have bitrate headroom and want belt-and-suspenders
+  recovery on close-range / line-of-sight links.
+
+Both join the OSD-safe column (no green smear).  No code-path
+changes — just two new entries in the resilience preset table.
+
+## [0.10.15] - 2026-05-15
+
+Both backends: resilience SETs now persist their new value to
+`/etc/waybeam.json` and return `{"reboot_required": true}` rather than
+reinitialising the encoder in-place.
+
+Empirically confirmed on Maruko (192.168.2.12) that in-process pipeline
+reinit also crashes the SDK kernel module — not always, but reliably
+within a small number of transitions.  A controlled 7-transition sweep
+on the Feb 22 (pre-gate) binary worked for 6 transitions, then on the
+7th (range→fpv) the daemon zombied with a kernel page fault inside
+`MI_SYS_IMPL_FlushInputPortTasks` in the `mi` module:
+
+    do_task_dead ← do_exit ← die ← __do_kernel_fault ← do_page_fault
+        ← do_DataAbort ← __dabt_svc ← CamOsTimerModify
+        ← MI_SYS_IMPL_FlushInputPortTasks [mi]
+
+System stayed alive (ICMP OK) but waybeam process became State=Z and
+did not respawn (no init supervisor).  SIGHUP did not recover; reboot
+was required.
+
+**Why.**  The SigmaStar VENC SDK does not cleanly release kernel
+encoder driver state across live reinit cycles when intra-refresh or
+refPred toggles, even with fork+exec respawn and a 500 ms post-exit
+settle.  Bench testing (Star6E, 192.168.1.13) reproduced two failure
+modes:
+
+- **Cross-group transitions** (refPred on↔off, intra-refresh on↔off)
+  crash on the first transition.  The original gate in 0.10.14b
+  caught these.
+- **In-group transitions** (e.g. `endurance` → `patrol`, both
+  `ref_base = 0`, intra-refresh active) succeed once or twice then
+  crash.  The second sweep wedged the device after racing → endurance
+  (success) → patrol (SoC panic, ICMP dies, power cycle required).
+  No combination of settle delay or partial state reset prevented the
+  cumulative kernel state corruption.
+
+Cold-boot into any preset is 100 % reliable.  Shipping the reboot
+model is the conservative, no-surprises choice — users edit config or
+issue a SET, the daemon writes the change, the user reboots, and the
+new preset takes effect.
+
+**Implementation.**
+
+- `src/venc_api.c`: extended the `resilience_change` detector in
+  `process_restart_set_query()` to fire on changes to any of
+  `resilience`, `intra_refresh_mode/lines/qp`, or
+  `ref_base/enhance/pred`.  When a change matches, the new config is
+  persisted to disk, `venc_api_request_reinit()` is **not** called,
+  and the response carries `reboot_required: true`.  `gop_size` is
+  intentionally NOT gated — it has always been live-changeable as a
+  plain MUT_RESTART field and preset switches are caught by the
+  `resilience` name change already.
+- README documents the reboot-required behaviour next to the field
+  table.
+
+## [0.10.14] - 2026-05-15
+
+Three new resilience presets — `endurance`, `patrol`, `rally` — and a
+revised classification along an OSD-safe / OSD-unsafe axis after
+bench-isolating why `range`/`fpv` leave persistent green smear on the
+OSD panel.
+
+**Root cause (two layers):**
+
+1. **SVC-T TRAIL_N effective wavefront math.**  The temporal-layering
+   rewrite marks `ref_enhance` of every `(ref_enhance + 1)` frames as
+   TRAIL_N (display-only, dropped from the decoder's DPB), so the
+   effective wavefront in the DPB is
+       effective_wavefront_ms = nominal_wavefront_ms × (ref_enhance + 1)
+   `range` = 2500 ms and `fpv` = 5000 ms both exceed the 2.0 s GOP,
+   so the picture never reaches stripe-only recovery — only an IDR
+   completes it.
+
+2. **OSD-specific chroma artefact.**  For static high-contrast overlay
+   content (OSD text, near-neutral chroma everywhere), the R-D loop
+   picks chroma skip-mode in every MB because chroma residual is
+   essentially zero.  Once chroma drifts in a TRAIL_N frame, no
+   amount of intra-refresh recovers it — the stripe MBs land in
+   display-only frames and never reach the DPB.  Bench-confirmed via
+   JPEG snapshot from the same VPE port: the encoder *input* is
+   clean (sharp OSD, correct chroma), the H.265 bitstream is what
+   produces the green smear.  ROI delta-QP doesn't help because
+   skip-mode bypasses QP for zero-residual blocks, and the SigmaStar
+   i6c VENC API exposes no force-intra-MB knob.
+
+**Conclusion baked into the preset table:**
+
+Any preset with `ref_enhance > 0` is OSD-unsafe.  The fix is to
+classify presets along this axis and let users pick:
+
+| preset      | intra-refresh   | ref_enhance | GOP   | OSD-safe?         | role                                       |
+|-------------|-----------------|-------------|-------|-------------------|--------------------------------------------|
+| `off`       | off             | 0           | user  | yes (no refresh)  | manual control                              |
+| `quality`   | off             | 0           | 4.0 s | yes (IDR-based)   | best image, slow recovery                   |
+| `racing`    | fast (150 ms)   | 0           | 2.0 s | yes               | close-range LOS, fast stripe recovery       |
+| `endurance` | balanced (500ms)| **0** (was 2) | 2.0 s | yes               | less bitrate on stripes, slower wavefront   |
+| `patrol`    | balanced (500ms)| **0** (was 1) | 4.0 s | yes               | long stable flight, 4 s GOP for bandwidth   |
+| `rally`     | fast (150 ms)   | 1           | 2.0 s | no                | light refPred, motion-heavy scenes (no OSD) |
+| `range`     | balanced (500ms)| 4           | 2.0 s | no                | long-range FPV, heavy refPred (no OSD)      |
+| `fpv`       | robust (1000ms) | 4           | 2.0 s | no                | drone FPV, heaviest refPred (no OSD)        |
+
+`endurance` and `patrol` lose their original 1:2 / 1:1 SVC-T pyramid —
+they're now racing-class OSD-safe presets distinguished by slower
+wavefront (less stripe bitrate) and longer GOP respectively.  `rally`
+keeps its 1:1 SVC-T as the lightest refPred option for OSD-off
+scenarios.  `range` and `fpv` remain the heavy-refPred presets,
+unchanged.
+
+Existing config files that set `resilience=racing`, `range`, or `fpv`
+load with identical behaviour.  Users explicitly on `endurance` or
+`patrol` from intermediate 0.10.14 dev binaries lose SVC-T but gain
+OSD-safe recovery — a behavioural change documented in README.md.
+
+WebUI dashboard enum, API test suite (1588 unit tests), and preset
+expansion test cases all updated.  Bench-validated on Star6E
+192.168.1.13: racing/endurance/patrol clean up the OSD area within
+~10 wavefront cycles; rally/range/fpv leave persistent green smear
+that only an IDR can clear.
+
+## [0.10.13] - 2026-05-15
+
+Config-surface simplification: drop dormant `sensor.unlock_*` fields
+and merge per-backend AE selectors into one knob.
+
+- **`isp.aeEngine` replaces `isp.legacyAe` (Star6E) + `isp.aeMode`
+  (Maruko).**  Two values: `"sdk"` (default) — SDK firmware runs AE —
+  and `"custom"` — userspace cus3a takes over.  Mapping on load:
+
+  | `aeEngine` | Star6E | Maruko |
+  |---|---|---|
+  | `"sdk"` (default) | `legacy_ae=true`  | `ae_mode="native"`   |
+  | `"custom"`        | `legacy_ae=false` | `ae_mode="throttle"` |
+
+  Parser keeps the per-backend struct fields populated from the
+  unified field, so existing call sites in `star6e_runtime.c`,
+  `star6e_pipeline.c`, and `maruko_pipeline.c` need no change.
+  Unknown values fall back to `"sdk"`.  Migration: existing
+  `/etc/waybeam.json` files containing `legacyAe` and/or `aeMode`
+  load cleanly — the parser silently drops both keys and the
+  `aeEngine` default (`"sdk"`) drives behaviour, which is the same
+  as the historical defaults (`legacyAe=true` + `aeMode="native"`).
+  Bench-confirmed on 192.168.1.13: setting `legacyAe=false` cycled
+  in custom-AE mode (`[cus3a]` supervisory thread + 15 Hz limits
+  enforcement) before the unification commit.
+
+- **H.265 dead-branch cleanup follow-up to 0.10.12.**
+  `rtp_session_payload_type()` is now an unconditional `97`,
+  `maruko_video.c` drops the defensive non-PT_H265 guard, and
+  `star6e_scene_is_idr()` drops the codec parameter (always 1 since
+  the H.264 retirement).  Three stale H.264/H.265 comments updated.
+  Encoder rate-control union branches (`H264CBR`/`H264VBR`/`H264AVBR`
+  in `*_controls.c`) remain in place as documented dead code — they
+  follow the SDK enum and ripping them out is more churn than it's
+  worth.
+
+
+
+- **`sensor.unlockEnabled` / `unlockCmd` / `unlockReg` / `unlockValue` /
+  `unlockDir` retired from the user surface; unlock now fires
+  unconditionally on every cold boot.**  The
+  `MI_SNR_CustFunction(pad, cmd=0x23, reg=0x300a, value=0x80, dir=0)`
+  hook is required on IMX415 and IMX335 before `MI_SNR_SetRes`/
+  `MI_SNR_SetFps(120)` will accept the high-FPS modes — without it
+  the SDK returns -1608835041 and the sensor clamps to 30 fps.
+  Initial hot-state bench testing on 192.168.1.13 suggested the hook
+  was redundant, but a cold reboot proved that was kernel-driver
+  sticky state from earlier unlocked frames; the hook is genuinely
+  needed.
+
+  Removing the user-facing knob (rather than reverting the
+  simplification) keeps the rule out of the config surface where
+  flipping it off accidentally would brick high-FPS sensors.
+
+- **Migration:** existing `/etc/waybeam.json` files containing any of
+  the five legacy `unlock*` keys load cleanly — the parser silently
+  drops them.  Default JSON ships without the keys.  A user config
+  with `"unlockEnabled": false` (which used to be valid) is silently
+  ignored; the always-on default takes over.
+
+- **Code path preserved.**  `VencConfigSensor::unlock_{enabled,cmd,
+  reg,value,dir}` remain in the struct (defaults: enabled=true plus
+  the IMX415/IMX335 register values), and `sensor_unlock_strategy()`
+  + `MI_SNR_CustFunction` call sites in `star6e_pipeline.c` and
+  `maruko_config.c` stay intact.
+
+
+
+refPred (SVC-T temporal hierarchical reference) lands as a real feature
+behind a single user-facing knob: `video0.resilience`.
+
+- **`video0.resilience` is the sole knob for intra-refresh + SVC-T +
+  GOP.**  Five values pick a 2x2 matrix of trade-offs:
+
+  |                          | Low resilience (best image) | High resilience (more overhead) |
+  |--------------------------|-----------------------------|---------------------------------|
+  | **Fast recovery needed** | `racing` (intra=fast)       | `fpv` (intra=robust + refPred)  |
+  | **Slow recovery OK**     | `quality` (no extras)       | `range` (intra=balanced + refPred) |
+
+  `off` (default) disables both intra-refresh and refPred and honours
+  the user's `gopSize`.  Named presets always set `gopSize` (4.0s for
+  `quality`, 2.0s for the rest) — the previous "gop=0 means
+  intra-refresh picks" auto-mode is gone.  Removed from the user
+  surface: `intraRefreshMode`, `intraRefreshLines`, `intraRefreshQp`,
+  `refBase`, `refEnhance`, `refPred` (granular fields are still
+  populated internally by the preset).
+
+- **refPred (SVC-T) TRAIL_N rewrite.**  The encoder produces a real
+  base/enhance pyramid (`MI_VENC_SetRefParam(base=1, enhance=4)` for
+  `range`/`fpv`) and the runtime patches NAL byte 0 from `TRAIL_R`
+  (type 1) to `TRAIL_N` (type 0) for frames the SDK marked
+  `ENHANCE_P_NOTFORREF`.  Without the rewrite the firmware emits every
+  NAL as TRAIL_R regardless of its actual eRefType — generic HEVC
+  decoders DPB-thrash and visibly warp.  H.265 only.  Mirrored on both
+  Star6E (`src/star6e_runtime.c:79-150`) and Maruko
+  (`src/maruko_pipeline.c:2904-2965`).
+
+- **`GET /api/v1/resilience/status`** — combined view.  Returns
+  `preset`, `intra.{mode,active,mi_supported,apply_ok,effective_lines,
+  effective_qp}`, `refPred.{active,mi_supported,apply_ok,base,enhance,
+  pred}`, `gop.{effective_sec,auto}`.  GOP value comes from
+  `g_cfg->video0.gop_size` (post-preset expansion), so it stays
+  accurate even when intra-refresh is off and the existing
+  `/api/v1/intra/status` reports zero.
+
+- **Debug OSD: resilience banner.**  When `resilience != "off"`, an
+  extra row renders above the existing `intra`/`gop` lines —
+  `res fpv rp=1/4` when refPred is active, `res quality` otherwise.
+
+- **Migration:** existing `/etc/waybeam.json` files containing the old
+  `intraRefreshMode` / `refBase` / `refEnhance` / `refPred` keys load
+  cleanly — the parser ignores them and `resilience` (defaulting to
+  `off`) drives behaviour.  Devices upgrading from 0.10.11 keep their
+  `gopSize`, `outgoing.server`, and all operational state intact.
+
+- **Bench validation:** Star6E 192.168.1.13 cycled through all five
+  presets via REST + restart + log inspection.  Maruko 192.168.2.12
+  surgically patched (old granular keys removed, `resilience: "off"`
+  added, every other field preserved) and exercised through `quality`,
+  `racing`, `range`, `fpv`.  Decoder picture clean at 192.168.2.20 with
+  refPred on; OSD garbling on first apply resolves on next IDR (not a
+  refPred corruption bug — documented in agent memory).
+
+- **H.265 hardcoded — `video0.codec` retired.**  The video codec is now
+  unconditionally HEVC across both backends; the user-facing field is
+  gone from the schema, default JSON, and pretty-print/JSON-export.
+  This removes the H.264 + refPred footgun (the SVC-T + TRAIL_N rewrite
+  is HEVC-only) and collapses several rcMode / RTP / refType branches
+  into a single H.265 path.  Migration: existing configs with
+  `"codec": "h264"` load cleanly — the key is silently dropped and the
+  daemon emits HEVC.  Legacy clients setting `video0.codec=h264` via
+  `/api/v1/set` receive a 404 `unknown config field` rather than silent
+  acceptance.  Resilience preset table is no longer codec-conditional.
+
 ## Investigation - 2026-05-14 — **SOLVED**: IMX415 driver regression is a single missing register write
 
 **Root cause**: `drivers/sensor_imx415_maruko.c` does not write
@@ -142,43 +415,31 @@ Maruko-specific default config finally reaches the release tarball.
   load path: cold boot keeps the full `maruko_load_isp_bin`; reinit
   uses a new minimal variant that skips both CUS3A hooks (sufficient
   because the kernel ISP module's state survives the in-process
-  teardown).  10 consecutive `killall -1 waybeam` cycles verified clean
+  teardown).  10 consecutive `killall -1 venc` cycles verified clean
   on 192.168.2.12; pid 1894 stable, no SDK reset, no zombie state.
 
 - **Maruko default config reaches the release tarball.**  Two-part
-  fix.  First, `config/waybeam.default.maruko.json` gains the `snapshot`
+  fix.  First, `config/venc.default.maruko.json` gains the `snapshot`
   block (was missing entirely — Maruko users had snapshot disabled
   until they hand-edited the JSON, even though the schema and runtime
   defaults were already in place).  Second, `.github/workflows/release.yml`
-  was copying `config/waybeam.default.json` for *both* backends when
+  was copying `config/venc.default.json` for *both* backends when
   staging the release archives, so the Maruko tarball's bundled
-  `waybeam.json` carried Star6E defaults (`sensor.unlockEnabled=true`,
+  `venc.json` carried Star6E defaults (`sensor.unlockEnabled=true`,
   no `snapshot` block).  Now picks the Maruko-specific template when
-  staging `waybeam-maruko.tar.gz`, falls back to the shared default for
+  staging `venc-maruko.tar.gz`, falls back to the shared default for
   Star6E.  Firstboot Maruko devices installed from the release tarball
   now ship with `snapshot.enabled=true` and the right unlock policy.
 
 - **Firstboot deployment verified end-to-end on Maruko.**  Wiped
-  device (no `/usr/bin/waybeam`, no `/usr/lib/libmi_*.so`, no
-  `/etc/waybeam.json`); pushed binary + 14 MI libs + 10 sensor `.ko` +
-  3 ISP `.bin` + `json_cli` + the bundled `waybeam.json` in a single
+  device (no `/usr/bin/venc`, no `/usr/lib/libmi_*.so`, no
+  `/etc/venc.json`); pushed binary + 14 MI libs + 10 sensor `.ko` +
+  3 ISP `.bin` + `json_cli` + the bundled `venc.json` in a single
   bulk-push via `scripts/maruko_direct_deploy.sh full
-  --push-config config/waybeam.default.maruko.json`; rebooted; waybeam
+  --push-config config/venc.default.maruko.json`; rebooted; venc
   came up clean at pid 720, IMX335 sensor module loaded, pipeline
   configured at 1920×1080@60, `/api/v1/snapshot.jpg` worked first
   request without manual config edits.
-
-- **Rebrand `venc` → `waybeam`.**  Binary path `/usr/bin/venc` →
-  `/usr/bin/waybeam`, config `/etc/venc.json` → `/etc/waybeam.json`,
-  log `/tmp/venc.log` → `/tmp/waybeam.log`, init script
-  `/etc/init.d/S95venc` → `/etc/init.d/S95waybeam`, process comm
-  pinned via `prctl(PR_SET_NAME, "waybeam")` with helpers
-  `waybeam-resp` / `waybeam-wd`.  Release tarballs renamed
-  `waybeam-<backend>.tar.gz` with `S95waybeam` bundled in both.
-  No legacy fallback in the binary; deploy scripts auto-migrate
-  legacy `/etc/venc.json` → `/etc/waybeam.json` and clean up the
-  rest.  Filename references above already use the post-rebrand
-  paths to match the current tree.
 
 ## [0.10.10] - 2026-05-14
 

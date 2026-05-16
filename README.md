@@ -5,7 +5,7 @@
 <h1 align="center">Waybeam — Vehicle Video Encoder</h1>
 
 <p align="center">
-  <em>Standalone H.265/H.264 encoder &amp; RTP streamer for SigmaStar Infinity6E and Infinity6C camera SoCs.</em>
+  <em>Standalone H.265 (HEVC) encoder &amp; RTP streamer for SigmaStar Infinity6E and Infinity6C camera SoCs.</em>
 </p>
 
 ---
@@ -33,7 +33,7 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
 
 ## Features
 
-- H.265 (HEVC) and H.264 encoding with CBR / VBR / AVBR / FIXQP rate control
+- H.265 (HEVC) encoding with CBR / VBR / AVBR / FIXQP rate control
 - RTP packetization with adaptive payload sizing; compact UDP raw-NAL mode
 - Built-in web dashboard at `/` for configuration, API docs, and IQ tuning
 - HTTP API for live parameter tuning without pipeline restart
@@ -47,7 +47,7 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
   alongside video), power-loss safe; raw `.hevc` available on Star6E
 - Gemini / dual-VENC: concurrent stream + high-quality record (both backends)
 - Adaptive recording bitrate: auto-reduces if SD card can't keep up
-- Maruko-specific opt-in 3A throttle (`isp.aeMode="throttle"`) — saves
+- Maruko-specific opt-in 3A throttle (`isp.aeEngine="custom"`) — saves
   ~24 % sys CPU at 120 fps with no visible AE quality loss
 - BMI270 IMU driver with frame-synced FIFO (both backends) — compiled in,
   disabled by default, ready for telemetry/sidecar consumers
@@ -229,27 +229,21 @@ omitted fields keep their compiled-in defaults.
 ```json
 {
   "system":   { "webPort": 80, "overclockLevel": 0, "verbose": false },
-  "sensor":   {
-    "index": -1, "mode": -1,
-    "unlockEnabled": true, "unlockCmd": 35,
-    "unlockReg": 12298, "unlockValue": 128, "unlockDir": 0
-  },
+  "sensor":   { "index": -1, "mode": -1 },
   "isp":      {
     "sensorBin": "",
-    "legacyAe": true, "aeFps": 15,
-    "aeMode": "native",
+    "aeEngine": "sdk", "aeFps": 15,
     "gainMax": 0,
     "awbMode": "auto", "awbCt": 5500,
     "keepAspect": true
   },
   "image":    { "mirror": false, "flip": false, "rotate": 0 },
   "video0":   {
-    "codec": "h265", "rcMode": "cbr", "fps": 30,
+    "rcMode": "cbr", "fps": 30,
     "bitrate": 8192, "gopSize": 1.0,
     "qpDelta": -4,
     "sceneThreshold": 0, "sceneHoldoff": 2,
-    "intraRefreshMode": "off",
-    "intraRefreshLines": 0, "intraRefreshQp": 0,
+    "resilience": "off",
     "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5
   },
   "outgoing": {
@@ -287,13 +281,16 @@ omitted fields keep their compiled-in defaults.
 
 - **`system`** — HTTP API port, CPU overclock level, verbose logging
   toggle.
-- **`sensor`** — pad/mode selection (-1 = auto) plus the high-FPS
-  unlock register sequence (IMX415 defaults shown).
-- **`isp`** — ISP tuning bin path, AE source (legacy/custom 3A), gain
-  ceiling, AWB mode, aspect-preserving crop. `aeMode` is Maruko-only.
+- **`sensor`** — pad/mode selection (-1 = auto).
+- **`isp`** — ISP tuning bin path, AE engine selector
+  (`aeEngine="sdk"` lets the SDK firmware run AE, `"custom"` runs
+  userspace cus3a; on Maruko `custom` additionally installs the no-op
+  adaptor + supervisory thread for the CPU win), AE rate, gain
+  ceiling, AWB mode, aspect-preserving crop.
 - **`image`** — mirror / flip / rotate.
-- **`video0`** — codec, rate control, fps, resolution, bitrate, GOP,
-  per-section QP delta. Scene-change-triggered IDR (`sceneThreshold`,
+- **`video0`** — rate control, fps, resolution, bitrate, GOP,
+  per-section QP delta. Video codec is hardcoded H.265 (HEVC).
+  Scene-change-triggered IDR (`sceneThreshold`,
   `sceneHoldoff`) is Star6E-only. Intra-refresh and digital zoom are
   both backends.
 - **`outgoing`** — destination URI (`udp://`, `unix://`, `shm://`),
@@ -330,7 +327,7 @@ an `{"ok": true/false, ...}` envelope.
 #### GET /api/v1/snapshot.jpg
 
 Returns one JPEG frame from a dedicated MJPEG VENC channel tapped off
-the same VPE/SCL output port the main H.264/H.265 stream uses. No
+the same VPE/SCL output port the main H.265 stream uses. No
 parameters; quality defaults to 80, resolution matches the main stream.
 Captures are serialized through a module mutex (concurrent clients
 queue rather than collide), and the channel is created at pipeline
@@ -576,20 +573,21 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 |-------|------|------------|-------------|
 | `sensor.index` | int | restart | Sensor pad index (-1 = auto) |
 | `sensor.mode` | int | restart | Sensor mode (-1 = auto) |
-| `sensor.unlock_enabled` | bool | restart | Enable high-FPS sensor unlock |
-| `sensor.unlock_cmd` | uint | restart | I2C register write command |
-| `sensor.unlock_reg` | uint16 | restart | Unlock register address |
-| `sensor.unlock_value` | uint16 | restart | Unlock register value |
-| `sensor.unlock_dir` | int | restart | I2C direction flag |
+
+The legacy `sensor.unlock_*` register-hook fields were retired in
+0.10.13 — the OpenIPC kernel sensor drivers and the per-mode ISP
+binaries now write the high-FPS unlock registers themselves, so the
+userspace pre-hook is redundant.  Existing configs containing
+`unlockEnabled`/`unlockCmd`/`unlockReg`/`unlockValue`/`unlockDir`
+load cleanly; the keys are silently ignored.
 
 #### ISP
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `isp.sensor_bin` | string | live | ISP tuning binary path (empty = auto-detect /etc/sensors/&lt;sensor&gt;.bin) |
-| `isp.legacy_ae` | bool | restart | Use ISP internal AE instead of custom 3A (Star6E) |
+| `isp.ae_engine` | string | restart | `"sdk"` (default) lets the SDK firmware run AE on both backends.  `"custom"` runs userspace cus3a — on Star6E it spins the supervisory AE thread; on Maruko it installs the no-op adaptor + 15 Hz `SetAeParam` thread (~24% sys CPU saving at 120 fps).  Alias: `isp.aeEngine`. |
 | `isp.ae_fps` | uint | restart | Custom 3A processing rate in Hz (default 15) |
-| `isp.ae_mode` | string | restart | Maruko-only: `"native"` (default, SDK runs AE/AWB at sensor rate) or `"throttle"` (no-op AE adaptor + 15 Hz manual AE; saves ~24% sys CPU at 120 fps). Alias: `isp.aeMode`. |
 | `isp.gain_max` | uint | live | AE max ISP gain ceiling (0 = use ISP bin default) |
 | `isp.awb_mode` | string | live | `"auto"` or `"ct_manual"` |
 | `isp.awb_ct` | uint | live | Color temperature in K (for ct_manual) |
@@ -605,9 +603,12 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 
 #### Video
 
+Video codec is hardcoded H.265 (HEVC) — there is no `video0.codec`
+field. Existing configs containing `"codec": "h264"` or `"h265"` load
+cleanly; the key is silently ignored.
+
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.codec` | string | restart | `"h265"` (Maruko also supports `"h264"`; Star6E RTP remains h265-only) |
 | `video0.rc_mode` | string | restart | `"cbr"`, `"vbr"`, `"avbr"`, `"fixqp"` |
 | `video0.fps` | uint | live | Output frame rate |
 | `video0.size` | string | restart | Encode resolution: `"auto"` (default, uses sensor native), `"1920x1080"`, `"720p"`, `"1080p"` |
@@ -678,56 +679,144 @@ Typical usage:
   controller needs per-frame `frame_type`, `complexity`, `scene_change`,
   `idr_inserted`, and `frames_since_idr` telemetry on the sidecar.
 
-Codec note:
-- Star6E with `outgoing.stream_mode="rtp"` requires `video0.codec="h265"`.
-- Maruko accepts both `h264` and `h265`.
+#### Resilience preset (Star6E + Maruko)
 
-#### Intra Refresh (Star6E + Maruko)
+A single field picks an error-resilience profile.  Intra-refresh
+(rolling GDR stripe), the SVC-T reference pyramid (refPred), and the GOP
+length are all derived from the preset — no per-feature knobs.
 
-GDR-style rolling stripe: a configurable number of MB/LCU rows in each
-P-frame are intra-coded so a decoder that joins mid-stream — or recovers
-from a packet loss burst — can resync without waiting for the next IDR.
-Layered over normal GOP-based IDRs.
+**The two axes that matter:**
 
-Single mode knob picks intent (self-heal target window); GOP, lines, and
-QP all derive from the mode. Per-field overrides remain available for
-power users — non-zero overrides win.
+1. **Stripe-only recovery** — can a damaged frame buffer be cleaned up
+   by intra-refresh stripes alone, without waiting for an IDR?
+2. **OSD-safe** — does the preset leave persistent chroma artefacts
+   ("green smear") over static high-contrast overlays like an OSD
+   panel?  The two are linked: any preset with `ref_enhance > 0`
+   (SVC-T temporal hierarchy) marks enhancement frames as TRAIL_N, so
+   their intra-refresh stripes are display-only and never propagate
+   into the decoder's reference state.  For motion-rich pixels this
+   doesn't matter — opportunistic intra coding scrubs the DPB
+   anyway.  For static OSD content the chroma plane stays in
+   skip-mode-from-stale-reference and you get the green smear until
+   the next IDR.
+
+|                            | **OSD-safe** (no SVC-T)                      | **OSD-unsafe** (uses SVC-T → refPred)         |
+|----------------------------|----------------------------------------------|-----------------------------------------------|
+| **Ultra-low recovery**     | `rescue` — IDR-spam, no intra-refresh       | —                                             |
+| **Very fast recovery**     | `sprint` — close-range + plenty of bitrate  | —                                             |
+| **Fast recovery needed**   | `racing` — close-range LOS                   | `rally` — light refPred, motion-heavy scenes  |
+| **Recovery time tradable** | `endurance` — balanced wavefront, less bitrate | `range` — long-range FPV (heavy refPred)    |
+| **Long stable flight**     | `patrol` — balanced + 4 s GOP                | `fpv` — drone FPV (heaviest refPred)          |
+| **Slow recovery OK**       | `quality` — plane / cruiser (IDR-based)      | —                                             |
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.intra_refresh_mode` | string | restart | `off` \| `fast` \| `balanced` \| `robust` (default `off`) |
-| `video0.intra_refresh_lines` | uint16 | restart | LCU/MB rows refreshed per P-frame (`0` = mode auto) |
-| `video0.intra_refresh_qp` | uint8 | restart | QP for the intra-refreshed rows (`0` = codec default: 48 H.265 / 45 H.264) |
+| `video0.resilience` | string | **reboot** | `off` \| `rescue` \| `quality` \| `sprint` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` (default `off`) |
+| `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience: "off"`; named presets override it.  Live-reinit applies (no reboot). |
 
-CamelCase aliases: `video0.intraRefreshMode`, `video0.intraRefreshLines`,
-`video0.intraRefreshQp`.
+> ⚠️  **Resilience changes require a reboot on both Star6E and Maruko.**
+> Setting `video0.resilience` (or any of the derived fields
+> `intra_refresh_*` or `ref_*`) persists the new value to
+> `/etc/waybeam.json` and returns `{"reboot_required": true}`.  The
+> live encoder pipeline keeps running the previous preset until the
+> next daemon start.
+>
+> The SigmaStar MI SDK kernel module does not survive a live
+> re-configure of these fields.  Empirically confirmed on both
+> backends (2026-05-15 bench testing):
+>
+> - **Star6E (Infinity6E)** — fork+exec respawn for the new config
+>   triggers an SoC kernel panic within 1–2 transitions; ICMP dies,
+>   requires a power-cycle.
+> - **Maruko (Infinity6C)** — in-process pipeline reinit completes
+>   cleanly for most transitions, but one in a sweep of 7 zombied
+>   the daemon via a page fault in `MI_SYS_IMPL_FlushInputPortTasks`
+>   inside the `mi` kernel module.  System stays up but waybeam dies
+>   and does not respawn — reboot is required to restart it.
+>
+> Different failure modes, same root cause.  Cold-boot into any
+> preset is 100 % reliable on both backends, so the reboot model is
+> what we ship.
 
-Mode targets (self-heal window from packet loss to fully-refreshed picture):
+Expansion table:
 
-| Mode | target | Use case |
-|------|--------|----------|
-| `off` | — | feature disabled |
-| `fast` | 150 ms | FPV racing, low-latency, clean link |
-| `balanced` | 500 ms | general FPV (recommended starting point) |
-| `robust` | 1000 ms | lossy long-range, high packet loss |
+| Preset      | intra-refresh    | refPred (base/enhance) | gopSize override | OSD-safe?         |
+|-------------|------------------|------------------------|------------------|-------------------|
+| `off`       | off              | off                    | user-set         | yes (no refresh)  |
+| `rescue`    | off              | off                    | **0.25 s**       | yes (IDR-spam)    |
+| `quality`   | off              | off                    | 4.0 s            | yes (IDR-based)   |
+| `sprint`    | fast (150 ms)    | off                    | **0.5 s**        | yes               |
+| `racing`    | fast (150 ms)    | off                    | 2.0 s            | yes               |
+| `endurance` | balanced (500 ms)| off                    | 2.0 s            | yes               |
+| `patrol`    | balanced (500 ms)| off                    | 4.0 s            | yes               |
+| `rally`     | fast (150 ms)    | base=1, enhance=1      | 2.0 s            | no — green smear  |
+| `range`     | balanced (500 ms)| base=1, enhance=4      | 2.0 s            | no — green smear  |
+| `fpv`       | robust (1000 ms) | base=1, enhance=4      | 2.0 s            | no — green smear  |
 
-Quick start — one HTTP call:
+**Latency vs bitrate cost of short-GOP presets.**  Short GOPs reduce
+worst-case recovery latency (next IDR is closer) but cost bitrate
+because IDRs are 10–20× the size of P-frames.  At 1080p60 / 13 Mbps:
+
+| GOP    | IDRs per 120 frames | IDR share of bitstream |
+|--------|---------------------|------------------------|
+| 4.0 s  | 0.5 (one every 240 fr) | ~3 %               |
+| 2.0 s  | 1                       | ~5 %               |
+| 0.5 s  | 4                       | ~20–25 %           |
+| 0.25 s | 8                       | ~35–40 %           |
+
+Pick `sprint` over `racing` when you have headroom and want a
+guaranteed IDR floor on top of intra-refresh stripes.  Pick `rescue`
+when you specifically want spec-compliant pure-IDR recovery (e.g. for
+A/B-debugging whether an intra-refresh preset is misbehaving in the
+field).  Both are OSD-safe.
+
+Quick start:
 
 ```bash
-curl "http://<device>/api/v1/set?video0.intraRefreshMode=balanced"
+# Default for FPV with OSD overlay — fast stripe recovery, no SVC-T
+curl "http://<device>/api/v1/set?video0.resilience=racing"
+
+# Long stable flight with OSD — balanced wavefront + 4 s GOP for bitrate
+curl "http://<device>/api/v1/set?video0.resilience=patrol"
+
+# OSD off, heavy refPred for long-range lossy link
+curl "http://<device>/api/v1/set?video0.resilience=fpv"
 ```
 
 Notes:
-- Budget +20–30 % bitrate when enabling refresh; intra-coded rows compress
-  worse than inter-coded ones.
-- Refresh is applied to ch0 only. The dual-VENC recorder (ch1) is
-  intentionally skipped — TS containers expect IDRs at GOP boundaries.
-- Both backends use the identical `MI_VENC_IntraRefresh_t` layout
-  (`bEnable`, `u32RefreshLineNum`, `u32ReqIQp`); the Maruko symbol takes
-  `(MI_VENC_DEV, MI_VENC_CHN, *cfg)` while Star6E takes `(MI_VENC_CHN, *cfg)`.
-- Maruko: `MI_VENC_SetIntraRefresh` is treated as an optional symbol — the
-  loader logs a warning if `dlsym` misses on older firmware drops, and the
-  pipeline falls back to plain GOP-based IDRs (`mi_supported=false`).
+- H.265 only.  The runtime rewrites the NAL header of frames the SDK
+  marks `ENHANCE_P_NOTFORREF` from `TRAIL_R` (type 1) to `TRAIL_N`
+  (type 0) so a generic HEVC decoder can identify non-reference frames
+  and drop them cleanly under loss.
+- `video0.resilience` is the **only** user-facing knob for
+  intra-refresh and refPred.  The underlying granular fields
+  (`intra_refresh_*`, `ref_base`, `ref_enhance`, `ref_pred`) are
+  intentionally not part of the JSON schema or HTTP API — the preset
+  table fully drives them.  Use a named preset; if none fits, file an
+  issue and we'll add one.
+- Applied to ch0 only.  The dual-VENC recorder (ch1) is intentionally
+  skipped — TS containers expect IDRs at GOP boundaries.
+- Budget +20–30 % bitrate when picking a preset that enables
+  intra-refresh; intra-coded rows compress worse than inter-coded ones.
+- **OSD-unsafe explained.**  SVC-T TRAIL_N frames are dropped from the
+  decoder's DPB after display, so their intra-refresh stripes don't
+  persist as reference data.  For static high-contrast content (OSD
+  text) the chroma plane stays in skip-mode prediction from the
+  pre-refresh reference frame.  Once chroma drifts it can only be
+  corrected by an IDR — stripe-only recovery doesn't work for those
+  MBs.  The SigmaStar VENC SDK exposes no force-intra-MB knob to
+  override this (ROI is delta-QP only, and skip-mode bypasses QP for
+  zero-residual blocks).  Bench-confirmed: `racing`/`endurance`/`patrol`
+  fully clean up the OSD area within ~10 wavefront cycles; `rally`
+  and stronger refPred presets leave persistent green smear that only
+  an IDR can clear.
+- Real-world refPred benefit on a lossy link depends on the sender
+  applying per-NAL-type FEC priority (protecting `TRAIL_R` more
+  aggressively than `TRAIL_N`).  Without that integration the pyramid
+  is roughly neutral on uniform random loss but keeps the bitstream
+  spec-correct (no decoder warping).
+- Unknown `resilience` values fall back to `off` with a warning at
+  load time.
 
 #### Outgoing (Streaming)
 
@@ -1006,19 +1095,6 @@ frames-since-IDR.
 
 See `include/rtp_sidecar.h` and `tools/rtp_timing_probe.c` for the
 full wire protocol and reference probe.
-
-## Sensor Unlock
-
-IMX415 and IMX335 sensors support high-FPS modes (90/120 fps) via a
-register unlock sequence applied before pipeline initialization. This
-is enabled by default (`sensor.unlock_enabled=true`) with preset values
-for IMX415.
-
-For different sensors, adjust `sensor.unlock_cmd`, `sensor.unlock_reg`,
-and `sensor.unlock_value` in the config file or via the API before a
-restart.
-
-See `documentation/SENSOR_UNLOCK_IMX415_IMX335.md` for register details.
 
 ## Sensor Driver Sources
 

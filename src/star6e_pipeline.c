@@ -70,7 +70,7 @@ void star6e_pipeline_vpe_scl_preset_shutdown(void)
 	(void)write(fd, "384000000\n", 10);
 	close(fd);
 	(void)write(STDERR_FILENO, "[waybeam] VPE SCL preset stored for next run\n",
-		45);
+		42);
 }
 
 /* Called after MI_SYS_Init() to silently tear down any pipeline state left
@@ -714,9 +714,13 @@ static void star6e_pipeline_fill_h26x_attr(i6_venc_attr_h26x *attr,
 	attr->refNum = 1;
 }
 
+static int star6e_pipeline_pre_start_apply_ref_pred(MI_VENC_CHN chn,
+	const VencConfig *vcfg);
+
 static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 	uint32_t bitrate, uint32_t framerate, uint32_t gop, PAYLOAD_TYPE_E codec,
-	int rc_mode, bool frame_lost_enabled, MI_VENC_CHN *chn)
+	int rc_mode, bool frame_lost_enabled, const VencConfig *vcfg,
+	MI_VENC_CHN *chn)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bit_rate_bits;
@@ -826,6 +830,11 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 		return ret;
 	}
 
+	/* SDK convention: SetRefParam must be called between CreateChn and
+	 * StartRecvPic.  Star6E silently no-ops the call if invoked after
+	 * StartRecvPic, producing a flat single-layer stream. */
+	(void)star6e_pipeline_pre_start_apply_ref_pred(*chn, vcfg);
+
 	ret = MI_VENC_StartRecvPic(*chn);
 	if (ret != 0) {
 		fprintf(stderr, "ERROR: MI_VENC_StartRecvPic failed %d\n", ret);
@@ -871,7 +880,8 @@ static IntraRefreshMode star6e_pipeline_intra_refresh_derive(
 	memset(out_ir, 0, sizeof(*out_ir));
 	if (vcfg) {
 		mode = intra_refresh_parse_mode(vcfg->video0.intra_refresh_mode);
-		intra_refresh_compute(mode, height, fps, codec == PT_H265,
+		(void)codec; /* H.265 only */
+		intra_refresh_compute(mode, height, fps,
 			vcfg->video0.intra_refresh_lines,
 			vcfg->video0.intra_refresh_qp,
 			vcfg->video0.gop_size, out_ir);
@@ -955,6 +965,72 @@ static int star6e_pipeline_apply_intra_refresh(MI_VENC_CHN chn,
 		"gop=%.2fs (%s)\n", name, cfg.u32RefreshLineNum, cfg.u32ReqIQp,
 		snap.effective_gop_sec, snap.gop_auto ? "auto" : "explicit");
 	return 0;
+}
+
+static Star6eRefPredStatus g_ref_pred_status;
+static pthread_mutex_t g_ref_pred_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void star6e_pipeline_ref_pred_status(Star6eRefPredStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	*out = g_ref_pred_status;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+}
+
+/* SVC-T reference structure — opt-in via video0.refBase.  Disabled means
+ * SDK default single-layer reference (one P references previous P).
+ *
+ * Star6E SDK requires SetRefParam to land between CreateChn and
+ * StartRecvPic — calling it later silently no-ops (verified with the
+ * test_ref_pred harness: bitstream identical at any post-Start value).
+ * Therefore this helper is invoked from star6e_pipeline_start_venc()
+ * immediately after CreateChn. */
+static int star6e_pipeline_pre_start_apply_ref_pred(MI_VENC_CHN chn,
+	const VencConfig *vcfg)
+{
+	MI_VENC_ParamRef_t ref;
+	Star6eRefPredStatus snap;
+
+	memset(&snap, 0, sizeof(snap));
+	snap.mi_supported = g_mi_venc.fnSetRefParam ? 1 : 0;
+	if (vcfg) {
+		snap.base    = vcfg->video0.ref_base;
+		snap.enhance = vcfg->video0.ref_enhance;
+		snap.pred    = vcfg->video0.ref_pred ? 1 : 0;
+	}
+
+	if (!vcfg || vcfg->video0.ref_base == 0)
+		goto publish;
+	if (!g_mi_venc.fnSetRefParam) {
+		fprintf(stderr, "[waybeam] WARNING: refBase=%u requested but "
+			"libmi_venc.so does not export MI_VENC_SetRefParam\n",
+			vcfg->video0.ref_base);
+		goto publish;
+	}
+
+	memset(&ref, 0, sizeof(ref));
+	ref.u32Base     = vcfg->video0.ref_base;
+	ref.u32Enhance  = vcfg->video0.ref_enhance ? vcfg->video0.ref_enhance : 1;
+	ref.bEnablePred = vcfg->video0.ref_pred ? 1 : 0;
+
+	if (MI_VENC_SetRefParam(chn, &ref) != 0) {
+		fprintf(stderr, "[waybeam] ERROR: MI_VENC_SetRefParam(chn=%d, "
+			"base=%u, enhance=%u, pred=%u) failed\n", chn,
+			ref.u32Base, ref.u32Enhance, ref.bEnablePred);
+		goto publish;
+	}
+	snap.apply_ok = 1;
+	snap.active   = 1;
+	fprintf(stderr, "[waybeam] refPred: chn=%d base=%u enhance=%u pred=%u "
+		"(applied pre-Start)\n", chn, ref.u32Base, ref.u32Enhance,
+		ref.bEnablePred);
+publish:
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	g_ref_pred_status = snap;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+	return snap.active ? 0 : (vcfg && vcfg->video0.ref_base > 0 ? -1 : 0);
 }
 
 static void star6e_pipeline_sysfs_write(const char *path, const char *value)
@@ -1057,7 +1133,7 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	pconf->sensor_framerate = vcfg->video0.fps;
 	pconf->venc_max_rate   = vcfg->video0.bitrate;
 
-	if (codec_config_resolve_codec_rc(vcfg->video0.codec, vcfg->video0.rc_mode,
+	if (codec_config_resolve_codec_rc(vcfg->video0.rc_mode,
 	    &pconf->rc_codec, &pconf->rc_mode) != 0)
 		return -1;
 
@@ -1071,15 +1147,6 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	    vcfg->outgoing.stream_mode,
 	    vcfg->outgoing.connected_udp) != 0)
 		return -1;
-
-	if (star6e_output_setup_is_rtp(&pconf->output_setup) &&
-	    pconf->rc_codec != PT_H265) {
-		fprintf(stderr,
-			"ERROR: RTP mode on star6e currently supports H.265 only.\n");
-		fprintf(stderr,
-			"       Set video0.codec to h265 or use compact mode / non-RTP output.\n");
-		return -1;
-	}
 
 	/* Auto-cap exposure to frame period so the AE shutter never exceeds
 	 * the frame period.  Without this, the AE converges on a long
@@ -1744,7 +1811,7 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	ret = star6e_pipeline_start_venc(pconf.image_width, pconf.image_height,
 		pconf.venc_max_rate, venc_fps, pconf.venc_gop_size,
 		pconf.rc_codec, pconf.rc_mode,
-		vcfg->video0.frame_lost, &state->venc_channel);
+		vcfg->video0.frame_lost, vcfg, &state->venc_channel);
 	if (ret != 0)
 		goto fail_vpe;
 
@@ -1752,6 +1819,10 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	 * but not fatal: stream still works without rolling refresh. */
 	(void)star6e_pipeline_apply_intra_refresh(state->venc_channel, vcfg,
 		pconf.image_height, venc_fps, pconf.rc_codec);
+
+	/* SVC-T reference pyramid (refPred) is applied inside
+	 * star6e_pipeline_start_venc() before StartRecvPic — the SDK
+	 * requires that ordering or the call silently no-ops. */
 
 	ret = bind_and_finalize_pipeline(state, vcfg, &pconf, sdk_quiet);
 	if (ret != 0)
@@ -1804,9 +1875,12 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	if (server)
 		snprintf(d->server, sizeof(d->server), "%s", server);
 
+	/* Dual ch1 does not see vcfg here — refPred not applied to ch1.  The
+	 * secondary stream is typically a low-bandwidth recorder feed where
+	 * SVC-T is less impactful; revisit if needed. */
 	ret = star6e_pipeline_start_venc(state->image_width,
 		state->image_height, bitrate, fps, gop,
-		PT_H265, 3 /* CBR */, frame_lost, &d->channel);
+		PT_H265, 3 /* CBR */, frame_lost, NULL, &d->channel);
 	if (ret != 0) {
 		fprintf(stderr, "WARNING: dual VENC ch1 create failed (%d), "
 			"falling back to mirror mode\n", ret);

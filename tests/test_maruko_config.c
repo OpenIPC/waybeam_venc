@@ -37,7 +37,6 @@ int test_maruko_config(void)
 	vcfg.video0.zoom_pct = 0.5;
 	vcfg.video0.zoom_x = 0.25;
 	vcfg.video0.zoom_y = 0.75;
-	strcpy(vcfg.video0.codec, "h264");
 	strcpy(vcfg.video0.rc_mode, "vbr");
 	strcpy(vcfg.outgoing.server, "udp://192.168.2.20:5602");
 	strcpy(vcfg.outgoing.stream_mode, "compact");
@@ -63,8 +62,8 @@ int test_maruko_config(void)
 	CHECK("maruko config sink host",
 		strcmp(cfg.output_uri.host, "192.168.2.20") == 0);
 	CHECK("maruko config sink port", cfg.output_uri.port == 5602);
-	CHECK("maruko config codec", cfg.rc_codec == PT_H264);
-	CHECK("maruko config rc mode", cfg.rc_mode == 2);
+	CHECK("maruko config codec", cfg.rc_codec == PT_H265);
+	CHECK("maruko config rc mode", cfg.rc_mode == 4);
 	CHECK("maruko config stream mode", cfg.stream_mode == MARUKO_STREAM_COMPACT);
 	CHECK("maruko config forced pad", cfg.forced_sensor_pad == (MI_SNR_PAD_ID_e)2);
 	CHECK("maruko config forced mode", cfg.forced_sensor_mode == 3);
@@ -88,8 +87,9 @@ int test_maruko_config(void)
 		strcmp(cfg.output_uri.endpoint, "maruko_ring") == 0);
 
 	strcpy(vcfg.outgoing.server, "udp://192.168.2.20:5602");
-	strcpy(vcfg.video0.codec, "jpeg");
-	CHECK("maruko config bad codec fails", maruko_config_from_venc(&vcfg, &cfg) != 0);
+	strcpy(vcfg.video0.rc_mode, "bogus");
+	CHECK("maruko config bad rc mode fails",
+		maruko_config_from_venc(&vcfg, &cfg) != 0);
 
 	CHECK("maruko config null vcfg fails", maruko_config_from_venc(NULL, &cfg) != 0);
 	CHECK("maruko config null cfg fails", maruko_config_from_venc(&vcfg, NULL) != 0);

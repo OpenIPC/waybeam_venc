@@ -187,27 +187,16 @@ create_backup() {
 	log "Backed up ${CONFIG_PATH} -> ${target}"
 }
 
-# Provision /etc/waybeam.json on devices that don't yet have one.  Two
-# entry paths:
-#   1. Upgrade from a venc-era device — /etc/venc.json exists.  Rename
-#      it (preserving operator customizations) and clean up the rest of
-#      the legacy install so the next reboot doesn't double-start.
-#   2. Fresh firstboot — neither path exists.  Write the bundled
-#      Maruko default.
-# Existing /etc/waybeam.json is left untouched.
+# Provision /etc/waybeam.json from the bundled Maruko default only when
+# the target has no config (fresh firstboot device). Never overwrites an
+# existing config — users with customized configs are preserved.
 provision_default_config_if_missing() {
 	local default_cfg="${ROOT_DIR}/config/waybeam.default.maruko.json"
-	if remote_capture "[ -f $(printf '%q' "${CONFIG_PATH}") ] && echo PRESENT || echo ABSENT" | grep -q PRESENT; then
-		return 0
-	fi
-	if remote_capture "[ -f /etc/venc.json ] && echo PRESENT || echo ABSENT" | grep -q PRESENT; then
-		log "Migrating legacy /etc/venc.json -> ${CONFIG_PATH} (preserving customizations)"
-		remote_sh "mv /etc/venc.json $(printf '%q' "${CONFIG_PATH}")"
-		remote_sh "rm -f /etc/init.d/S95venc /usr/bin/venc /tmp/venc.log"
-		return 0
-	fi
 	if [[ ! -f "${default_cfg}" ]]; then
 		warn "default config ${default_cfg} not found — skipping fresh-device provisioning"
+		return 0
+	fi
+	if remote_capture "[ -f $(printf '%q' "${CONFIG_PATH}") ] && echo PRESENT || echo ABSENT" | grep -q PRESENT; then
 		return 0
 	fi
 	log "No ${CONFIG_PATH} on device — provisioning default from $(basename "${default_cfg}")"
@@ -404,7 +393,7 @@ show_status() {
 	printf 'sensor.index=%s\n'   "$(config_value .sensor.index unknown)"
 	printf 'sensor.mode=%s\n'    "$(config_value .sensor.mode unknown)"
 	printf 'isp.sensorBin=%s\n'  "$(config_value .isp.sensorBin unknown)"
-	printf 'isp.aeMode=%s\n'     "$(config_value .isp.aeMode unknown)"
+	printf 'isp.aeEngine=%s\n'   "$(config_value .isp.aeEngine unknown)"
 	printf 'video0.size=%s\n'    "$(config_value .video0.size unknown)"
 	printf 'video0.fps=%s\n'     "$(config_value .video0.fps unknown)"
 	printf 'video0.bitrate=%s\n' "$(config_value .video0.bitrate unknown)"

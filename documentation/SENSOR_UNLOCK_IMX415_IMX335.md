@@ -69,19 +69,32 @@ MI_S32 init_sensor_unlock_then_mode(MI_SNR_PAD_ID_e pad, MI_U32 mode, MI_U32 fps
 }
 ```
 
-## Standalone `venc` Integration
+## `waybeam` Integration
 
-The current runtime path exposes the unlock settings through `/etc/venc.json`
-and the live config model:
+As of 0.10.13 the unlock hook fires unconditionally at every pipeline
+start; the five `sensor.unlock_*` user-facing fields have been retired.
+The hardcoded values inside `venc_config_defaults()` (`src/venc_config.c`)
+match the IMX415/IMX335 high-FPS sequence:
 
-- `sensor.unlockEnabled`
-- `sensor.unlockCmd` (default `0x23`)
-- `sensor.unlockReg` (default `0x300a`)
-- `sensor.unlockValue` (default `0x80`)
-- `sensor.unlockDir` (default `0`, driver direction)
+| Field             | Value    |
+|-------------------|----------|
+| `unlock_enabled`  | `true`   |
+| `unlock_cmd`      | `0x23`   |
+| `unlock_reg`      | `0x300a` |
+| `unlock_value`    | `0x80`   |
+| `unlock_dir`      | `0` (`E_MI_SNR_CUSTDATA_TO_DRIVER`) |
 
-Recommended default:
-- Keep defaults for IMX415 cold-boot operation.
+The struct fields remain in `VencConfigSensor` and the
+`sensor_unlock_strategy()` apply path (`src/sensor_select.c`,
+`src/star6e_pipeline.c`, `src/maruko_config.c`) is unchanged.  Re-exposing
+the schema for a future sensor would mean restoring the five entries in
+`g_fields[]` and `g_field_aliases[]` in `src/venc_api.c`, plus the
+parser/pretty-print/JSON-export blocks in `src/venc_config.c`.
+
+Existing `/etc/waybeam.json` files containing the legacy
+`unlockEnabled` / `unlockCmd` / `unlockReg` / `unlockValue` /
+`unlockDir` keys load cleanly — the parser silently drops them and the
+always-on default takes over.
 
 Low-level probe binaries still use their CLI flags for unlock experiments.
 
