@@ -713,6 +713,27 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->snapshot.quality < 1 || cfg->snapshot.quality > 99)
 			return "snapshot.quality must be in range [1, 99]";
 	}
+	if (strcmp(key, "snapshot.width") == 0 ||
+	    strcmp(key, "snapshot.height") == 0) {
+		/* 0 == "use sensor native" (auto).  Otherwise bound to the
+		 * same envelope as video0.size — protects bufSize = w*h*3/2
+		 * from uint32_t overflow inside MI_VENC_CreateChn and stops
+		 * a single SET from asking the SoC to allocate gigabytes. */
+		uint32_t w = cfg->snapshot.width;
+		uint32_t h = cfg->snapshot.height;
+		if (w != 0 && (w < 128 || w > 4096))
+			return "snapshot.width must be 0 or in [128, 4096]";
+		if (h != 0 && (h < 128 || h > 4096))
+			return "snapshot.height must be 0 or in [128, 4096]";
+	}
+	if (strcmp(key, "snapshot.channel") == 0) {
+		/* Main encoders live on chn 0/1; keep snapshot in [2, 15] so
+		 * it cannot collide with the live H.265 pipeline and stays
+		 * inside the practical MI_VENC channel space. */
+		int c = cfg->snapshot.channel;
+		if (c < 2 || c > 15)
+			return "snapshot.channel must be in [2, 15]";
+	}
 	if (strcmp(key, "outgoing.max_payload_size") == 0) {
 		uint16_t v = cfg->outgoing.max_payload_size;
 		/* Lower bound keeps RTP/FU header overhead a small fraction of
@@ -748,6 +769,9 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"fpv.roi_center",
 		"outgoing.max_payload_size",
 		"snapshot.quality",
+		"snapshot.width",
+		"snapshot.height",
+		"snapshot.channel",
 	};
 	size_t i;
 
@@ -1874,11 +1898,19 @@ static int process_restart_set_query(const SetQueryParam *param,
 	 * out of the stream loop.  Each backend's runner then decides
 	 * what to do (Star6E and Maruko both currently always respawn on
 	 * reinit; the `path=` label above is forward-looking — it tells
-	 * an operator *why* this transition needs the slower path).  Do
-	 * not branch routing on needs_respawn yet — if a future change
-	 * re-enables in-process reconfigure for intra-only deltas, that
-	 * lives in the runner, not the HTTP path. */
-	(void)needs_respawn;
+	 * an operator *why* this transition needs the slower path).
+	 *
+	 * DO NOT REMOVE the needs_respawn classification at lines
+	 * 1866-1869 even though it does not branch routing today.  The
+	 * intent is to wire Phase 1 (intra-only deltas → in-process
+	 * reinit, skipping respawn) into this branch — the diff log
+	 * above is the only Phase-0 user of the classification, and
+	 * losing it would mean re-deriving the ref_*-vs-intra rule when
+	 * the in-process path lands.  An explicit branch keeps the
+	 * decision load-bearing even when both arms collapse. */
+	if (needs_respawn) {
+		/* future Phase 1 hook: skip respawn for intra-only deltas */
+	}
 	venc_api_request_reinit();
 
 	if (!jval) {

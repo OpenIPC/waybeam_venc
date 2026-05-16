@@ -786,10 +786,33 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * receivers can safely drop those NALs without cascade.
 	 *
 	 * Only active when refPred is enabled (ref_base > 0) — otherwise the
-	 * encoder produces a flat single-ref stream and every frame matters. */
-	if (vcfg->video0.ref_base > 0 &&
-	    stream.h265Info.refType == SS_REFTYPE_ENHANCE_P_NOTFORREF) {
-		star6e_patch_stream_to_trail_n(&stream);
+	 * encoder produces a flat single-ref stream and every frame matters.
+	 *
+	 * Guard against silent SDK enum drift: if refPred is on for N
+	 * frames and we never see refType==4, the SDK header value likely
+	 * shifted and the bitstream is regressing to TRAIL_R unnoticed.
+	 * One-line warning per pipeline lifetime when that gap appears. */
+	if (vcfg->video0.ref_base > 0) {
+		static unsigned long long s_frames_refpred = 0;
+		static unsigned long long s_frames_patched = 0;
+		static int s_warning_emitted = 0;
+		s_frames_refpred++;
+		if (stream.h265Info.refType == SS_REFTYPE_ENHANCE_P_NOTFORREF) {
+			star6e_patch_stream_to_trail_n(&stream);
+			s_frames_patched++;
+		}
+		if (!s_warning_emitted &&
+		    s_frames_refpred > 1000 && s_frames_patched == 0) {
+			fprintf(stderr, "[star6e] WARNING: refPred active "
+				"(ref_base=%u) but no SS_REFTYPE_ENHANCE_P_NOTFORREF "
+				"(=%d) frames seen in %llu samples — SDK enum likely "
+				"shifted; resilience patcher inactive, bitstream "
+				"using TRAIL_R\n",
+				(unsigned)vcfg->video0.ref_base,
+				SS_REFTYPE_ENHANCE_P_NOTFORREF,
+				s_frames_refpred);
+			s_warning_emitted = 1;
+		}
 	}
 
 	{

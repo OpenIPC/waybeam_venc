@@ -2973,10 +2973,31 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	 * encoder-firmware gap with i6e (Star6E): the pyramid logic is
 	 * correct internally but every NAL is emitted as TRAIL_R, leaving
 	 * generic decoders unable to identify non-reference frames.  See
-	 * star6e_runtime.c for the matching helper. */
-	if (ctx->cfg.ref_base > 0 &&
-	    stream.h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF) {
-		maruko_patch_stream_to_trail_n(&stream);
+	 * star6e_runtime.c for the matching helper.
+	 *
+	 * Guard against silent SDK enum drift — one-time warning when
+	 * refPred is on but the marker never appears (mirrors Star6E). */
+	if (ctx->cfg.ref_base > 0) {
+		static unsigned long long s_frames_refpred = 0;
+		static unsigned long long s_frames_patched = 0;
+		static int s_warning_emitted = 0;
+		s_frames_refpred++;
+		if (stream.h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF) {
+			maruko_patch_stream_to_trail_n(&stream);
+			s_frames_patched++;
+		}
+		if (!s_warning_emitted &&
+		    s_frames_refpred > 1000 && s_frames_patched == 0) {
+			fprintf(stderr, "[maruko] WARNING: refPred active "
+				"(ref_base=%u) but no MARUKO_REFTYPE_ENHANCE_P_NOTFORREF "
+				"(=%d) frames seen in %llu samples — SDK enum likely "
+				"shifted; resilience patcher inactive, bitstream "
+				"using TRAIL_R\n",
+				(unsigned)ctx->cfg.ref_base,
+				MARUKO_REFTYPE_ENHANCE_P_NOTFORREF,
+				s_frames_refpred);
+			s_warning_emitted = 1;
+		}
 	}
 
 	++rt->frame_counter;
@@ -3335,7 +3356,15 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 *   6. Stop VIF.
 	 *   7. Unbind VIF→ISP.
 	 *   8. Sensor disable. */
-	if (ctx->venc_started)
+	/* Snapshot the flag and clear it up front so a future editor
+	 * inserting a fallible step between StopRecv and DestroyChn
+	 * cannot accidentally run DestroyChn on a half-torn-down
+	 * channel.  Both StopRecv and DestroyChn must run if VENC was
+	 * started; ordering is fixed. */
+	const int was_venc_started = ctx->venc_started;
+	ctx->venc_started = 0;
+
+	if (was_venc_started)
 		(void)maruko_mi_venc_stop_recv(ctx->venc_device,
 			ctx->venc_channel);
 
@@ -3344,12 +3373,11 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		ctx->bound_vpe_venc = 0;
 	}
 
-	if (ctx->venc_started) {
+	if (was_venc_started) {
 		(void)maruko_mi_venc_destroy_chn(ctx->venc_device,
 			ctx->venc_channel);
 		if (ctx->venc_dev_created)
 			(void)maruko_mi_venc_destroy_dev(ctx->venc_device);
-		ctx->venc_started = 0;
 		ctx->venc_dev_created = 0;
 
 		/* Clear IntraRefresh status — the channel is gone. */
