@@ -188,6 +188,11 @@ typedef struct {
 	int httpd_started;
 	int pipeline_started;
 	SceneDetector scene;
+	/* Configured base size this pipeline started with — used at reinit to
+	 * detect a video0.size change (the only config field that crosses a
+	 * sensor-mode boundary), so the respawn can cold-init VIF/VPE. */
+	uint32_t started_base_w;
+	uint32_t started_base_h;
 } Star6eRunnerContext;
 
 static void install_signal_handlers(void);
@@ -714,6 +719,30 @@ static int star6e_runtime_handle_reinit(int *handled)
 	printf("> Reinit requested: cold restart via fork+exec on shutdown\n");
 	fflush(stdout);
 
+	/* Detect a video0.size change.  size is the only config field that
+	 * crosses a sensor-mode boundary; resilience/framing stay within one
+	 * mode.  On a mode change the respawn must cold-init VIF/VPE (close their
+	 * inherited /dev/mi_* fds in the fd-scrub) — otherwise the fresh process
+	 * re-inits VIF to a different mode against the old mode's kernel state and
+	 * wedges vpe0_P0_MAIN.  Same-size respawns leave the fds inherited (the
+	 * deadlock-safe default).  See venc_respawn.c.
+	 *
+	 * NOTE: same-mode respawns can still hit a pre-existing MMU read-fault
+	 * storm (MMU client 0x15, IsWrite=0) on the ~2nd consecutive respawn —
+	 * intrinsic to rebuilding a VENC channel against the live VPE port on this
+	 * SoC, independent of process model.  Not addressed here; forcing cold-vif
+	 * on every respawn made it WORSE (the close mid-flight storms immediately),
+	 * so this is gated strictly to size changes. */
+	if (g_runner_ctx &&
+	    (g_runner_ctx->vcfg.video0.width != g_runner_ctx->started_base_w ||
+	     g_runner_ctx->vcfg.video0.height != g_runner_ctx->started_base_h)) {
+		printf("> size change %ux%u -> %ux%u: cold-init VIF/VPE on respawn\n",
+			g_runner_ctx->started_base_w, g_runner_ctx->started_base_h,
+			g_runner_ctx->vcfg.video0.width,
+			g_runner_ctx->vcfg.video0.height);
+		venc_respawn_set_cold_vif(1);
+	}
+
 	/* Mark for respawn after teardown, then exit the run loop.
 	 * main() will execute backend->teardown (clean MI_SYS_Exit) then
 	 * fork+exec the successor process from a clean state. */
@@ -1031,6 +1060,10 @@ static int star6e_runner_init(void *opaque)
 		return ret;
 	}
 	ctx->pipeline_started = 1;
+	/* Snapshot the base size the pipeline started with (before any live
+	 * SET mutates ctx->vcfg in place via the aliased g_cfg). */
+	ctx->started_base_w = ctx->vcfg.video0.width;
+	ctx->started_base_h = ctx->vcfg.video0.height;
 
 	ret = star6e_runtime_apply_startup_controls(ctx);
 	if (ret != 0)

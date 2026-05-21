@@ -36,6 +36,14 @@ void venc_respawn_request(void);
  *  since process start. */
 int venc_respawn_pending(void);
 
+/** Request that the next respawn cold-init VIF/VPE: the fd-scrub will
+ *  additionally close the inherited /dev/mi_vif and /dev/mi_vpe fds so the
+ *  fresh process re-inits them from a clean kernel state.  Set this ONLY for
+ *  a sensor-mode change (video0.size change) — the close() is in the same
+ *  driver-release path that deadlocks /dev/mi_sys, so it must not run on
+ *  every respawn.  Latched until the next respawn. */
+void venc_respawn_set_cold_vif(int enable);
+
 /** Fork a child that waits for the parent to exit, then execv's
  *  /proc/self/exe.  Caller MUST exit the process immediately after
  *  this returns from the parent path (it is a non-blocking fork). */

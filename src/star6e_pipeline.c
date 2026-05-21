@@ -2083,8 +2083,29 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	 * source.  Idempotent; safe even if init was skipped or failed. */
 	venc_jpeg_shutdown();
 
-	/* Unbind VPE→VENC.  Safe now — no concurrent consumers calling
-	 * GetStream, so the kernel unbind won't deadlock. */
+	/* MI teardown order: StopRecvPic each VENC consumer BEFORE unbinding
+	 * its input port.  The previous Star6E order unbound VPE→VENC first and
+	 * only then stopped VENC, leaving the kernel SDK still encoding/flushing
+	 * a buffered frame out of a port userspace had just ripped out — VENC
+	 * (MMU client 0x15) then reads a freed VPE buffer:
+	 * `_MI_SYS_MMU_Callback Status=0x2 IsWrite=0` storms into a hardware
+	 * watchdog reset on the ~2nd rapid respawn (reproduced on master from a
+	 * cold boot, so it predates the stab/framing work).  Maruko hit the same
+	 * root cause as a page fault in MI_SYS_IMPL_FlushInputPortTasks and was
+	 * fixed to stop-first — see maruko_pipeline_teardown_graph(); Star6E was
+	 * never given that fix until now.  StopRecvPic is a soft pause and does
+	 * not deadlock while still bound.  Sequence: StopRecvPic → drain output →
+	 * unbind VPE→VENC → unbind VIF→VPE → destroy VENC → stop VPE/VIF/sensor. */
+	if (state->dual)
+		MI_VENC_StopRecvPic(state->dual->channel);
+	MI_VENC_StopRecvPic(state->venc_channel);
+
+	/* Drain the last buffered frames that StopRecvPic let flow out. */
+	drain_venc_channel(state->venc_channel, 150, "ch0");
+	if (state->dual)
+		drain_venc_channel(state->dual->channel, 150, "ch1-post");
+
+	/* Unbind VPE→VENC now that the consumer is stopped. */
 	if (state->dual && state->dual->bound) {
 		MI_SYS_UnBindChnPort(&state->vpe_port, &state->dual->port);
 		state->dual->bound = 0;
@@ -2093,16 +2114,6 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 		MI_SYS_UnBindChnPort(&state->vpe_port, &state->venc_port);
 		state->bound_vpe_venc = 0;
 	}
-
-	/* Drain remaining buffered frames after unbind. */
-	drain_venc_channel(state->venc_channel, 150, "ch0");
-	if (state->dual)
-		drain_venc_channel(state->dual->channel, 150, "ch1-post");
-
-	/* StopRecvPic — VPE is unbound, no flush wait needed. */
-	if (state->dual)
-		MI_VENC_StopRecvPic(state->dual->channel);
-	MI_VENC_StopRecvPic(state->venc_channel);
 
 	if (state->bound_vif_vpe) {
 		MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);

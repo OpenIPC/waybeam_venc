@@ -2,6 +2,46 @@
 
 Per-incident notes on hangs, D-state, and recovery actions on the bench.
 
+## 2026-05-21 — Teardown fd-cleanup cherry-pick from PR #122/#123
+
+**Scope:** the SoC/MI-independent teardown fixes extracted from the DIS
+stabilization work (PR #122) and the MMU-storm investigation (PR #123),
+without the stab feature, the in-process reinit experiment (disproven on
+device, see below), or the reboot-gate.
+
+**Fix 1 — VENC teardown order (`star6e_pipeline_stop`).**  Star6E unbound
+VPE→VENC *before* stopping VENC, so for the teardown window the kernel SDK
+kept encoding/flushing a buffered frame out of a port userspace had already
+ripped out.  VENC (MMU client 0x15) then reads a freed VPE buffer —
+`_MI_SYS_MMU_Callback Status=0x2 IsWrite=0` — which storms into a hardware
+watchdog reset on the ~2nd rapid respawn.  Reproduced on master from a cold
+boot, so it predates the stab/framing work.  Reordered to **StopRecvPic →
+drain output → unbind VPE→VENC → unbind VIF→VPE → destroy → stop
+VPE/VIF/sensor**, matching the already-fixed Maruko path
+(`maruko_pipeline_teardown_graph`, fixed S1 bench 2026-05-15 for the same
+root cause as a page fault in `MI_SYS_IMPL_FlushInputPortTasks`).  Star6E had
+never been given that fix.
+
+**Fix 2 — cold-init VIF/VPE on sensor-mode change.**  On a `video0.size`
+change the respawn child inherits `/dev/mi_vif` + `/dev/mi_vpe` fds that pin
+the OLD sensor mode's kernel state; the fresh process then re-inits VIF to a
+different mode against that stale state and wedges `[vpe0_P0_MAIN]`.  The
+runtime now snapshots the started base size and, on a size change only,
+latches `venc_respawn_set_cold_vif(1)` so the fd-scrub closes just those two
+fds (never `/dev/mi_sys` — closing it mid-teardown is the confirmed
+deadlock).  Same-size respawns keep the deadlock-safe inherited-fd default.
+
+**Known limitation NOT fixed here (SoC/MI):**  same-mode respawns can still
+hit the MMU read-fault storm (client 0x15, `IsWrite=0`) on the ~2nd
+consecutive respawn.  PR #123 proved this is **intrinsic to destroying +
+rebinding a VENC channel against the live VPE port on this SoC, independent
+of process model** — an in-process rebuild storms too.  Neither the teardown
+reorder nor the cold-vif scrub removes it; they remove the teardown-time
+D-state wedge and the cross-mode VIF wedge respectively.  Routing rebuild-
+class config changes around the storm (live intra/GOP apply, or a cold-boot
+gate) was developed in PR #123 but is deliberately out of scope for this
+cherry-pick.
+
 ## 2026-05-19 — Device hang on zoomPct SET (v0.11.0 dev, PR #120)
 
 **Bench:** `root@192.168.1.13` — SSC338Q + IMX335.

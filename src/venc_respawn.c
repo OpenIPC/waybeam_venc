@@ -26,10 +26,16 @@
 #define VENC_LOG_PATH       "/tmp/waybeam.log"
 
 static int g_respawn_pending;
+static int g_respawn_cold_vif;
 
 void venc_respawn_request(void)
 {
 	g_respawn_pending = 1;
+}
+
+void venc_respawn_set_cold_vif(int enable)
+{
+	g_respawn_cold_vif = enable ? 1 : 0;
 }
 
 int venc_respawn_pending(void)
@@ -186,6 +192,27 @@ void venc_respawn_after_exit(void)
 				if (n < 0) n = 0;
 				target[n] = '\0';
 				if (strncmp(target, "/dev/mi_", 8) == 0) {
+					/* Cold-init exception: on a sensor-mode
+					 * change (video0.size), the inherited VIF
+					 * and VPE fds pin the OLD mode's kernel
+					 * state — re-initing them to a new mode in
+					 * the fresh process wedges vpe0_P0_MAIN.
+					 * Close just those two so they re-init
+					 * cold.  /dev/mi_sys and the rest stay
+					 * inherited (closing mi_sys here is the
+					 * confirmed deadlock).  Gated on
+					 * g_respawn_cold_vif so it never runs on a
+					 * same-mode respawn. */
+					if (g_respawn_cold_vif &&
+					    (strcmp(target, "/dev/mi_vif") == 0 ||
+					     strcmp(target, "/dev/mi_vpe") == 0)) {
+						fprintf(stderr,
+							"[respawn] cold-init: closing %s\n",
+							target);
+						close(fd);
+						closed_count++;
+						continue;
+					}
 					skipped_count++;
 					continue;
 				}
