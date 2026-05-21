@@ -361,9 +361,6 @@ Majestic-oriented clients.
   - Values: `off` | `stab` (image stabilization, Star6E only) | `zoom-1.25x` |
     `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` | `zoom-3x` | `zoom-4x` (digital
     zoom, both backends).
-  - The retired `low`/`medium`/`high` stab presets are accepted in stored config
-    for backward compatibility and migrate to `stab` on load; `SET` only accepts
-    the values above.
   - Mutability: `restart_required` (changes encoded resolution / pipeline).
   - The preset expands internally into the zoom crop fraction (zoom presets) or
     the stabilization crop/recenter (`stab`); the two are mutually exclusive.
@@ -1285,9 +1282,9 @@ divergence is listed.  As of `contract_version: 0.10.1`:
     values unchanged.  Approach-C still shrinks crop+output 1:1, so the
     deep crops are not bound by the SCL ~2× upscale ceiling.
   - `video0.framing` stabilization collapsed to a single `stab` preset
-    (was `low`/`medium`/`high`).  `SET` accepts `stab`; stored configs
-    with the retired names migrate to `stab` on load.  There is no
-    settable `zoom_pct`/`zoomPct` — the preset is the only knob.
+    (was the never-shipped `low`/`medium`/`high`).  Those names are now
+    unknown values that fall back to `off` on load; `SET` accepts `stab`.
+    There is no settable `zoom_pct`/`zoomPct` — the preset is the only knob.
   - `GET /api/v1/dual/status` always returns `200` now.  When dual VENC
     is not active the body is `{"ok":true,"data":{"active":false}}`
     instead of the previous `404` + `not_active` error envelope.

@@ -447,8 +447,8 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 	 * border @1080p), recenter tau 180 frames, plus the EMA output low-pass in
 	 * star6e_pipeline.c.  This is the on-device sweet spot — the earlier
 	 * low/medium/high presets traded border vs magnification and only the
-	 * middle one felt right, so they were collapsed into one.  Legacy
-	 * low/medium/high config values migrate to "stab" on load (load_video0).
+	 * middle one felt right, so they were collapsed into one.  Unknown values
+	 * (incl. the never-shipped low/medium/high) fall back to "off" on load.
 	 * Star6E only; no-op on Maruko.  Source auto-clamps to <=1920x1080.
 	 *
 	 * Zoom presets — zoom_pct = 1 / magnification (e.g. 2x -> 0.50).  Both
@@ -566,12 +566,6 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	 * longer parsed from JSON.  Unknown values fall back to "off". */
 	{
 		const char *fname = json_get_string(obj, "framing", v->framing);
-		/* Migrate the retired low/medium/high stab presets to the single
-		 * "stab" mode so existing configs keep stabilization (rather than
-		 * silently falling back to off). */
-		if (strcmp(fname, "low") == 0 || strcmp(fname, "medium") == 0 ||
-		    strcmp(fname, "high") == 0)
-			fname = "stab";
 		safe_strcpy(v->framing, sizeof(v->framing), fname);
 		if (venc_config_apply_framing_preset(v->framing, v) != 0) {
 			fprintf(stderr, "[config] WARNING: unknown video0.framing "

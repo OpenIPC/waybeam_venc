@@ -649,9 +649,7 @@ upscale ceiling.
 
 **Stabilization** (`stab`, Star6E only) holds a centered 80% crop and shifts
 it per frame to cancel motion (recenter τ 180 frames, EMA-smoothed output).
-It is always centered — `zoom_x`/`zoom_y` are ignored in `stab` mode. Legacy
-configs that set the retired `low`/`medium`/`high` presets migrate to `stab`
-on load.
+It is always centered — `zoom_x`/`zoom_y` are ignored in `stab` mode.
 
 **Panning** applies to the `zoom-*` modes only and is live (`zoom_x`,
 `zoom_y` ∈ [0,1], default 0.5/0.5 = centered):
