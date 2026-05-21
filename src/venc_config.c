@@ -439,38 +439,37 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 		uint32_t recenter;  /* stab recenter tau (frames); 0 = stick */
 		double zoom_pct;    /* Approach-C zoom crop fraction; 0 = no zoom */
 	};
-	/* Framing preset table.  A preset is EITHER a stabilization preset
-	 * (crop_pct/recenter set, zoom_pct 0) OR a zoom preset (zoom_pct set,
-	 * stab 0) OR off (all 0) — never both.
+	/* Framing preset table.  A preset is EITHER the stabilization preset
+	 * ("stab": crop_pct/recenter set, zoom_pct 0) OR a zoom preset (zoom_pct
+	 * set, stab 0) OR off (all 0) — never both.
 	 *
-	 * Stab presets — crop_pct is the kept fraction (lower = bigger
-	 * dead-border = more shake headroom but a tighter crop); recenter is the
-	 * return-to-center time-constant in frames (lower = snappier diagonal,
-	 * 0 = stick).  Star6E only; no-op on Maruko.
+	 * Stabilization is a SINGLE tuned mode ("stab"): 80% crop (±192/±108 dead
+	 * border @1080p), recenter tau 180 frames, plus the EMA output low-pass in
+	 * star6e_pipeline.c.  This is the on-device sweet spot — the earlier
+	 * low/medium/high presets traded border vs magnification and only the
+	 * middle one felt right, so they were collapsed into one.  Legacy
+	 * low/medium/high config values migrate to "stab" on load (load_video0).
+	 * Star6E only; no-op on Maruko.  Source auto-clamps to <=1920x1080.
 	 *
 	 * Zoom presets — zoom_pct = 1 / magnification (e.g. 2x -> 0.50).  Both
-	 * backends; zoom_x/zoom_y pan live.
+	 * backends; zoom_x/zoom_y pan live (stab is always centered).
 	 *
 	 *   preset       cropPct  tau   zoom_pct   effect
 	 *   ──────────────────────────────────────────────────────────────
 	 *   off          0        0     0.00       full image
-	 *   low          90       120   0.00       light stabilization
-	 *   medium       80       60    0.00       balanced stabilization
-	 *   high         65       30    0.00       aggressive stabilization
+	 *   stab         80       180   0.00       image stabilization
 	 *   zoom-1.25x   0        0     0.80       1.25x digital zoom
 	 *   zoom-1.50x   0        0     0.6667     1.50x digital zoom
 	 *   zoom-1.75x   0        0     0.5714     1.75x digital zoom
 	 *   zoom-2x      0        0     0.50       2x digital zoom
 	 */
 	static const struct framing_preset table[] = {
-		{ "off",        0,  0,   0.0    },
-		{ "low",        90, 120, 0.0    },
-		{ "medium",     80, 60,  0.0    },
-		{ "high",       65, 30,  0.0    },
-		{ "zoom-1.25x", 0,  0,   0.80   },
-		{ "zoom-1.50x", 0,  0,   0.6667 },
-		{ "zoom-1.75x", 0,  0,   0.5714 },
-		{ "zoom-2x",    0,  0,   0.50   },
+		{ "off",        0,  0,    0.0    },
+		{ "stab",       80, 180,  0.0    },
+		{ "zoom-1.25x", 0,  0,    0.80   },
+		{ "zoom-1.50x", 0,  0,    0.6667 },
+		{ "zoom-1.75x", 0,  0,    0.5714 },
+		{ "zoom-2x",    0,  0,    0.50   },
 	};
 
 	const char *want = (!name || !*name) ? "off" : name;
@@ -559,6 +558,12 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	 * longer parsed from JSON.  Unknown values fall back to "off". */
 	{
 		const char *fname = json_get_string(obj, "framing", v->framing);
+		/* Migrate the retired low/medium/high stab presets to the single
+		 * "stab" mode so existing configs keep stabilization (rather than
+		 * silently falling back to off). */
+		if (strcmp(fname, "low") == 0 || strcmp(fname, "medium") == 0 ||
+		    strcmp(fname, "high") == 0)
+			fname = "stab";
 		safe_strcpy(v->framing, sizeof(v->framing), fname);
 		if (venc_config_apply_framing_preset(v->framing, v) != 0) {
 			fprintf(stderr, "[config] WARNING: unknown video0.framing "

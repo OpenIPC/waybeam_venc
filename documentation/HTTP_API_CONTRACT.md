@@ -358,20 +358,22 @@ Majestic-oriented clients.
 ### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`
 
 - `video0.framing`: string preset — the single knob for what the VPE crop does.
-  - Values: `off` | `low` | `medium` | `high` (stabilization, Star6E only) |
-    `zoom-1.25x` | `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` (digital zoom, both
-    backends).
+  - Values: `off` | `stab` (image stabilization, Star6E only) | `zoom-1.25x` |
+    `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` (digital zoom, both backends).
+  - The retired `low`/`medium`/`high` stab presets are accepted in stored config
+    for backward compatibility and migrate to `stab` on load; `SET` only accepts
+    the values above.
   - Mutability: `restart_required` (changes encoded resolution / pipeline).
   - The preset expands internally into the zoom crop fraction (zoom presets) or
-    the stabilization crop/recenter (stab presets); the two are mutually
-    exclusive. There is no settable continuous `zoom_pct` — use a zoom preset.
+    the stabilization crop/recenter (`stab`); the two are mutually exclusive.
+    There is no settable continuous `zoom_pct` — use a zoom preset.
 - `video0.zoom_x`, `video0.zoom_y`: double, `0.0..1.0`, mutability `live`.
   Aliases `video0.zoomX`, `video0.zoomY`.
 - Semantics: digital zoom uses a 1:1 crop — the crop window and encoded output
   resolution shrink together (e.g. `zoom-2x` of 1920×1080 → 960×528); no SCL
   upscale, no extra output bandwidth. `zoom_x`/`zoom_y` move the crop center
-  live inside the active aspect-ratio-corrected source surface (and serve as the
-  pan center under a stabilization preset too).
+  live inside the active aspect-ratio-corrected source surface. Under `stab`
+  the crop is always centered (`zoom_x`/`zoom_y` are ignored).
 
 ### `GET /api/v1/fps/config`
 
@@ -1270,7 +1272,7 @@ divergence is listed.  As of `contract_version: 0.10.1`:
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
-| `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, stab presets (low/medium/high) are Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls. |
+| `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
 | `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
 
 ## Change Log (Contract)

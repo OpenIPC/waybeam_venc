@@ -766,8 +766,21 @@ typedef MI_S32 (*stab_ive_shift_fn_t)(StabIveHandle_t handle,
  *    central zone are never eroded (no fight); during sustained motion the
  *    offset settles near the edge instead of being pinned/saturated. */
 #define STAB_MOTION_THRESH         1
-#define STAB_RECENTER_STILL_FRAMES 30
-#define STAB_RECENTER_EDGE_PCT     70
+/* "Lock the scene stiffer" tuning: hold the stabilized crop longer before
+ * leaking back to center.  STILL_FRAMES is the post-motion cooldown (frames
+ * of stillness before the settled-recenter starts) — longer = the view stays
+ * locked after a disturbance instead of creeping back.  EDGE_PCT is how much
+ * of the ±border the offset may use during sustained motion before margin is
+ * given back — higher = sticks harder (closer to saturation) before leaking.
+ * The leak RATE itself is the per-preset recenter_speed (venc_config.c). */
+#define STAB_RECENTER_STILL_FRAMES 60
+#define STAB_RECENTER_EDGE_PCT     88
+/* Final EMA low-pass on the applied crop offset (per frame, DETECT_EVERY=1).
+ * applied += ALPHA * (target - applied).  Lower = smoother but more lag.
+ * 0.30 ≈ 3-frame time constant (~33ms @90fps): kills the per-frame judder
+ * that the raw offset magnifies at the geometry extremes (low/high) while
+ * the lag stays imperceptible for the "locked scene" feel. */
+#define STAB_OUTPUT_SMOOTH_ALPHA   0.30
 
 static stab_sys_get_fd_fn_t g_stab_sys_get_fd;
 static stab_sys_close_fd_fn_t g_stab_sys_close_fd;
@@ -1414,6 +1427,14 @@ static void *star6e_stab_thread_main(void *arg)
 	 * and OSD each detect. */
 	double facc_x = 0.0;
 	double facc_y = 0.0;
+	/* Final low-pass on the APPLIED offset.  The accumulator/recenter math
+	 * can carry per-frame jitter (detector noise, 2-px crop quantization);
+	 * applied raw it shows as judder, and the geometry magnifies it
+	 * differently per preset (low: small motion vs quantization; high: large
+	 * upscale) so only the mid preset looked smooth.  EMA-smoothing the
+	 * offset before the crop equalises that — see STAB_OUTPUT_SMOOTH_ALPHA. */
+	double smooth_x = 0.0;
+	double smooth_y = 0.0;
 	int acc_x = 0;
 	int acc_y = 0;
 	int dbg_frame = 0;
@@ -1596,8 +1617,12 @@ static void *star6e_stab_thread_main(void *arg)
 					}
 				}
 
-				acc_x = (int)lround(facc_x);
-				acc_y = (int)lround(facc_y);
+				/* Low-pass the offset before it reaches the crop so
+				 * per-frame jitter doesn't judder the output. */
+				smooth_x += STAB_OUTPUT_SMOOTH_ALPHA * (facc_x - smooth_x);
+				smooth_y += STAB_OUTPUT_SMOOTH_ALPHA * (facc_y - smooth_y);
+				acc_x = (int)lround(smooth_x);
+				acc_y = (int)lround(smooth_y);
 				pthread_mutex_lock(&g_stab_lock);
 				g_stab_off_x = acc_x;
 				g_stab_off_y = acc_y;

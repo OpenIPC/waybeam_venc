@@ -666,7 +666,7 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	if (strcmp(key, "video0.framing") == 0) {
 		VencConfigVideo probe;
 		if (venc_config_apply_framing_preset(cfg->video0.framing, &probe) != 0)
-			return "framing must be one of: off, low, medium, high, "
+			return "framing must be one of: off, stab, "
 				"zoom-1.25x, zoom-1.50x, zoom-1.75x, zoom-2x";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {

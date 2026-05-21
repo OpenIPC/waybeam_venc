@@ -479,16 +479,28 @@ static int test_framing_presets(void)
 	free(path);
 	CHECK("framing zoom2x pct", cfg.video0.zoom_pct == 0.50);
 
-	/* Stab presets expand into stab_crop_pct/recenter, zoom_pct 0. */
+	/* The single "stab" preset expands into stab_crop_pct/recenter, zoom 0. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing stab name", strcmp(cfg.video0.framing, "stab") == 0);
+	CHECK("framing stab crop", cfg.video0.stab_crop_pct == 80);
+	CHECK("framing stab recenter", cfg.video0.stab_recenter_speed == 180);
+	CHECK("framing stab no zoom", cfg.video0.zoom_pct == 0.0);
+
+	/* Retired low/medium/high presets migrate to "stab" on load. */
 	path = write_temp_json("{ \"video0\": { \"framing\": \"medium\" } }");
 	if (!path) return failures;
 	venc_config_defaults(&cfg);
 	venc_config_load(path, &cfg);
 	unlink(path);
 	free(path);
-	CHECK("framing medium crop", cfg.video0.stab_crop_pct == 80);
-	CHECK("framing medium recenter", cfg.video0.stab_recenter_speed == 60);
-	CHECK("framing medium no zoom", cfg.video0.zoom_pct == 0.0);
+	CHECK("framing legacy migrate name", strcmp(cfg.video0.framing, "stab") == 0);
+	CHECK("framing legacy migrate crop", cfg.video0.stab_crop_pct == 80);
+	CHECK("framing legacy migrate recenter", cfg.video0.stab_recenter_speed == 180);
 
 	/* Unknown preset falls back to off (all derived fields cleared). */
 	path = write_temp_json("{ \"video0\": { \"framing\": \"bogus\" } }");
