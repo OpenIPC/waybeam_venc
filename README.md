@@ -620,6 +620,8 @@ cleanly; the key is silently ignored.
 | `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
 | `video0.zoom_x` | double | live | Pan crop center X (`0.0` left to `1.0` right) — applies to `zoom-*` modes only |
 | `video0.zoom_y` | double | live | Pan crop center Y (`0.0` top to `1.0` bottom) — applies to `zoom-*` modes only |
+| `video0.stab_crop_pct` | uint | restart | Advanced: override `stab` kept-frame % (`0` = preset default 80, else `50..100`) |
+| `video0.stab_recenter_speed` | uint | restart | Advanced: override `stab` recenter speed (`0` = stick, higher = slower; preset default 180) |
 
 #### Framing: Stabilization & Digital Zoom
 
@@ -650,6 +652,32 @@ upscale ceiling.
 **Stabilization** (`stab`, Star6E only) holds a centered 80% crop and shifts
 it per frame to cancel motion (recenter τ 180 frames, EMA-smoothed output).
 It is always centered — `zoom_x`/`zoom_y` are ignored in `stab` mode.
+
+Two **advanced tuning** knobs refine the `stab` preset (both restart-required;
+inert under `off`/`zoom-*`):
+
+- `stab_crop_pct` — kept-frame %. `0` keeps the preset default (80). A smaller
+  value (e.g. `60`) leaves a bigger dead border, so the crop has more room to
+  absorb motion, at the cost of a tighter, lower-resolution frame.
+- `stab_recenter_speed` — how fast the crop glides back to center after motion
+  (decay time-constant in frames). `0` = **stick** (never recenters — the most
+  visible effect, but it drifts to the border and saturates in real use).
+  Higher = slower, gentler return; `180` is the production default.
+
+Set `framing=stab` first, then the overrides (re-selecting the preset resets
+them to 80/180):
+
+```bash
+# Production stab.
+curl "http://<device>/api/v1/set?video0.framing=stab"
+
+# Demo: 80% crop that sticks to the patch (no recenter) — strongest visible
+# stabilization, drifts to the border (not for real-world use).
+curl "http://<device>/api/v1/set?video0.stabRecenterSpeed=0"
+
+# Tighter crop (more motion headroom) with a quick recenter.
+curl "http://<device>/api/v1/set?video0.stabCropPct=60&video0.stabRecenterSpeed=60"
+```
 
 **Panning** applies to the `zoom-*` modes only and is live (`zoom_x`,
 `zoom_y` ∈ [0,1], default 0.5/0.5 = centered):

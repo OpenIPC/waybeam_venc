@@ -35,7 +35,9 @@
     "resilience": "off",
     "zoomX": 0.5,
     "zoomY": 0.5,
-    "framing": "off"
+    "framing": "off",
+    "stabCropPct": 0,
+    "stabRecenterSpeed": 0
   },
   "outgoing": {
     "enabled": false,

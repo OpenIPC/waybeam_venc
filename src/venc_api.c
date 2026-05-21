@@ -395,6 +395,12 @@ static const FieldDesc g_fields[] = {
 	 * stab_crop_pct/recenter or zoom_pct.  Encoded resolution changes when
 	 * toggled, so the whole pipeline must restart. */
 	FIELD(video0, framing,             FT_STRING, MUT_RESTART),
+	/* Advanced stab tuning — override the "stab" preset's derived crop %
+	 * (0 or 50..100) and recenter speed (0 = stick to patch, higher = slower
+	 * glide back to center).  Set framing=stab first; these refine it.  Inert
+	 * under off/zoom.  Restart-required (crop changes encode resolution). */
+	FIELD(video0, stab_crop_pct,       FT_UINT,   MUT_RESTART),
+	FIELD(video0, stab_recenter_speed, FT_UINT,   MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -449,6 +455,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
+	{ "video0.stabCropPct", "video0.stab_crop_pct" },
+	{ "video0.stabRecenterSpeed", "video0.stab_recenter_speed" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -669,6 +677,16 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 			return "framing must be one of: off, stab, "
 				"zoom-1.25x, zoom-1.50x, zoom-1.75x, zoom-2x, "
 				"zoom-3x, zoom-4x";
+	}
+	if (strcmp(key, "video0.stab_crop_pct") == 0) {
+		uint32_t v = cfg->video0.stab_crop_pct;
+		if (v != 0 && (v < 50 || v > 100))
+			return "stab_crop_pct must be 0 (off) or in range [50, 100]";
+	}
+	if (strcmp(key, "video0.stab_recenter_speed") == 0) {
+		if (cfg->video0.stab_recenter_speed > 3600)
+			return "stab_recenter_speed must be in range [0, 3600] "
+				"(0 = stick, higher = slower recenter)";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)

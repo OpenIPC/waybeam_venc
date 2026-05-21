@@ -511,6 +511,29 @@ static int test_framing_presets(void)
 	CHECK("framing stab recenter", cfg.video0.stab_recenter_speed == 180);
 	CHECK("framing stab no zoom", cfg.video0.zoom_pct == 0.0);
 
+	/* Advanced overrides win over the preset's derived 80/180, and are read
+	 * after preset expansion (stick mode = recenter 0, tighter 60% crop). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\", "
+		"\"stabCropPct\": 60, \"stabRecenterSpeed\": 0 } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("stab override crop", cfg.video0.stab_crop_pct == 60);
+	CHECK("stab override recenter stick", cfg.video0.stab_recenter_speed == 0);
+
+	/* Absent override keys keep the preset default (plain stab = 80/180). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("stab override absent keeps crop", cfg.video0.stab_crop_pct == 80);
+	CHECK("stab override absent keeps recenter",
+		cfg.video0.stab_recenter_speed == 180);
+
 	/* The never-shipped low/medium/high presets are no longer special-cased;
 	 * they are unknown values and fall back to "off" like any other. */
 	path = write_temp_json("{ \"video0\": { \"framing\": \"medium\" } }");

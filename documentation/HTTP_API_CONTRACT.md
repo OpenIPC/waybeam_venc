@@ -355,7 +355,7 @@ Majestic-oriented clients.
 - Alias: `video0.qpDelta`
 - Semantics: adjusts I-frame QP relative to P-frame; negative values lower I-frame QP (higher quality keyframes), positive values raise it.
 
-### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`
+### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_recenter_speed`
 
 - `video0.framing`: string preset — the single knob for what the VPE crop does.
   - Values: `off` | `stab` (image stabilization, Star6E only) | `zoom-1.25x` |
@@ -365,6 +365,16 @@ Majestic-oriented clients.
   - The preset expands internally into the zoom crop fraction (zoom presets) or
     the stabilization crop/recenter (`stab`); the two are mutually exclusive.
     There is no settable continuous `zoom_pct` — use a zoom preset.
+- `video0.stab_crop_pct`, `video0.stab_recenter_speed`: uint, mutability
+  `restart_required`. Aliases `video0.stabCropPct`, `video0.stabRecenterSpeed`.
+  Advanced overrides of the `stab` preset's derived crop/recenter — read
+  *after* preset expansion so an explicit value wins, while a plain
+  `framing=stab` keeps the 80/180 default. Re-selecting `framing=stab` resets
+  them, so set framing first. Inert under `off`/`zoom-*`.
+  - `stab_crop_pct`: `0` = preset default (80); else `50..100` kept-frame %.
+    Smaller % = larger dead border = more motion headroom, tighter frame.
+  - `stab_recenter_speed`: `0..3600`. `0` = stick (no recenter, drifts to
+    border — demo only); higher = slower glide back to center (default 180).
 - `video0.zoom_x`, `video0.zoom_y`: double, `0.0..1.0`, mutability `live`.
   Aliases `video0.zoomX`, `video0.zoomY`.
 - Semantics: digital zoom uses a 1:1 crop — the crop window and encoded output
@@ -1277,6 +1287,11 @@ divergence is listed.  As of `contract_version: 0.10.1`:
 
 ## Change Log (Contract)
 - `0.10.1` (additive, no version bump):
+  - Re-exposed `video0.stab_crop_pct` + `video0.stab_recenter_speed`
+    (aliases `stabCropPct`/`stabRecenterSpeed`, both `restart_required`) as
+    advanced overrides of the `stab` preset.  Read after preset expansion so
+    `framing=stab` alone keeps 80/180; explicit values win.  `0`/`0` =
+    stick-to-patch (demo).  Inert under `off`/`zoom-*`.
   - `video0.framing` gained `zoom-3x` (1080p → 640×352) and `zoom-4x`
     (480×256) digital-zoom presets.  Additive enum extension; existing
     values unchanged.  Approach-C still shrinks crop+output 1:1, so the

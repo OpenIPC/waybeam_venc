@@ -561,9 +561,10 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	if (v->zoom_y > 1.0)
 		v->zoom_y = 1.0;
 
-	/* Framing preset is the sole driver of stab_crop_pct + stab_recenter_speed
-	 * (stab presets) and zoom_pct (zoom presets); those granular fields are no
-	 * longer parsed from JSON.  Unknown values fall back to "off". */
+	/* Framing preset drives zoom_pct (zoom presets) and the BASE
+	 * stab_crop_pct + stab_recenter_speed ("stab").  The two stab fields may
+	 * then be overridden explicitly below for advanced tuning.  Unknown
+	 * framing values fall back to "off". */
 	{
 		const char *fname = json_get_string(obj, "framing", v->framing);
 		safe_strcpy(v->framing, sizeof(v->framing), fname);
@@ -573,6 +574,14 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 			safe_strcpy(v->framing, sizeof(v->framing), "off");
 			(void)venc_config_apply_framing_preset("off", v);
 		}
+		/* Advanced overrides of the stab preset's derived crop/recenter.
+		 * Read AFTER the preset expansion so an explicit value wins; absent
+		 * keys keep the preset default (so a plain framing="stab" still gets
+		 * 80/180).  Meaningful only under framing="stab"; inert otherwise. */
+		v->stab_crop_pct = (uint32_t)json_get_int(obj, "stabCropPct",
+			(int)v->stab_crop_pct);
+		v->stab_recenter_speed = (uint32_t)json_get_int(obj,
+			"stabRecenterSpeed", (int)v->stab_recenter_speed);
 	}
 }
 
@@ -1124,7 +1133,9 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
 	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              0);
-	pp_field_string(p, 2, "framing",           cfg->video0.framing,             1);
+	pp_field_string(p, 2, "framing",           cfg->video0.framing,             0);
+	pp_field_uint(p,   2, "stabCropPct",       cfg->video0.stab_crop_pct,       0);
+	pp_field_uint(p,   2, "stabRecenterSpeed", cfg->video0.stab_recenter_speed, 1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1309,6 +1320,9 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);
 		cJSON_AddStringToObject(vid, "framing", cfg->video0.framing);
+		cJSON_AddNumberToObject(vid, "stabCropPct", cfg->video0.stab_crop_pct);
+		cJSON_AddNumberToObject(vid, "stabRecenterSpeed",
+			cfg->video0.stab_recenter_speed);
 	}
 
 	/* outgoing */
