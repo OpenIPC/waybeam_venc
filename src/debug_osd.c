@@ -16,6 +16,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+
+/* Settle between MI_RGN_DetachFromChn and MI_RGN_Destroy in
+ * debug_osd_destroy().  The detach removes the region from the VPE
+ * compositor's list, but a frame already mid-composite can still be reading
+ * the RGN canvas; freeing it immediately races that read → MMU read-fault
+ * (ClientId=0x15, IsWrite=0) that storms to a HW watchdog reset on rapid
+ * respawn.  ~3 frame intervals at 60fps covers the in-flight composite.
+ * Overridable at build time for tuning. */
+#ifndef VENC_OSD_DESTROY_SETTLE_US
+#define VENC_OSD_DESTROY_SETTLE_US 50000
+#endif
 
 /* ── MI_RGN types ──────────────────────────────────────────────────────
  * Defined locally because the SDK headers (sdk/ssc338q/include/i6_rgn.h)
@@ -327,6 +339,10 @@ void debug_osd_destroy(DebugOsdState *osd)
 {
 	if (!osd) return;
 	osd->fnDetachChannel(RGN_HANDLE, &osd->vpe_bind);
+	/* Let any in-flight VPE composite finish reading the canvas before the
+	 * destroy frees it — closes the client-0x15 MMU read-fault race that
+	 * wedges rapid respawn (see VENC_OSD_DESTROY_SETTLE_US above). */
+	usleep(VENC_OSD_DESTROY_SETTLE_US);
 	osd->fnDestroyRegion(RGN_HANDLE);
 	osd->fnDeinit();
 	if (osd->lib)
