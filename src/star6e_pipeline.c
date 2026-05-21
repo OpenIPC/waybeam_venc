@@ -2326,12 +2326,13 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	if (!state) return -1;
 	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
 		return -1;
-	/* When stabilization is active it owns the VPE port0 crop window;
-	 * route the pan center to the stab thread instead of the pan-ramp /
-	 * SetPortCrop path (which would fight the manual drain).  zoom_pct is
-	 * fixed at start under stab, so only x/y matter here. */
+	/* When stabilization is active the crop window is enforced CENTERED
+	 * (0.5/0.5) so the accumulator has symmetric headroom — zoomX/zoomY are
+	 * the zoom-mode pan and must not steer the stab window off-center (that
+	 * would pin it against the frame edge and kill stabilization).  Ignore
+	 * live x/y here; keep the window centered. */
 	if (g_stab_running) {
-		star6e_stab_set_pan(x, y);
+		star6e_stab_set_pan(0.5, 0.5);
 		return 0;
 	}
 	if (pct <= 0.0 || pct >= 1.0) {
@@ -3759,11 +3760,18 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 			pconf.image_width = nw;
 			pconf.image_height = nh;
 		}
+		/* Stabilization is always CENTERED: the crop window must sit at the
+		 * frame center so the accumulator has symmetric headroom (±max) on
+		 * both axes.  zoomX/zoomY are the zoom-mode pan and do NOT apply here —
+		 * an off-center pan (e.g. 0.7) would pin the window against the frame
+		 * edge and leave no room to stabilize.  Pass 0.5/0.5 unconditionally;
+		 * the saved zoomX/zoomY are preserved for when the user switches to a
+		 * zoom preset. */
 		star6e_stab_configure(pconf.image_width, pconf.image_height,
 			vcfg->video0.stab_crop_pct,
 			vcfg->video0.stab_recenter_speed,
 			vcfg->video0.fps,
-			vcfg->video0.zoom_x, vcfg->video0.zoom_y);
+			0.5, 0.5);
 		pconf.image_width = g_stab_enc_w;
 		pconf.image_height = g_stab_enc_h;
 		state->image_width = g_stab_enc_w;
