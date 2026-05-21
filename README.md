@@ -244,7 +244,7 @@ omitted fields keep their compiled-in defaults.
     "qpDelta": -4,
     "sceneThreshold": 0, "sceneHoldoff": 2,
     "resilience": "off",
-    "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5
+    "framing": "off", "zoomX": 0.5, "zoomY": 0.5
   },
   "outgoing": {
     "enabled": false, "server": "", "streamMode": "rtp",
@@ -291,8 +291,9 @@ omitted fields keep their compiled-in defaults.
 - **`video0`** — rate control, fps, resolution, bitrate, GOP,
   per-section QP delta. Video codec is hardcoded H.265 (HEVC).
   Scene-change-triggered IDR (`sceneThreshold`,
-  `sceneHoldoff`) is Star6E-only. Intra-refresh and digital zoom are
-  both backends.
+  `sceneHoldoff`) is Star6E-only. Intra-refresh is both backends. The
+  `framing` knob expands to either digital zoom (both backends) or image
+  stabilization (Star6E only).
 - **`outgoing`** — destination URI (`udp://`, `unix://`, `shm://`),
   stream mode (`rtp` / `compact`), payload sizing, optional dedicated
   audio + sidecar UDP ports.
@@ -616,44 +617,75 @@ cleanly; the key is silently ignored.
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |
 | `video0.frame_lost` | bool | restart | Enable frame-lost safety net |
-| `video0.zoom_pct` | double | restart | Digital zoom crop fraction (`0.0` = off, `0.25..1.0` = crop fraction) |
-| `video0.zoom_x` | double | live | Zoom crop center X (`0.0` left to `1.0` right) |
-| `video0.zoom_y` | double | live | Zoom crop center Y (`0.0` top to `1.0` bottom) |
+| `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
+| `video0.zoom_x` | double | live | Pan crop center X (`0.0` left to `1.0` right) — applies to `zoom-*` modes only |
+| `video0.zoom_y` | double | live | Pan crop center Y (`0.0` top to `1.0` bottom) — applies to `zoom-*` modes only |
 
-#### Digital Zoom (Star6E + Maruko)
+#### Framing: Stabilization & Digital Zoom
 
-Approach-C digital zoom shrinks both the crop window and encoded output
-resolution. The SCL path reads the crop at 1:1 and emits it unchanged, so
-there is no upscale pass and no extra bandwidth pressure. Receivers see the
-smaller resolution in SPS/PPS.
+`video0.framing` is the **single user-facing knob** for the VPE crop. It
+is a named preset (restart-required); the underlying crop fraction is
+*derived* from the preset and is not separately settable — there is no
+`zoom_pct`/`zoomPct` API field.
 
-| Field | Type | Mutability | Description |
-|-------|------|------------|-------------|
-| `video0.zoom_pct` | double | restart | `0.0` = off/full frame; `0.25..1.0` = crop fraction (smaller = deeper zoom) |
-| `video0.zoom_x` | double | live | Crop center X, `0.0` = left, `1.0` = right |
-| `video0.zoom_y` | double | live | Crop center Y, `0.0` = top, `1.0` = bottom |
+| `framing` | Effect | Encode dim @1080p | Backends |
+|-----------|--------|-------------------|----------|
+| `off` | Full image | 1920×1080 | both |
+| `stab` | Image stabilization (centered 80% crop) | 1536×864 | Star6E only |
+| `zoom-1.25x` | 1.25× digital zoom | 1536×864 | both |
+| `zoom-1.50x` | 1.50× digital zoom | 1280×720 | both |
+| `zoom-1.75x` | 1.75× digital zoom | 1088×608 | both |
+| `zoom-2x` | 2× digital zoom | 960×528 | both |
+| `zoom-3x` | 3× digital zoom | 640×352 | both |
+| `zoom-4x` | 4× digital zoom | 480×256 | both |
 
-CamelCase aliases: `video0.zoomPct`, `video0.zoomX`, `video0.zoomY`.
+**Digital zoom** uses Approach-C: it shrinks *both* the crop window and the
+encoded output resolution. The SCL path reads the crop at 1:1 and emits it
+unchanged — no upscale pass, no extra bandwidth pressure. Receivers see the
+smaller resolution in SPS/PPS (the encode dims above are 16-px aligned with a
+256-px floor, so the tightest 4× still emits a valid 480×256 frame). Because
+there is no upscale, the deep 3×/4× crops are **not** bound by the SCL ~2×
+upscale ceiling.
 
-Examples:
+**Stabilization** (`stab`, Star6E only) holds a centered 80% crop and shifts
+it per frame to cancel motion (recenter τ 180 frames, EMA-smoothed output).
+It is always centered — `zoom_x`/`zoom_y` are ignored in `stab` mode. Legacy
+configs that set the retired `low`/`medium`/`high` presets migrate to `stab`
+on load.
+
+**Panning** applies to the `zoom-*` modes only and is live (`zoom_x`,
+`zoom_y` ∈ [0,1], default 0.5/0.5 = centered):
 
 ```bash
-# Restart-required: enable a 2x crop.
-curl "http://<device>/api/v1/set?video0.zoomPct=0.5"
+# Restart-required: enable a 3x crop (centered).
+curl "http://<device>/api/v1/set?video0.framing=zoom-3x"
 
-# Live pan inside the current crop size.
-curl "http://<device>/api/v1/set?video0.zoomX=0.25&video0.zoomY=0.75"
+# Live pan inside the current zoom crop — top-left corner.
+curl "http://<device>/api/v1/set?video0.zoomX=0.0&video0.zoomY=0.0"
 
-# Disable zoom on the next reinit.
-curl "http://<device>/api/v1/set?video0.zoomPct=0.0"
+# Live pan — bottom-right corner.
+curl "http://<device>/api/v1/set?video0.zoomX=1.0&video0.zoomY=1.0"
+
+# Re-center the zoom crop.
+curl "http://<device>/api/v1/set?video0.zoomX=0.5&video0.zoomY=0.5"
+
+# Switch to stabilization (centered; pan ignored).
+curl "http://<device>/api/v1/set?video0.framing=stab"
+
+# Back to full frame.
+curl "http://<device>/api/v1/set?video0.framing=off"
 ```
 
-When `debug.showOsd=true` and zoom is active, the overlay adds rows
+CamelCase aliases: `video0.zoomX`, `video0.zoomY`. `zoom_x`/`zoom_y` SETs
+return `service paused for pipeline reinit, retry` while a `framing` change
+is still reinitializing — retry once it settles.
+
+When `debug.showOsd=true` and a zoom preset is active, the overlay adds rows
 after existing OSD stats:
 
 ```
-zoom  2.00x 960x540
-crop  960x540+480+270
+zoom  3.00x 640x352
+crop  640x352+640+364
 ```
 
 #### Adaptive Encoder Control (Star6E + Maruko)

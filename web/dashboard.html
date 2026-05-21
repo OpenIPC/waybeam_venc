@@ -614,7 +614,7 @@ const TOOLTIPS = {
 
 'video0.zoomY':'Digital zoom crop center Y, 0 = top and 1 = bottom. Applied live',
 
-'video0.framing':'Framing mode — what the VPE crop does. off = full image. stab = image stabilization (Star6E only; centered 80% crop, source auto-clamped to <=1920x1080 to keep fps; stabilizes ch0 only; zoomX/zoomY are ignored — stab is always centered). zoom-1.25x/1.50x/1.75x/2x = pure digital zoom (both backends; zoomX/zoomY pan the crop live). Requires restart',
+'video0.framing':'Framing mode — what the VPE crop does. off = full image. stab = image stabilization (Star6E only; centered 80% crop, source auto-clamped to <=1920x1080 to keep fps; stabilizes ch0 only; zoomX/zoomY are ignored — stab is always centered). zoom-1.25x/1.50x/1.75x/2x/3x/4x = pure digital zoom (both backends; zoomX/zoomY pan the crop live; no upscale — higher zoom emits a smaller frame). Requires restart',
 
 'debug.showOsd':'Enable debug OSD overlay on the live stream (Star6E composites at the VPE port; with stabilization on, the stats panel anchor tracks the moving crop window so it stays put in the encoded view). Requires restart',
 
@@ -674,7 +674,7 @@ const ENUMS = {
 
 'video0.rcMode':['cbr','vbr','avbr','qvbr'],
 'video0.resilience':['off','rescue','quality','sprint','racing','rally','endurance','patrol','range','fpv'],
-'video0.framing':['off','stab','zoom-1.25x','zoom-1.50x','zoom-1.75x','zoom-2x'],
+'video0.framing':['off','stab','zoom-1.25x','zoom-1.50x','zoom-1.75x','zoom-2x','zoom-3x','zoom-4x'],
 'isp.aeEngine':['sdk','custom'],
 'isp.awbMode':['auto','ct_manual'],
 'audio.codec':['opus','pcm','g711a','g711u'],

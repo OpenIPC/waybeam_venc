@@ -391,9 +391,9 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, zoom_x,      FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, zoom_y,      FT_DOUBLE, MUT_LIVE),
 	/* Framing preset — sole user-facing knob for the VPE crop (stabilization
-	 * presets low|medium|high or zoom presets zoom-1.25x..zoom-2x); expands
-	 * into derived stab_crop_pct/recenter or zoom_pct.  Encoded resolution
-	 * changes when toggled, so the whole pipeline must restart. */
+	 * preset "stab" or zoom presets zoom-1.25x..zoom-4x); expands into derived
+	 * stab_crop_pct/recenter or zoom_pct.  Encoded resolution changes when
+	 * toggled, so the whole pipeline must restart. */
 	FIELD(video0, framing,             FT_STRING, MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
@@ -667,7 +667,8 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		VencConfigVideo probe;
 		if (venc_config_apply_framing_preset(cfg->video0.framing, &probe) != 0)
 			return "framing must be one of: off, stab, "
-				"zoom-1.25x, zoom-1.50x, zoom-1.75x, zoom-2x";
+				"zoom-1.25x, zoom-1.50x, zoom-1.75x, zoom-2x, "
+				"zoom-3x, zoom-4x";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)

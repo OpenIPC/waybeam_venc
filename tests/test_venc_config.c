@@ -479,6 +479,26 @@ static int test_framing_presets(void)
 	free(path);
 	CHECK("framing zoom2x pct", cfg.video0.zoom_pct == 0.50);
 
+	/* 3x maps to 0.3333 (no upscale — Approach-C emits a smaller frame). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"zoom-3x\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing zoom3x pct", cfg.video0.zoom_pct == 0.3333);
+	CHECK("framing zoom3x no stab", cfg.video0.stab_crop_pct == 0);
+
+	/* 4x maps to 0.25 (tightest zoom; 1080p -> 480x256, above 256 floor). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"zoom-4x\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing zoom4x pct", cfg.video0.zoom_pct == 0.25);
+	CHECK("framing zoom4x no stab", cfg.video0.stab_crop_pct == 0);
+
 	/* The single "stab" preset expands into stab_crop_pct/recenter, zoom 0. */
 	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\" } }");
 	if (!path) return failures;

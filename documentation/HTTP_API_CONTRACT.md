@@ -359,7 +359,8 @@ Majestic-oriented clients.
 
 - `video0.framing`: string preset — the single knob for what the VPE crop does.
   - Values: `off` | `stab` (image stabilization, Star6E only) | `zoom-1.25x` |
-    `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` (digital zoom, both backends).
+    `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` | `zoom-3x` | `zoom-4x` (digital
+    zoom, both backends).
   - The retired `low`/`medium`/`high` stab presets are accepted in stored config
     for backward compatibility and migrate to `stab` on load; `SET` only accepts
     the values above.
@@ -370,8 +371,10 @@ Majestic-oriented clients.
 - `video0.zoom_x`, `video0.zoom_y`: double, `0.0..1.0`, mutability `live`.
   Aliases `video0.zoomX`, `video0.zoomY`.
 - Semantics: digital zoom uses a 1:1 crop — the crop window and encoded output
-  resolution shrink together (e.g. `zoom-2x` of 1920×1080 → 960×528); no SCL
-  upscale, no extra output bandwidth. `zoom_x`/`zoom_y` move the crop center
+  resolution shrink together (1920×1080 → `zoom-2x` 960×528, `zoom-3x` 640×352,
+  `zoom-4x` 480×256); no SCL upscale, no extra output bandwidth, so the deep
+  3×/4× crops are not bound by the SCL ~2× upscale ceiling. `zoom_x`/`zoom_y`
+  move the crop center
   live inside the active aspect-ratio-corrected source surface. Under `stab`
   the crop is always centered (`zoom_x`/`zoom_y` are ignored).
 
@@ -1276,7 +1279,15 @@ divergence is listed.  As of `contract_version: 0.10.1`:
 | `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
 
 ## Change Log (Contract)
-- `0.10.1`:
+- `0.10.1` (additive, no version bump):
+  - `video0.framing` gained `zoom-3x` (1080p → 640×352) and `zoom-4x`
+    (480×256) digital-zoom presets.  Additive enum extension; existing
+    values unchanged.  Approach-C still shrinks crop+output 1:1, so the
+    deep crops are not bound by the SCL ~2× upscale ceiling.
+  - `video0.framing` stabilization collapsed to a single `stab` preset
+    (was `low`/`medium`/`high`).  `SET` accepts `stab`; stored configs
+    with the retired names migrate to `stab` on load.  There is no
+    settable `zoom_pct`/`zoomPct` — the preset is the only knob.
   - `GET /api/v1/dual/status` always returns `200` now.  When dual VENC
     is not active the body is `{"ok":true,"data":{"active":false}}`
     instead of the previous `404` + `not_active` error envelope.

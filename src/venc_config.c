@@ -462,6 +462,12 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 	 *   zoom-1.50x   0        0     0.6667     1.50x digital zoom
 	 *   zoom-1.75x   0        0     0.5714     1.75x digital zoom
 	 *   zoom-2x      0        0     0.50       2x digital zoom
+	 *   zoom-3x      0        0     0.3333     3x digital zoom
+	 *   zoom-4x      0        0     0.25       4x digital zoom
+	 *
+	 * Approach-C zoom never upscales (crop dim == SCL output dim), so the
+	 * ch1 ~2x SCL upscale ceiling does NOT bound it; 3x/4x simply emit a
+	 * smaller frame (1080p: 3x->640x352, 4x->480x256, both >=256 floor).
 	 */
 	static const struct framing_preset table[] = {
 		{ "off",        0,  0,    0.0    },
@@ -470,6 +476,8 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 		{ "zoom-1.50x", 0,  0,    0.6667 },
 		{ "zoom-1.75x", 0,  0,    0.5714 },
 		{ "zoom-2x",    0,  0,    0.50   },
+		{ "zoom-3x",    0,  0,    0.3333 },
+		{ "zoom-4x",    0,  0,    0.25   },
 	};
 
 	const char *want = (!name || !*name) ? "off" : name;
