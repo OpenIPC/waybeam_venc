@@ -971,20 +971,10 @@ static int test_zoom_validation_rejects_invalid(void)
 	CHECK("zoom y unchanged", cfg.video0.zoom_y == 0.5);
 	CHECK("zoom y no callback", g_api_cb_state.apply_zoom_calls == 0);
 
-	CHECK("zoom pct floor reject rc",
-		apply_set_query_http(&cfg, "star6e", &cb,
-			"video0.zoomPct=0.1", &status, response,
-			sizeof(response)) == 0);
-	CHECK("zoom pct floor reject status", status == 409);
-	CHECK("zoom pct floor reject error",
-		strstr(response, "zoom_pct must be 0.0 or in range [0.25, 1.0]") != NULL);
-	CHECK("zoom pct unchanged", cfg.video0.zoom_pct == 0.5);
-	CHECK("zoom pct no callback", g_api_cb_state.apply_zoom_calls == 0);
-
 	return failures;
 }
 
-static int test_zoom_pct_restart(void)
+static int test_framing_preset_restart(void)
 {
 	int failures = 0;
 	VencConfig cfg;
@@ -997,17 +987,29 @@ static int test_zoom_pct_restart(void)
 	memset(&cb, 0, sizeof(cb));
 	cb.apply_zoom = test_apply_zoom;
 
-	CHECK("zoom pct restart rc",
+	/* A zoom framing preset is MUT_RESTART: derives zoom_pct, no live cb. */
+	CHECK("framing restart rc",
 		apply_set_query_http(&cfg, "star6e", &cb,
-			"video0.zoomPct=0.5", &status, response,
+			"video0.framing=zoom-2x", &status, response,
 			sizeof(response)) == 0);
-	CHECK("zoom pct restart status", status == 200);
-	CHECK("zoom pct restart cfg", cfg.video0.zoom_pct == 0.5);
-	CHECK("zoom pct restart response",
+	CHECK("framing restart status", status == 200);
+	CHECK("framing restart cfg", strcmp(cfg.video0.framing, "zoom-2x") == 0);
+	CHECK("framing restart derives pct", cfg.video0.zoom_pct == 0.5);
+	CHECK("framing restart response",
 		strstr(response, "\"reinit_pending\":true") != NULL);
-	CHECK("zoom pct restart no live callback",
+	CHECK("framing restart no live callback",
 		g_api_cb_state.apply_zoom_calls == 0);
 	venc_api_clear_reinit();
+
+	/* Invalid framing preset is rejected. */
+	CHECK("framing reject rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.framing=bogus", &status, response,
+			sizeof(response)) == 0);
+	CHECK("framing reject status", status == 409);
+	CHECK("framing reject error",
+		strstr(response, "framing must be one of") != NULL);
+	CHECK("framing reject unchanged", strcmp(cfg.video0.framing, "zoom-2x") == 0);
 
 	return failures;
 }
@@ -1123,7 +1125,7 @@ int test_venc_api(void)
 	failures += test_live_set_max_payload_size_no_callback();
 	failures += test_live_zoom_pan_applies();
 	failures += test_zoom_validation_rejects_invalid();
-	failures += test_zoom_pct_restart();
+	failures += test_framing_preset_restart();
 	failures += test_live_set_isp_bin_dispatches_callback();
 	failures += test_live_set_isp_bin_rejects_unreadable_path();
 	failures += test_live_set_isp_bin_no_callback_returns_501();

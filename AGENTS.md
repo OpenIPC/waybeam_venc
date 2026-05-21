@@ -452,6 +452,7 @@ Read these before working on related areas:
 | Coding conventions | `documentation/CONVENTIONS.md` |
 | Code structure prestudy | `documentation/CODE_STRUCTURE_PRESTUDY.md` |
 | Refactoring plan | `documentation/REFACTORING_PLAN.md` |
+| Stabilization on-device tests | `documentation/STABILIZATION_TEST_PLAN.md` |
 
 ## Config / WebUI / API Sync Rules
 

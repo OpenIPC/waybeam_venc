@@ -720,19 +720,18 @@ static int star6e_runtime_handle_reinit(int *handled)
 	fflush(stdout);
 
 	/* Detect a video0.size change.  size is the only config field that
-	 * crosses a sensor-mode boundary; resilience/framing stay within one
-	 * mode.  On a mode change the respawn must cold-init VIF/VPE (close their
-	 * inherited /dev/mi_* fds in the fd-scrub) — otherwise the fresh process
-	 * re-inits VIF to a different mode against the old mode's kernel state and
-	 * wedges vpe0_P0_MAIN.  Same-size respawns leave the fds inherited (the
-	 * deadlock-safe default).  See venc_respawn.c.
+	 * crosses a sensor-mode boundary; resilience/framing(stab|zoom) stay
+	 * within one mode.  On a mode change the respawn must cold-init VIF/VPE
+	 * (close their inherited /dev/mi_* fds in the fd-scrub) — otherwise the
+	 * fresh process re-inits VIF to a different mode against the old mode's
+	 * kernel state and wedges vpe0_P0_MAIN.  Same-size respawns leave the
+	 * fds inherited (the deadlock-safe default).  See venc_respawn.c.
 	 *
-	 * NOTE: same-mode respawns can still hit a pre-existing MMU read-fault
-	 * storm (MMU client 0x15, IsWrite=0) on the ~2nd consecutive respawn —
-	 * intrinsic to rebuilding a VENC channel against the live VPE port on this
-	 * SoC, independent of process model.  Not addressed here; forcing cold-vif
-	 * on every respawn made it WORSE (the close mid-flight storms immediately),
-	 * so this is gated strictly to size changes. */
+	 * NOTE: the same-mode MMU read-fault storm (MMU client 0x15, IsWrite=0)
+	 * that used to wedge the ~2nd consecutive respawn is now fixed at its
+	 * root — see debug_osd_destroy()'s detach→destroy settle.  Cold-vif here
+	 * remains gated strictly to size changes (forcing it on every respawn
+	 * storms immediately because the close lands mid-flight). */
 	if (g_runner_ctx &&
 	    (g_runner_ctx->vcfg.video0.width != g_runner_ctx->started_base_w ||
 	     g_runner_ctx->vcfg.video0.height != g_runner_ctx->started_base_h)) {
@@ -944,6 +943,19 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		static unsigned int osd_fps;
 		struct timespec osd_now;
 
+		/* When image stabilization is on, the OSD canvas is at full
+		 * VPE port dim but the encoded view is the centered crop.
+		 * Track the crop origin every frame so the panel stays
+		 * stationary in the encoded view as stab corrections shift
+		 * the crop window in port coords. */
+		{
+			int anchor_x;
+			int anchor_y;
+			if (star6e_pipeline_stab_panel_anchor(&anchor_x, &anchor_y))
+				debug_osd_set_panel_offset(ps->debug_osd,
+					anchor_x, anchor_y);
+		}
+
 		debug_osd_begin_frame(ps->debug_osd);
 		debug_osd_sample_cpu(ps->debug_osd);
 
@@ -1076,11 +1088,14 @@ static int star6e_runner_run(void *opaque)
 {
 	Star6eRunnerContext *ctx = opaque;
 	struct timespec cus3a_ts_last = {0};
+	struct timespec run_start;
+	int legacy_fps_kick_done = 0;
 	unsigned int idle_counter = 0;
 	int handled;
 	int ret;
 
 	clock_gettime(CLOCK_MONOTONIC, &cus3a_ts_last);
+	clock_gettime(CLOCK_MONOTONIC, &run_start);
 
 	/* Pin encoder to CPU 0 with minimum RT priority.  Reduces
 	 * scheduling jitter from ISP/audio/httpd threads.  Silent
@@ -1110,6 +1125,21 @@ static int star6e_runner_run(void *opaque)
 			&idle_counter);
 		if (ret != 0) {
 			return ret;
+		}
+
+		/* One-shot legacy-AE cold-boot fps re-kick ~1.5s after start,
+		 * once the ISP bin load + AE have settled (the init-time kick
+		 * fires too early and doesn't stick on a cold boot).  No-op in
+		 * CUS3A mode (its thread does the frame-15 kick). */
+		if (!legacy_fps_kick_done) {
+			struct timespec now;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			if ((now.tv_sec - run_start.tv_sec) +
+			    (now.tv_nsec - run_start.tv_nsec) / 1e9 >= 1.5) {
+				star6e_pipeline_legacy_fps_rekick(&ctx->ps,
+					&ctx->vcfg);
+				legacy_fps_kick_done = 1;
+			}
 		}
 	}
 

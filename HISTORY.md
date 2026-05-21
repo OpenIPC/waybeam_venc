@@ -1,5 +1,100 @@
 # History
 
+## [0.12.0] - 2026-05-20
+
+Digital image stabilization (DIS) on the Star6E VPE pipeline, re-grafted
+cleanly on top of the 0.11.0 zoom work (#120) rather than the original
+stabilization branch (#118), which forked before the pan-ramp/AE-meter
+changes landed and could no longer cherry-pick clean.
+
+**Framing mode — one knob for stabilization and zoom.**  A single
+`video0.framing` preset is the sole user-facing knob for what the VPE crop
+does (resilience-style): `off`, the stabilization presets `low`|`medium`|
+`high` (Star6E only), and the digital-zoom presets `zoom-1.25x`|`zoom-1.50x`|
+`zoom-1.75x`|`zoom-2x` (both backends).  It expands into the derived
+stab crop/recenter or zoom crop fraction — mutually exclusive — and replaces
+the old standalone `stab` and continuous `zoomPct` fields, neither of which
+is part of the JSON schema or HTTP API anymore.  Zoom presets shrink the
+crop + encoded output together (1:1, no SCL upscale; e.g. `zoom-2x` of
+1920×1080 → 960×528).  `zoomX`/`zoomY` remain live and pan the crop in every
+mode.  `video0.framing` is `MUT_RESTART`.
+
+**Stabilization data path (Star6E).**  Preferred path (HW-crop): VPE port0 hardware-crops the stab
+window — `MI_VPE_SetPortCrop` per detection — straight into a VENC **bind**
+(zero-copy, no per-frame blit), while a tiny 256×256 port1 tap feeds
+`MI_IVE_Shift_Detector` for motion estimation.  Decoupling the detector
+from the stream lets ch0 run at full sensor rate (90/120 fps at 1080p
+confirmed).  The original single-port manual-drain + `MI_SYS_BufBlitPa`
+path is retained as an **automatic fallback** if a BSP rejects the
+simultaneous port1.  Binding port0→VENC also fixes the long-standing
+teardown wedge (the legacy un-drained full-res port0 queue that wedged
+`[vpe0_P0_MAIN]` into D-state on restart).  Return-to-center decays the
+offset *vector* in a float accumulator → a straight diagonal back to
+center with no per-axis rounding tail.  When enabled the source is clamped
+to ≤1920×1080 (preserve aspect) to avoid the high-res fps regression; the
+encoded resolution then shrinks to the crop fraction of the (clamped)
+source, reported in SPS/PPS.  Only the live ch0 stream is stabilized; JPEG
+snapshots and the debug OSD see the unstabilized frame.  Dual recording
+(`record.mode` dual/dual-stream) is downgraded to single-channel while
+stab is active (both would consume VPE port0) — it records the stabilized
+ch0 at its bitrate, with a warning.  `video0.stab` is `MUT_RESTART`.
+
+**Interplay with 0.11.0 zoom.**  Stabilization and zoom are now mutually
+exclusive *by construction* — a `framing` preset is either one or the other,
+so the old "zoomPct ignored while stab on" warning is gone.  `zoomX`/`zoomY`
+are honoured in both modes: under a stab preset they pan the stabilized crop
+via `star6e_stab_set_pan()`; under a zoom preset they drive the 0.11.0
+pan-ramp path.  `apply_zoom` short-circuits to the stab pan when the stab
+thread is running.
+
+**Size-change reboot fixed (cold-init VIF/VPE on respawn).**  A
+`video0.size` change crosses a sensor-mode boundary; the fork+exec respawn
+keeps `/dev/mi_*` fds open (the PR#117/#120 deadlock fix), so the inherited
+VIF/VPE fds pinned the *old* mode and the fresh process wedged
+`vpe0_P0_MAIN` re-initing to the new mode.  The runtime now detects a
+size change (the only field that changes the sensor mode) and the fd-scrub
+additionally closes `/dev/mi_vif` + `/dev/mi_vpe` so they re-init cold —
+gated so it never runs on same-mode respawns (resilience/framing), which
+stay deadlock-safe.  Device-verified clean in both directions
+(1920↔2560) on a non-degraded device; closing those two fds does not
+deadlock.  (Heavy back-to-back respawn cycling can still hit the
+pre-existing cumulative SoC-state degradation that needs a power cycle —
+that is independent of this fix.)
+
+**Cold-boot fps re-kick (legacy AE).**  On a cold boot the init-time
+`MI_SNR_SetFps` can fire before the ISP bin's AE settles and leave the
+sensor timing register below the configured fps.  The CUS3A path already
+re-kicks at frame 15; legacy AE now gets an equivalent one-shot re-kick
+~1.5s into the run loop.  The CUS3A frame-15 kick was also decoupled from
+the shutter-above-cap gate so it fires reliably.
+
+**AE meter follows the crop in both modes.**  The zoom-aware AE meter
+(`MI_ISP_CUS3A_SetAECropSize`) now also tracks the stabilized crop window,
+so exposure is metered on the framed view rather than the full sensor —
+the only intended runtime difference between the two modes is the pan ramp
+(smooth under zoom, direct under stab) plus the stab loop's small per-frame
+correction.  The SDK emit/readiness/dedup/disable machinery is shared
+(`star6e_emit_ae_crop`); the stab window is sized as the crop fraction of
+the VPE output (`g_stab_enc / g_stab_src`), not `image_width / precrop` as
+the zoom path uses, because stab crops the VPE output rather than precrop.
+
+**Debug OSD under stabilization.**  The OSD attaches at the full source
+dim (port0 is never cropped on the stab path) and its stats panel offset
+tracks the live crop window per-frame via
+`star6e_pipeline_stab_panel_anchor()`, so the panel stays put in the
+encoded view as corrections shift the crop.
+
+**IMU-gyro readiness.**  The motion estimate is purely optical today, but
+the design leaves a clean seam for gyro fusion: the existing BMI270 driver
+now routes its frame-synced samples into a shared `ImuRing` (replacing the
+discard stub), and the per-frame estimate lives in
+`star6e_stab_estimate_shift()` with `star6e_stab_gyro_window()` supplying
+the frame-aligned angular rates for the interval.  Adding gyro-assisted
+stabilization is then just the math: integrate yaw/pitch to pixels via the
+lens focal length and fuse with the optical shift.  The gyro window is read
+and surfaced in the periodic stab diagnostic so the plumbing and
+frame-sync are live, not speculative.
+
 ## [0.11.0] - 2026-05-19
 
 Star6E zoom improvements lifted from the DIVP/stabilization branch

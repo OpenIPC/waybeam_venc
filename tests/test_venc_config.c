@@ -205,7 +205,7 @@ static int test_load_full_json(void)
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
 		/* "codec" above is intentionally legacy — parser must silently drop it. */
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
-		"    \"frameLost\": false, \"zoomPct\": 0.5, \"zoomX\": 0.25, \"zoomY\": 0.75 },"
+		"    \"frameLost\": false, \"framing\": \"zoom-2x\", \"zoomX\": 0.25, \"zoomY\": 0.75 },"
 		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false },"
 		"  \"fpv\": { \"roiEnabled\": true, \"roiQp\": -18, \"roiSteps\": 2, \"noiseLevel\": 5 }"
 		"}";
@@ -239,7 +239,8 @@ static int test_load_full_json(void)
 	CHECK("load_gop", cfg.video0.gop_size == 1);
 	CHECK("load_qp_delta", cfg.video0.qp_delta == -7);
 	CHECK("load_frame_lost_off", cfg.video0.frame_lost == false);
-	CHECK("load_zoom_pct", cfg.video0.zoom_pct == 0.5);
+	CHECK("load_framing_zoom2x", strcmp(cfg.video0.framing, "zoom-2x") == 0);
+	CHECK("load_framing_zoom_pct", cfg.video0.zoom_pct == 0.5);
 	CHECK("load_zoom_x", cfg.video0.zoom_x == 0.25);
 	CHECK("load_zoom_y", cfg.video0.zoom_y == 0.75);
 	CHECK("load_enabled", cfg.outgoing.enabled == true);
@@ -377,7 +378,7 @@ static int test_roundtrip(void)
 	cfg.video0.qp_delta = 6;
 	cfg.system.verbose = true;
 	cfg.video0.scene_threshold = 150;
-	cfg.video0.zoom_pct = 0.5;
+	strcpy(cfg.video0.framing, "zoom-2x");  /* zoom_pct derived on reload */
 	cfg.video0.zoom_x = 0.25;
 	cfg.video0.zoom_y = 0.75;
 
@@ -403,6 +404,7 @@ static int test_roundtrip(void)
 	CHECK("roundtrip_qp_delta", cfg2.video0.qp_delta == 6);
 	CHECK("roundtrip_verbose", cfg2.system.verbose == true);
 	CHECK("roundtrip_scene_threshold", cfg2.video0.scene_threshold == 150);
+	CHECK("roundtrip_framing", strcmp(cfg2.video0.framing, "zoom-2x") == 0);
 	CHECK("roundtrip_zoom_pct", cfg2.video0.zoom_pct == 0.5);
 	CHECK("roundtrip_zoom_x", cfg2.video0.zoom_x == 0.25);
 	CHECK("roundtrip_zoom_y", cfg2.video0.zoom_y == 0.75);
@@ -448,44 +450,56 @@ static int test_noise_level_clamping(void)
 	return failures;
 }
 
-static int test_zoom_clamping(void)
+static int test_framing_presets(void)
 {
 	int failures = 0;
 	VencConfig cfg;
 	char *path;
 
-	path = write_temp_json("{ \"video0\": { \"zoomPct\": 0.1, "
+	/* Zoom presets expand into zoom_pct; pan still clamps. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"zoom-1.25x\", "
 		"\"zoomX\": -1, \"zoomY\": 2 } }");
-	CHECK("zoom clamp tmpfile", path != NULL);
+	CHECK("framing zoom tmpfile", path != NULL);
 	if (!path) return failures;
-
 	venc_config_defaults(&cfg);
 	venc_config_load(path, &cfg);
 	unlink(path);
 	free(path);
-	CHECK("zoom pct clamped floor", cfg.video0.zoom_pct == 0.25);
-	CHECK("zoom x clamped low", cfg.video0.zoom_x == 0.0);
-	CHECK("zoom y clamped high", cfg.video0.zoom_y == 1.0);
+	CHECK("framing zoom1.25 pct", cfg.video0.zoom_pct == 0.80);
+	CHECK("framing zoom no stab", cfg.video0.stab_crop_pct == 0);
+	CHECK("framing zoom x clamped low", cfg.video0.zoom_x == 0.0);
+	CHECK("framing zoom y clamped high", cfg.video0.zoom_y == 1.0);
 
-	path = write_temp_json("{ \"video0\": { \"zoomPct\": -0.5 } }");
-	CHECK("zoom negative tmpfile", path != NULL);
+	/* 2x maps to 0.50. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"zoom-2x\" } }");
 	if (!path) return failures;
-
 	venc_config_defaults(&cfg);
 	venc_config_load(path, &cfg);
 	unlink(path);
 	free(path);
-	CHECK("zoom pct negative off", cfg.video0.zoom_pct == 0.0);
+	CHECK("framing zoom2x pct", cfg.video0.zoom_pct == 0.50);
 
-	path = write_temp_json("{ \"video0\": { \"zoomPct\": 2.0 } }");
-	CHECK("zoom high tmpfile", path != NULL);
+	/* Stab presets expand into stab_crop_pct/recenter, zoom_pct 0. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"medium\" } }");
 	if (!path) return failures;
-
 	venc_config_defaults(&cfg);
 	venc_config_load(path, &cfg);
 	unlink(path);
 	free(path);
-	CHECK("zoom pct clamped high", cfg.video0.zoom_pct == 1.0);
+	CHECK("framing medium crop", cfg.video0.stab_crop_pct == 80);
+	CHECK("framing medium recenter", cfg.video0.stab_recenter_speed == 60);
+	CHECK("framing medium no zoom", cfg.video0.zoom_pct == 0.0);
+
+	/* Unknown preset falls back to off (all derived fields cleared). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"bogus\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing bogus off", strcmp(cfg.video0.framing, "off") == 0);
+	CHECK("framing bogus no zoom", cfg.video0.zoom_pct == 0.0);
+	CHECK("framing bogus no stab", cfg.video0.stab_crop_pct == 0);
 
 	return failures;
 }
@@ -883,7 +897,7 @@ int test_venc_config(void)
 	failures += test_roundtrip();
 	failures += test_overclock_clamping();
 	failures += test_noise_level_clamping();
-	failures += test_zoom_clamping();
+	failures += test_framing_presets();
 	failures += test_resolution_aliases();
 	failures += test_rotate_180();
 	failures += test_sample_config_file();

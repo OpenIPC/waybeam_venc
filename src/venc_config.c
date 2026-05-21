@@ -178,10 +178,14 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->video0.resilience,
 		sizeof(cfg->video0.resilience), "off");
 
-	/* digital zoom (video0) — disabled by default */
-	cfg->video0.zoom_pct = 0.0;
+	/* pan centre (video0) — live; zoom_pct is derived from the framing
+	 * preset below */
 	cfg->video0.zoom_x = 0.5;
 	cfg->video0.zoom_y = 0.5;
+
+	/* framing mode (video0) — off by default; expands zoom_pct + stab */
+	safe_strcpy(cfg->video0.framing, sizeof(cfg->video0.framing), "off");
+	(void)venc_config_apply_framing_preset("off", &cfg->video0);
 
 	/* snapshot — MJPEG /api/v1/snapshot.jpg endpoint.  Defaults inherit
 	 * main-stream dimensions (width=0/height=0) so a fresh config gets a
@@ -427,6 +431,60 @@ int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v)
 	return -1;
 }
 
+int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
+{
+	struct framing_preset {
+		const char *name;
+		uint32_t crop_pct;  /* stab kept fraction; 0 = no stab */
+		uint32_t recenter;  /* stab recenter tau (frames); 0 = stick */
+		double zoom_pct;    /* Approach-C zoom crop fraction; 0 = no zoom */
+	};
+	/* Framing preset table.  A preset is EITHER a stabilization preset
+	 * (crop_pct/recenter set, zoom_pct 0) OR a zoom preset (zoom_pct set,
+	 * stab 0) OR off (all 0) — never both.
+	 *
+	 * Stab presets — crop_pct is the kept fraction (lower = bigger
+	 * dead-border = more shake headroom but a tighter crop); recenter is the
+	 * return-to-center time-constant in frames (lower = snappier diagonal,
+	 * 0 = stick).  Star6E only; no-op on Maruko.
+	 *
+	 * Zoom presets — zoom_pct = 1 / magnification (e.g. 2x -> 0.50).  Both
+	 * backends; zoom_x/zoom_y pan live.
+	 *
+	 *   preset       cropPct  tau   zoom_pct   effect
+	 *   ──────────────────────────────────────────────────────────────
+	 *   off          0        0     0.00       full image
+	 *   low          90       120   0.00       light stabilization
+	 *   medium       80       60    0.00       balanced stabilization
+	 *   high         65       30    0.00       aggressive stabilization
+	 *   zoom-1.25x   0        0     0.80       1.25x digital zoom
+	 *   zoom-1.50x   0        0     0.6667     1.50x digital zoom
+	 *   zoom-1.75x   0        0     0.5714     1.75x digital zoom
+	 *   zoom-2x      0        0     0.50       2x digital zoom
+	 */
+	static const struct framing_preset table[] = {
+		{ "off",        0,  0,   0.0    },
+		{ "low",        90, 120, 0.0    },
+		{ "medium",     80, 60,  0.0    },
+		{ "high",       65, 30,  0.0    },
+		{ "zoom-1.25x", 0,  0,   0.80   },
+		{ "zoom-1.50x", 0,  0,   0.6667 },
+		{ "zoom-1.75x", 0,  0,   0.5714 },
+		{ "zoom-2x",    0,  0,   0.50   },
+	};
+
+	const char *want = (!name || !*name) ? "off" : name;
+	for (size_t i = 0; i < sizeof(table)/sizeof(table[0]); ++i) {
+		if (strcmp(want, table[i].name) != 0)
+			continue;
+		v->stab_crop_pct = table[i].crop_pct;
+		v->stab_recenter_speed = table[i].recenter;
+		v->zoom_pct = table[i].zoom_pct;
+		return 0;
+	}
+	return -1;
+}
+
 static void load_video0(const cJSON *root, VencConfigVideo *v)
 {
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "video0");
@@ -483,20 +541,10 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		}
 	}
 
-	v->zoom_pct = json_get_double(obj, "zoomPct", v->zoom_pct);
+	/* zoom_pct is derived from the framing preset (below) — no longer
+	 * parsed from JSON.  Only the live pan centre is read here. */
 	v->zoom_x   = json_get_double(obj, "zoomX",   v->zoom_x);
 	v->zoom_y   = json_get_double(obj, "zoomY",   v->zoom_y);
-	if (v->zoom_pct < 0.0)
-		v->zoom_pct = 0.0;
-	if (v->zoom_pct > 1.0)
-		v->zoom_pct = 1.0;
-	/* Min 0.25 keeps the encoded frame large enough for receiver-side
-	 * decoders that ignore mid-stream SPS resolution changes (going
-	 * smaller produces a stream the receiver still renders at the first
-	 * SPS dim, so deeper zoom is invisible).  This also stays comfortably
-	 * above the VENC_CreateChn minimum dim. */
-	if (v->zoom_pct > 0.0 && v->zoom_pct < 0.25)
-		v->zoom_pct = 0.25;
 	if (v->zoom_x < 0.0)
 		v->zoom_x = 0.0;
 	if (v->zoom_x > 1.0)
@@ -505,6 +553,20 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		v->zoom_y = 0.0;
 	if (v->zoom_y > 1.0)
 		v->zoom_y = 1.0;
+
+	/* Framing preset is the sole driver of stab_crop_pct + stab_recenter_speed
+	 * (stab presets) and zoom_pct (zoom presets); those granular fields are no
+	 * longer parsed from JSON.  Unknown values fall back to "off". */
+	{
+		const char *fname = json_get_string(obj, "framing", v->framing);
+		safe_strcpy(v->framing, sizeof(v->framing), fname);
+		if (venc_config_apply_framing_preset(v->framing, v) != 0) {
+			fprintf(stderr, "[config] WARNING: unknown video0.framing "
+				"preset '%s', falling back to off\n", v->framing);
+			safe_strcpy(v->framing, sizeof(v->framing), "off");
+			(void)venc_config_apply_framing_preset("off", v);
+		}
+	}
 }
 
 static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
@@ -1053,9 +1115,9 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
-	pp_field_double(p, 2, "zoomPct",           cfg->video0.zoom_pct,            0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
-	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              1);
+	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              0);
+	pp_field_string(p, 2, "framing",           cfg->video0.framing,             1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1237,9 +1299,9 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
 		cJSON_AddStringToObject(vid, "resilience", cfg->video0.resilience);
-		cJSON_AddNumberToObject(vid, "zoomPct", cfg->video0.zoom_pct);
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);
+		cJSON_AddStringToObject(vid, "framing", cfg->video0.framing);
 	}
 
 	/* outgoing */

@@ -103,7 +103,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1 },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "frameLost": true, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5 },
+      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "frameLost": true, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -146,9 +146,9 @@ Response `200`:
       "video0.scene_threshold": { "mutability": "restart_required", "supported": true },
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
       "video0.resilience": { "mutability": "restart_required", "supported": true },
-      "video0.zoom_pct": { "mutability": "restart_required", "supported": true },
       "video0.zoom_x": { "mutability": "live", "supported": true },
       "video0.zoom_y": { "mutability": "live", "supported": true },
+      "video0.framing": { "mutability": "restart_required", "supported": true },
       "system.verbose": { "mutability": "live", "supported": true },
       "outgoing.enabled": { "mutability": "live", "supported": true },
       "outgoing.server": { "mutability": "live", "supported": true },
@@ -220,7 +220,7 @@ including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `isp.keepAspect`, `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
 `video0.sceneThreshold`, `video0.sceneHoldoff`,
 `video0.intraRefreshMode`, `video0.intraRefreshLines`,
-`video0.intraRefreshQp`, `video0.zoomPct`, `video0.zoomX`, `video0.zoomY`,
+`video0.intraRefreshQp`, `video0.zoomX`, `video0.zoomY`, `video0.framing`,
 `outgoing.maxPayloadSize`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
 
@@ -292,7 +292,7 @@ curl "http://<device-ip>/api/v1/set?video0.size=1080p"
 curl "http://<device-ip>/api/v1/set?video0.scene_threshold=150"
 
 # Enable 2x digital zoom (encoded resolution becomes half width/height)
-curl "http://<device-ip>/api/v1/set?video0.zoomPct=0.5"
+curl "http://<device-ip>/api/v1/set?video0.framing=zoom-2x"
 ```
 
 Response `200` (includes `"reinit_pending": true`):
@@ -355,21 +355,23 @@ Majestic-oriented clients.
 - Alias: `video0.qpDelta`
 - Semantics: adjusts I-frame QP relative to P-frame; negative values lower I-frame QP (higher quality keyframes), positive values raise it.
 
-### `video0.zoom_pct`, `video0.zoom_x`, `video0.zoom_y`
+### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`
 
-- Types: double
-- Ranges:
-  - `video0.zoom_pct`: `0.0` to disable zoom, or `0.25..1.0` crop fraction
-  - `video0.zoom_x`: `0.0..1.0`
-  - `video0.zoom_y`: `0.0..1.0`
-- Mutability:
-  - `video0.zoom_pct`: `restart_required` because it changes encoded resolution
-  - `video0.zoom_x`, `video0.zoom_y`: `live`
-- Aliases: `video0.zoomPct`, `video0.zoomX`, `video0.zoomY`
-- Semantics: digital zoom uses a 1:1 crop. The crop window and encoded output
-  resolution shrink together; there is no SCL upscale and no additional output
-  bandwidth pressure. `zoom_x` and `zoom_y` move the crop center inside the
-  active aspect-ratio-corrected source surface.
+- `video0.framing`: string preset — the single knob for what the VPE crop does.
+  - Values: `off` | `low` | `medium` | `high` (stabilization, Star6E only) |
+    `zoom-1.25x` | `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` (digital zoom, both
+    backends).
+  - Mutability: `restart_required` (changes encoded resolution / pipeline).
+  - The preset expands internally into the zoom crop fraction (zoom presets) or
+    the stabilization crop/recenter (stab presets); the two are mutually
+    exclusive. There is no settable continuous `zoom_pct` — use a zoom preset.
+- `video0.zoom_x`, `video0.zoom_y`: double, `0.0..1.0`, mutability `live`.
+  Aliases `video0.zoomX`, `video0.zoomY`.
+- Semantics: digital zoom uses a 1:1 crop — the crop window and encoded output
+  resolution shrink together (e.g. `zoom-2x` of 1920×1080 → 960×528); no SCL
+  upscale, no extra output bandwidth. `zoom_x`/`zoom_y` move the crop center
+  live inside the active aspect-ratio-corrected source surface (and serve as the
+  pan center under a stabilization preset too).
 
 ### `GET /api/v1/fps/config`
 
@@ -1268,7 +1270,7 @@ divergence is listed.  As of `contract_version: 0.10.1`:
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
-| `video0.zoom_pct` / `zoom_x` / `zoom_y` | yes | yes | `zoom_pct` requires reinit; `zoom_x/y` are live pan controls. |
+| `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, stab presets (low/medium/high) are Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls. |
 | `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
 
 ## Change Log (Contract)

@@ -385,13 +385,16 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
-	/* zoom_pct shrinks the encoded resolution to the crop dim (no SCL
-	 * upscale, no bandwidth pressure) — that requires resizing the VPE
-	 * port and VENC channel, hence MUT_RESTART.  zoom_x/y stay live for
-	 * smooth panning at the same crop dim via MI_VPE_SetPortCrop. */
-	FIELD(video0, zoom_pct,    FT_DOUBLE, MUT_RESTART),
+	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
+	 * magnitude is part of the framing preset (derived zoom_pct), not a
+	 * settable field. */
 	FIELD(video0, zoom_x,      FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, zoom_y,      FT_DOUBLE, MUT_LIVE),
+	/* Framing preset — sole user-facing knob for the VPE crop (stabilization
+	 * presets low|medium|high or zoom presets zoom-1.25x..zoom-2x); expands
+	 * into derived stab_crop_pct/recenter or zoom_pct.  Encoded resolution
+	 * changes when toggled, so the whole pipeline must restart. */
+	FIELD(video0, framing,             FT_STRING, MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -444,7 +447,6 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.gopSize", "record.gop_size" },
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
-	{ "video0.zoomPct", "video0.zoom_pct" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
@@ -651,13 +653,6 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.qp_delta < -12 || cfg->video0.qp_delta > 12)
 			return "qp_delta must be in range [-12, 12]";
 	}
-	if (strcmp(key, "video0.zoom_pct") == 0) {
-		double v = cfg->video0.zoom_pct;
-		if (!isfinite(v))
-			return "zoom_pct must be finite";
-		if (v != 0.0 && (v < 0.25 || v > 1.0))
-			return "zoom_pct must be 0.0 or in range [0.25, 1.0]";
-	}
 	if (strcmp(key, "video0.zoom_x") == 0) {
 		double v = cfg->video0.zoom_x;
 		if (!isfinite(v) || v < 0.0 || v > 1.0)
@@ -667,6 +662,12 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		double v = cfg->video0.zoom_y;
 		if (!isfinite(v) || v < 0.0 || v > 1.0)
 			return "zoom_y must be in range [0.0, 1.0]";
+	}
+	if (strcmp(key, "video0.framing") == 0) {
+		VencConfigVideo probe;
+		if (venc_config_apply_framing_preset(cfg->video0.framing, &probe) != 0)
+			return "framing must be one of: off, low, medium, high, "
+				"zoom-1.25x, zoom-1.50x, zoom-1.75x, zoom-2x";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
@@ -740,9 +741,9 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.qp_delta",
 		"video0.size",
 		"video0.scene_holdoff",
-		"video0.zoom_pct",
 		"video0.zoom_x",
 		"video0.zoom_y",
+		"video0.framing",
 		"fpv.roi_qp",
 		"fpv.roi_steps",
 		"fpv.roi_center",
@@ -1036,8 +1037,7 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_MAX_PAYLOAD;
 	if (strcmp(canonical_key, "audio.mute") == 0)
 		return LIVE_GROUP_MUTE;
-	if (strcmp(canonical_key, "video0.zoom_pct") == 0 ||
-	    strcmp(canonical_key, "video0.zoom_x") == 0 ||
+	if (strcmp(canonical_key, "video0.zoom_x") == 0 ||
 	    strcmp(canonical_key, "video0.zoom_y") == 0)
 		return LIVE_GROUP_ZOOM;
 	if (strcmp(canonical_key, "isp.sensor_bin") == 0)
@@ -1860,6 +1860,15 @@ static int process_restart_set_query(const SetQueryParam *param,
 			old_v.gop_size, new_cfg.video0.gop_size,
 			needs_respawn ? "respawn" : "live-reinit");
 	}
+
+	/* Detect a framing preset change.  Like resilience, the staged new_cfg
+	 * holds the new preset *name* but the derived stab_crop_pct /
+	 * stab_recenter_speed / zoom_pct still hold the old expansion.  Re-expand
+	 * now so in-memory /status + GET stay coherent until the respawn reloads
+	 * from disk.  Always a plain restart — no respawn classification needed. */
+	if (strcmp(g_cfg->video0.framing, new_cfg.video0.framing) != 0)
+		(void)venc_config_apply_framing_preset(new_cfg.video0.framing,
+			&new_cfg.video0);
 
 	/* Commit g_cfg in memory and persist to disk for both paths.
 	 * For respawn, the fresh process will reload from disk anyway,
