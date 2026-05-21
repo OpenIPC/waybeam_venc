@@ -732,14 +732,17 @@ typedef MI_S32 (*stab_ive_shift_fn_t)(StabIveHandle_t handle,
 /* Shift_Detector geometry.  On Star6E there is no IVE kernel module, so
  * MI_IVE_Shift_Detector runs as a userspace CPU fallback — it is the
  * dominant per-frame stab cost (~19ms on the A7), independent of the crop
- * resolution.  Crop/box are sized down from the original 384/256 to cut
- * that cost while preserving the proven search geometry: margin
- * (crop-box)/2 = 64px and SEARCH_RANGE = 96 are kept identical to the
- * 384/256 config, only the pyramid-build area and correlation box shrink. */
-#define STAB_SHIFT_CROP_W   256
-#define STAB_SHIFT_CROP_H   256
-#define STAB_BOX_SIZE       128
-#define STAB_PYRAMID        2
+ * resolution.  These are the FULL 384/256/3 values: a larger correlation
+ * box and a 3-level pyramid give noticeably smoother motion estimates than
+ * the cheapened 256/128/2 config (which was tried for fps but produced
+ * visibly jittery/shaky stabilization — the estimates are noisier and the
+ * offset is applied raw every frame).  Smoothness was chosen over the fps
+ * the cheaper detector bought.  margin = (crop-box)/2 = 64px and
+ * SEARCH_RANGE = 96 are unchanged. */
+#define STAB_SHIFT_CROP_W   384
+#define STAB_SHIFT_CROP_H   384
+#define STAB_BOX_SIZE       256
+#define STAB_PYRAMID        3
 #define STAB_SEARCH_RANGE   96
 #define STAB_SHIFT_SIGN_X   (-1)
 #define STAB_SHIFT_SIGN_Y   (-1)
