@@ -577,11 +577,17 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		/* Advanced overrides of the stab preset's derived crop/recenter.
 		 * Read AFTER the preset expansion so an explicit value wins; absent
 		 * keys keep the preset default (so a plain framing="stab" still gets
-		 * 80/180).  Meaningful only under framing="stab"; inert otherwise. */
-		v->stab_crop_pct = (uint32_t)json_get_int(obj, "stabCropPct",
-			(int)v->stab_crop_pct);
-		v->stab_recenter_speed = (uint32_t)json_get_int(obj,
-			"stabRecenterSpeed", (int)v->stab_recenter_speed);
+		 * 80/180).  These belong to the "stab" preset, so honor them ONLY
+		 * when framing=="stab" — under off/zoom the preset's cleared 0/0 must
+		 * stand.  Otherwise a stale stabCropPct left over from a prior stab
+		 * session silently re-enables stabilization at framing=off, because
+		 * star6e_stab_enabled() keys solely on stab_crop_pct (>=50). */
+		if (strcmp(v->framing, "stab") == 0) {
+			v->stab_crop_pct = (uint32_t)json_get_int(obj, "stabCropPct",
+				(int)v->stab_crop_pct);
+			v->stab_recenter_speed = (uint32_t)json_get_int(obj,
+				"stabRecenterSpeed", (int)v->stab_recenter_speed);
+		}
 	}
 }
 

@@ -534,6 +534,31 @@ static int test_framing_presets(void)
 	CHECK("stab override absent keeps recenter",
 		cfg.video0.stab_recenter_speed == 180);
 
+	/* A stale stabCropPct/stabRecenterSpeed left over from a prior stab
+	 * session must NOT re-enable stabilization at framing="off" — the
+	 * overrides are scoped to framing="stab" (regression: stab ran with
+	 * framing=off because star6e_stab_enabled() keys on stab_crop_pct). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"off\", "
+		"\"stabCropPct\": 60, \"stabRecenterSpeed\": 0 } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing off ignores stale crop override", cfg.video0.stab_crop_pct == 0);
+	CHECK("framing off ignores stale recenter override",
+		cfg.video0.stab_recenter_speed == 0);
+
+	/* Same for zoom presets: a leftover stabCropPct stays inert. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"zoom-2x\", "
+		"\"stabCropPct\": 80 } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing zoom ignores stale crop override", cfg.video0.stab_crop_pct == 0);
+
 	/* The never-shipped low/medium/high presets are no longer special-cased;
 	 * they are unknown values and fall back to "off" like any other. */
 	path = write_temp_json("{ \"video0\": { \"framing\": \"medium\" } }");
