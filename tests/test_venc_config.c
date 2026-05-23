@@ -510,6 +510,11 @@ static int test_framing_presets(void)
 	CHECK("framing stab crop", cfg.video0.stab_crop_pct == 80);
 	CHECK("framing stab recenter", cfg.video0.stab_recenter_speed == 180);
 	CHECK("framing stab no zoom", cfg.video0.zoom_pct == 0.0);
+	/* The "stab" preset also seeds the advanced feel knobs. */
+	CHECK("framing stab smooth", cfg.video0.stab_smooth_pct == 30);
+	CHECK("framing stab still", cfg.video0.stab_still_frames == 60);
+	CHECK("framing stab edge", cfg.video0.stab_edge_pct == 88);
+	CHECK("framing stab thresh", cfg.video0.stab_motion_thresh == 1);
 
 	/* Advanced overrides win over the preset's derived 80/180, and are read
 	 * after preset expansion (stick mode = recenter 0, tighter 60% crop). */
@@ -522,6 +527,34 @@ static int test_framing_presets(void)
 	free(path);
 	CHECK("stab override crop", cfg.video0.stab_crop_pct == 60);
 	CHECK("stab override recenter stick", cfg.video0.stab_recenter_speed == 0);
+
+	/* Advanced feel knobs override the preset defaults the same way, and a
+	 * still_frames=0 (recenter immediately) must survive as a literal 0. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\", "
+		"\"stabSmoothPct\": 50, \"stabStillFrames\": 0, "
+		"\"stabEdgePct\": 70, \"stabMotionThresh\": 3 } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("stab override smooth", cfg.video0.stab_smooth_pct == 50);
+	CHECK("stab override still zero", cfg.video0.stab_still_frames == 0);
+	CHECK("stab override edge", cfg.video0.stab_edge_pct == 70);
+	CHECK("stab override thresh", cfg.video0.stab_motion_thresh == 3);
+
+	/* Absent feel-knob keys keep the preset defaults (30/60/88/1). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\", "
+		"\"stabCropPct\": 60 } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("stab feel absent keeps smooth", cfg.video0.stab_smooth_pct == 30);
+	CHECK("stab feel absent keeps still", cfg.video0.stab_still_frames == 60);
+	CHECK("stab feel absent keeps edge", cfg.video0.stab_edge_pct == 88);
+	CHECK("stab feel absent keeps thresh", cfg.video0.stab_motion_thresh == 1);
 
 	/* Absent override keys keep the preset default (plain stab = 80/180). */
 	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\" } }");

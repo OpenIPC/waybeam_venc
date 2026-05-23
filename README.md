@@ -622,6 +622,10 @@ cleanly; the key is silently ignored.
 | `video0.zoom_y` | double | live | Pan crop center Y (`0.0` top to `1.0` bottom) — applies to `zoom-*` modes only |
 | `video0.stab_crop_pct` | uint | restart | Advanced: override `stab` kept-frame % (`0` = preset default 80, else `50..100`) |
 | `video0.stab_recenter_speed` | uint | restart | Advanced: override `stab` recenter speed (`0` = stick, higher = slower; preset default 180) |
+| `video0.stab_smooth_pct` | uint | restart | Advanced: `stab` output smoothing % (`0` = preset default 30, else `5..100`; lower = smoother but laggier, `100` = none) |
+| `video0.stab_still_frames` | uint | restart | Advanced: `stab` frames of stillness before recenter starts (`0..600`; higher = stays locked longer; preset default 60) |
+| `video0.stab_edge_pct` | uint | restart | Advanced: `stab` % of dead-border used before margin is reclaimed during a pan (`0` = preset default 88, else `50..100`) |
+| `video0.stab_motion_thresh` | uint | restart | Advanced: `stab` px shift counted as "moving" (`0..16`; higher = less twitchy; preset default 1) |
 
 #### Framing: Stabilization & Digital Zoom
 
@@ -653,30 +657,86 @@ upscale ceiling.
 it per frame to cancel motion (recenter τ 180 frames, EMA-smoothed output).
 It is always centered — `zoom_x`/`zoom_y` are ignored in `stab` mode.
 
-Two **advanced tuning** knobs refine the `stab` preset (both restart-required;
-inert under `off`/`zoom-*`):
+Six **advanced tuning** knobs refine the `stab` preset (all restart-required;
+all inert under `off`/`zoom-*`; re-selecting `framing=stab` resets every one to
+its preset default, so **set `framing=stab` first, then the overrides**). They
+fall into three groups:
 
-- `stab_crop_pct` — kept-frame %. `0` keeps the preset default (80). A smaller
-  value (e.g. `60`) leaves a bigger dead border, so the crop has more room to
-  absorb motion, at the cost of a tighter, lower-resolution frame.
-- `stab_recenter_speed` — how fast the crop glides back to center after motion
-  (decay time-constant in frames). `0` = **stick** (never recenters — the most
-  visible effect, but it drifts to the border and saturates in real use).
-  Higher = slower, gentler return; `180` is the production default.
+*Headroom* — how much room the crop has to absorb motion:
+- `stab_crop_pct` — kept-frame %. `0` keeps the preset default (80). Smaller
+  (e.g. `60`) = bigger dead border = more motion the crop can cancel, at the
+  cost of a tighter, lower-resolution frame.
 
-Set `framing=stab` first, then the overrides (re-selecting the preset resets
-them to 80/180):
+*Smoothness* — how the correction feels:
+- `stab_smooth_pct` — EMA low-pass on the applied offset, as a %. `0` keeps the
+  preset default (30). **This is the primary feel knob.** Lower = smoother but
+  laggier (the frame trails your real motion); higher = snappier but more jitter
+  passes through; `100` = no smoothing.
+
+*Lock & return* — how it behaves after a disturbance and during a deliberate pan:
+- `stab_recenter_speed` — how fast the crop glides back to center (decay τ in
+  frames). `0` = **stick** (never recenters — strongest visible effect, but
+  drifts to the border and saturates in real use). Higher = slower, gentler
+  return; `180` is the production default.
+- `stab_still_frames` — frames of stillness after motion before the return
+  starts (`0..600`, default 60). Higher = the view stays locked longer after a
+  bump; `0` = start returning the instant motion stops.
+- `stab_edge_pct` — during a *sustained* pan, the % of the dead-border the offset
+  may use before margin is reclaimed (`0` = default 88, else `50..100`). Higher =
+  sticks harder toward the edge before letting go.
+- `stab_motion_thresh` — inter-frame shift (px) that counts as "moving" and
+  re-arms the stillness timer (`0..16`, default 1). Higher = less twitchy, treats
+  small vibration as still.
+
+##### Calibrating `stab` to taste
+
+Work one group at a time and watch the `stab tick` line in the log (printed every
+120 frames) — it is the calibration instrument:
+
+```
+stab tick 600: meas=(82,83) acc=(-206,31) max=(288,216) pan=(500,500) still=0 ...
+```
+- `meas` = motion estimate this detect · `acc` = the crop offset being applied ·
+  `max` = the dead-border limit (= half the cropped-away pixels) · `still` =
+  stillness counter (counts up to `stab_still_frames`, resets to 0 on motion).
+
+Recommended order:
+
+1. **Headroom first.** Shake the camera the way it will really move. If `acc`
+   sits pinned near `±max` and clips, you're saturating — lower `stab_crop_pct`
+   (e.g. 80 → 70 → 60) until `acc` has room. If motion is gentle and you want
+   max FOV/sharpness, keep 80.
+2. **Then smoothness.** If the output looks jittery/shaky (or `acc` jumps around
+   erratically frame-to-frame), *lower* `stab_smooth_pct` (30 → 20 → 15). If it
+   feels floaty and lags your real movement, *raise* it (30 → 50 → 70).
+3. **Then lock & return.** If the view creeps back to center too eagerly after
+   you stop, raise `stab_still_frames` (60 → 120 → 180) and/or `stab_recenter_speed`
+   (slower glide). If it drifts to the edge and won't come home, lower
+   `stab_recenter_speed`. If a deliberate pan jumps when it reaches the border,
+   raise `stab_edge_pct`.
+4. **Twitchiness last.** If tiny vibration keeps resetting `still` to 0 (it
+   rarely reaches the ceiling), raise `stab_motion_thresh` to 2–3.
+
+The active values are echoed once at start so you can confirm each change:
+```
+[waybeam] stab: src=1440x1080 out=864x648 crop=60% recenter=20 (0=stick) smooth=0.15 still=120 edge=88% thresh=1
+```
+
+Examples (each `set` is restart-required; the daemon respawns to apply):
 
 ```bash
-# Production stab.
+# Production stab (all knobs at preset defaults).
 curl "http://<device>/api/v1/set?video0.framing=stab"
 
-# Demo: 80% crop that sticks to the patch (no recenter) — strongest visible
-# stabilization, drifts to the border (not for real-world use).
-curl "http://<device>/api/v1/set?video0.stabRecenterSpeed=0"
+# Smoother, locked-longer feel: heavier low-pass + longer hold.
+curl "http://<device>/api/v1/set?video0.stabSmoothPct=15&video0.stabStillFrames=180"
 
-# Tighter crop (more motion headroom) with a quick recenter.
+# More motion headroom (tighter crop) with a quick, gentle recenter.
 curl "http://<device>/api/v1/set?video0.stabCropPct=60&video0.stabRecenterSpeed=60"
+
+# Demo: stick to the patch (no recenter) — strongest visible effect, drifts to
+# the border (not for real-world use).
+curl "http://<device>/api/v1/set?video0.stabRecenterSpeed=0"
 ```
 
 **Panning** applies to the `zoom-*` modes only and is live (`zoom_x`,

@@ -401,6 +401,12 @@ static const FieldDesc g_fields[] = {
 	 * under off/zoom.  Restart-required (crop changes encode resolution). */
 	FIELD(video0, stab_crop_pct,       FT_UINT,   MUT_RESTART),
 	FIELD(video0, stab_recenter_speed, FT_UINT,   MUT_RESTART),
+	/* Advanced "stab" feel knobs — refine the preset's smoothness/lock/edge
+	 * behavior.  Set framing=stab first; inert under off/zoom.  All restart. */
+	FIELD(video0, stab_smooth_pct,     FT_UINT,   MUT_RESTART),
+	FIELD(video0, stab_still_frames,   FT_UINT,   MUT_RESTART),
+	FIELD(video0, stab_edge_pct,       FT_UINT,   MUT_RESTART),
+	FIELD(video0, stab_motion_thresh,  FT_UINT,   MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -457,6 +463,10 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.zoomY", "video0.zoom_y" },
 	{ "video0.stabCropPct", "video0.stab_crop_pct" },
 	{ "video0.stabRecenterSpeed", "video0.stab_recenter_speed" },
+	{ "video0.stabSmoothPct", "video0.stab_smooth_pct" },
+	{ "video0.stabStillFrames", "video0.stab_still_frames" },
+	{ "video0.stabEdgePct", "video0.stab_edge_pct" },
+	{ "video0.stabMotionThresh", "video0.stab_motion_thresh" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -687,6 +697,28 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.stab_recenter_speed > 3600)
 			return "stab_recenter_speed must be in range [0, 3600] "
 				"(0 = stick, higher = slower recenter)";
+	}
+	if (strcmp(key, "video0.stab_smooth_pct") == 0) {
+		uint32_t v = cfg->video0.stab_smooth_pct;
+		if (v != 0 && (v < 5 || v > 100))
+			return "stab_smooth_pct must be 0 (preset default) or in "
+				"range [5, 100] (lower = smoother but laggier)";
+	}
+	if (strcmp(key, "video0.stab_still_frames") == 0) {
+		if (cfg->video0.stab_still_frames > 600)
+			return "stab_still_frames must be in range [0, 600] "
+				"(higher = view stays locked longer after a bump)";
+	}
+	if (strcmp(key, "video0.stab_edge_pct") == 0) {
+		uint32_t v = cfg->video0.stab_edge_pct;
+		if (v != 0 && (v < 50 || v > 100))
+			return "stab_edge_pct must be 0 (preset default) or in "
+				"range [50, 100] (higher = sticks harder to edge)";
+	}
+	if (strcmp(key, "video0.stab_motion_thresh") == 0) {
+		if (cfg->video0.stab_motion_thresh > 16)
+			return "stab_motion_thresh must be in range [0, 16] "
+				"(higher = less twitchy stillness detection)";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)

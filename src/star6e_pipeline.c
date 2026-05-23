@@ -827,6 +827,13 @@ static uint32_t g_stab_pre_w;
 static uint32_t g_stab_pre_h;
 static uint32_t g_stab_crop_percent;
 static uint32_t g_stab_recenter_period;   /* frames between 1-pixel leak; 0=off */
+/* Advanced "stab" feel knobs, set from VencConfig in star6e_stab_configure()
+ * (MUT_RESTART, so fixed for the lifetime of a stab run).  Initialized to the
+ * STAB_* compile-time defaults as a fallback if configure is bypassed. */
+static double g_stab_smooth_alpha = STAB_OUTPUT_SMOOTH_ALPHA;
+static int g_stab_still_frames_max = STAB_RECENTER_STILL_FRAMES;
+static int g_stab_edge_pct = STAB_RECENTER_EDGE_PCT;
+static int g_stab_motion_thresh = STAB_MOTION_THRESH;
 static volatile int g_stab_off_x;
 static volatile int g_stab_off_y;
 /* User-controlled pan center as parts-per-thousand of (src_w, src_h).
@@ -938,13 +945,29 @@ static int star6e_stab_pan_clamp_mil(double v)
 
 static void star6e_stab_configure(uint32_t src_w, uint32_t src_h,
 	uint32_t crop_pct, uint32_t recenter_speed, uint32_t venc_fps,
-	double pan_x, double pan_y)
+	double pan_x, double pan_y, uint32_t smooth_pct, uint32_t still_frames,
+	uint32_t edge_pct, uint32_t motion_thresh)
 {
 	g_stab_src_w = src_w & ~1u;
 	g_stab_src_h = src_h & ~1u;
 	g_stab_crop_percent = crop_pct;
 	star6e_stab_compute_crop_dims(g_stab_src_w, g_stab_src_h,
 		crop_pct, &g_stab_enc_w, &g_stab_enc_h);
+
+	/* Advanced feel knobs.  Each accepts a sentinel/out-of-range value and
+	 * falls back to the compile-time default, so a hand-edited config (which
+	 * bypasses the HTTP validator) can never freeze or destabilize the loop:
+	 *  - smooth_pct 0 or <5/>100  → default EMA alpha (smoother = lower).
+	 *  - still_frames clamped to <=600 (0 = recenter as soon as settled).
+	 *  - edge_pct 0 or <50/>100   → default edge-stick.
+	 *  - motion_thresh clamped to <=16 (0 = any motion re-arms stillness). */
+	g_stab_smooth_alpha = (smooth_pct >= 5 && smooth_pct <= 100) ?
+		(double)smooth_pct / 100.0 : STAB_OUTPUT_SMOOTH_ALPHA;
+	g_stab_still_frames_max = (still_frames <= 600) ?
+		(int)still_frames : 600;
+	g_stab_edge_pct = (edge_pct >= 50 && edge_pct <= 100) ?
+		(int)edge_pct : STAB_RECENTER_EDGE_PCT;
+	g_stab_motion_thresh = (motion_thresh <= 16) ? (int)motion_thresh : 16;
 
 	/* recenter_speed is "frames between 1-pixel leak":
 	 * 0 = no leak (stick to current patch),
@@ -1439,7 +1462,7 @@ static void *star6e_stab_thread_main(void *arg)
 	int acc_y = 0;
 	int dbg_frame = 0;
 	int loop_n = 0;            /* drained frames since have_prev; gates detect */
-	int still_frames = STAB_RECENTER_STILL_FRAMES;  /* recenter cooldown; start settled */
+	int still_frames = g_stab_still_frames_max;  /* recenter cooldown; start settled */
 	StabIveImage_t dx;
 	StabIveImage_t dy;
 	struct timespec prev_ts;
@@ -1586,17 +1609,17 @@ static void *star6e_stab_thread_main(void *arg)
 				if (g_stab_recenter_period > 0) {
 					uint32_t tau = g_stab_recenter_period;
 					int settled;
-					int edge_x = (max_x * STAB_RECENTER_EDGE_PCT) / 100;
-					int edge_y = (max_y * STAB_RECENTER_EDGE_PCT) / 100;
+					int edge_x = (max_x * g_stab_edge_pct) / 100;
+					int edge_y = (max_y * g_stab_edge_pct) / 100;
 					int do_recenter;
 					if (tau < 2) tau = 2;
 
-					if (abs(meas_dx) > STAB_MOTION_THRESH ||
-					    abs(meas_dy) > STAB_MOTION_THRESH)
+					if (abs(meas_dx) > g_stab_motion_thresh ||
+					    abs(meas_dy) > g_stab_motion_thresh)
 						still_frames = 0;
-					else if (still_frames < STAB_RECENTER_STILL_FRAMES)
+					else if (still_frames < g_stab_still_frames_max)
 						still_frames++;
-					settled = (still_frames >= STAB_RECENTER_STILL_FRAMES);
+					settled = (still_frames >= g_stab_still_frames_max);
 
 					do_recenter = settled ||
 						facc_x > edge_x || facc_x < -edge_x ||
@@ -1619,8 +1642,8 @@ static void *star6e_stab_thread_main(void *arg)
 
 				/* Low-pass the offset before it reaches the crop so
 				 * per-frame jitter doesn't judder the output. */
-				smooth_x += STAB_OUTPUT_SMOOTH_ALPHA * (facc_x - smooth_x);
-				smooth_y += STAB_OUTPUT_SMOOTH_ALPHA * (facc_y - smooth_y);
+				smooth_x += g_stab_smooth_alpha * (facc_x - smooth_x);
+				smooth_y += g_stab_smooth_alpha * (facc_y - smooth_y);
 				acc_x = (int)lround(smooth_x);
 				acc_y = (int)lround(smooth_y);
 				pthread_mutex_lock(&g_stab_lock);
@@ -1912,9 +1935,11 @@ static int star6e_stab_start(void)
 	}
 
 	fprintf(stderr, "[waybeam] stab: src=%ux%u out=%ux%u crop=%u%% "
-		"recenter=%u (0=stick)\n", g_stab_src_w, g_stab_src_h,
+		"recenter=%u (0=stick) smooth=%.2f still=%d edge=%d%% thresh=%d\n",
+		g_stab_src_w, g_stab_src_h,
 		g_stab_enc_w, g_stab_enc_h, g_stab_crop_percent,
-		g_stab_recenter_period);
+		g_stab_recenter_period, g_stab_smooth_alpha, g_stab_still_frames_max,
+		g_stab_edge_pct, g_stab_motion_thresh);
 	return 0;
 }
 
@@ -3799,7 +3824,11 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 			vcfg->video0.stab_crop_pct,
 			vcfg->video0.stab_recenter_speed,
 			vcfg->video0.fps,
-			0.5, 0.5);
+			0.5, 0.5,
+			vcfg->video0.stab_smooth_pct,
+			vcfg->video0.stab_still_frames,
+			vcfg->video0.stab_edge_pct,
+			vcfg->video0.stab_motion_thresh);
 		pconf.image_width = g_stab_enc_w;
 		pconf.image_height = g_stab_enc_h;
 		state->image_width = g_stab_enc_w;

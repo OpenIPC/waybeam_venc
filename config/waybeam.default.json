@@ -37,7 +37,11 @@
     "zoomY": 0.5,
     "framing": "off",
     "stabCropPct": 0,
-    "stabRecenterSpeed": 0
+    "stabRecenterSpeed": 0,
+    "stabSmoothPct": 0,
+    "stabStillFrames": 0,
+    "stabEdgePct": 0,
+    "stabMotionThresh": 0
   },
   "outgoing": {
     "enabled": false,

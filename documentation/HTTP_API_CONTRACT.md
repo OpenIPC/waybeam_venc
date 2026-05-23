@@ -355,7 +355,7 @@ Majestic-oriented clients.
 - Alias: `video0.qpDelta`
 - Semantics: adjusts I-frame QP relative to P-frame; negative values lower I-frame QP (higher quality keyframes), positive values raise it.
 
-### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_recenter_speed`
+### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_recenter_speed`, `video0.stab_smooth_pct`, `video0.stab_still_frames`, `video0.stab_edge_pct`, `video0.stab_motion_thresh`
 
 - `video0.framing`: string preset — the single knob for what the VPE crop does.
   - Values: `off` | `stab` (image stabilization, Star6E only) | `zoom-1.25x` |
@@ -375,6 +375,26 @@ Majestic-oriented clients.
     Smaller % = larger dead border = more motion headroom, tighter frame.
   - `stab_recenter_speed`: `0..3600`. `0` = stick (no recenter, drifts to
     border — demo only); higher = slower glide back to center (default 180).
+- `video0.stab_smooth_pct`, `video0.stab_still_frames`, `video0.stab_edge_pct`,
+  `video0.stab_motion_thresh`: uint, mutability `restart_required`. Aliases
+  `video0.stabSmoothPct`, `video0.stabStillFrames`, `video0.stabEdgePct`,
+  `video0.stabMotionThresh`. Advanced "feel" knobs of the `stab` preset, same
+  scoping as crop/recenter above (read after preset expansion, framing=stab
+  only, reset on re-selecting the preset). These tune the motion response so a
+  user can dial in the optimal feel:
+  - `stab_smooth_pct`: `0` = preset default (30); else `5..100`. EMA low-pass on
+    the applied crop offset, as a percentage. Lower = smoother but more lag;
+    `100` = no smoothing (snappiest, most shake-through). This is the primary
+    judder/smoothness control.
+  - `stab_still_frames`: `0..600` (default 60). Frames of stillness after a
+    disturbance before the view starts gliding back to center. Higher = stays
+    locked longer; `0` = recenter as soon as motion stops.
+  - `stab_edge_pct`: `0` = preset default (88); else `50..100`. How far into the
+    dead-border the offset may travel during a sustained pan before margin is
+    reclaimed. Higher = sticks harder near the edge before leaking.
+  - `stab_motion_thresh`: `0..16` (default 1). Inter-frame shift in pixels
+    counted as "moving" (re-arms the stillness timer). Higher = less twitchy,
+    treats small jitter as still.
 - `video0.zoom_x`, `video0.zoom_y`: double, `0.0..1.0`, mutability `live`.
   Aliases `video0.zoomX`, `video0.zoomY`.
 - Semantics: digital zoom uses a 1:1 crop — the crop window and encoded output

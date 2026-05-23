@@ -147,6 +147,22 @@ typedef struct {
 	uint32_t stab_crop_pct;       /* 0 = off, 50..100 = crop % */
 	uint32_t stab_recenter_speed; /* 0 = stick to patch, >0 = recenter
 	                               * time-constant tau in frames */
+	/* Advanced "stab" feel knobs — refine the preset, MUT_RESTART, scoped to
+	 * framing=="stab" (inert under off/zoom).  All derive from the preset
+	 * default unless explicitly overridden; see apply_framing_preset(). */
+	uint32_t stab_smooth_pct;     /* EMA low-pass on the applied offset, as %
+	                               * (5..100; lower = smoother but laggier,
+	                               * 100 = no smoothing). 0 = preset default. */
+	uint32_t stab_still_frames;   /* frames of stillness before the settled
+	                               * recenter starts (0..600; higher = view
+	                               * stays locked longer after a bump). */
+	uint32_t stab_edge_pct;       /* % of the dead-border the offset may use
+	                               * during sustained motion before margin is
+	                               * reclaimed (50..100; higher = sticks
+	                               * harder). 0 = preset default. */
+	uint32_t stab_motion_thresh;  /* |inter-frame shift| (px) counted as
+	                               * "moving" — re-arms the stillness timer
+	                               * (0..16; higher = less twitchy). */
 } VencConfigVideo;
 
 typedef struct {
