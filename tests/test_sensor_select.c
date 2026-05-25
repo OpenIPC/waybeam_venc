@@ -109,6 +109,12 @@ MI_S32 MI_SNR_SetFps(MI_SNR_PAD_ID_e pad_id, MI_U32 fps)
 	return 0;
 }
 
+MI_S32 MI_SNR_SetOrien(MI_SNR_PAD_ID_e pad_id, MI_U8 mirror, MI_U8 flip)
+{
+	(void)pad_id; (void)mirror; (void)flip;
+	return 0;
+}
+
 MI_S32 MI_SNR_Enable(MI_SNR_PAD_ID_e pad_id)
 {
 	(void)pad_id;
