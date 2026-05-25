@@ -786,13 +786,25 @@ fail:
 
 static int maruko_start_vpe(const SensorSelectResult *sensor,
 	uint32_t out_width, uint32_t out_height, int vpe_level_3dnr,
-	const PipelinePrecropRect *precrop)
+	const PipelinePrecropRect *precrop, int mirror, int flip)
 {
 	int isp_started = 0;
 
 	if (configure_maruko_isp(sensor, vpe_level_3dnr) != 0)
 		return -1;
 	isp_started = 1;
+
+	/* Sensor-level orientation — mirrors star6e MI_SNR_SetOrien usage.
+	 * Non-fatal: some sensor drivers reject the call; log so regressions
+	 * surface. */
+	{
+		MI_S32 orien_ret = MI_SNR_SetOrien(sensor->pad_id,
+			(uint8_t)mirror, (uint8_t)flip);
+		if (orien_ret != 0)
+			fprintf(stderr, "[maruko] WARNING: MI_SNR_SetOrien"
+				"(pad=%d mirror=%d flip=%d) returned %d\n",
+				(int)sensor->pad_id, mirror, flip, (int)orien_ret);
+	}
 
 	if (configure_maruko_scl(sensor, out_width, out_height, precrop) != 0)
 		goto fail_scl;
@@ -1876,6 +1888,8 @@ static int setup_maruko_graph_dimensions(MarukoBackendContext *ctx)
 		(int)ctx->cfg.forced_sensor_pad, ctx->cfg.forced_sensor_mode,
 		ctx->cfg.sensor_width, ctx->cfg.sensor_height,
 		ctx->cfg.sensor_fps);
+	sel_cfg.image_mirror = ctx->cfg.image_mirror;
+	sel_cfg.image_flip   = ctx->cfg.image_flip;
 	SensorStrategy strategy;
 	if (ctx->cfg.sensor_unlock.enabled) {
 		strategy = sensor_unlock_strategy(&ctx->cfg.sensor_unlock);
@@ -2165,6 +2179,12 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 				"pad %d fps %u\n",
 				(int)ctx->sensor.pad_id,
 				ctx->sensor.fps);
+			/* SetFps can reset sensor timing registers and clobber
+			 * orientation; re-apply after each kick. */
+			if (ctx->cfg.image_mirror || ctx->cfg.image_flip)
+				(void)MI_SNR_SetOrien(ctx->sensor.pad_id,
+					(uint8_t)ctx->cfg.image_mirror,
+					(uint8_t)ctx->cfg.image_flip);
 		}
 
 		/* AE-mode dispatch.
@@ -2848,7 +2868,8 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	ctx->vif_started = 1;
 
 	if (maruko_start_vpe(&ctx->sensor, out_w, out_h,
-	    ctx->cfg.vpe_level_3dnr, &precrop) != 0)
+	    ctx->cfg.vpe_level_3dnr, &precrop,
+	    ctx->cfg.image_mirror, ctx->cfg.image_flip) != 0)
 		return -1;
 	ctx->vpe_started = 1;
 	if (ctx->cfg.zoom_pct > 0.0 && ctx->cfg.zoom_pct < 1.0) {
@@ -3372,6 +3393,23 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		printf("> [maruko] delayed FPS kick: pad %d fps %u "
 			"(cold-boot fix at frame %u)\n",
 			ctx->sensor.pad_id, ctx->sensor.fps, rt->frame_counter);
+		if (ctx->cfg.image_mirror || ctx->cfg.image_flip)
+			(void)MI_SNR_SetOrien(ctx->sensor.pad_id,
+				(uint8_t)ctx->cfg.image_mirror,
+				(uint8_t)ctx->cfg.image_flip);
+	}
+
+	/* Persist sensor orientation for the first 5 sensor-seconds — parity
+	 * with star6e_runtime.c.  ISP AE first-tick can reset sensor timing
+	 * registers and incidentally clear orientation bits. */
+	if (ctx->cfg.image_mirror || ctx->cfg.image_flip) {
+		uint32_t fc  = rt->frame_counter;
+		uint32_t fps = ctx->sensor.fps > 0 ? ctx->sensor.fps : 30;
+		uint32_t win = fps * 5;
+		if (fc > 0 && fc <= win && (fc == 1 || fc % fps == 0))
+			(void)MI_SNR_SetOrien(ctx->sensor.pad_id,
+				(uint8_t)ctx->cfg.image_mirror,
+				(uint8_t)ctx->cfg.image_flip);
 	}
 
 	/* Debug OSD overlay — Star6E parity (star6e_runtime.c:825-849). */

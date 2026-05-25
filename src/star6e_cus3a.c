@@ -74,6 +74,7 @@ typedef int (*fn_ae_set_exposure_limit_t)(int channel,
  * gain) which may differ from the ISP AE limit/target on cold boot. */
 typedef int (*fn_snr_get_plane_info_t)(int pad, int plane_id, void *info);
 typedef int (*fn_snr_set_fps_t)(int pad, unsigned int fps);
+typedef int (*fn_snr_set_orien_t)(int pad, uint8_t mirror, uint8_t flip);
 
 /* ── Module state ────────────────────────────────────────────────────── */
 
@@ -106,6 +107,7 @@ typedef struct {
 	fn_ae_set_exposure_limit_t  fn_set_exposure_limit;
 	fn_snr_get_plane_info_t     fn_get_plane_info;
 	fn_snr_set_fps_t            fn_set_fps;
+	fn_snr_set_orien_t          fn_set_orien;
 	void                       *h_sensor;
 } Cus3aState;
 
@@ -170,6 +172,8 @@ static int resolve_symbols(Cus3aState *s)
 			s->h_sensor, "MI_SNR_GetPlaneInfo");
 		s->fn_set_fps = (fn_snr_set_fps_t)dlsym(
 			s->h_sensor, "MI_SNR_SetFps");
+		s->fn_set_orien = (fn_snr_set_orien_t)dlsym(
+			s->h_sensor, "MI_SNR_SetOrien");
 	}
 
 	if (!s->fn_get_hw_stats || !s->fn_get_ae_status) {
@@ -343,12 +347,12 @@ static void *cus3a_thread(void *arg)
 			 * reconfigure its timing registers, then re-set
 			 * the exposure limit.  Only fires once.
 			 *
-			 * Note: star6e_pipeline_start_vpe calls MI_SNR_SetFps
+			 * Note: bind_and_finalize_pipeline calls MI_SNR_SetFps
 			 * during the legacyAe startup branch.  This block
-			 * remains the safety net for CUS3A cold boot
-			 * (non-legacyAe) — where the pipeline-level kick
-			 * doesn't fire and the sensor register can still be
-			 * stuck above our cap after ISP bin load.
+			 * is the safety net for CUS3A cold boot (non-legacyAe)
+			 * — where the pipeline-level kick doesn't fire and the
+			 * sensor register can still be stuck above our cap
+			 * after ISP bin load.
 			 * Cus3a_thread is stopped and restarted on reinit,
 			 * so `fps_kick_done` resets automatically and this
 			 * branch re-arms each pipeline cycle. */
@@ -378,6 +382,12 @@ static void *cus3a_thread(void *arg)
 						    s->cfg.sensor_fps);
 						s->fn_set_fps(0,
 						    s->cfg.sensor_fps);
+						if (s->fn_set_orien &&
+						    (s->cfg.mirror ||
+						     s->cfg.flip))
+							s->fn_set_orien(0,
+							    (uint8_t)s->cfg.mirror,
+							    (uint8_t)s->cfg.flip);
 						fps_kick_done = 1;
 					}
 				}

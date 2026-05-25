@@ -12,6 +12,8 @@ typedef struct {
 	uint32_t shutter_max_us;   /* 0 = auto from sensor_fps */
 	uint32_t gain_max;         /* 0 = use ISP bin default */
 	int      verbose;          /* enable periodic status logging */
+	int      mirror;           /* re-apply after SetFps resets orientation */
+	int      flip;
 } Star6eCus3aConfig;
 
 /** Fill config with sensible FPV defaults. */

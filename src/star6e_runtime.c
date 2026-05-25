@@ -337,6 +337,8 @@ static void start_custom_ae(const Star6ePipelineState *ps,
 	if (vcfg->isp.gain_max > 0)
 		ae_cfg.gain_max = vcfg->isp.gain_max;
 	ae_cfg.verbose = vcfg->system.verbose;
+	ae_cfg.mirror  = vcfg->image.mirror ? 1 : 0;
+	ae_cfg.flip    = vcfg->image.flip   ? 1 : 0;
 	star6e_cus3a_start(&ae_cfg);
 }
 /* Reduce ch1 bitrate by 10%.  Mirrors apply_bitrate() from
@@ -840,6 +842,22 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			star6e_output_observe_pressure(&ps->output);
 		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
 			ps->output_enabled, vcfg->system.verbose, &enc_info);
+	}
+
+	/* Persist sensor orientation for the first 5 sensor-seconds.  The ISP
+	 * AE first-tick (fired after the CUS3A handoff at ~1s) rewrites sensor
+	 * timing registers on some sensors and can incidentally reset the
+	 * orientation bits.  Re-applying at frame intervals catches all such
+	 * late resets without significant overhead (one ioctl per interval). */
+	if (vcfg->image.mirror || vcfg->image.flip) {
+		uint32_t fc  = ps->video.frame_counter;
+		uint32_t fps = ps->sensor.fps > 0 ? ps->sensor.fps : 30;
+		uint32_t win = fps * 5;
+		if (fc > 0 && fc <= win && (fc == 1 || fc % fps == 0)) {
+			(void)MI_SNR_SetOrien(ps->sensor.pad_id,
+				(uint8_t)(vcfg->image.mirror ? 1 : 0),
+				(uint8_t)(vcfg->image.flip   ? 1 : 0));
+		}
 	}
 
 	/* In dual/dual-stream mode, ch1 handles recording (see below).

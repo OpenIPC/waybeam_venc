@@ -455,6 +455,23 @@ static int configure_selected_sensor(const SensorSelectConfig *cfg,
 	if (ret != 0)
 		return ret;
 
+	/* Apply orientation before Enable so the sensor driver's pCus_sensor_init
+	 * (triggered by Enable) picks up the correct flip/mirror state.
+	 * Matches the sequence used by the reference majestic streamer. */
+	if (cfg->image_mirror || cfg->image_flip) {
+		MI_S32 orien_ret = MI_SNR_SetOrien(best_pad,
+			(uint8_t)(cfg->image_mirror ? 1 : 0),
+			(uint8_t)(cfg->image_flip   ? 1 : 0));
+		if (orien_ret != 0)
+			fprintf(stderr, "[sensor_select] WARNING: "
+				"MI_SNR_SetOrien(pad=%d mirror=%d flip=%d) "
+				"returned %d\n",
+				(int)best_pad,
+				cfg->image_mirror ? 1 : 0,
+				cfg->image_flip   ? 1 : 0,
+				(int)orien_ret);
+	}
+
 	sdk_quiet_begin(&g_sensor_sdk_quiet);
 	ret = MI_SNR_Enable(best_pad);
 	sdk_quiet_end(&g_sensor_sdk_quiet);
