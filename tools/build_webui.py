@@ -35,7 +35,15 @@ BLOBS = [
 
 def build_gzip(html_bytes: bytes) -> bytes:
     # mtime=0 so repeated builds produce byte-identical output.
-    return gzip.compress(html_bytes, compresslevel=9, mtime=0)
+    gz = bytearray(gzip.compress(html_bytes, compresslevel=9, mtime=0))
+    # Normalize the gzip OS byte (header offset 9).  CPython <=3.10 wrote 0x03
+    # (Unix); 3.11+ writes 0xff (unknown) — without pinning it the blob differs
+    # by one byte across Python versions and `make webui-check` fails depending
+    # on who built it.  Pin to 0x03 to match the committed convention so the
+    # check is reproducible regardless of the builder's Python.
+    if len(gz) > 9:
+        gz[9] = 0x03
+    return bytes(gz)
 
 
 def format_c_array(data: bytes, indent: str = "\t") -> str:

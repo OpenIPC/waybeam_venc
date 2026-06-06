@@ -1,8 +1,14 @@
 #include "star6e_pipeline.h"
+#include "star6e_framing.h"
+#include "star6e_framing_host.h"
+#if HAVE_FRAMING_STAB
+#include "star6e_framing_stab.h"
+#endif
 
 #include "codec_config.h"
 #include "codec_types.h"
 #include "debug_osd.h"
+#include "imu_ring.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
 #include "file_util.h"
@@ -17,9 +23,12 @@
 #include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -42,6 +51,41 @@ typedef int (*isp_set_exposure_limit_fn_t)(int channel,
 typedef int (*isp_load_bin_fn_t)(int channel, char *path, unsigned int key);
 typedef int (*isp_disable_userspace3a_fn_t)(int channel);
 typedef int (*cus3a_fn_t)(int channel, void *params);
+
+/* ── Framing-module registry ──────────────────────────────────────────────
+ * Compiled-in framing modules (e.g. the "stab" preset) self-register here via
+ * star6e_framing_register_builtins().  g_framing is the module selected for
+ * the current run (NULL when framing is off / a plain zoom or full-frame
+ * bind), set in star6e_pipeline_start and used through bind/stop/zoom. */
+#define FRAMING_MAX 4
+static const FramingModule *g_framing_registry[FRAMING_MAX];
+static int g_framing_count;
+static const FramingModule *g_framing;
+
+void star6e_framing_register(const FramingModule *m)
+{
+	if (m && g_framing_count < FRAMING_MAX)
+		g_framing_registry[g_framing_count++] = m;
+}
+
+const FramingModule *star6e_framing_select(const VencConfig *vcfg)
+{
+	int i;
+	for (i = 0; i < g_framing_count; i++)
+		if (g_framing_registry[i]->enabled(vcfg))
+			return g_framing_registry[i];
+	return NULL;
+}
+
+void star6e_framing_register_builtins(void)
+{
+	if (g_framing_count > 0)
+		return;   /* idempotent */
+#if HAVE_FRAMING_STAB
+	star6e_framing_register(&star6e_framing_stab);
+	star6e_framing_register(&star6e_framing_stab_fill);
+#endif
+}
 
 static void star6e_pipeline_reset(Star6ePipelineState *state)
 {
@@ -119,8 +163,8 @@ static int star6e_pipeline_disable_userspace3a(const IspRuntimeLib *lib,
 	return fn ? fn(0) : 0;
 }
 
-/* Forward decls — definitions live alongside the zoom/pan block but they
- * are referenced from the ISP-ready waiters above it. */
+/* Forward decl — definition lives alongside the zoom/pan block but is
+ * referenced from the ISP-ready waiters above it. */
 static void star6e_ae_crop_mark_ready(void);
 
 /* Poll MI_ISP_IQ_GetParaInitStatus until bFlag==1 or timeout (2000 ms).
@@ -315,6 +359,27 @@ static int g_cus3a_handoff_done = 0;
 void star6e_pipeline_cus3a_reset(void)
 {
 	g_cus3a_handoff_done = 0;
+}
+
+/* Delayed legacy-AE cold-boot fps re-kick.  The pipeline-init MI_SNR_SetFps
+ * (bind_and_finalize_pipeline) fires before the ISP bin's AE has settled, so on
+ * a cold boot the sensor's physical timing register can be left below the
+ * configured fps (observed ~70fps @ target 90; a warm restart keeps the kernel
+ * sensor state so it shows ~90).  CUS3A handles this via its frame-15 thread
+ * kick; legacy AE has no periodic thread, so re-issue SetFps once from the run
+ * loop ~1.5s after start, after the bin load + AE converge, to force the sensor
+ * register to the target.  No-op when legacy_ae is off (CUS3A path) or fps is 0. */
+void star6e_pipeline_legacy_fps_rekick(const Star6ePipelineState *state,
+	const VencConfig *vcfg)
+{
+	if (!state || !vcfg || !vcfg->isp.legacy_ae)
+		return;
+	if (state->sensor.fps == 0)
+		return;
+	printf("[waybeam] legacy cold-boot fps re-kick: SetFps(%u)\n",
+		state->sensor.fps);
+	fflush(stdout);
+	MI_SNR_SetFps(state->sensor.pad_id, state->sensor.fps);
 }
 
 void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
@@ -531,6 +596,20 @@ static void star6e_pipeline_stop_vpe(void)
 	MI_VPE_DestroyChannel(0);
 }
 
+
+/* ── Gyro motion source (IMU-assisted stabilization seam) ────────────────
+ * The BMI270 driver (imu_bmi270.c) already runs frame-synced; when
+ * imu.enabled it pushes timestamped 6-axis samples here via
+ * star6e_pipeline_imu_push().  Today motion is estimated optically with
+ * MI_IVE_Shift_Detector; this ring makes CLOCK_MONOTONIC-stamped gyro data
+ * available frame-aligned so a gyro/optical fusion can drop into
+ * star6e_stab_estimate_shift() without new plumbing.  Populated whenever the
+ * IMU is enabled (also useful for telemetry/sidecar logging), independent of
+ * whether stabilization is active. */
+static ImuRing g_imu_ring;
+static volatile int g_imu_ring_ready;
+
+
 /* Compute the effective output dim for digital zoom.
  *
  * Approach C: zoom_pct shrinks BOTH crop and encoded output.  SCL output
@@ -720,14 +799,9 @@ static Star6ePanRampState g_pan_ramp = {
 /* MI_ISP_CUS3A_SetAECropSize confines the AE meter to a sub-rect of the
  * ISP frame in 0..1023 normalized coords.  Resolved lazily; if absent or
  * libmi_isp didn't dlopen, every call is a silent no-op so the pipeline
- * still runs (master behaviour before AE-aware zoom was added). */
-typedef struct {
-	uint16_t crop_x;  /* 0..1023 */
-	uint16_t crop_y;
-	uint16_t crop_w;
-	uint16_t crop_h;
-} Star6eAeCropRect;
-
+ * still runs (master behaviour before AE-aware zoom was added).
+ * Star6eAeCropRect lives in star6e_framing_host.h (shared with framing
+ * modules). */
 typedef int (*star6e_set_ae_crop_fn_t)(uint32_t channel,
 	Star6eAeCropRect *data);
 
@@ -919,12 +993,33 @@ static void star6e_pan_ramp_stop(void)
  * VENC, which needs reinit), so the live path only handles x/y.  pct is
  * accepted just to short-circuit when zoom is off (rect dim == image dim).
  * Updates the *target*; the ramp thread tweens `current` toward it. */
+/* Live stab pause toggle (framing=stab and framing=stab-fill).  Routed to the
+ * active framing module's set_live hook so the pipeline stays agnostic of the
+ * preset's semantics.  No-op (returns -1) when no stab module is selected
+ * (framing off / zoom / STAB=0). */
+int star6e_pipeline_set_pause_stab(bool paused)
+{
+	if (g_framing && g_framing->set_live)
+		return g_framing->set_live("pause", paused ? "1" : "0");
+	return -1;
+}
+
 int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	double pct, double x, double y)
 {
 	if (!state) return -1;
 	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
 		return -1;
+	/* When stabilization is active the crop window is enforced CENTERED
+	 * (0.5/0.5) so the accumulator has symmetric headroom — zoomX/zoomY are
+	 * the zoom-mode pan and must not steer the stab window off-center (that
+	 * would pin it against the frame edge and kill stabilization).  Ignore
+	 * live x/y here; keep the window centered. */
+	if (g_framing && g_framing->active && g_framing->active()) {
+		if (g_framing->set_pan)
+			g_framing->set_pan(0.5, 0.5);
+		return 0;
+	}
 	if (pct <= 0.0 || pct >= 1.0) {
 		star6e_pipeline_clear_zoom_status();
 		pthread_mutex_lock(&g_pan_ramp.lock);
@@ -959,30 +1054,24 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	return 0;
 }
 
-/* Constrain the ISP's AE statistics window to the zoom rect.  Coords are
- * 0..1023 normalized against the ISP frame (the post-VIF input — same
- * domain as the VPE port input, `active_precrop`).
+/* Emit a normalized (0..1023) AE-meter crop rect to the ISP.  Shared by the
+ * zoom and stabilization tracking paths.  Coords are normalized against the
+ * ISP frame (the post-VIF input — same domain as `active_precrop`).
  *
  * Failure modes the bench taught us:
  *   - The SDK refuses calls before CUS3A handoff; we gate on
  *     g_star6e_ae_crop_ready and just queue the change in the cache.
  *   - Calling with full-frame (0,0,1023,1023) on this BSP returns -1
- *     during init.  Whether it works at all is uncertain, so we never
- *     emit a "restore to full frame" call — the cache is pre-seeded
- *     full-frame and only sub-rects ever get pushed.  When zoom is
- *     disabled live, the meter stays on the last zoom rect; the ISP's
- *     own filtering re-equilibrates exposure over the next few seconds.
+ *     during init.  Whether it works at all is uncertain, so callers never
+ *     build a full-frame rect — the cache is pre-seeded full-frame and only
+ *     sub-rects ever get pushed.  When the crop is removed live, the meter
+ *     stays on the last rect; the ISP's own filtering re-equilibrates
+ *     exposure over the next few seconds.
  *   - On any non-zero return from the SDK, we set
  *     g_star6e_ae_crop_disabled and stop calling for the rest of the
  *     process.  Next start cold-resets via pipeline_stop. */
-static void star6e_apply_ae_crop(double pct, double x, double y)
+void star6e_emit_ae_crop(const Star6eAeCropRect *r)
 {
-	Star6eAeCropRect r;
-	uint32_t in_w, in_h;
-	uint32_t rect_w, rect_h;
-	double cx, cy, rx, ry;
-	Star6ePipelineState *state;
-
 	if (g_star6e_ae_crop_disabled)
 		return;
 	if (!g_star6e_ae_crop_resolved) {
@@ -992,12 +1081,43 @@ static void star6e_apply_ae_crop(double pct, double x, double y)
 		if (!g_star6e_set_ae_crop)
 			fprintf(stderr,
 				"WARNING: MI_ISP_CUS3A_SetAECropSize not present — "
-				"AE will not track zoom\n");
+				"AE will not track zoom/stab\n");
 	}
 	if (!g_star6e_set_ae_crop)
 		return;
 
-	/* Skip the "full frame" path entirely.  See header comment. */
+	if (r->crop_x == g_star6e_ae_crop_last.crop_x &&
+	    r->crop_y == g_star6e_ae_crop_last.crop_y &&
+	    r->crop_w == g_star6e_ae_crop_last.crop_w &&
+	    r->crop_h == g_star6e_ae_crop_last.crop_h)
+		return;
+
+	g_star6e_ae_crop_last = *r;
+
+	if (!g_star6e_ae_crop_ready)
+		return;  /* queued — ISP not yet ready */
+
+	if (g_star6e_set_ae_crop(0, (Star6eAeCropRect *)r) != 0) {
+		fprintf(stderr,
+			"WARNING: MI_ISP_CUS3A_SetAECropSize(%u,%u,%u,%u) failed — "
+			"disabling AE crop-tracking for this run\n",
+			r->crop_x, r->crop_y, r->crop_w, r->crop_h);
+		g_star6e_ae_crop_disabled = 1;
+	}
+}
+
+/* Zoom path: constrain the AE meter to the zoom rect.  The encoded dim
+ * (state->image_width) is the crop size in precrop coords (Approach C SCL is
+ * 1:1), so the meter fraction is image_width / active_precrop.w. */
+static void star6e_apply_ae_crop(double pct, double x, double y)
+{
+	Star6eAeCropRect r;
+	uint32_t in_w, in_h;
+	uint32_t rect_w, rect_h;
+	double cx, cy, rx, ry;
+	Star6ePipelineState *state;
+
+	/* Skip the "full frame" path entirely.  See star6e_emit_ae_crop. */
 	if (!isfinite(pct) || pct <= 0.0 || pct >= 1.0)
 		return;
 
@@ -1040,25 +1160,9 @@ static void star6e_apply_ae_crop(double pct, double x, double y)
 	if (r.crop_y + r.crop_h > 1023)
 		r.crop_y = (uint16_t)(1023 - r.crop_h);
 
-	if (r.crop_x == g_star6e_ae_crop_last.crop_x &&
-	    r.crop_y == g_star6e_ae_crop_last.crop_y &&
-	    r.crop_w == g_star6e_ae_crop_last.crop_w &&
-	    r.crop_h == g_star6e_ae_crop_last.crop_h)
-		return;
-
-	g_star6e_ae_crop_last = r;
-
-	if (!g_star6e_ae_crop_ready)
-		return;  /* queued — ISP not yet ready */
-
-	if (g_star6e_set_ae_crop(0, &r) != 0) {
-		fprintf(stderr,
-			"WARNING: MI_ISP_CUS3A_SetAECropSize(%u,%u,%u,%u) failed — "
-			"disabling AE zoom-tracking for this run\n",
-			r.crop_x, r.crop_y, r.crop_w, r.crop_h);
-		g_star6e_ae_crop_disabled = 1;
-	}
+	star6e_emit_ae_crop(&r);
 }
+
 
 /* Called from the ISP-ready hook in pipeline_start.  If the user booted
  * with zoom active, this is the first chance the AE crop can actually
@@ -1685,14 +1789,35 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	return 0;
 }
 
-/* IMU push callback: stub.  EIS was the only consumer and was removed
- * (see HISTORY 0.8.0).  Samples are discarded; the callback stays so
- * imu_init() has a valid push_fn slot if a future consumer (telemetry
- * export, sidecar logging) is wired in. */
+/* IMU push callback: route frame-synced 6-axis samples into the shared
+ * gyro ring (g_imu_ring).  The ring is the single home for IMU data —
+ * the stabilization motion estimator reads it (see
+ * star6e_stab_estimate_shift), and telemetry/sidecar consumers can read the
+ * same ring.  Cheap (mutex + copy); a no-op until the ring is initialized in
+ * the IMU bring-up block. */
 static void star6e_pipeline_imu_push(void *ctx, const ImuSample *sample)
 {
 	(void)ctx;
-	(void)sample;
+	if (!g_imu_ring_ready || !sample)
+		return;
+	ImuRingSample rs = {
+		.ts      = sample->ts,
+		.gyro_x  = sample->gyro_x,
+		.gyro_y  = sample->gyro_y,
+		.gyro_z  = sample->gyro_z,
+		.accel_x = sample->accel_x,
+		.accel_y = sample->accel_y,
+		.accel_z = sample->accel_z,
+	};
+	imu_ring_push(&g_imu_ring, &rs);
+}
+
+/* Framing-module host service: the pipeline-owned IMU ring, or NULL until
+ * imu.enabled init has run.  Read-only consumers (a framing module's motion
+ * estimator, telemetry) use this. */
+ImuRing *star6e_pipeline_imu_ring(void)
+{
+	return g_imu_ring_ready ? &g_imu_ring : NULL;
 }
 
 /* Tracks whether CUS3A has been enabled in this MI_SYS lifetime.  Cleared
@@ -1816,22 +1941,58 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	 * lower framerate until reinit. */
 	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate);
 
-	bind_src_fps = state->sensor.mode.maxFps ?
-		state->sensor.mode.maxFps : pconf->sensor_framerate;
-	bind_dst_fps = vcfg->video0.fps;
-	if (bind_dst_fps == 0 || bind_dst_fps > bind_src_fps)
-		bind_dst_fps = bind_src_fps;
+	g_framing = star6e_framing_select(vcfg);
+	if (g_framing) {
+		/* Framing module owns the VPE port0 → VENC path.  The "stab" preset
+		 * hardware-crops the stab window straight to a VENC bind (zero-copy)
+		 * while a tiny port1 tap feeds the detector, setting
+		 * state->bound_vpe_venc=1 for the standard teardown. */
+		bind_src_fps = state->sensor.mode.maxFps ?
+			state->sensor.mode.maxFps : pconf->sensor_framerate;
+		bind_dst_fps = vcfg->video0.fps;
+		if (bind_dst_fps == 0 || bind_dst_fps > bind_src_fps)
+			bind_dst_fps = bind_src_fps;
 
-	ret = MI_SYS_BindChnPort2(&state->vpe_port, &state->venc_port,
-		bind_src_fps, bind_dst_fps, I6_SYS_LINK_FRAMEBASE, 0);
-	if (ret != 0) {
-		fprintf(stderr, "ERROR: MI_SYS_Bind VPE->VENC failed %d\n", ret);
-		MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
-		state->bound_vif_vpe = 0;
-		return ret;
+		ret = g_framing->setup_ports(state, bind_src_fps, bind_dst_fps);
+		if (ret != 0) {
+			MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
+			state->bound_vif_vpe = 0;
+			return ret;
+		}
+		ret = g_framing->start();
+		if (ret != 0) {
+			g_framing->stop();   /* tears down the tap / partial state */
+			if (state->bound_vpe_venc) {
+				MI_SYS_UnBindChnPort(&state->vpe_port,
+					&state->venc_port);
+				state->bound_vpe_venc = 0;
+			}
+			MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
+			state->bound_vif_vpe = 0;
+			return ret;
+		}
+		/* Seed the AE meter to the stabilized crop window.  The ISP-ready
+		 * wait above has already fired star6e_ae_crop_mark_ready(), so
+		 * this emits immediately rather than queueing. */
+		g_framing->apply_ae_crop();
+	} else {
+		bind_src_fps = state->sensor.mode.maxFps ?
+			state->sensor.mode.maxFps : pconf->sensor_framerate;
+		bind_dst_fps = vcfg->video0.fps;
+		if (bind_dst_fps == 0 || bind_dst_fps > bind_src_fps)
+			bind_dst_fps = bind_src_fps;
+
+		ret = MI_SYS_BindChnPort2(&state->vpe_port, &state->venc_port,
+			bind_src_fps, bind_dst_fps, I6_SYS_LINK_FRAMEBASE, 0);
+		if (ret != 0) {
+			fprintf(stderr, "ERROR: MI_SYS_Bind VPE->VENC failed %d\n", ret);
+			MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
+			state->bound_vif_vpe = 0;
+			return ret;
+		}
+		state->bound_vpe_venc = 1;
+		MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
 	}
-	state->bound_vpe_venc = 1;
-	MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
 
 	/* Bring up the JPEG snapshot subsystem on the same VPE source port the
 	 * main channel just bound to.  Failure is non-fatal — /api/v1/snapshot.jpg
@@ -1920,6 +2081,10 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 
 	/* IMU */
 	if (vcfg->imu.enabled) {
+		if (!g_imu_ring_ready) {
+			imu_ring_init(&g_imu_ring);
+			g_imu_ring_ready = 1;
+		}
 		ImuConfig imu_cfg = {
 			.i2c_device = vcfg->imu.i2c_device,
 			.i2c_addr = vcfg->imu.i2c_addr,
@@ -1939,14 +2104,24 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 	}
 
-	/* Debug OSD.  Canvas dim is the encoded frame dim; on Star6E RGN
-	 * attaches at the VPE port output (post-SCL crop), so the canvas is
-	 * already 1:1 with the encoded frame and needs no zoom-time offset. */
+	/* Debug OSD.  Canvas dim is the encoded frame dim; on Star6E RGN attaches
+	 * at the VPE port output (post-SCL crop), so the canvas is 1:1 with the
+	 * encoded frame.  HW-crop stab is no different (port0 outputs the cropped
+	 * encoded dim).  Vehicle-local diagnostic only.
+	 *
+	 * D16 note: under framing=stab-fill the OSD rides the stabilized content
+	 * (it composites on VPE port0, before the manual-drain compose shifts the
+	 * frame) — a known cosmetic limitation of this dev overlay.  For a
+	 * screen-fixed OSD on the stabilized stream use waybeam_hub's osd_render,
+	 * which composites at the SCL stage (post-shift).  The two share MI_RGN
+	 * (a single global RGN device), so they are mutually exclusive — run one
+	 * or the other, not both. */
 	if (vcfg->debug.show_osd) {
-		state->debug_osd = debug_osd_create(
-			state->image_width, state->image_height, &state->vpe_port);
-		if (!state->debug_osd)
+		state->debug_osd = debug_osd_create(state->image_width,
+			state->image_height, &state->vpe_port);
+		if (!state->debug_osd) {
 			fprintf(stderr, "WARNING: debug OSD requested but MI_RGN unavailable\n");
+		}
 	}
 
 	return 0;
@@ -2083,6 +2258,16 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	 * source.  Idempotent; safe even if init was skipped or failed. */
 	venc_jpeg_shutdown();
 
+	/* Stop the stabilization detector thread: park the detector, disable the
+	 * tiny port1 tap, and join the thread; port0 stays a normal VPE→VENC bind
+	 * torn down by the standard unbind path below (state->bound_vpe_venc set).
+	 * Idempotent: no-op when stab was not started (incl. the static-crop
+	 * degrade with no detector). */
+	if (g_framing) {
+		g_framing->stop();
+		g_framing = NULL;
+	}
+
 	/* MI teardown order: StopRecvPic each VENC consumer BEFORE unbinding
 	 * its input port.  The previous Star6E order unbound VPE→VENC first and
 	 * only then stopped VENC, leaving the kernel SDK still encoding/flushing
@@ -2162,6 +2347,7 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 
 	star6e_pipeline_reset(state);
 	star6e_pipeline_clear_zoom_status();
+	star6e_framing_register_builtins();
 
 	if (prepare_pipeline_config(state, vcfg, &pconf) != 0)
 		return -1;
@@ -2191,8 +2377,34 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	state->image_width = pconf.image_width;
 	state->image_height = pconf.image_height;
 
-	(void)star6e_pan_ramp_start(state, vcfg->video0.zoom_pct,
-		vcfg->video0.zoom_x, vcfg->video0.zoom_y);
+	/* Framing mode: the video0.framing preset expands into either stab
+	 * (stab_crop_pct/recenter) or zoom (zoom_pct).  They are mutually
+	 * exclusive, so exactly one branch below runs.
+	 *
+	 * Stab path (HW-crop): VPE port0 hardware-crops the stab window into a
+	 * VENC bind; a tiny port1 tap feeds IVE shift detection.  If the BSP
+	 * rejects the tap, port0 stays bound at a static centre crop (no
+	 * detector).  VENC ch0 is created at the crop dim.  zoomX/zoomY pick the
+	 * crop center so the stabilized stream pans live.  Zoom path: the pan-ramp
+	 * thread owns
+	 * x/y at the configured zoom_pct.  When framing is off, zoom_pct is 0 and
+	 * the pan-ramp runs at full image. */
+	g_framing = star6e_framing_select(vcfg);
+	if (g_framing) {
+		/* The framing module computes its geometry (clamping the source as
+		 * needed) and returns the encode dims the pipeline sizes VENC to. */
+		uint32_t enc_w = pconf.image_width, enc_h = pconf.image_height;
+		if (g_framing->prepare(vcfg, pconf.image_width, pconf.image_height,
+		    &enc_w, &enc_h) == 0) {
+			pconf.image_width = enc_w;
+			pconf.image_height = enc_h;
+			state->image_width = enc_w;
+			state->image_height = enc_h;
+		}
+	} else {
+		(void)star6e_pan_ramp_start(state, vcfg->video0.zoom_pct,
+			vcfg->video0.zoom_x, vcfg->video0.zoom_y);
+	}
 
 	state->venc_channel = 0;
 	venc_fps = vcfg->video0.fps;
@@ -2256,6 +2468,24 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 
 	if (!state || !mode)
 		return -1;
+
+	/* Stabilization owns VPE port0 via a manual GetBuf drain; a dual VENC
+	 * bind on the same source port would contend with that drain (and dual
+	 * would inherit the crop-overridden image dims).  The two are mutually
+	 * exclusive for the *second* channel — so we skip the dual ch1 here but
+	 * the caller still starts the ts_recorder on the stabilized main ch0
+	 * (runtime's generic record block).  Net effect: recording is NOT
+	 * disabled, it is downgraded to single-channel — one .ts of the
+	 * stabilized main stream, at the main-stream bitrate rather than
+	 * record.bitrate. */
+	if (g_framing && g_framing->active && g_framing->active()) {
+		fprintf(stderr, "[waybeam] WARNING: dual recording downgraded to "
+			"single-channel while image stabilization is active "
+			"(video0.framing): no separate ch1 — recording the "
+			"stabilized main stream (ch0) at its bitrate, not "
+			"record.bitrate\n");
+		return 0;
+	}
 
 	sensor_fps = state->sensor.mode.maxFps;
 	if (sensor_fps == 0) sensor_fps = 30;

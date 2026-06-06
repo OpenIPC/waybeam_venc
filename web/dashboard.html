@@ -609,11 +609,14 @@ const TOOLTIPS = {
 
 'video0.resilience':'Error-resilience preset (intra-refresh + SVC-T refPred + GOP). OSD-safe: off/rescue/quality/sprint/racing/endurance/patrol. OSD-unsafe (persistent green smear over OSD area): rally/range/fpv use SVC-T refPred. rescue=0.25s IDR-spam. sprint=intra+0.5s IDR. See README for the full table. Requires reboot',
 
-'video0.zoomPct':'Digital zoom crop fraction. 0 = off, 0.25-1.0 = crop fraction; smaller is deeper zoom. Requires restart',
 
 'video0.zoomX':'Digital zoom crop center X, 0 = left and 1 = right. Applied live',
 
 'video0.zoomY':'Digital zoom crop center Y, 0 = top and 1 = bottom. Applied live',
+
+'video0.framing':'Framing mode — what the VPE crop does. off = full image. stab = image stabilization, crop+shrink (Star6E only; centered 80% crop, source auto-clamped to <=1920x1080 to keep fps; stabilizes ch0 only; zoomX/zoomY are ignored — stab is always centered; live pauseStab toggle). stab-fill = image stabilization, floating image on a black border (Star6E only; encode stays full-res, stabCropPct sets the shift/border budget; live pauseStab toggle). zoom-1.25x/1.50x/1.75x/2x/3x/4x = pure digital zoom (both backends; zoomX/zoomY pan the crop live; no upscale — higher zoom emits a smaller frame). Requires restart',
+
+'debug.showOsd':'Enable debug OSD overlay on the live stream (Star6E composites at the VPE port; with stabilization on, the stats panel anchor tracks the moving crop window so it stays put in the encoded view). Requires restart',
 
 'outgoing.enabled':'Enable video output streaming. When disabled, encoder runs at idle FPS. Applied live',
 
@@ -671,6 +674,7 @@ const ENUMS = {
 
 'video0.rcMode':['cbr','vbr','avbr','qvbr'],
 'video0.resilience':['off','rescue','quality','sprint','racing','rally','endurance','patrol','range','fpv'],
+'video0.framing':['off','stab','stab-fill','zoom-1.25x','zoom-1.50x','zoom-1.75x','zoom-2x','zoom-3x','zoom-4x'],
 'isp.aeEngine':['sdk','custom'],
 'isp.awbMode':['auto','ct_manual'],
 'audio.codec':['opus','pcm','g711a','g711u'],
@@ -683,7 +687,6 @@ const NUMBER_ATTRS = {
 
 'video0.sceneThreshold':{min:'0',max:'1000',step:'1'},
 'video0.sceneHoldoff':{min:'1',max:'255',step:'1'},
-'video0.zoomPct':{min:'0',max:'1',step:'0.01'},
 'video0.zoomX':{min:'0',max:'1',step:'0.01'},
 'video0.zoomY':{min:'0',max:'1',step:'0.01'}
 };
@@ -693,7 +696,6 @@ const DOUBLE_FIELDS = new Set([
 'video0.gopSize',
 'fpv.roiCenter',
 'record.gopSize',
-'video0.zoomPct',
 'video0.zoomX',
 'video0.zoomY'
 ]);
@@ -706,7 +708,7 @@ const SECTIONS = [
 
 {id:'isp',title:'ISP',keys:['isp.sensorBin','isp.gainMax','isp.awbMode','isp.awbCt','isp.aeEngine','isp.aeFps','isp.keepAspect']},
 {id:'image',title:'Image',keys:['image.mirror','image.flip','image.rotate']},
-{id:'video0',title:'Video',keys:['video0.rcMode','video0.fps','video0.size','video0.bitrate','video0.gopSize','video0.qpDelta','video0.frameLost','video0.sceneThreshold','video0.sceneHoldoff','video0.resilience','video0.zoomPct','video0.zoomX','video0.zoomY']},
+{id:'video0',title:'Video',keys:['video0.rcMode','video0.fps','video0.size','video0.bitrate','video0.gopSize','video0.qpDelta','video0.frameLost','video0.sceneThreshold','video0.sceneHoldoff','video0.resilience','video0.zoomX','video0.zoomY','video0.framing']},
 {id:'outgoing',title:'Outgoing',keys:['outgoing.enabled','outgoing.server','outgoing.streamMode','outgoing.maxPayloadSize','outgoing.connectedUdp','outgoing.audioPort','outgoing.sidecarPort']},
 {id:'audio',title:'Audio',keys:['audio.enabled','audio.codec','audio.sampleRate','audio.channels','audio.volume','audio.mute']},
 {id:'fpv',title:'FPV',keys:['fpv.roiEnabled','fpv.roiQp','fpv.roiSteps','fpv.roiCenter','fpv.noiseLevel']},
@@ -1064,6 +1066,61 @@ function renderSettings(){
 
     form.appendChild(div);
 
+  }
+
+  // Data-driven pass: render any capability field that carries `ui` metadata
+  // but has no static SECTIONS row (e.g. video0.pauseStab).  Grouped by
+  // ui.group into collapsible sections.  These fields may be runtime-only and
+  // absent from /api/v1/config, so the value is self-defaulted rather than
+  // read from localConfig.  Adding a new module field needs no dashboard edit.
+  {
+    const rendered = new Set();
+    for(const s of SECTIONS) for(const k of s.keys) rendered.add(k);
+    const groups = {};
+    for(const [key, cap] of Object.entries(capabilities)){
+      if(!cap || !cap.ui) continue;
+      if(key.includes('_')) continue;            // skip snake_case dup key
+      if(rendered.has(key)) continue;            // already in a static section
+      if(cap.supported === false) continue;       // backend doesn't support it
+      const g = cap.ui.group || 'Module';
+      (groups[g] = groups[g] || []).push([key, cap]);
+    }
+    for(const [group, entries] of Object.entries(groups)){
+      const div = document.createElement('div');
+      div.className = 'section collapsed';
+      div.innerHTML = `<div class="section-header" onclick="this.parentElement.classList.toggle('collapsed')"><h3>${group}</h3><span class="section-chevron">▼</span></div><div class="section-body"></div>`;
+      const body = div.querySelector('.section-body');
+      for(const [key, cap] of entries){
+        const ui = cap.ui;
+        const ctrl = ui.control || 'text';
+        let val = (key in localConfig) ? localConfig[key]
+          : (ctrl === 'toggle' ? false : (ctrl === 'number' ? (ui.min||0) : ''));
+        if(!(key in localConfig)) localConfig[key] = val;  // seed for set flow
+        const mut = cap.mutability || 'live';
+        const label = ui.label || key.split('.').pop().replace(/_/g,' ');
+        const badgeClass = mut === 'live' ? 'badge-live' : 'badge-restart';
+        const badgeText  = mut === 'live' ? 'LIVE' : 'RESTART';
+        let input = '';
+        if(ctrl === 'toggle'){
+          input = `<label class="toggle"><input type="checkbox" data-key="${key}" ${val?'checked':''} onchange="fieldChanged('${key}',this.checked)"><span class="toggle-track"></span></label>`;
+        } else if(ctrl === 'select'){
+          const opts = (ui.options||[]).map(o=>`<option value="${o}" ${o===String(val)?'selected':''}>${o}</option>`).join('');
+          input = `<select data-key="${key}" onchange="fieldChanged('${key}',this.value)">${opts}</select>`;
+        } else if(ctrl === 'number'){
+          const a = ` min="${ui.min}" max="${ui.max}" step="${ui.step||'any'}"`;
+          input = `<input type="number"${a} data-key="${key}" value="${val}" onchange="fieldChanged('${key}',parseFloat(this.value))">`;
+        } else {
+          input = `<input type="text" data-key="${key}" value="${val}" onchange="fieldChanged('${key}',this.value)">`;
+        }
+        const tip = (ui.tooltip||'').replace(/"/g,'&quot;');
+        const row = document.createElement('div');
+        row.className = 'field';
+        row.id = 'field-'+key;
+        row.innerHTML = `<div class="field-label" title="${tip}">${label} <span class="badge ${badgeClass}">${badgeText}</span></div><div>${input}</div>`;
+        body.appendChild(row);
+      }
+      form.appendChild(div);
+    }
   }
 
   document.getElementById('settings-loading').style.display = 'none';

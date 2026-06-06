@@ -295,6 +295,11 @@ static int apply_zoom(double pct, double x, double y)
 		pct, x, y);
 }
 
+static int apply_pause_stab(bool paused)
+{
+	return star6e_pipeline_set_pause_stab(paused);
+}
+
 static int apply_qp_delta(int delta)
 {
 	MI_VENC_ChnAttr_t attr = {0};
@@ -1185,6 +1190,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_zoom = apply_zoom,
 	.apply_isp_bin = apply_isp_bin,
 	.apply_snapshot_quality = venc_jpeg_set_quality,
+	.apply_pause_stab = apply_pause_stab,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

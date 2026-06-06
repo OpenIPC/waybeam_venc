@@ -178,10 +178,18 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->video0.resilience,
 		sizeof(cfg->video0.resilience), "off");
 
-	/* digital zoom (video0) — disabled by default */
-	cfg->video0.zoom_pct = 0.0;
+	/* pan centre (video0) — live; zoom_pct is derived from the framing
+	 * preset below */
 	cfg->video0.zoom_x = 0.5;
 	cfg->video0.zoom_y = 0.5;
+
+	/* framing mode (video0) — off by default; expands zoom_pct + stab */
+	safe_strcpy(cfg->video0.framing, sizeof(cfg->video0.framing), "off");
+	(void)venc_config_apply_framing_preset("off", &cfg->video0);
+
+	/* Runtime-only "stab-fill" bypass — always boots false; not parsed or
+	 * serialized (a fresh stab-fill run always comes up composing). */
+	cfg->video0.pause_stab = false;
 
 	/* snapshot — MJPEG /api/v1/snapshot.jpg endpoint.  Defaults inherit
 	 * main-stream dimensions (width=0/height=0) so a fresh config gets a
@@ -427,6 +435,73 @@ int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v)
 	return -1;
 }
 
+int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
+{
+	struct framing_preset {
+		const char *name;
+		uint32_t crop_pct;  /* stab kept fraction; 0 = no stab */
+		uint32_t recenter;  /* pauseStab glide rate (frames); 0 = default */
+		double zoom_pct;    /* Approach-C zoom crop fraction; 0 = no zoom */
+		double kalman_q;    /* stab Kalman process noise / pan response */
+		double kalman_r;    /* stab Kalman measurement noise / smoothness */
+	};
+	/* Framing preset table.  A preset is EITHER the stabilization preset
+	 * ("stab": crop_pct/recenter set, zoom_pct 0) OR a zoom preset (zoom_pct
+	 * set, stab 0) OR off (all 0) — never both.
+	 *
+	 * Stabilization is a SINGLE tuned mode ("stab"): 80% crop (±192/±108 dead
+	 * border @1080p), recenter tau 180 frames, plus the EMA output low-pass in
+	 * star6e_pipeline.c.  This is the on-device sweet spot — the earlier
+	 * low/medium/high presets traded border vs magnification and only the
+	 * middle one felt right, so they were collapsed into one.  Unknown values
+	 * (incl. the never-shipped low/medium/high) fall back to "off" on load.
+	 * Star6E only; no-op on Maruko.  Source auto-clamps to <=1920x1080.
+	 *
+	 * Zoom presets — zoom_pct = 1 / magnification (e.g. 2x -> 0.50).  Both
+	 * backends; zoom_x/zoom_y pan live (stab is always centered).
+	 *
+	 *   preset       cropPct  tau   zoom_pct   effect
+	 *   ──────────────────────────────────────────────────────────────
+	 *   off          0        0     0.00       full image
+	 *   stab         80       180   0.00       image stabilization (crop+shrink)
+	 *   stab-fill    80       180   0.00       floating image + black border
+	 *   zoom-1.25x   0        0     0.80       1.25x digital zoom
+	 *   zoom-1.50x   0        0     0.6667     1.50x digital zoom
+	 *   zoom-1.75x   0        0     0.5714     1.75x digital zoom
+	 *   zoom-2x      0        0     0.50       2x digital zoom
+	 *   zoom-3x      0        0     0.3333     3x digital zoom
+	 *   zoom-4x      0        0     0.25       4x digital zoom
+	 *
+	 * Approach-C zoom never upscales (crop dim == SCL output dim), so the
+	 * ch1 ~2x SCL upscale ceiling does NOT bound it; 3x/4x simply emit a
+	 * smaller frame (1080p: 3x->640x352, 4x->480x256, both >=256 floor).
+	 */
+	static const struct framing_preset table[] = {
+		{ "off",        0,  0,    0.0,    0.0,  0.0 },
+		{ "stab",       80, 180,  0.0,    0.03, 2.0 },
+		{ "stab-fill",  80, 180,  0.0,    0.03, 2.0 },
+		{ "zoom-1.25x", 0,  0,    0.80,   0.0,  0.0 },
+		{ "zoom-1.50x", 0,  0,    0.6667, 0.0,  0.0 },
+		{ "zoom-1.75x", 0,  0,    0.5714, 0.0,  0.0 },
+		{ "zoom-2x",    0,  0,    0.50,   0.0,  0.0 },
+		{ "zoom-3x",    0,  0,    0.3333, 0.0,  0.0 },
+		{ "zoom-4x",    0,  0,    0.25,   0.0,  0.0 },
+	};
+
+	const char *want = (!name || !*name) ? "off" : name;
+	for (size_t i = 0; i < sizeof(table)/sizeof(table[0]); ++i) {
+		if (strcmp(want, table[i].name) != 0)
+			continue;
+		v->stab_crop_pct = table[i].crop_pct;
+		v->stab_recenter_speed = table[i].recenter;
+		v->zoom_pct = table[i].zoom_pct;
+		v->stab_kalman_q = table[i].kalman_q;
+		v->stab_kalman_r = table[i].kalman_r;
+		return 0;
+	}
+	return -1;
+}
+
 static void load_video0(const cJSON *root, VencConfigVideo *v)
 {
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "video0");
@@ -483,20 +558,10 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		}
 	}
 
-	v->zoom_pct = json_get_double(obj, "zoomPct", v->zoom_pct);
+	/* zoom_pct is derived from the framing preset (below) — no longer
+	 * parsed from JSON.  Only the live pan centre is read here. */
 	v->zoom_x   = json_get_double(obj, "zoomX",   v->zoom_x);
 	v->zoom_y   = json_get_double(obj, "zoomY",   v->zoom_y);
-	if (v->zoom_pct < 0.0)
-		v->zoom_pct = 0.0;
-	if (v->zoom_pct > 1.0)
-		v->zoom_pct = 1.0;
-	/* Min 0.25 keeps the encoded frame large enough for receiver-side
-	 * decoders that ignore mid-stream SPS resolution changes (going
-	 * smaller produces a stream the receiver still renders at the first
-	 * SPS dim, so deeper zoom is invisible).  This also stays comfortably
-	 * above the VENC_CreateChn minimum dim. */
-	if (v->zoom_pct > 0.0 && v->zoom_pct < 0.25)
-		v->zoom_pct = 0.25;
 	if (v->zoom_x < 0.0)
 		v->zoom_x = 0.0;
 	if (v->zoom_x > 1.0)
@@ -505,6 +570,53 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		v->zoom_y = 0.0;
 	if (v->zoom_y > 1.0)
 		v->zoom_y = 1.0;
+
+	/* Framing preset drives zoom_pct (zoom presets) and the BASE
+	 * stab_crop_pct + stab_recenter_speed ("stab").  The two stab fields may
+	 * then be overridden explicitly below for advanced tuning.  Unknown
+	 * framing values fall back to "off". */
+	{
+		const char *fname = json_get_string(obj, "framing", v->framing);
+		safe_strcpy(v->framing, sizeof(v->framing), fname);
+		if (venc_config_apply_framing_preset(v->framing, v) != 0) {
+			fprintf(stderr, "[config] WARNING: unknown video0.framing "
+				"preset '%s', falling back to off\n", v->framing);
+			safe_strcpy(v->framing, sizeof(v->framing), "off");
+			(void)venc_config_apply_framing_preset("off", v);
+		}
+		/* Advanced overrides of the stab presets' derived feel knobs.  Read
+		 * AFTER the preset expansion so an explicit value wins; absent keys
+		 * keep the preset default (so a plain framing="stab" still gets
+		 * 80/180).  Honored ONLY under the stab presets — under off/zoom the
+		 * preset's cleared 0/0 must stand, else a stale stabCropPct left over
+		 * from a prior stab session silently re-enables stabilization at
+		 * framing=off (star6e_stab_*_enabled() key on stab_crop_pct).  Both
+		 * "stab" and "stab-fill" share these: stabCropPct is the crop+shrink
+		 * border for "stab" and the max-shift / black-border budget for
+		 * "stab-fill". */
+		if (strcmp(v->framing, "stab") == 0 ||
+		    strcmp(v->framing, "stab-fill") == 0) {
+			v->stab_crop_pct = (uint32_t)json_get_int(obj, "stabCropPct",
+				(int)v->stab_crop_pct);
+			v->stab_recenter_speed = (uint32_t)json_get_int(obj,
+				"stabRecenterSpeed", (int)v->stab_recenter_speed);
+			v->stab_kalman_q = json_get_double(obj,
+				"stabKalmanQ", v->stab_kalman_q);
+			v->stab_kalman_r = json_get_double(obj,
+				"stabKalmanR", v->stab_kalman_r);
+			/* Harden stab_crop_pct to [60, 100] for the active stab preset.
+			 * A stab preset must have a usable crop budget; clamping here
+			 * also self-heals a stale stabCropPct (e.g. a 0 saved while
+			 * framing=off, then framing re-set via json_cli string-only)
+			 * that would otherwise override the preset's 80 down to 0 and
+			 * silently disable stabilization (star6e_stab_*_enabled() key on
+			 * stab_crop_pct >= 50 → fall through to the unstabilized bind). */
+			if (v->stab_crop_pct < 60)
+				v->stab_crop_pct = 60;
+			if (v->stab_crop_pct > 100)
+				v->stab_crop_pct = 100;
+		}
+	}
 }
 
 static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
@@ -1053,9 +1165,13 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
-	pp_field_double(p, 2, "zoomPct",           cfg->video0.zoom_pct,            0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
-	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              1);
+	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              0);
+	pp_field_string(p, 2, "framing",           cfg->video0.framing,             0);
+	pp_field_uint(p,   2, "stabCropPct",       cfg->video0.stab_crop_pct,       0);
+	pp_field_uint(p,   2, "stabRecenterSpeed", cfg->video0.stab_recenter_speed, 0);
+	pp_field_double(p, 2, "stabKalmanQ",       cfg->video0.stab_kalman_q,       0);
+	pp_field_double(p, 2, "stabKalmanR",       cfg->video0.stab_kalman_r,       1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1237,9 +1353,16 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
 		cJSON_AddStringToObject(vid, "resilience", cfg->video0.resilience);
-		cJSON_AddNumberToObject(vid, "zoomPct", cfg->video0.zoom_pct);
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);
+		cJSON_AddStringToObject(vid, "framing", cfg->video0.framing);
+		cJSON_AddNumberToObject(vid, "stabCropPct", cfg->video0.stab_crop_pct);
+		cJSON_AddNumberToObject(vid, "stabRecenterSpeed",
+			cfg->video0.stab_recenter_speed);
+		cJSON_AddNumberToObject(vid, "stabKalmanQ",
+			cfg->video0.stab_kalman_q);
+		cJSON_AddNumberToObject(vid, "stabKalmanR",
+			cfg->video0.stab_kalman_r);
 	}
 
 	/* outgoing */

@@ -1,5 +1,206 @@
 # History
 
+## [0.15.0] - 2026-06-06
+
+Unified stabilization control law — `stab` and `stab-fill` now behave
+identically, and the feel knobs were replaced with the Kalman Q/R.
+
+**`stab` adopts the `stab-fill` Kalman trajectory smoother.**  Previously the two
+presets ran different control laws — `stab` used an EMA + gated return-to-centre
+(driven by `stabSmoothPct`/`StillFrames`/`EdgePct`/`MotionThresh`), `stab-fill`
+used a Kalman trajectory filter — so identical settings produced different
+return-to-centre behaviour.  The detector now runs ONE law (the Kalman) for both;
+the only per-preset difference is the emit step (HW crop reprogram vs software
+compose).  Same settings → same feel.
+
+**Feel knobs replaced by the Kalman tuning.**  The four inert-after-unification
+knobs (`stabSmoothPct`, `stabStillFrames`, `stabEdgePct`, `stabMotionThresh`)
+were removed and replaced with the two knobs the Kalman law actually exposes,
+shared by both presets:
+- `stabKalmanQ` (FT_DOUBLE, default 0.03, range `0.001..1.0`) — pan response
+  (process noise): higher = follows pans sooner / weaker hold.
+- `stabKalmanR` (FT_DOUBLE, default 2.0, range `0.1..50.0`) — smoothness
+  (measurement noise): higher = smoother but laggier.
+
+`stabRecenterSpeed` is retained but now only sets the `pauseStab` glide-home
+rate (the Kalman recentres during normal operation).  Schema migration is
+graceful: old `stab*` keys in a saved config are ignored on load; absent
+`stabKalman*` keys take the preset defaults.  Both new fields render in the
+data-driven Stabilization WebUI section.
+
+## [0.14.0] - 2026-06-06
+
+Live stab pause for the HW-crop `stab` preset + a fully data-driven
+**Stabilization** WebUI section.
+
+**`pauseStab` now works on `framing=stab`, not just `stab-fill`.**  The D13
+software-ramp pause was previously gated to the fill path (its `set_live` hook
+was wired only on the `stab-fill` module; toggling it under `framing=stab`
+returned `-1` → a WebUI error toast).  The pause branch is now mode-agnostic in
+the detector: when paused it undoes the tick's measurement and decays the
+trajectory toward centre, so HW-crop glides the crop window home (via the smooth
+low-pass → `apply_port_crop`) and fill glides the floating image home — same
+software ramp, no HW rebind on either.  `set_live` is wired on both stab
+vtables; `star6e_stab_set_paused` now guards on `g_stab_running` (any stab
+detector) instead of `g_stab_fill_mode`.
+
+**Stabilization section is now data-driven.**  The six persisted stab knobs
+(`stabCropPct`, `stabRecenterSpeed`, `stabSmoothPct`, `stabStillFrames`,
+`stabEdgePct`, `stabMotionThresh`) carry `FIELD_UI` metadata and were removed
+from the static Video section; together with the runtime-only `pauseStab` they
+render as one collapsible **Stabilization** group from `/api/v1/capabilities`
+— no per-field `dashboard.html` edit or webui-blob rebuild.  The four advanced
+feel knobs (smooth/still/edge/motion), previously API-only, now have WebUI
+controls.  Ranges mirror the API validators; `0 = preset default` where noted.
+
+## [0.13.0] - 2026-06-06
+
+Framing-module refactor + the `stab-fill` floating-image stabilization preset
+(PR #136 reworked onto master), plus a data-driven field schema so module
+fields reach the WebUI without a dashboard rebuild.
+
+**Stabilization is now a registered `FramingModule` (Star6E).**  All `stab`
+code moved out of `star6e_pipeline.c` into `src/star6e_framing_stab.c` behind a
+`FramingModule` vtable, gated by a `STAB` build flag (default 1; `make build
+STAB=0` excludes the module entirely — no stab code linked, `framing` falls to
+`off`).  The legacy single-thread manual-drain fallback is gone; on port1-tap
+failure the HW-crop path degrades to a bound static centre crop.  Behavior of
+`framing="stab"` is unchanged (bench-verified on imx335).
+
+**New preset `framing="stab-fill"` — floating image on a black border.**  A
+second registered module sharing the IVE detector/geometry/Kalman with `stab`.
+Instead of HW-cropping, it SCL-downscales the full sensor frame to the encode
+size (no shrink) and the manual-drain compose shifts a window inside it,
+black-filling the exposed edge (`BufFillPa` strips + `BufBlitPa` content) on a
+threaded blit worker decoupled from IVE via a 2-slot ring.  `stabCropPct` sets
+the max shift / black-border budget.  A Kalman trajectory smoother (folded
+preset constants) replaces the `stab` EMA.  Device-verified 60 fps on imx335.
+
+**Live `video0.pauseStab` (stab-fill only).**  Software ramp: glides the
+applied offset back to centre via the recenter decay — no `MI_VENC_StopRecvPic`
+/ `BindChnPort2` live rebind (the maneuver that wedged the SoC), no thread
+teardown.  `MUT_LIVE`, not persisted; routed module-side through the
+`FramingModule` set_live hook.
+
+**`stabCropPct` hardened to [60,100]** for stab presets (API validator floor
+50→60, plus load-time + module clamp).  Self-heals a stale `stabCropPct=0`
+(saved while `framing=off`, then framing re-set via a string-only edit) that
+previously overrode the preset default and silently disabled stabilization.
+
+**Data-driven field schema.**  `FieldDesc` gains an optional `ui` descriptor
+(group/label/control/range/options/tooltip); `/api/v1/capabilities` emits a
+per-field `ui` block when present, and the dashboard renders those fields
+generically — a module field is WebUI-visible with no `dashboard.html` edit or
+webui-blob rebuild.  `pauseStab` ships via this path; `stab-fill` added to the
+framing dropdown.  Core fields keep the static dashboard schema unchanged.
+
+**OSD note (Star6E).**  The venc debug OSD composites on VPE port0 (pre-stab),
+so under stab-fill it rides the content — a known cosmetic limit of this
+vehicle-local dev overlay (off by default).  For a screen-fixed OSD on the
+stabilized stream use waybeam_hub's `osd_render` (composites at the SCL stage,
+post-shift).  The two share the single global `MI_RGN` device and are mutually
+exclusive — run one or the other.
+
+**Tooling.**  `tools/build_webui.py` now pins the gzip OS header byte so the
+embedded blob is byte-identical regardless of the builder's Python version
+(CPython 3.11+ changed it from 0x03 to 0xff), fixing `make webui-check` /
+`make verify` on modern Python.
+
+## [0.12.0] - 2026-05-20
+
+Digital image stabilization (DIS) on the Star6E VPE pipeline, re-grafted
+cleanly on top of the 0.11.0 zoom work (#120) rather than the original
+stabilization branch (#118), which forked before the pan-ramp/AE-meter
+changes landed and could no longer cherry-pick clean.
+
+**Framing mode — one knob for stabilization and zoom.**  A single
+`video0.framing` preset is the sole user-facing knob for what the VPE crop
+does (resilience-style): `off`, the stabilization presets `low`|`medium`|
+`high` (Star6E only), and the digital-zoom presets `zoom-1.25x`|`zoom-1.50x`|
+`zoom-1.75x`|`zoom-2x` (both backends).  It expands into the derived
+stab crop/recenter or zoom crop fraction — mutually exclusive — and replaces
+the old standalone `stab` and continuous `zoomPct` fields, neither of which
+is part of the JSON schema or HTTP API anymore.  Zoom presets shrink the
+crop + encoded output together (1:1, no SCL upscale; e.g. `zoom-2x` of
+1920×1080 → 960×528).  `zoomX`/`zoomY` remain live and pan the crop in every
+mode.  `video0.framing` is `MUT_RESTART`.
+
+**Stabilization data path (Star6E).**  Preferred path (HW-crop): VPE port0 hardware-crops the stab
+window — `MI_VPE_SetPortCrop` per detection — straight into a VENC **bind**
+(zero-copy, no per-frame blit), while a tiny 256×256 port1 tap feeds
+`MI_IVE_Shift_Detector` for motion estimation.  Decoupling the detector
+from the stream lets ch0 run at full sensor rate (90/120 fps at 1080p
+confirmed).  The original single-port manual-drain + `MI_SYS_BufBlitPa`
+path is retained as an **automatic fallback** if a BSP rejects the
+simultaneous port1.  Binding port0→VENC also fixes the long-standing
+teardown wedge (the legacy un-drained full-res port0 queue that wedged
+`[vpe0_P0_MAIN]` into D-state on restart).  Return-to-center decays the
+offset *vector* in a float accumulator → a straight diagonal back to
+center with no per-axis rounding tail.  When enabled the source is clamped
+to ≤1920×1080 (preserve aspect) to avoid the high-res fps regression; the
+encoded resolution then shrinks to the crop fraction of the (clamped)
+source, reported in SPS/PPS.  Only the live ch0 stream is stabilized; JPEG
+snapshots and the debug OSD see the unstabilized frame.  Dual recording
+(`record.mode` dual/dual-stream) is downgraded to single-channel while
+stab is active (both would consume VPE port0) — it records the stabilized
+ch0 at its bitrate, with a warning.  `video0.stab` is `MUT_RESTART`.
+
+**Interplay with 0.11.0 zoom.**  Stabilization and zoom are now mutually
+exclusive *by construction* — a `framing` preset is either one or the other,
+so the old "zoomPct ignored while stab on" warning is gone.  `zoomX`/`zoomY`
+are honoured in both modes: under a stab preset they pan the stabilized crop
+via `star6e_stab_set_pan()`; under a zoom preset they drive the 0.11.0
+pan-ramp path.  `apply_zoom` short-circuits to the stab pan when the stab
+thread is running.
+
+**Size-change reboot fixed (cold-init VIF/VPE on respawn).**  A
+`video0.size` change crosses a sensor-mode boundary; the fork+exec respawn
+keeps `/dev/mi_*` fds open (the PR#117/#120 deadlock fix), so the inherited
+VIF/VPE fds pinned the *old* mode and the fresh process wedged
+`vpe0_P0_MAIN` re-initing to the new mode.  The runtime now detects a
+size change (the only field that changes the sensor mode) and the fd-scrub
+additionally closes `/dev/mi_vif` + `/dev/mi_vpe` so they re-init cold —
+gated so it never runs on same-mode respawns (resilience/framing), which
+stay deadlock-safe.  Device-verified clean in both directions
+(1920↔2560) on a non-degraded device; closing those two fds does not
+deadlock.  (Heavy back-to-back respawn cycling can still hit the
+pre-existing cumulative SoC-state degradation that needs a power cycle —
+that is independent of this fix.)
+
+**Cold-boot fps re-kick (legacy AE).**  On a cold boot the init-time
+`MI_SNR_SetFps` can fire before the ISP bin's AE settles and leave the
+sensor timing register below the configured fps.  The CUS3A path already
+re-kicks at frame 15; legacy AE now gets an equivalent one-shot re-kick
+~1.5s into the run loop.  The CUS3A frame-15 kick was also decoupled from
+the shutter-above-cap gate so it fires reliably.
+
+**AE meter follows the crop in both modes.**  The zoom-aware AE meter
+(`MI_ISP_CUS3A_SetAECropSize`) now also tracks the stabilized crop window,
+so exposure is metered on the framed view rather than the full sensor —
+the only intended runtime difference between the two modes is the pan ramp
+(smooth under zoom, direct under stab) plus the stab loop's small per-frame
+correction.  The SDK emit/readiness/dedup/disable machinery is shared
+(`star6e_emit_ae_crop`); the stab window is sized as the crop fraction of
+the VPE output (`g_stab_enc / g_stab_src`), not `image_width / precrop` as
+the zoom path uses, because stab crops the VPE output rather than precrop.
+
+**Debug OSD under stabilization.**  The OSD attaches at the full source
+dim (port0 is never cropped on the stab path) and its stats panel offset
+tracks the live crop window per-frame via
+`star6e_pipeline_stab_panel_anchor()`, so the panel stays put in the
+encoded view as corrections shift the crop.
+
+**IMU-gyro readiness.**  The motion estimate is purely optical today, but
+the design leaves a clean seam for gyro fusion: the existing BMI270 driver
+now routes its frame-synced samples into a shared `ImuRing` (replacing the
+discard stub), and the per-frame estimate lives in
+`star6e_stab_estimate_shift()` with `star6e_stab_gyro_window()` supplying
+the frame-aligned angular rates for the interval.  Adding gyro-assisted
+stabilization is then just the math: integrate yaw/pitch to pixels via the
+lens focal length and fuse with the optical shift.  The gyro window is read
+and surfaced in the periodic stab diagnostic so the plumbing and
+frame-sync are live, not speculative.
+
 ## [0.11.0] - 2026-05-19
 
 Star6E zoom improvements lifted from the DIVP/stabilization branch

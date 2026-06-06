@@ -103,7 +103,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1 },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "frameLost": true, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5 },
+      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "frameLost": true, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -146,15 +146,29 @@ Response `200`:
       "video0.scene_threshold": { "mutability": "restart_required", "supported": true },
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
       "video0.resilience": { "mutability": "restart_required", "supported": true },
-      "video0.zoom_pct": { "mutability": "restart_required", "supported": true },
       "video0.zoom_x": { "mutability": "live", "supported": true },
       "video0.zoom_y": { "mutability": "live", "supported": true },
+      "video0.framing": { "mutability": "restart_required", "supported": true },
       "system.verbose": { "mutability": "live", "supported": true },
       "outgoing.enabled": { "mutability": "live", "supported": true },
       "outgoing.server": { "mutability": "live", "supported": true },
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
       "outgoing.connected_udp": { "mutability": "restart_required", "supported": true },
-      "fpv.roi_qp": { "mutability": "live", "supported": true }
+      "fpv.roi_qp": { "mutability": "live", "supported": true },
+      "video0.stab_crop_pct": {
+        "mutability": "restart_required", "supported": true,
+        "ui": {
+          "group": "Stabilization", "label": "Stab crop %", "control": "number",
+          "min": 60, "max": 100, "step": 1, "tooltip": "Kept-frame percentage ..."
+        }
+      },
+      "video0.pause_stab": {
+        "mutability": "live", "supported": true,
+        "ui": {
+          "group": "Stabilization", "label": "Pause stab", "control": "toggle",
+          "tooltip": "Live pause for framing=stab and stab-fill ..."
+        }
+      }
     }
   }
 }
@@ -163,6 +177,17 @@ Response `200`:
 
 `supported` is backend-specific. Current Star6E and Maruko builds both expose
 scene detection, intra refresh, and digital zoom fields.
+
+A field MAY carry an optional `ui` object (data-driven field schema): when
+present the dashboard renders a control for it generically — no `dashboard.html`
+edit or webui-blob rebuild is needed to surface a new module field.  Keys:
+`group` (collapsible section title), `label`, `control`
+(`toggle`|`number`|`select`|`text`), `min`/`max`/`step` (for `number`),
+`options` (array, for `select`), `tooltip`.  Fields without `ui` use the
+dashboard's static schema.  The entire **Stabilization** section is data-driven:
+the four persisted `video0.stab_*` knobs (`stab_crop_pct`, `stab_kalman_q`,
+`stab_kalman_r`, `stab_recenter_speed`) plus the runtime-only `video0.pause_stab`
+(the live stab pause — not in `/api/v1/config`) are all surfaced this way.
 
 ### `GET /api/v1/config.json`
 
@@ -220,7 +245,7 @@ including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `isp.keepAspect`, `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
 `video0.sceneThreshold`, `video0.sceneHoldoff`,
 `video0.intraRefreshMode`, `video0.intraRefreshLines`,
-`video0.intraRefreshQp`, `video0.zoomPct`, `video0.zoomX`, `video0.zoomY`,
+`video0.intraRefreshQp`, `video0.zoomX`, `video0.zoomY`, `video0.framing`,
 `outgoing.maxPayloadSize`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
 
@@ -292,7 +317,7 @@ curl "http://<device-ip>/api/v1/set?video0.size=1080p"
 curl "http://<device-ip>/api/v1/set?video0.scene_threshold=150"
 
 # Enable 2x digital zoom (encoded resolution becomes half width/height)
-curl "http://<device-ip>/api/v1/set?video0.zoomPct=0.5"
+curl "http://<device-ip>/api/v1/set?video0.framing=zoom-2x"
 ```
 
 Response `200` (includes `"reinit_pending": true`):
@@ -355,21 +380,56 @@ Majestic-oriented clients.
 - Alias: `video0.qpDelta`
 - Semantics: adjusts I-frame QP relative to P-frame; negative values lower I-frame QP (higher quality keyframes), positive values raise it.
 
-### `video0.zoom_pct`, `video0.zoom_x`, `video0.zoom_y`
+### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_kalman_q`, `video0.stab_kalman_r`, `video0.stab_recenter_speed`
 
-- Types: double
-- Ranges:
-  - `video0.zoom_pct`: `0.0` to disable zoom, or `0.25..1.0` crop fraction
-  - `video0.zoom_x`: `0.0..1.0`
-  - `video0.zoom_y`: `0.0..1.0`
-- Mutability:
-  - `video0.zoom_pct`: `restart_required` because it changes encoded resolution
-  - `video0.zoom_x`, `video0.zoom_y`: `live`
-- Aliases: `video0.zoomPct`, `video0.zoomX`, `video0.zoomY`
-- Semantics: digital zoom uses a 1:1 crop. The crop window and encoded output
-  resolution shrink together; there is no SCL upscale and no additional output
-  bandwidth pressure. `zoom_x` and `zoom_y` move the crop center inside the
-  active aspect-ratio-corrected source surface.
+- `video0.framing`: string preset — the single knob for what the VPE crop does.
+  - Values: `off` | `stab` (image stabilization, crop+shrink, Star6E only) |
+    `stab-fill` (image stabilization, floating image on a black border, Star6E
+    only; encode stays full-res, `stabCropPct` sets the shift/border budget) |
+    `zoom-1.25x` | `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` | `zoom-3x` |
+    `zoom-4x` (digital zoom, both backends).
+  - Mutability: `restart_required` (changes encoded resolution / pipeline).
+- `video0.pauseStab`: bool, live (`stab` **and** `stab-fill`) — glide the
+  stabilized window (`stab`: HW crop) / floating image (`stab-fill`) back to
+  centre via a software ramp, no rebind.  Runtime-only: not persisted, always
+  boots `false`.  No effect under `framing=off` or zoom.
+- `video0.stabCropPct`: the stab crop / shift budget; clamped to **[60, 100]**
+  for a stab preset (a smaller value is rejected by the API and floored on
+  load).
+  - The preset expands internally into the zoom crop fraction (zoom presets) or
+    the stabilization crop/recenter (`stab`); the two are mutually exclusive.
+    There is no settable continuous `zoom_pct` — use a zoom preset.
+- `video0.stab_crop_pct`, `video0.stab_kalman_q`, `video0.stab_kalman_r`,
+  `video0.stab_recenter_speed`: mutability `restart_required`. Aliases
+  `video0.stabCropPct`, `video0.stabKalmanQ`, `video0.stabKalmanR`,
+  `video0.stabRecenterSpeed`. Tuning for the shared Kalman stabilization control
+  law — read *after* preset expansion so an explicit value wins, while a plain
+  `framing=stab`/`stab-fill` keeps the preset defaults. Re-selecting the preset
+  resets them, so set framing first. Inert under `off`/`zoom-*`. **Both presets
+  use the same law, so identical values give identical behaviour.**
+  - `stab_crop_pct`: uint. `0` = preset default (80); else `60..100` kept-frame %
+    (`stab`) / shift+border budget (`stab-fill`). Clamped to **[60, 100]** for an
+    active stab preset (smaller is rejected by the API and floored on load).
+    Smaller % = larger dead border = more motion headroom, tighter/more-bordered
+    frame.
+  - `stab_kalman_q`: double, `0.001..1.0` (default 0.03). Process noise / **pan
+    response** — higher = the view follows slow pans sooner (weaker hold); lower
+    = holds tighter and more locked. The estimate eases the offset back to centre
+    on its own (no separate recenter).
+  - `stab_kalman_r`: double, `0.1..50.0` (default 2.0). Measurement noise /
+    **smoothness** — higher = smoother but laggier; lower = snappier, more jitter
+    passes through. Primary feel knob.
+  - `stab_recenter_speed`: uint, `0..3600`. Only the `pauseStab` glide-home rate
+    (`0` = default ramp); inert during normal stabilization.
+- `video0.zoom_x`, `video0.zoom_y`: double, `0.0..1.0`, mutability `live`.
+  Aliases `video0.zoomX`, `video0.zoomY`.
+- Semantics: digital zoom uses a 1:1 crop — the crop window and encoded output
+  resolution shrink together (1920×1080 → `zoom-2x` 960×528, `zoom-3x` 640×352,
+  `zoom-4x` 480×256); no SCL upscale, no extra output bandwidth, so the deep
+  3×/4× crops are not bound by the SCL ~2× upscale ceiling. `zoom_x`/`zoom_y`
+  move the crop center
+  live inside the active aspect-ratio-corrected source surface. Under `stab`
+  the crop is always centered (`zoom_x`/`zoom_y` are ignored).
 
 ### `GET /api/v1/fps/config`
 
@@ -1268,11 +1328,24 @@ divergence is listed.  As of `contract_version: 0.10.1`:
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
-| `video0.zoom_pct` / `zoom_x` / `zoom_y` | yes | yes | `zoom_pct` requires reinit; `zoom_x/y` are live pan controls. |
+| `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
 | `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
 
 ## Change Log (Contract)
-- `0.10.1`:
+- `0.10.1` (additive, no version bump):
+  - Re-exposed `video0.stab_crop_pct` + `video0.stab_recenter_speed`
+    (aliases `stabCropPct`/`stabRecenterSpeed`, both `restart_required`) as
+    advanced overrides of the `stab` preset.  Read after preset expansion so
+    `framing=stab` alone keeps 80/180; explicit values win.  `0`/`0` =
+    stick-to-patch (demo).  Inert under `off`/`zoom-*`.
+  - `video0.framing` gained `zoom-3x` (1080p → 640×352) and `zoom-4x`
+    (480×256) digital-zoom presets.  Additive enum extension; existing
+    values unchanged.  Approach-C still shrinks crop+output 1:1, so the
+    deep crops are not bound by the SCL ~2× upscale ceiling.
+  - `video0.framing` stabilization collapsed to a single `stab` preset
+    (was the never-shipped `low`/`medium`/`high`).  Those names are now
+    unknown values that fall back to `off` on load; `SET` accepts `stab`.
+    There is no settable `zoom_pct`/`zoomPct` — the preset is the only knob.
   - `GET /api/v1/dual/status` always returns `200` now.  When dual VENC
     is not active the body is `{"ok":true,"data":{"active":false}}`
     instead of the previous `404` + `not_active` error envelope.

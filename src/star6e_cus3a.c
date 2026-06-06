@@ -334,52 +334,44 @@ static void *cus3a_thread(void *arg)
 				changed = 1;
 			}
 
-			/* Cold-boot fix: the ISP bin AE may initialize
-			 * the sensor at a shutter above our cap.
-			 * SetExposureLimit alone does not force the
-			 * physical sensor register on cold boot.
-			 * After 15 ticks (~1s), if still stuck, call
-			 * MI_SNR_SetFps to force the sensor driver to
-			 * reconfigure its timing registers, then re-set
-			 * the exposure limit.  Only fires once.
+			/* Cold-boot fps kick (CUS3A path).  On cold boot the ISP
+			 * bin AE can leave the sensor timing register below the
+			 * target fps (observed ~70fps @ target 90).
+			 * SetExposureLimit only constrains the AE algorithm, not
+			 * the physical register; MI_SNR_SetFps forces the sensor
+			 * driver to reconfigure timing.
 			 *
-			 * Note: star6e_pipeline_start_vpe calls MI_SNR_SetFps
-			 * during the legacyAe startup branch.  This block
-			 * remains the safety net for CUS3A cold boot
-			 * (non-legacyAe) — where the pipeline-level kick
-			 * doesn't fire and the sensor register can still be
-			 * stuck above our cap after ISP bin load.
-			 * Cus3a_thread is stopped and restarted on reinit,
-			 * so `fps_kick_done` resets automatically and this
-			 * branch re-arms each pipeline cycle. */
+			 * Fire it UNCONDITIONALLY once at frame 15 (~1s, after
+			 * the ISP bin load + 3A handoff settle).  The prior gate
+			 * only kicked when pi.shutter > applied_shutter_max, but
+			 * the cold-boot lock does not always manifest as
+			 * shutter-above-cap (and applied_shutter_max may not be
+			 * read yet), so that gate silently missed the 70fps case.
+			 * The pipeline-level kick is skipped in CUS3A mode, so
+			 * this is the sole deterministic kick.  Cus3a_thread
+			 * restarts on reinit, so fps_kick_done re-arms each
+			 * pipeline cycle. */
+			if (frames == 15 && !fps_kick_done &&
+			    s->fn_set_fps && s->cfg.sensor_fps > 0) {
+				printf("[cus3a] cold-boot fps kick: "
+				    "SetFps(%u)\n", s->cfg.sensor_fps);
+				s->fn_set_fps(0, s->cfg.sensor_fps);
+				fps_kick_done = 1;
+			}
+
+			/* Independent shutter clamp: if the sensor shutter crept
+			 * above our cap during the first second, re-apply the
+			 * exposure limit (does not depend on the kick above). */
 			if (frames > 0 && frames <= 15 &&
-			    !fps_kick_done &&
 			    s->fn_get_plane_info &&
 			    applied_shutter_max > 0) {
 				MI_SNR_PlaneInfo_t pi;
 				memset(&pi, 0, sizeof(pi));
-				if (s->fn_get_plane_info(0, 0,
-				    &pi) == 0 &&
-				    pi.shutter >
-				    applied_shutter_max) {
+				if (s->fn_get_plane_info(0, 0, &pi) == 0 &&
+				    pi.shutter > applied_shutter_max) {
 					cur_limit.maxShutterUs =
 						applied_shutter_max;
 					changed = 1;
-					if (frames == 15 &&
-					    s->fn_set_fps &&
-					    s->cfg.sensor_fps > 0) {
-						printf("[cus3a] sensor "
-						    "shutter %uus stuck "
-						    "above %uus, "
-						    "kicking via "
-						    "SetFps(%u)\n",
-						    pi.shutter,
-						    applied_shutter_max,
-						    s->cfg.sensor_fps);
-						s->fn_set_fps(0,
-						    s->cfg.sensor_fps);
-						fps_kick_done = 1;
-					}
 				}
 			}
 

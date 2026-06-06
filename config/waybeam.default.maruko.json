@@ -33,9 +33,9 @@
     "sceneThreshold": 0,
     "sceneHoldoff": 2,
     "resilience": "off",
-    "zoomPct": 0.0,
     "zoomX": 0.5,
-    "zoomY": 0.5
+    "zoomY": 0.5,
+    "framing": "off"
   },
   "outgoing": {
     "enabled": false,

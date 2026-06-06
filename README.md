@@ -244,7 +244,7 @@ omitted fields keep their compiled-in defaults.
     "qpDelta": -4,
     "sceneThreshold": 0, "sceneHoldoff": 2,
     "resilience": "off",
-    "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5
+    "framing": "off", "zoomX": 0.5, "zoomY": 0.5
   },
   "outgoing": {
     "enabled": false, "server": "", "streamMode": "rtp",
@@ -291,8 +291,10 @@ omitted fields keep their compiled-in defaults.
 - **`video0`** — rate control, fps, resolution, bitrate, GOP,
   per-section QP delta. Video codec is hardcoded H.265 (HEVC).
   Scene-change-triggered IDR (`sceneThreshold`,
-  `sceneHoldoff`) is Star6E-only. Intra-refresh and digital zoom are
-  both backends.
+  `sceneHoldoff`) is Star6E-only. Intra-refresh is both backends. The
+  `framing` knob expands to either digital zoom (both backends) or image
+  stabilization (`stab` HW-crop / `stab-fill` floating-image, Star6E only;
+  live `pauseStab`).
 - **`outgoing`** — destination URI (`udp://`, `unix://`, `shm://`),
   stream mode (`rtp` / `compact`), payload sizing, optional dedicated
   audio + sidecar UDP ports.
@@ -380,6 +382,15 @@ and support status. Support is backend-specific; for example, Star6E
 reports `video0.scene_threshold` / `video0.scene_holdoff` as supported,
 while Maruko reports them as unsupported. Use this to discover which
 fields can be changed at runtime.
+
+A field MAY also carry an optional `ui` object (data-driven field schema):
+`group` (collapsible section title), `label`, `control`
+(`toggle`/`number`/`select`/`text`), `min`/`max`/`step` (for `number`),
+`options` (for `select`), and `tooltip`. The dashboard renders a control
+from this generically, so a module field reaches the WebUI with no
+`dashboard.html` edit or webui-blob rebuild. The entire **Stabilization**
+section is built this way (the six `video0.stab_*` knobs plus the
+runtime-only `video0.pause_stab`).
 
 ```sh
 curl http://<device-ip>:<port>/api/v1/capabilities
@@ -616,44 +627,166 @@ cleanly; the key is silently ignored.
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |
 | `video0.frame_lost` | bool | restart | Enable frame-lost safety net |
-| `video0.zoom_pct` | double | restart | Digital zoom crop fraction (`0.0` = off, `0.25..1.0` = crop fraction) |
-| `video0.zoom_x` | double | live | Zoom crop center X (`0.0` left to `1.0` right) |
-| `video0.zoom_y` | double | live | Zoom crop center Y (`0.0` top to `1.0` bottom) |
+| `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `stab-fill`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
+| `video0.zoom_x` | double | live | Pan crop center X (`0.0` left to `1.0` right) — applies to `zoom-*` modes only |
+| `video0.zoom_y` | double | live | Pan crop center Y (`0.0` top to `1.0` bottom) — applies to `zoom-*` modes only |
+| `video0.stab_crop_pct` | uint | restart | Override `stab`/`stab-fill` kept-frame / border budget (`0` = preset default 80, else `60..100`) |
+| `video0.stab_kalman_q` | double | restart | Pan response (Kalman process noise), shared by `stab`/`stab-fill` (`0.001..1.0`; higher = follows pans sooner / weaker hold; preset default 0.03) |
+| `video0.stab_kalman_r` | double | restart | Smoothness (Kalman measurement noise), shared by `stab`/`stab-fill` (`0.1..50.0`; higher = smoother but laggier; preset default 2.0) |
+| `video0.stab_recenter_speed` | uint | restart | `pauseStab` glide-home rate in frames (`0..3600`, `0` = default ramp). Inert during normal stabilization — the Kalman recentres |
+| `video0.pause_stab` | bool | live | Live pause for `stab`/`stab-fill` — glides the stabilized window / floating image back to centre (software ramp, no rebind). Runtime-only (not persisted); boots `false`. No effect under `off`/`zoom-*` |
 
-#### Digital Zoom (Star6E + Maruko)
+#### Framing: Stabilization & Digital Zoom
 
-Approach-C digital zoom shrinks both the crop window and encoded output
-resolution. The SCL path reads the crop at 1:1 and emits it unchanged, so
-there is no upscale pass and no extra bandwidth pressure. Receivers see the
-smaller resolution in SPS/PPS.
+`video0.framing` is the **single user-facing knob** for the VPE crop. It
+is a named preset (restart-required); the underlying crop fraction is
+*derived* from the preset and is not separately settable — there is no
+`zoom_pct`/`zoomPct` API field.
 
-| Field | Type | Mutability | Description |
-|-------|------|------------|-------------|
-| `video0.zoom_pct` | double | restart | `0.0` = off/full frame; `0.25..1.0` = crop fraction (smaller = deeper zoom) |
-| `video0.zoom_x` | double | live | Crop center X, `0.0` = left, `1.0` = right |
-| `video0.zoom_y` | double | live | Crop center Y, `0.0` = top, `1.0` = bottom |
+| `framing` | Effect | Encode dim @1080p | Backends |
+|-----------|--------|-------------------|----------|
+| `off` | Full image | 1920×1080 | both |
+| `stab` | Image stabilization (centered 80% crop) | 1536×864 | Star6E only |
+| `stab-fill` | Image stabilization (floating image on a black border) | 1920×1080 | Star6E only |
+| `zoom-1.25x` | 1.25× digital zoom | 1536×864 | both |
+| `zoom-1.50x` | 1.50× digital zoom | 1280×720 | both |
+| `zoom-1.75x` | 1.75× digital zoom | 1088×608 | both |
+| `zoom-2x` | 2× digital zoom | 960×528 | both |
+| `zoom-3x` | 3× digital zoom | 640×352 | both |
+| `zoom-4x` | 4× digital zoom | 480×256 | both |
 
-CamelCase aliases: `video0.zoomPct`, `video0.zoomX`, `video0.zoomY`.
+**Digital zoom** uses Approach-C: it shrinks *both* the crop window and the
+encoded output resolution. The SCL path reads the crop at 1:1 and emits it
+unchanged — no upscale pass, no extra bandwidth pressure. Receivers see the
+smaller resolution in SPS/PPS (the encode dims above are 16-px aligned with a
+256-px floor, so the tightest 4× still emits a valid 480×256 frame). Because
+there is no upscale, the deep 3×/4× crops are **not** bound by the SCL ~2×
+upscale ceiling.
 
-Examples:
+Both stabilization presets run the **same control law** — a Kalman trajectory
+smoother — so identical settings give identical feel. The only difference is how
+the stabilized offset is applied:
+
+**Stabilization** (`stab`, Star6E only) holds a centered 80% crop and shifts the
+**hardware crop window** per frame to cancel motion. It is always centered —
+`zoom_x`/`zoom_y` are ignored. Encode is HW-cropped, so the stream resolution
+shrinks (1536×864 @1080p) — a fps cost applies (~60→40 on imx335).
+
+**Stabilization, fill variant** (`stab-fill`, Star6E only) keeps the **full
+encode resolution** (1920×1080) and composes a *floating* stabilized image on a
+black border: it SCL-downscales the full sensor frame and shifts a window inside
+it, filling the exposed edges with black. The trade is fps for full resolution.
+
+**Live pause** (`pauseStab`, `stab` *and* `stab-fill`) freezes stabilization
+without a pipeline restart: it glides the stabilized window (`stab`) / floating
+image (`stab-fill`) back to centre via a software ramp — no HW rebind. It is
+runtime-only (not persisted, always boots `false`) and a no-op under `off`/`zoom-*`:
 
 ```bash
-# Restart-required: enable a 2x crop.
-curl "http://<device>/api/v1/set?video0.zoomPct=0.5"
-
-# Live pan inside the current crop size.
-curl "http://<device>/api/v1/set?video0.zoomX=0.25&video0.zoomY=0.75"
-
-# Disable zoom on the next reinit.
-curl "http://<device>/api/v1/set?video0.zoomPct=0.0"
+curl "http://<device>/api/v1/set?video0.pauseStab=1"   # freeze (glide to centre)
+curl "http://<device>/api/v1/set?video0.pauseStab=0"   # resume
 ```
 
-When `debug.showOsd=true` and zoom is active, the overlay adds rows
+Three **tuning** knobs shape the stabilization (all restart-required; all inert
+under `off`/`zoom-*`; shared identically by `stab` and `stab-fill`; re-selecting
+the preset resets them to the defaults, so **set `framing` first, then the
+overrides**):
+
+- `stab_crop_pct` — **headroom**. Kept-frame % (`stab`) / shift+border budget
+  (`stab-fill`). `0` keeps the preset default (80). Smaller (e.g. `60`) = bigger
+  dead border = more motion absorbed, at the cost of a tighter / more-bordered
+  frame.
+- `stab_kalman_q` — **pan response** (Kalman process noise, default `0.03`,
+  range `0.001..1.0`). Higher = the view follows slow pans sooner (weaker hold);
+  lower = holds tighter and more locked. The estimate eases the offset back to
+  centre on its own — there is no separate recenter knob.
+- `stab_kalman_r` — **smoothness** (Kalman measurement noise, default `2.0`,
+  range `0.1..50.0`). **The primary feel knob.** Higher = smoother but laggier
+  (the frame trails your real motion); lower = snappier but more jitter passes
+  through.
+
+(`stab_recenter_speed` only sets the `pauseStab` glide-home rate; during normal
+stabilization the Kalman handles recentering.)
+
+##### Calibrating to taste
+
+Watch the `stab tick` line in the log (printed every 120 frames):
+
+```
+stab tick 600: meas=(82,83) acc=(-206,31) max=(288,216) pan=(500,500) kalman(q=0.0300,r=2.00) paused=0 ...
+```
+- `meas` = motion estimate this detect · `acc` = the offset being applied ·
+  `max` = the border budget (= half the cropped-away pixels) · `kalman` = the
+  active q/r.
+
+Recommended order:
+
+1. **Headroom first.** Shake the camera the way it will really move. If `acc`
+   sits pinned near `±max` and clips, you're saturating — lower `stab_crop_pct`
+   (80 → 70 → 60) until `acc` has room. If motion is gentle and you want max
+   FOV/sharpness, keep 80.
+2. **Then smoothness (R).** If the output looks jittery/shaky, *raise*
+   `stab_kalman_r` (2 → 4 → 8). If it feels floaty and lags your real movement,
+   *lower* it (2 → 1 → 0.5).
+3. **Then hold vs pan (Q).** If a deliberate pan feels sticky/rubber-banded,
+   *raise* `stab_kalman_q` (0.03 → 0.06 → 0.1) so the view follows sooner. If the
+   view drifts during slow movement, *lower* it (0.03 → 0.015) to hold tighter.
+
+The active values are echoed once at start so you can confirm each change:
+```
+[waybeam] stab: src=1440x1080 out=864x648 crop=60% kalman(q=0.0300,r=2.00) pauseGlide=180
+```
+
+Examples (each `set` is restart-required; the daemon respawns to apply):
+
+```bash
+# Production stab (all knobs at preset defaults).
+curl "http://<device>/api/v1/set?video0.framing=stab"
+
+# Smoother, more locked feel: heavier measurement filtering + tighter hold.
+# (Restart-required fields must be set ONE per request — the daemon respawns
+# between them, so wait for each to come back before the next.)
+curl "http://<device>/api/v1/set?video0.stabKalmanR=6"
+curl "http://<device>/api/v1/set?video0.stabKalmanQ=0.02"
+
+# Looser, follows pans sooner; more motion headroom (tighter crop).
+curl "http://<device>/api/v1/set?video0.stabKalmanQ=0.08"
+curl "http://<device>/api/v1/set?video0.stabCropPct=60"
+```
+
+**Panning** applies to the `zoom-*` modes only and is live (`zoom_x`,
+`zoom_y` ∈ [0,1], default 0.5/0.5 = centered):
+
+```bash
+# Restart-required: enable a 3x crop (centered).
+curl "http://<device>/api/v1/set?video0.framing=zoom-3x"
+
+# Live pan inside the current zoom crop — top-left corner.
+curl "http://<device>/api/v1/set?video0.zoomX=0.0&video0.zoomY=0.0"
+
+# Live pan — bottom-right corner.
+curl "http://<device>/api/v1/set?video0.zoomX=1.0&video0.zoomY=1.0"
+
+# Re-center the zoom crop.
+curl "http://<device>/api/v1/set?video0.zoomX=0.5&video0.zoomY=0.5"
+
+# Switch to stabilization (centered; pan ignored).
+curl "http://<device>/api/v1/set?video0.framing=stab"
+
+# Back to full frame.
+curl "http://<device>/api/v1/set?video0.framing=off"
+```
+
+CamelCase aliases: `video0.zoomX`, `video0.zoomY`. `zoom_x`/`zoom_y` SETs
+return `service paused for pipeline reinit, retry` while a `framing` change
+is still reinitializing — retry once it settles.
+
+When `debug.showOsd=true` and a zoom preset is active, the overlay adds rows
 after existing OSD stats:
 
 ```
-zoom  2.00x 960x540
-crop  960x540+480+270
+zoom  3.00x 640x352
+crop  640x352+640+364
 ```
 
 #### Adaptive Encoder Control (Star6E + Maruko)
@@ -678,6 +811,27 @@ Typical usage:
 - Pair scene detection with `outgoing.sidecar_port>0` when an external
   controller needs per-frame `frame_type`, `complexity`, `scene_change`,
   `idr_inserted`, and `frames_since_idr` telemetry on the sidecar.
+
+#### Encoder thread priority (Star6E)
+
+The Star6E encode path — `MI_VENC_GetStream` → RTP packetize → `sendto`, plus
+the `stab-fill` blit/compose thread — runs on `SCHED_FIFO` priority **50**,
+pinned to CPU 0. At the previous minimum RT priority (`1`) these threads were
+occasionally preempted mid-frame by other userspace RT threads and
+`SCHED_OTHER` work, producing a periodic ~one-frame RTP delivery stall (a
+single idle gap on the wire — no frame loss, FPS unaffected). Priority 50 sits
+above those peers but well below the SDK pipeline kernel threads
+(`SCHED_RR/98`), which must keep producing the frames we consume.
+
+Override without a rebuild via the `VENC_RT_PRIO` environment variable
+(clamped `1..80`); `VENC_RT_PRIO=1` restores the old minimum-priority
+behaviour. Requires root (silent fallback otherwise).
+
+A *separate* jitter source — a large I-frame whose serialization exceeds one
+frame interval on a constrained uplink (e.g. 50 Mbps on a 100 Mbps link) — is
+not a scheduling issue and is unaffected by this priority; mitigate it with a
+[resilience preset](#resilience-preset-star6e--maruko) (intra-refresh) or a
+lower bitrate.
 
 #### Resilience preset (Star6E + Maruko)
 
