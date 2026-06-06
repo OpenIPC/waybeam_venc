@@ -22,6 +22,11 @@ static int g_stub_set_fps_fail;  /* if >0, first N calls fail */
 static int g_stub_enable_fail;
 static MI_SNR_PadInfo_t g_stub_pad_info;
 static MI_SNR_PlaneInfo_t g_stub_plane_info;
+/* Records the last MI_SNR_SetOrien call so flip-gate tests can assert what
+ * actually reached the sensor. */
+static int g_stub_orien_calls;
+static MI_U8 g_stub_orien_mirror;
+static MI_U8 g_stub_orien_flip;
 
 /* Track strategy hook calls */
 static int g_hook_pre_set_mode_count;
@@ -37,6 +42,9 @@ static void stub_reset(void)
 	g_stub_enable_fail = 0;
 	memset(&g_stub_pad_info, 0, sizeof(g_stub_pad_info));
 	memset(&g_stub_plane_info, 0, sizeof(g_stub_plane_info));
+	g_stub_orien_calls = 0;
+	g_stub_orien_mirror = 0;
+	g_stub_orien_flip = 0;
 	g_hook_pre_set_mode_count = 0;
 	g_hook_fps_retry_count = 0;
 	g_hook_post_enable_count = 0;
@@ -106,6 +114,15 @@ MI_S32 MI_SNR_SetFps(MI_SNR_PAD_ID_e pad_id, MI_U32 fps)
 		return -1;
 	}
 	g_stub_set_fps_value = fps;
+	return 0;
+}
+
+MI_S32 MI_SNR_SetOrien(MI_SNR_PAD_ID_e pad_id, MI_U8 mirror, MI_U8 flip)
+{
+	(void)pad_id;
+	g_stub_orien_calls++;
+	g_stub_orien_mirror = mirror;
+	g_stub_orien_flip = flip;
 	return 0;
 }
 
@@ -453,6 +470,68 @@ static int test_euclidean_tiebreak(void)
 	return failures;
 }
 
+/* ── Orientation bring-up apply ──────────────────────────────────────── */
+
+static void stub_set_sensor_name(const char *name)
+{
+	memset(g_stub_plane_info.sensName, 0, sizeof(g_stub_plane_info.sensName));
+	if (name) {
+		size_t len = strlen(name);
+		if (len >= sizeof(g_stub_plane_info.sensName))
+			len = sizeof(g_stub_plane_info.sensName) - 1;
+		memcpy(g_stub_plane_info.sensName, name, len);
+	}
+}
+
+/* sensor_select applies the requested orientation once, before Enable,
+ * unconditionally — flip is no longer gated per-sensor (IMX335 included;
+ * mid-stream re-apply, not the bring-up apply, was what wedged it). */
+static int test_orientation_applied_as_requested(void)
+{
+	int failures = 0;
+	SensorStrategy strategy = sensor_default_strategy();
+	SensorSelectResult result;
+
+	/* IMX335 with flip+mirror → both reach the sensor (no gating). */
+	stub_reset();
+	stub_add_mode(0, 2592, 1944, 1, 90, "5MP90");
+	stub_set_sensor_name("imx335");
+	SensorSelectConfig cfg335 = {
+		.forced_pad = -1, .forced_mode = -1,
+		.target_width = 1920, .target_height = 1080, .target_fps = 60,
+		.image_mirror = 1, .image_flip = 1,
+	};
+	CHECK("imx335_ok", sensor_select(&cfg335, &strategy, &result) == 0);
+	CHECK("imx335_orien_called", g_stub_orien_calls >= 1);
+	CHECK("imx335_mirror_applied", g_stub_orien_mirror == 1);
+	CHECK("imx335_flip_applied", g_stub_orien_flip == 1);
+
+	/* IMX415 with flip → reaches the sensor. */
+	stub_reset();
+	stub_add_mode(0, 3840, 2160, 1, 90, "4K90");
+	stub_set_sensor_name("imx415");
+	SensorSelectConfig cfg415 = {
+		.forced_pad = -1, .forced_mode = -1,
+		.target_width = 1920, .target_height = 1080, .target_fps = 60,
+		.image_mirror = 0, .image_flip = 1,
+	};
+	CHECK("imx415_ok", sensor_select(&cfg415, &strategy, &result) == 0);
+	CHECK("imx415_flip_applied", g_stub_orien_flip == 1);
+
+	/* No orientation requested → no SetOrien call. */
+	stub_reset();
+	stub_add_mode(0, 1920, 1080, 1, 60, "1080p60");
+	stub_set_sensor_name("imx335");
+	SensorSelectConfig cfg0 = {
+		.forced_pad = -1, .forced_mode = -1,
+		.target_width = 1920, .target_height = 1080, .target_fps = 30,
+		.image_mirror = 0, .image_flip = 0,
+	};
+	CHECK("noorient_ok", sensor_select(&cfg0, &strategy, &result) == 0);
+	CHECK("noorient_no_call", g_stub_orien_calls == 0);
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_sensor_select(void)
@@ -472,5 +551,6 @@ int test_sensor_select(void)
 	failures += test_fps_retry_calls_hook();
 	failures += test_list_modes();
 	failures += test_euclidean_tiebreak();
+	failures += test_orientation_applied_as_requested();
 	return failures;
 }
