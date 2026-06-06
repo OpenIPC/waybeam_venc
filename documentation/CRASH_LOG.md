@@ -42,6 +42,64 @@ class config changes around the storm (live intra/GOP apply, or a cold-boot
 gate) was developed in PR #123 but is deliberately out of scope for this
 cherry-pick.
 
+## 2026-05-20 — Stab teardown wedge RESOLVED by HW-crop refactor
+
+**Bench:** `root@192.168.1.13` — SSC338Q + IMX335.
+
+**Resolution of the wedge logged below.** Root cause was specific to the
+legacy stab data path: VPE port0 ran at full src dim, **unbound**, and was
+drained manually by the stab thread (the *only* consumer).  `pipeline_stop`
+stopped that thread before unbinding VIF→VPE, so for the >150 ms teardown
+window the source kept filling an un-consumed depth-8 port0 queue →
+`[vpe0_P0_MAIN]` wedged in D-state.  At full 1080p that queue overflows in
+~130 ms.  (A naive "unbind VIF→VPE first" band-aid traded this for a
+GetBuf-vs-UnBind lock contention and still wedged on its first teardown.)
+
+**Fix:** HW-crop refactor — port0 hardware-crops the stab window via
+`MI_VPE_SetPortCrop` straight into a VENC **bind** (consumed by hardware, no
+manual drain, torn down by the standard bound-port path); only a tiny port1
+256×256 detector tap is manually drained, disabled on stop via a pause/park
+quiesce handshake so `DisablePort(0,1)` never races a GetBuf.  **Validated
+2026-05-20: 5/5 consecutive `S95waybeam restart` cycles clean** (uptime
+continuous, no watchdog reboot), HW mode engaged, 60 fps.  Note `[vpe0_P0_MAIN]`
+sitting in `DW` during streaming is normal on this SoC (all modes) and inflates
+load average — it is NOT the wedge; the wedge is the load climbing while the
+SoC goes unreachable + watchdog reset.
+
+## 2026-05-20 — Repeated teardown wedges → hard hang (PR #122 DIS stab perf work)
+
+**Bench:** `root@192.168.1.13` — SSC338Q + IMX335.
+
+**Context:** Validating PR #122 (digital image stabilization) and then a
+perf fix (Shift_Detector throttle to every 2nd frame + crop 384→256, box
+256→128, pyramid 3→2). Each `stabCropPct` change is `MUT_RESTART`, so each
+test needs a `/etc/init.d/S95waybeam restart`.
+
+**Symptom:** The stab teardown path intermittently wedges `[vpe0_P0_MAIN]`
+into D-state on `restart` (stop+start). Of ~5 new-binary restarts this
+session, T1 / cycle-A / cycle-B were clean; the T4 (dual+stab) and a plain
+`stabCropPct 80→0` restart each wedged → SoC unreachable ~30–80s → watchdog
+(`panic=20`) reset, recovering to a healthy boot. No venc/MI oops survives
+the reset; the only post-boot dmesg fault is the unrelated 8812eu wifi
+`DEBUG_LOCKS_WARN_ON(in_interrupt())`.
+
+**Hard hang:** After ~8 wedge/reset cycles in one session, a restart of the
+throttle+cheapen build (md5 e28796a1, stab=80) wedged and did **not**
+self-recover — >150 s unreachable, ARP `FAILED`. Watchdog did not fire (or
+could not reset the SoC). Cumulative SoC-state degradation across repeated
+wedges is the suspected cause. **Requires a physical power cycle.**
+
+**State at hang:** new binary already renamed into `/usr/bin/waybeam` (will
+run on next boot via S95waybeam); `/etc/waybeam.json` has `stabCropPct=80`.
+Backups on device: `/usr/bin/waybeam.old.bak`, `/etc/waybeam.json.prepr122`.
+
+**Recovery procedure:** power-cycle, let it boot (auto-starts the new binary
+at stab=80), confirm `grep 'stab: src=' /tmp/waybeam.log` and the fps line.
+The throttle+cheapen fps measurement is still pending (could not capture
+before the hang). Class: known venc teardown fragility — see
+[[venc_teardown_regression]] / [[venc_star6e_reinit_fragility]], not a
+regression introduced by the stab perf change.
+
 ## 2026-05-19 — Device hang on zoomPct SET (v0.11.0 dev, PR #120)
 
 **Bench:** `root@192.168.1.13` — SSC338Q + IMX335.

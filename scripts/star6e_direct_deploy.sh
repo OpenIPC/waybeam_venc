@@ -9,6 +9,8 @@ LOG_PATH="/tmp/waybeam.log"
 LATEST_BACKUP_PATH="/tmp/waybeam.json.bak.latest"
 INIT_SCRIPT_LOCAL="init.d/S95waybeam"
 INIT_SCRIPT_REMOTE="/etc/init.d/S95waybeam"
+LIBS_DIR="${LIBS_DIR:-libs/star6e}"
+REMOTE_LIB_DIR="${REMOTE_LIB_DIR:-/usr/lib}"
 WAIT_SECS=20
 TAIL_LINES=120
 HTTP_PORT="${HTTP_PORT:-}"
@@ -33,6 +35,8 @@ Commands:
   backup-config         Copy /etc/waybeam.json to a timestamped backup on target
   restore-config [SRC]  Restore /etc/waybeam.json from SRC or latest backup
   deploy                Copy local binary to /usr/bin/waybeam on target
+  push-libs             Push libs/star6e/*.so -> /usr/lib/ (shadows /rom;
+                        needed for libmi_ive.so on firmware lacking it)
   stop                  Stop running waybeam
   start                 Start waybeam as a daemon and log to /tmp/waybeam.log
   reload                Send SIGHUP to running waybeam
@@ -57,6 +61,7 @@ Options:
 
 Examples:
   scripts/star6e_direct_deploy.sh cycle
+  scripts/star6e_direct_deploy.sh push-libs
   scripts/star6e_direct_deploy.sh config-set .system.verbose true
   scripts/star6e_direct_deploy.sh config-set .isp.sensorBin '"/etc/sensors/imx335_greg_fpvVII-gpt200.bin"'
   scripts/star6e_direct_deploy.sh reload
@@ -211,6 +216,26 @@ deploy_binary() {
 	remote_sh "chmod 0755 $(printf '%q' "${remote_tmp}") && mv $(printf '%q' "${remote_tmp}") $(printf '%q' "${REMOTE_BIN}")"
 }
 
+push_libs() {
+	local libs_dir="${LIBS_DIR}" count=0 f base remote_tmp
+	if [[ "${libs_dir}" != /* ]]; then libs_dir="${ROOT_DIR}/${libs_dir}"; fi
+	[[ -d "${libs_dir}" ]] || die "missing ${libs_dir}"
+	log "Pushing MI vendor libs from ${libs_dir} -> ${HOST}:${REMOTE_LIB_DIR}"
+	remote_sh "mkdir -p $(printf '%q' "${REMOTE_LIB_DIR}")"
+	shopt -s nullglob
+	for f in "${libs_dir}"/*.so; do
+		base="$(basename "${f}")"
+		remote_tmp="${REMOTE_LIB_DIR}/${base}.codex.new"
+		ssh -o BatchMode=yes -o ConnectTimeout=5 "${HOST}" "cat > $(printf '%q' "${remote_tmp}")" < "${f}"
+		remote_sh "chmod 0644 $(printf '%q' "${remote_tmp}") && mv $(printf '%q' "${remote_tmp}") $(printf '%q' "${REMOTE_LIB_DIR}/${base}")"
+		count=$((count + 1))
+	done
+	shopt -u nullglob
+	[[ "${count}" -gt 0 ]] || log "WARNING: no .so files under ${libs_dir}"
+	remote_sh "ldconfig 2>/dev/null || true"
+	log "Pushed ${count} libs to ${REMOTE_LIB_DIR}"
+}
+
 start_venc() {
 	log "Starting waybeam with log ${LOG_PATH}"
 	remote_sh "
@@ -319,7 +344,7 @@ run_cycle() {
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-		cycle|build|backup-config|restore-config|deploy|stop|start|reload|wait-http|status|config-get|config-set)
+		cycle|build|backup-config|restore-config|deploy|push-libs|stop|start|reload|wait-http|status|config-get|config-set)
 			COMMAND="$1"
 			shift
 			COMMAND_ARGS=("$@")
@@ -395,6 +420,9 @@ case "${COMMAND}" in
 	deploy)
 		deploy_binary
 		deploy_init_script
+		;;
+	push-libs)
+		push_libs
 		;;
 	stop)
 		stop_venc

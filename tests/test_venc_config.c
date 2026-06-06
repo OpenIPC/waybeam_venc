@@ -205,7 +205,7 @@ static int test_load_full_json(void)
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
 		/* "codec" above is intentionally legacy — parser must silently drop it. */
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
-		"    \"frameLost\": false, \"zoomPct\": 0.5, \"zoomX\": 0.25, \"zoomY\": 0.75 },"
+		"    \"frameLost\": false, \"framing\": \"zoom-2x\", \"zoomX\": 0.25, \"zoomY\": 0.75 },"
 		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false },"
 		"  \"fpv\": { \"roiEnabled\": true, \"roiQp\": -18, \"roiSteps\": 2, \"noiseLevel\": 5 }"
 		"}";
@@ -239,7 +239,8 @@ static int test_load_full_json(void)
 	CHECK("load_gop", cfg.video0.gop_size == 1);
 	CHECK("load_qp_delta", cfg.video0.qp_delta == -7);
 	CHECK("load_frame_lost_off", cfg.video0.frame_lost == false);
-	CHECK("load_zoom_pct", cfg.video0.zoom_pct == 0.5);
+	CHECK("load_framing_zoom2x", strcmp(cfg.video0.framing, "zoom-2x") == 0);
+	CHECK("load_framing_zoom_pct", cfg.video0.zoom_pct == 0.5);
 	CHECK("load_zoom_x", cfg.video0.zoom_x == 0.25);
 	CHECK("load_zoom_y", cfg.video0.zoom_y == 0.75);
 	CHECK("load_enabled", cfg.outgoing.enabled == true);
@@ -377,7 +378,7 @@ static int test_roundtrip(void)
 	cfg.video0.qp_delta = 6;
 	cfg.system.verbose = true;
 	cfg.video0.scene_threshold = 150;
-	cfg.video0.zoom_pct = 0.5;
+	strcpy(cfg.video0.framing, "zoom-2x");  /* zoom_pct derived on reload */
 	cfg.video0.zoom_x = 0.25;
 	cfg.video0.zoom_y = 0.75;
 
@@ -403,6 +404,7 @@ static int test_roundtrip(void)
 	CHECK("roundtrip_qp_delta", cfg2.video0.qp_delta == 6);
 	CHECK("roundtrip_verbose", cfg2.system.verbose == true);
 	CHECK("roundtrip_scene_threshold", cfg2.video0.scene_threshold == 150);
+	CHECK("roundtrip_framing", strcmp(cfg2.video0.framing, "zoom-2x") == 0);
 	CHECK("roundtrip_zoom_pct", cfg2.video0.zoom_pct == 0.5);
 	CHECK("roundtrip_zoom_x", cfg2.video0.zoom_x == 0.25);
 	CHECK("roundtrip_zoom_y", cfg2.video0.zoom_y == 0.75);
@@ -448,44 +450,161 @@ static int test_noise_level_clamping(void)
 	return failures;
 }
 
-static int test_zoom_clamping(void)
+static int test_framing_presets(void)
 {
 	int failures = 0;
 	VencConfig cfg;
 	char *path;
 
-	path = write_temp_json("{ \"video0\": { \"zoomPct\": 0.1, "
+	/* Zoom presets expand into zoom_pct; pan still clamps. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"zoom-1.25x\", "
 		"\"zoomX\": -1, \"zoomY\": 2 } }");
-	CHECK("zoom clamp tmpfile", path != NULL);
+	CHECK("framing zoom tmpfile", path != NULL);
 	if (!path) return failures;
-
 	venc_config_defaults(&cfg);
 	venc_config_load(path, &cfg);
 	unlink(path);
 	free(path);
-	CHECK("zoom pct clamped floor", cfg.video0.zoom_pct == 0.25);
-	CHECK("zoom x clamped low", cfg.video0.zoom_x == 0.0);
-	CHECK("zoom y clamped high", cfg.video0.zoom_y == 1.0);
+	CHECK("framing zoom1.25 pct", cfg.video0.zoom_pct == 0.80);
+	CHECK("framing zoom no stab", cfg.video0.stab_crop_pct == 0);
+	CHECK("framing zoom x clamped low", cfg.video0.zoom_x == 0.0);
+	CHECK("framing zoom y clamped high", cfg.video0.zoom_y == 1.0);
 
-	path = write_temp_json("{ \"video0\": { \"zoomPct\": -0.5 } }");
-	CHECK("zoom negative tmpfile", path != NULL);
+	/* 2x maps to 0.50. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"zoom-2x\" } }");
 	if (!path) return failures;
-
 	venc_config_defaults(&cfg);
 	venc_config_load(path, &cfg);
 	unlink(path);
 	free(path);
-	CHECK("zoom pct negative off", cfg.video0.zoom_pct == 0.0);
+	CHECK("framing zoom2x pct", cfg.video0.zoom_pct == 0.50);
 
-	path = write_temp_json("{ \"video0\": { \"zoomPct\": 2.0 } }");
-	CHECK("zoom high tmpfile", path != NULL);
+	/* 3x maps to 0.3333 (no upscale — Approach-C emits a smaller frame). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"zoom-3x\" } }");
 	if (!path) return failures;
-
 	venc_config_defaults(&cfg);
 	venc_config_load(path, &cfg);
 	unlink(path);
 	free(path);
-	CHECK("zoom pct clamped high", cfg.video0.zoom_pct == 1.0);
+	CHECK("framing zoom3x pct", cfg.video0.zoom_pct == 0.3333);
+	CHECK("framing zoom3x no stab", cfg.video0.stab_crop_pct == 0);
+
+	/* 4x maps to 0.25 (tightest zoom; 1080p -> 480x256, above 256 floor). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"zoom-4x\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing zoom4x pct", cfg.video0.zoom_pct == 0.25);
+	CHECK("framing zoom4x no stab", cfg.video0.stab_crop_pct == 0);
+
+	/* The single "stab" preset expands into stab_crop_pct/recenter, zoom 0. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing stab name", strcmp(cfg.video0.framing, "stab") == 0);
+	CHECK("framing stab crop", cfg.video0.stab_crop_pct == 80);
+	CHECK("framing stab recenter", cfg.video0.stab_recenter_speed == 180);
+	CHECK("framing stab no zoom", cfg.video0.zoom_pct == 0.0);
+	/* The "stab" preset also seeds the shared Kalman knobs (q=0.03, r=2.0). */
+	CHECK("framing stab kalman q", cfg.video0.stab_kalman_q == 0.03);
+	CHECK("framing stab kalman r", cfg.video0.stab_kalman_r == 2.0);
+
+	/* Advanced overrides win over the preset's derived 80/180, and are read
+	 * after preset expansion (stick mode = recenter 0, tighter 60% crop). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\", "
+		"\"stabCropPct\": 60, \"stabRecenterSpeed\": 0 } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("stab override crop", cfg.video0.stab_crop_pct == 60);
+	CHECK("stab override recenter stick", cfg.video0.stab_recenter_speed == 0);
+
+	/* Kalman q/r override the preset defaults the same way. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\", "
+		"\"stabKalmanQ\": 0.08, \"stabKalmanR\": 5.0 } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("stab override kalman q", cfg.video0.stab_kalman_q == 0.08);
+	CHECK("stab override kalman r", cfg.video0.stab_kalman_r == 5.0);
+
+	/* Absent Kalman keys keep the preset defaults (0.03/2.0). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\", "
+		"\"stabCropPct\": 60 } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("stab kalman absent keeps q", cfg.video0.stab_kalman_q == 0.03);
+	CHECK("stab kalman absent keeps r", cfg.video0.stab_kalman_r == 2.0);
+
+	/* Absent override keys keep the preset default (plain stab = 80/180). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("stab override absent keeps crop", cfg.video0.stab_crop_pct == 80);
+	CHECK("stab override absent keeps recenter",
+		cfg.video0.stab_recenter_speed == 180);
+
+	/* A stale stabCropPct/stabRecenterSpeed left over from a prior stab
+	 * session must NOT re-enable stabilization at framing="off" — the
+	 * overrides are scoped to framing="stab" (regression: stab ran with
+	 * framing=off because star6e_stab_enabled() keys on stab_crop_pct). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"off\", "
+		"\"stabCropPct\": 60, \"stabRecenterSpeed\": 0 } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing off ignores stale crop override", cfg.video0.stab_crop_pct == 0);
+	CHECK("framing off ignores stale recenter override",
+		cfg.video0.stab_recenter_speed == 0);
+
+	/* Same for zoom presets: a leftover stabCropPct stays inert. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"zoom-2x\", "
+		"\"stabCropPct\": 80 } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing zoom ignores stale crop override", cfg.video0.stab_crop_pct == 0);
+
+	/* The never-shipped low/medium/high presets are no longer special-cased;
+	 * they are unknown values and fall back to "off" like any other. */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"medium\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing retired low/med/high off", strcmp(cfg.video0.framing, "off") == 0);
+	CHECK("framing retired no stab", cfg.video0.stab_crop_pct == 0);
+
+	/* Unknown preset falls back to off (all derived fields cleared). */
+	path = write_temp_json("{ \"video0\": { \"framing\": \"bogus\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("framing bogus off", strcmp(cfg.video0.framing, "off") == 0);
+	CHECK("framing bogus no zoom", cfg.video0.zoom_pct == 0.0);
+	CHECK("framing bogus no stab", cfg.video0.stab_crop_pct == 0);
 
 	return failures;
 }
@@ -883,7 +1002,7 @@ int test_venc_config(void)
 	failures += test_roundtrip();
 	failures += test_overclock_clamping();
 	failures += test_noise_level_clamping();
-	failures += test_zoom_clamping();
+	failures += test_framing_presets();
 	failures += test_resolution_aliases();
 	failures += test_rotate_180();
 	failures += test_sample_config_file();

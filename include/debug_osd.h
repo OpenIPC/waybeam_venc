@@ -27,7 +27,15 @@ typedef struct DebugOsdState DebugOsdState;
  *  vpe_port is internally cast to i6_sys_bind *. */
 DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
                                 const void *vpe_port);
+
 void debug_osd_destroy(DebugOsdState *osd);
+
+/** Shift the stats panel anchor by (off_x, off_y) pixels.  Used on Star6E
+ *  when the OSD canvas dim (VPE port output) is larger than the encoded
+ *  ch0 dim (image stab crops a centered window): set the offset to the
+ *  crop origin so the panel lands inside the encoded view.  Default
+ *  offset is (0, 0). */
+void debug_osd_set_panel_offset(DebugOsdState *osd, int off_x, int off_y);
 
 /** Frame lifecycle — bracket all draw calls between begin/end. */
 void debug_osd_begin_frame(DebugOsdState *osd);

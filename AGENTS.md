@@ -452,6 +452,7 @@ Read these before working on related areas:
 | Coding conventions | `documentation/CONVENTIONS.md` |
 | Code structure prestudy | `documentation/CODE_STRUCTURE_PRESTUDY.md` |
 | Refactoring plan | `documentation/REFACTORING_PLAN.md` |
+| Stabilization on-device tests | `documentation/STABILIZATION_TEST_PLAN.md` |
 
 ## Config / WebUI / API Sync Rules
 
@@ -482,12 +483,29 @@ When adding or removing a config field, update ALL of the following in the same 
   `venc_config_save`. `cJSON_Print` is no longer used for disk writes
   because it normalised away the canonical layout
 - Add the key to the appropriate `SECTIONS[]` entry in `web/dashboard.html`
+  (core fields).  **Data-driven alternative:** a field may instead carry UI
+  metadata via `FIELD_UI(..., &ui_desc)` (a `FieldUi`: group/label/control/
+  range/options/tooltip).  `/api/v1/capabilities` then emits a `ui` block and
+  the dashboard's generic renderer builds the control automatically — no
+  `SECTIONS[]` edit and no `make webui` rebuild for that field.  Use this for
+  module / runtime-only fields (e.g. `video0.pause_stab`); keep core fields on
+  the static `SECTIONS[]` path.
 - Add the key with its default value to `config/waybeam.default.json` in the
   unified layout (one key per line, 2-space indent, `": "` separator,
   integral doubles end in `.0`). The `test_save_layout_byte_equal` test
   enforces that printer output matches the default file byte-for-byte —
-  skipping the printer or default-file update will fail it
-- Regenerate the embedded gzip: `make webui` (runs `tools/build_webui.py`)
+  skipping the printer or default-file update will fail it.  **Runtime-only
+  fields** (not persisted, e.g. `pause_stab`) are EXEMPT: they are skipped by
+  load/render/cJSON and must NOT be added to the default file or `render_*`
+  printer, or the byte-equal test breaks
+- Regenerate the embedded gzip: `make webui` (runs `tools/build_webui.py`).
+  The tool pins the gzip OS header byte so the blob is reproducible across
+  Python versions (`make webui-check` / `make verify` stay green on 3.11+)
+
+Stabilization is a compile-gated `FramingModule` (`src/star6e_framing_stab.c`,
+Star6E): `make build STAB=0` excludes it entirely (`framing="stab"`/`"stab-fill"`
+fall to `off`).  Adding a stab/framing knob touches the module + the field
+layers above; prefer the data-driven `FIELD_UI` path for new module fields.
 
 Key naming conventions:
 - C struct fields: `snake_case` (e.g., `sample_rate_hz`)

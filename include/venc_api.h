@@ -76,6 +76,11 @@ typedef struct {
 	 * which dispatches to the per-backend venc_jpeg_backend_set_quality
 	 * hook (Get→modify→Set on the existing MJPEG channel). */
 	int (*apply_snapshot_quality)(uint32_t q);
+	/* Toggle the stab-fill compose bypass (video0.pause_stab).  Software-only
+	 * (D13): glides the floating image to centre via the recenter ramp, no
+	 * HW rebind.  Returns 0 on success, -1 if framing!=stab-fill.  NULL when
+	 * the backend has no stab path (e.g. Maruko). */
+	int (*apply_pause_stab)(bool paused);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

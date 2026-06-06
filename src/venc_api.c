@@ -294,18 +294,80 @@ void venc_api_fill_record_status(VencRecordStatus *out)
 typedef enum { MUT_LIVE, MUT_RESTART } Mutability;
 typedef enum { FT_BOOL, FT_INT, FT_UINT, FT_UINT8, FT_UINT16, FT_DOUBLE, FT_FLOAT, FT_STRING, FT_SIZE } FieldType;
 
+/* Optional UI metadata for a field.  When present (FieldDesc.ui != NULL) it is
+ * emitted in /api/v1/capabilities so the dashboard can render a control for the
+ * field WITHOUT a hardcoded SECTIONS entry — i.e. a module field becomes
+ * WebUI-visible with no dashboard.html edit / webui-blob rebuild.  Core fields
+ * keep ui = NULL and use the dashboard's static SECTIONS path. */
+typedef struct {
+	const char *group;          /* collapsible section title */
+	const char *label;          /* human label; NULL = derive from key tail */
+	const char *control;        /* "toggle" | "number" | "select" | "text" */
+	double min, max, step;      /* "number" range (0/0/0 = unset) */
+	const char *const *options; /* NULL-terminated list for "select", else NULL */
+	const char *tooltip;
+} FieldUi;
+
 typedef struct {
 	const char *key;          /* dot-separated JSON path, e.g. "video0.bitrate" */
 	FieldType type;
 	Mutability mut;
 	size_t offset;            /* offsetof into VencConfig */
 	size_t size;              /* sizeof the field (for strings) */
+	const FieldUi *ui;        /* optional data-driven UI metadata (NULL = core) */
 } FieldDesc;
 
 #define FIELD(section, member, ft, m) \
 	{ #section "." #member, ft, m, \
 	  offsetof(VencConfig, section.member), \
-	  sizeof(((VencConfig*)0)->section.member) }
+	  sizeof(((VencConfig*)0)->section.member), NULL }
+
+/* Like FIELD but carries data-driven UI metadata (see FieldUi). */
+#define FIELD_UI(section, member, ft, m, uiptr) \
+	{ #section "." #member, ft, m, \
+	  offsetof(VencConfig, section.member), \
+	  sizeof(((VencConfig*)0)->section.member), (uiptr) }
+
+/* UI descriptors for the Stabilization section.  These carry data-driven UI
+ * metadata so the dashboard renders the whole group from /api/v1/capabilities
+ * with no static SECTIONS rows — adding/retuning a stab knob needs no
+ * dashboard.html edit / webui-blob rebuild.  Ranges mirror the validators in
+ * validate_field(); 0 = "use preset default" where noted.  group = the
+ * collapsible section title the renderer buckets them under. */
+static const FieldUi ui_stab_crop_pct = {
+	"Stabilization", "Stab crop %", "number", 60, 100, 1, NULL,
+	"Kept-frame percentage for framing=stab / stab-fill. 0 = preset default "
+	"(80, API only); 60..100 = explicit crop %. Smaller = bigger dead border "
+	"= more room to absorb motion but more zoomed-in. Requires restart."
+};
+static const FieldUi ui_stab_recenter_speed = {
+	"Stabilization", "Recenter speed", "number", 0, 3600, 5, NULL,
+	"How fast the stabilized window glides back to centre after motion "
+	"(decay time-constant in frames). 0 = stick (never recenters); higher = "
+	"slower, gentler return. Production default 180 (~3s @60fps). Requires restart."
+};
+static const FieldUi ui_stab_kalman_q = {
+	"Stabilization", "Pan response (Q)", "number", 0.001, 1.0, 0.005, NULL,
+	"Kalman process noise — how fast the view follows slow pans. Higher = "
+	"tracks pans sooner / weaker hold; lower = holds tighter, more locked. "
+	"Shared by stab + stab-fill. Default 0.03. Requires restart."
+};
+static const FieldUi ui_stab_kalman_r = {
+	"Stabilization", "Smoothness (R)", "number", 0.1, 50.0, 0.1, NULL,
+	"Kalman measurement noise — output smoothness. Higher = smoother but "
+	"laggier; lower = snappier, more jitter passes through. Shared by stab + "
+	"stab-fill. Default 2.0. Requires restart."
+};
+
+/* UI descriptor for video0.pause_stab — the live stab pause.  Rendered as a
+ * toggle in the "Stabilization" group purely from capabilities (the field is
+ * runtime-only / not in /api/v1/config, so it has no static SECTIONS row). */
+static const FieldUi ui_pause_stab = {
+	"Stabilization", "Pause stab", "toggle", 0, 0, 0, NULL,
+	"Live pause for framing=stab and stab-fill: glide the stabilized window / "
+	"floating image back to centre (software ramp, no rebind). No effect under "
+	"framing=off or zoom."
+};
 
 static const FieldDesc g_fields[] = {
 	FIELD(system, web_port,        FT_UINT16, MUT_RESTART),
@@ -328,7 +390,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, fps,             FT_UINT,   MUT_LIVE),
 	{ "video0.size", FT_SIZE, MUT_RESTART,
 	  offsetof(VencConfig, video0.width),
-	  sizeof(uint32_t) * 2 },  /* covers width + height */
+	  sizeof(uint32_t) * 2, NULL },  /* covers width + height */
 	FIELD(video0, bitrate,         FT_UINT,   MUT_LIVE),
 	FIELD(video0, gop_size,        FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
@@ -385,13 +447,30 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
-	/* zoom_pct shrinks the encoded resolution to the crop dim (no SCL
-	 * upscale, no bandwidth pressure) — that requires resizing the VPE
-	 * port and VENC channel, hence MUT_RESTART.  zoom_x/y stay live for
-	 * smooth panning at the same crop dim via MI_VPE_SetPortCrop. */
-	FIELD(video0, zoom_pct,    FT_DOUBLE, MUT_RESTART),
+	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
+	 * magnitude is part of the framing preset (derived zoom_pct), not a
+	 * settable field. */
 	FIELD(video0, zoom_x,      FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, zoom_y,      FT_DOUBLE, MUT_LIVE),
+	/* Framing preset — sole user-facing knob for the VPE crop (stabilization
+	 * preset "stab" or zoom presets zoom-1.25x..zoom-4x); expands into derived
+	 * stab_crop_pct/recenter or zoom_pct.  Encoded resolution changes when
+	 * toggled, so the whole pipeline must restart. */
+	FIELD(video0, framing,             FT_STRING, MUT_RESTART),
+	/* Stabilization knobs — shared by stab + stab-fill (one Kalman control law).
+	 * crop_pct = kept-frame/border budget (0 or 60..100); recenter_speed = the
+	 * pauseStab glide-home rate; kalman_q/r = the pan-response / smoothness of
+	 * the trajectory filter.  Set framing=stab|stab-fill first; inert under
+	 * off/zoom.  Restart-required.  All carry FIELD_UI metadata so the dashboard
+	 * renders the whole "Stabilization" group data-driven. */
+	FIELD_UI(video0, stab_crop_pct,       FT_UINT,   MUT_RESTART, &ui_stab_crop_pct),
+	FIELD_UI(video0, stab_kalman_q,       FT_DOUBLE, MUT_RESTART, &ui_stab_kalman_q),
+	FIELD_UI(video0, stab_kalman_r,       FT_DOUBLE, MUT_RESTART, &ui_stab_kalman_r),
+	FIELD_UI(video0, stab_recenter_speed, FT_UINT,   MUT_RESTART, &ui_stab_recenter_speed),
+	/* Runtime stab pause (D13 software ramp) — MUT_LIVE, not persisted.  Carries
+	 * UI metadata so the dashboard renders it data-driven (no static SECTIONS
+	 * row; it isn't in /api/v1/config). */
+	FIELD_UI(video0, pause_stab,       FT_BOOL,   MUT_LIVE, &ui_pause_stab),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -444,9 +523,13 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.gopSize", "record.gop_size" },
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
-	{ "video0.zoomPct", "video0.zoom_pct" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
+	{ "video0.stabCropPct", "video0.stab_crop_pct" },
+	{ "video0.stabRecenterSpeed", "video0.stab_recenter_speed" },
+	{ "video0.stabKalmanQ", "video0.stab_kalman_q" },
+	{ "video0.stabKalmanR", "video0.stab_kalman_r" },
+	{ "video0.pauseStab", "video0.pause_stab" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -651,13 +734,6 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.qp_delta < -12 || cfg->video0.qp_delta > 12)
 			return "qp_delta must be in range [-12, 12]";
 	}
-	if (strcmp(key, "video0.zoom_pct") == 0) {
-		double v = cfg->video0.zoom_pct;
-		if (!isfinite(v))
-			return "zoom_pct must be finite";
-		if (v != 0.0 && (v < 0.25 || v > 1.0))
-			return "zoom_pct must be 0.0 or in range [0.25, 1.0]";
-	}
 	if (strcmp(key, "video0.zoom_x") == 0) {
 		double v = cfg->video0.zoom_x;
 		if (!isfinite(v) || v < 0.0 || v > 1.0)
@@ -667,6 +743,37 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		double v = cfg->video0.zoom_y;
 		if (!isfinite(v) || v < 0.0 || v > 1.0)
 			return "zoom_y must be in range [0.0, 1.0]";
+	}
+	if (strcmp(key, "video0.framing") == 0) {
+		VencConfigVideo probe;
+		if (venc_config_apply_framing_preset(cfg->video0.framing, &probe) != 0)
+			return "framing must be one of: off, stab, stab-fill, "
+				"zoom-1.25x, zoom-1.50x, zoom-1.75x, zoom-2x, "
+				"zoom-3x, zoom-4x";
+	}
+	if (strcmp(key, "video0.stab_crop_pct") == 0) {
+		uint32_t v = cfg->video0.stab_crop_pct;
+		/* Floor 60: below it the kept window is too small (huge border /
+		 * upscale) for usable stabilization on either preset. */
+		if (v != 0 && (v < 60 || v > 100))
+			return "stab_crop_pct must be 0 (off) or in range [60, 100]";
+	}
+	if (strcmp(key, "video0.stab_recenter_speed") == 0) {
+		if (cfg->video0.stab_recenter_speed > 3600)
+			return "stab_recenter_speed must be in range [0, 3600] "
+				"(pauseStab glide rate; 0 = default ramp)";
+	}
+	if (strcmp(key, "video0.stab_kalman_q") == 0) {
+		double v = cfg->video0.stab_kalman_q;
+		if (v < 0.001 || v > 1.0)
+			return "stab_kalman_q must be in range [0.001, 1.0] "
+				"(pan response; higher = follows pans faster)";
+	}
+	if (strcmp(key, "video0.stab_kalman_r") == 0) {
+		double v = cfg->video0.stab_kalman_r;
+		if (v < 0.1 || v > 50.0)
+			return "stab_kalman_r must be in range [0.1, 50.0] "
+				"(smoothness; higher = smoother but laggier)";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
@@ -740,9 +847,9 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.qp_delta",
 		"video0.size",
 		"video0.scene_holdoff",
-		"video0.zoom_pct",
 		"video0.zoom_x",
 		"video0.zoom_y",
+		"video0.framing",
 		"fpv.roi_qp",
 		"fpv.roi_steps",
 		"fpv.roi_center",
@@ -876,6 +983,7 @@ typedef enum {
 	LIVE_GROUP_ZOOM,
 	LIVE_GROUP_ISP_BIN,
 	LIVE_GROUP_SNAPSHOT_QUALITY,
+	LIVE_GROUP_PAUSE_STAB,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1036,14 +1144,15 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_MAX_PAYLOAD;
 	if (strcmp(canonical_key, "audio.mute") == 0)
 		return LIVE_GROUP_MUTE;
-	if (strcmp(canonical_key, "video0.zoom_pct") == 0 ||
-	    strcmp(canonical_key, "video0.zoom_x") == 0 ||
+	if (strcmp(canonical_key, "video0.zoom_x") == 0 ||
 	    strcmp(canonical_key, "video0.zoom_y") == 0)
 		return LIVE_GROUP_ZOOM;
 	if (strcmp(canonical_key, "isp.sensor_bin") == 0)
 		return LIVE_GROUP_ISP_BIN;
 	if (strcmp(canonical_key, "snapshot.quality") == 0)
 		return LIVE_GROUP_SNAPSHOT_QUALITY;
+	if (strcmp(canonical_key, "video0.pause_stab") == 0)
+		return LIVE_GROUP_PAUSE_STAB;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1077,6 +1186,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "isp.sensor_bin";
 	case LIVE_GROUP_SNAPSHOT_QUALITY:
 		return "snapshot.quality";
+	case LIVE_GROUP_PAUSE_STAB:
+		return "video0.pauseStab";
 	default:
 		return "unknown";
 	}
@@ -1231,6 +1342,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_isp_bin != NULL;
 	case LIVE_GROUP_SNAPSHOT_QUALITY:
 		return g_cb->apply_snapshot_quality != NULL;
+	case LIVE_GROUP_PAUSE_STAB:
+		return g_cb->apply_pause_stab != NULL;
 	default:
 		return 0;
 	}
@@ -1302,6 +1415,9 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_SNAPSHOT_QUALITY:
 		dst->snapshot.quality = src->snapshot.quality;
+		break;
+	case LIVE_GROUP_PAUSE_STAB:
+		dst->video0.pause_stab = src->video0.pause_stab;
 		break;
 	default:
 		break;
@@ -1405,6 +1521,8 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_isp_bin(cfg->isp.sensor_bin);
 	case LIVE_GROUP_SNAPSHOT_QUALITY:
 		return g_cb->apply_snapshot_quality(cfg->snapshot.quality);
+	case LIVE_GROUP_PAUSE_STAB:
+		return g_cb->apply_pause_stab(cfg->video0.pause_stab);
 	default:
 		return -2;
 	}
@@ -1861,6 +1979,15 @@ static int process_restart_set_query(const SetQueryParam *param,
 			needs_respawn ? "respawn" : "live-reinit");
 	}
 
+	/* Detect a framing preset change.  Like resilience, the staged new_cfg
+	 * holds the new preset *name* but the derived stab_crop_pct /
+	 * stab_recenter_speed / zoom_pct still hold the old expansion.  Re-expand
+	 * now so in-memory /status + GET stay coherent until the respawn reloads
+	 * from disk.  Always a plain restart — no respawn classification needed. */
+	if (strcmp(g_cfg->video0.framing, new_cfg.video0.framing) != 0)
+		(void)venc_config_apply_framing_preset(new_cfg.video0.framing,
+			&new_cfg.video0);
+
 	/* Commit g_cfg in memory and persist to disk for both paths.
 	 * For respawn, the fresh process will reload from disk anyway,
 	 * but committing in-memory keeps /status / GET responses
@@ -2036,6 +2163,27 @@ static int handle_capabilities(int fd, const HttpRequest *req, void *ctx)
 		cJSON_AddBoolToObject(entry, "supported",
 			venc_api_field_supported_for_backend(g_backend,
 				g_fields[i].key));
+		/* Data-driven UI metadata (opt-in per field).  The dashboard
+		 * renders a control from this when present, so a module field is
+		 * WebUI-visible with no dashboard.html edit / blob rebuild. */
+		if (g_fields[i].ui) {
+			const FieldUi *u = g_fields[i].ui;
+			cJSON *ui = cJSON_AddObjectToObject(entry, "ui");
+			if (u->group)   cJSON_AddStringToObject(ui, "group", u->group);
+			if (u->label)   cJSON_AddStringToObject(ui, "label", u->label);
+			if (u->control) cJSON_AddStringToObject(ui, "control", u->control);
+			if (u->tooltip) cJSON_AddStringToObject(ui, "tooltip", u->tooltip);
+			if (u->control && strcmp(u->control, "number") == 0) {
+				cJSON_AddNumberToObject(ui, "min", u->min);
+				cJSON_AddNumberToObject(ui, "max", u->max);
+				cJSON_AddNumberToObject(ui, "step", u->step);
+			}
+			if (u->options) {
+				cJSON *arr = cJSON_AddArrayToObject(ui, "options");
+				for (const char *const *o = u->options; *o; o++)
+					cJSON_AddItemToArray(arr, cJSON_CreateString(*o));
+			}
+		}
 	}
 	char *str = cJSON_PrintUnformatted(root);
 	cJSON_Delete(root);

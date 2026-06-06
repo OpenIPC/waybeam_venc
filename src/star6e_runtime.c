@@ -720,19 +720,18 @@ static int star6e_runtime_handle_reinit(int *handled)
 	fflush(stdout);
 
 	/* Detect a video0.size change.  size is the only config field that
-	 * crosses a sensor-mode boundary; resilience/framing stay within one
-	 * mode.  On a mode change the respawn must cold-init VIF/VPE (close their
-	 * inherited /dev/mi_* fds in the fd-scrub) — otherwise the fresh process
-	 * re-inits VIF to a different mode against the old mode's kernel state and
-	 * wedges vpe0_P0_MAIN.  Same-size respawns leave the fds inherited (the
-	 * deadlock-safe default).  See venc_respawn.c.
+	 * crosses a sensor-mode boundary; resilience/framing(stab|zoom) stay
+	 * within one mode.  On a mode change the respawn must cold-init VIF/VPE
+	 * (close their inherited /dev/mi_* fds in the fd-scrub) — otherwise the
+	 * fresh process re-inits VIF to a different mode against the old mode's
+	 * kernel state and wedges vpe0_P0_MAIN.  Same-size respawns leave the
+	 * fds inherited (the deadlock-safe default).  See venc_respawn.c.
 	 *
-	 * NOTE: same-mode respawns can still hit a pre-existing MMU read-fault
-	 * storm (MMU client 0x15, IsWrite=0) on the ~2nd consecutive respawn —
-	 * intrinsic to rebuilding a VENC channel against the live VPE port on this
-	 * SoC, independent of process model.  Not addressed here; forcing cold-vif
-	 * on every respawn made it WORSE (the close mid-flight storms immediately),
-	 * so this is gated strictly to size changes. */
+	 * NOTE: the same-mode MMU read-fault storm (MMU client 0x15, IsWrite=0)
+	 * that used to wedge the ~2nd consecutive respawn is now fixed at its
+	 * root — see debug_osd_destroy()'s detach→destroy settle.  Cold-vif here
+	 * remains gated strictly to size changes (forcing it on every respawn
+	 * storms immediately because the close lands mid-flight). */
 	if (g_runner_ctx &&
 	    (g_runner_ctx->vcfg.video0.width != g_runner_ctx->started_base_w ||
 	     g_runner_ctx->vcfg.video0.height != g_runner_ctx->started_base_h)) {
@@ -944,6 +943,9 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		static unsigned int osd_fps;
 		struct timespec osd_now;
 
+			/* HW-crop stab outputs the cropped encoded dim on port0, so the
+			 * OSD canvas is 1:1 with the encoded frame (static) — no
+			 * per-frame panel-offset tracking needed. */
 		debug_osd_begin_frame(ps->debug_osd);
 		debug_osd_sample_cpu(ps->debug_osd);
 
@@ -1076,25 +1078,52 @@ static int star6e_runner_run(void *opaque)
 {
 	Star6eRunnerContext *ctx = opaque;
 	struct timespec cus3a_ts_last = {0};
+	struct timespec run_start;
+	int legacy_fps_kick_done = 0;
 	unsigned int idle_counter = 0;
 	int handled;
 	int ret;
 
 	clock_gettime(CLOCK_MONOTONIC, &cus3a_ts_last);
+	clock_gettime(CLOCK_MONOTONIC, &run_start);
 
-	/* Pin encoder to CPU 0 with minimum RT priority.  Reduces
-	 * scheduling jitter from ISP/audio/httpd threads.  Silent
-	 * fallback if unprivileged or single-core. */
+	/* Pin encoder to CPU 0 and run the GetStream->packetize->send path at
+	 * an elevated SCHED_FIFO priority.  At the previous minimum priority (1)
+	 * this thread was preempted mid-frame by other userspace RT threads
+	 * (audio capture / IMU, also FIFO/1) and SCHED_OTHER work, surfacing as
+	 * a periodic ~one-frame RTP delivery stall (a single idle gap on the
+	 * wire, no catch-up burst).  The SDK pipeline kernel threads run at
+	 * SCHED_RR/98 and MUST keep outranking us — we depend on them to produce
+	 * frames — so the priority is clamped well below 98 (audio testing also
+	 * found ~90 made timing worse, likely priority inversion).
+	 *
+	 * Tunable for on-device A/B without a rebuild via the VENC_RT_PRIO env
+	 * var (clamped 1..80); VENC_RT_PRIO=1 reproduces the old behaviour.
+	 * Silent fallback if unprivileged or single-core. */
 	{
 		unsigned long mask = 1UL;  /* CPU 0 */
 		syscall(__NR_sched_setaffinity, 0, sizeof(mask), &mask);
 
+		int rt_prio = 50;
+		const char *env = getenv("VENC_RT_PRIO");
+		if (env && *env) {
+			int v = atoi(env);
+			if (v < 1)
+				v = 1;
+			else if (v > 80)
+				v = 80;
+			rt_prio = v;
+		}
+
 		struct sched_param sp;
-		sp.sched_priority = 1;
+		sp.sched_priority = rt_prio;
 		if (pthread_setschedparam(pthread_self(), SCHED_FIFO,
 		    &sp) != 0)
 			printf("> note: RT priority not available"
 				" (run as root)\n");
+		else
+			printf("> encoder thread: SCHED_FIFO prio %d,"
+				" pinned CPU0\n", rt_prio);
 	}
 
 	while (g_running) {
@@ -1110,6 +1139,21 @@ static int star6e_runner_run(void *opaque)
 			&idle_counter);
 		if (ret != 0) {
 			return ret;
+		}
+
+		/* One-shot legacy-AE cold-boot fps re-kick ~1.5s after start,
+		 * once the ISP bin load + AE have settled (the init-time kick
+		 * fires too early and doesn't stick on a cold boot).  No-op in
+		 * CUS3A mode (its thread does the frame-15 kick). */
+		if (!legacy_fps_kick_done) {
+			struct timespec now;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			if ((now.tv_sec - run_start.tv_sec) +
+			    (now.tv_nsec - run_start.tv_nsec) / 1e9 >= 1.5) {
+				star6e_pipeline_legacy_fps_rekick(&ctx->ps,
+					&ctx->vcfg);
+				legacy_fps_kick_done = 1;
+			}
 		}
 	}
 
