@@ -356,6 +356,10 @@ static void *cus3a_thread(void *arg)
 				printf("[cus3a] cold-boot fps kick: "
 				    "SetFps(%u)\n", s->cfg.sensor_fps);
 				s->fn_set_fps(0, s->cfg.sensor_fps);
+				/* Orientation (image.flip/mirror) is applied once
+				 * at bring-up and holds across this cold-boot fps
+				 * kick — device-verified on IMX335, no re-apply
+				 * needed here.  See star6e_runtime.c. */
 				fps_kick_done = 1;
 			}
 

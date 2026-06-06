@@ -608,8 +608,8 @@ load cleanly; the keys are silently ignored.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `image.mirror` | bool | restart | Horizontal mirror |
-| `image.flip` | bool | restart | Vertical flip |
+| `image.mirror` | bool | restart | Horizontal mirror. Applied at the sensor (`MI_SNR_SetOrien`) once at bring-up. Star6E + Maruko. |
+| `image.flip` | bool | restart | Vertical flip. Applied at the sensor (`MI_SNR_SetOrien`) once at bring-up. Star6E + Maruko. |
 | `image.rotate` | int | restart | Rotation (0, 90, 180, 270) |
 
 #### Video

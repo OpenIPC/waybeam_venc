@@ -95,6 +95,8 @@ typedef struct {
 	double zoom_pct;
 	double zoom_x;
 	double zoom_y;
+	int image_mirror;
+	int image_flip;
 	MarukoBackendConfigRecord record;
 	/* MJPEG snapshot subsystem — mirror of VencConfigSnapshot.  Read by
 	 * bind_maruko_pipeline() to fill VencJpegConfig; width=0/height=0

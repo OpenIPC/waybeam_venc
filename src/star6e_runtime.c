@@ -841,6 +841,15 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			ps->output_enabled, vcfg->system.verbose, &enc_info);
 	}
 
+	/* Orientation (image.flip / image.mirror) is applied once at bring-up
+	 * (sensor_select before MI_SNR_Enable + start_vpe before VPE start) and
+	 * holds for the life of the stream — device-verified on IMX335 and
+	 * IMX415.  The sensor driver only rewrites orientation when we set it
+	 * (orien_dirty), so nothing clears it mid-stream; no per-frame re-apply
+	 * is needed.  (MI_SNR_GetOrien proved unreliable under AE I2C load on
+	 * IMX335 — it reads 0 while the image is plainly held — so we do not
+	 * use it to second-guess the applied state.) */
+
 	/* In dual/dual-stream mode, ch1 handles recording (see below).
 	 * In mirror/off mode, ch0 feeds the recorder directly. */
 	if (!ps->dual) {

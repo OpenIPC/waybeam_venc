@@ -1,5 +1,26 @@
 # History
 
+## [0.16.0] - 2026-06-06
+
+Sensor-level image orientation — `image.flip` and `image.mirror` now work
+correctly on both backends.
+
+**`image.flip` / `image.mirror` are applied at the sensor, once at bring-up.**
+Previously orientation rode the VPE digital flip (`MI_VPE_SetChannelParam`
+`mirror`/`flip`), which is unreliable on several sensor combos — on IMX335
+(Star6E) `flip` stalled the encoder outright. Orientation now programs the
+sensor's own register via `MI_SNR_SetOrien`, applied **once** at bring-up
+(`sensor_select` before `MI_SNR_Enable`, and `start_vpe`/`maruko_start_vpe`
+before the VPE channel starts); the VPE digital flip stays disabled. The
+sensor driver only rewrites orientation when we set it, so a single apply
+holds for the life of the stream — device-verified on IMX335 (Star6E) and
+IMX415 (Maruko), `flip` + `mirror` both correct and stable.
+
+A one-shot re-apply follows the discrete `MI_SNR_SetFps` events that can
+reprogram sensor timing (Star6E live ISP-bin reload; Maruko cold-boot fps
+kick). There is **no** per-frame re-apply loop and **no** use of
+`MI_SNR_GetOrien` (it reads stale values under AE I2C load on IMX335).
+
 ## [0.15.0] - 2026-06-06
 
 Unified stabilization control law — `stab` and `stab-fill` now behave

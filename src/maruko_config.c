@@ -132,6 +132,8 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->zoom_pct = vcfg->video0.zoom_pct;
 	cfg->zoom_x   = vcfg->video0.zoom_x;
 	cfg->zoom_y   = vcfg->video0.zoom_y;
+	cfg->image_mirror = vcfg->image.mirror ? 1 : 0;
+	cfg->image_flip   = vcfg->image.flip   ? 1 : 0;
 	cfg->verbose = vcfg->system.verbose ? 1 : 0;
 	cfg->connected_udp = vcfg->outgoing.connected_udp ? 1 : 0;
 	cfg->keep_aspect = vcfg->isp.keep_aspect ? 1 : 0;

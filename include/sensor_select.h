@@ -50,6 +50,8 @@ typedef struct {
 	uint32_t target_width;
 	uint32_t target_height;
 	uint32_t target_fps;
+	int image_mirror;         /* applied via MI_SNR_SetOrien before Enable */
+	int image_flip;
 } SensorSelectConfig;
 
 struct SensorSelectResult {

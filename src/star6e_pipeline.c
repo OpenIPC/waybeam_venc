@@ -401,6 +401,9 @@ void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 
 	star6e_pipeline_cus3a_apply(sdk_quiet, p000);
 	g_cus3a_handoff_done = 1;
+	/* Orientation (image.flip/mirror) is applied once at bring-up and holds
+	 * across this CUS3A handoff — device-verified on IMX335, so no re-apply
+	 * is needed here. */
 }
 
 int star6e_pipeline_cap_exposure_for_fps(uint32_t fps)
@@ -529,8 +532,8 @@ static int star6e_pipeline_start_vpe(const SensorSelectResult *sensor,
 
 	param.hdr = I6_HDR_OFF;
 	param.level3DNR = level_3dnr;
-	param.mirror = mirror ? 1 : 0;
-	param.flip = flip ? 1 : 0;
+	param.mirror = 0;
+	param.flip = 0;
 	param.lensAdjOn = 0;
 	ret = MI_VPE_SetChannelParam(0, &param);
 	if (ret != 0) {
@@ -539,13 +542,10 @@ static int star6e_pipeline_start_vpe(const SensorSelectResult *sensor,
 		return ret;
 	}
 
-	/* Sensor-level orientation.  VPE digital flip is unreliable on some
-	 * sensor combos; MI_SNR_SetOrien programs the sensor's own flip
-	 * register which is what actually inverts scan-line order.  Applied
-	 * after MI_VPE_SetChannelParam so both paths agree.  Non-fatal: some
-	 * sensor drivers may reject mid-stream orientation changes; we log
-	 * so BSP regressions surface instead of silently leaving the image
-	 * upside down. */
+	/* Sensor-level orientation.  VPE digital mirror/flip is not used
+	 * (unreliable on several sensor combos; param above keeps them at 0).
+	 * MI_SNR_SetOrien programs the sensor's own register directly.
+	 * Non-fatal: log if it fails so BSP regressions surface. */
 	{
 		MI_S32 orien_ret = MI_SNR_SetOrien(sensor->pad_id,
 			mirror ? 1 : 0, flip ? 1 : 0);
@@ -1653,6 +1653,8 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	pconf->sensor_cfg = pipeline_common_build_sensor_select_config(
 		vcfg->sensor.index, vcfg->sensor.mode,
 		pconf->sensor_width, pconf->sensor_height, pconf->sensor_framerate);
+	pconf->sensor_cfg.image_mirror = pconf->image_mirror;
+	pconf->sensor_cfg.image_flip   = pconf->image_flip;
 	pconf->sensor_unlock = (SensorUnlockConfig){
 		.enabled = vcfg->sensor.unlock_enabled ? 1 : 0,
 		.cmd_id  = vcfg->sensor.unlock_cmd,
@@ -1883,8 +1885,17 @@ int star6e_pipeline_load_isp_bin_live(const char *configured_path,
 	 * at ~12 fps until reinit (cold_boot_fps_lock memory).  CUS3A mode
 	 * handles this via its periodic fps_kick logic, so skip the kick when
 	 * legacy_ae is off. */
-	if (vcfg->isp.legacy_ae && sensor_framerate > 0)
+	if (vcfg->isp.legacy_ae && sensor_framerate > 0) {
 		MI_SNR_SetFps(pad_id, sensor_framerate);
+		/* SetFps can reprogram sensor timing, which on some sensors also
+		 * resets the orientation registers.  This is a discrete runtime
+		 * event (live ISP-bin reload), so just re-apply orientation once
+		 * — cheap and safe (a single SetOrien is fine on all sensors). */
+		if (vcfg->image.mirror || vcfg->image.flip)
+			(void)MI_SNR_SetOrien(pad_id,
+				(uint8_t)(vcfg->image.mirror ? 1 : 0),
+				(uint8_t)(vcfg->image.flip   ? 1 : 0));
+	}
 
 	return 0;
 }
