@@ -51,6 +51,8 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	memset(&cfg->audio, 0, sizeof(cfg->audio));
 	cfg->audio_port = 5601;
 	cfg->max_payload_size = RTP_DEFAULT_PAYLOAD;
+	cfg->enhance_port = 0;
+	cfg->thin_enhance = 0;
 	memset(&cfg->record, 0, sizeof(cfg->record));
 	snprintf(cfg->record.mode, sizeof(cfg->record.mode), "%s", "off");
 	snprintf(cfg->record.format, sizeof(cfg->record.format), "%s", "ts");
@@ -146,6 +148,8 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->audio = vcfg->audio;
 	cfg->audio_port = vcfg->outgoing.audio_port;
 	cfg->max_payload_size = vcfg->outgoing.max_payload_size;
+	cfg->enhance_port = vcfg->outgoing.enhance_port;
+	cfg->thin_enhance = vcfg->outgoing.thin_enhance ? 1 : 0;
 
 	cfg->record.enabled = vcfg->record.enabled ? 1 : 0;
 	snprintf(cfg->record.mode, sizeof(cfg->record.mode), "%s",

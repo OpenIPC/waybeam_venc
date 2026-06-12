@@ -16,7 +16,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.10.1`
+- `contract_version`: `0.11.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -78,7 +78,7 @@ Response `200`:
   "ok": true,
   "data": {
     "app_version": "0.1.7",
-    "contract_version": "0.10.1",
+    "contract_version": "0.11.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -154,6 +154,8 @@ Response `200`:
       "outgoing.server": { "mutability": "live", "supported": true },
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
       "outgoing.connected_udp": { "mutability": "restart_required", "supported": true },
+      "outgoing.enhance_port": { "mutability": "restart_required", "supported": true },
+      "outgoing.thin_enhance": { "mutability": "live", "supported": true },
       "fpv.roi_qp": { "mutability": "live", "supported": true },
       "video0.stab_crop_pct": {
         "mutability": "restart_required", "supported": true,
@@ -526,6 +528,55 @@ curl "http://<device-ip>/api/v1/set?outgoing.connected_udp=true"
 - `outgoing.connected_udp`: When `true`, calls `connect()` on the UDP socket so the kernel
   returns ICMP port-unreachable errors via `sendmsg()`. Useful for detecting that a receiver
   is down. Default `false` (fire-and-forget).
+
+### SVC-T Per-Layer FEC Split (`outgoing.enhance_port` / `outgoing.thin_enhance`)
+
+```bash
+# Restart-only: route enhancement-layer frames to a second UDP port
+curl "http://<device-ip>/api/v1/set?outgoing.enhancePort=5605"
+
+# Live: drop enhancement-layer frames from the outgoing stream entirely
+curl "http://<device-ip>/api/v1/set?outgoing.thinEnhance=true"
+```
+
+- `outgoing.enhance_port` (`MUT_RESTART`, default `0` = off): when nonzero and a
+  resilience preset with refPred is active (`rally`/`range`/`fpv`, i.e.
+  `ref_base > 0`), every frame the encoder labels as enhancement-layer
+  (`refType` ENHANCE_*) is sent to the **same host** on this UDP port instead of
+  the main `outgoing.server` port. Base frames (IDR + parameter sets + base-P)
+  stay on the main port.
+  - **One RTP session across both ports** — shared SSRC, timestamp, and
+    sequence space. The ground station forwards both `wfb_rx` outputs to the
+    same decoder port; RTP sequence numbers merge the two flows. No new
+    receiver logic is required.
+  - **Why**: wfb-ng applies FEC per stream/port, so this split enables unequal
+    error protection — strong FEC on the always-decodable base layer, weak or
+    no FEC on the droppable enhancement layer. Dropping the enhancement
+    channel (or never tunnelling it) yields a decodable reduced-rate stream
+    (1/2 at `rally`, 1/(1+enhance) for the deeper presets).
+  - With `shm://` output, any nonzero value creates a second ring named
+    `<name>_enh` for a second `wfb_tx` instance. `unix://` does not support
+    the split (warned at startup, single channel).
+  - Must differ from the `outgoing.server` UDP port, `audio_port`, and
+    `sidecar_port` (validated, HTTP 409 on conflict).
+  - If the channel fails to open at bring-up, the daemon logs a warning and
+    continues single-channel — the base video link never dies because of the
+    auxiliary channel.
+  - A live `outgoing.server` retarget moves both ports to the new host. If the
+    new URI cannot host the split (non-UDP, or its port collides), the split
+    is disabled until the next restart (warned).
+  - With `enhance_port` set but `ref_base == 0` the split is disabled at
+    bring-up with an informational log line.
+  - Sidecar transport trailers describe the channel each frame actually used.
+    `/api/v1/transport/status` continues to report the base output only.
+- `outgoing.thin_enhance` (`MUT_LIVE`, default `false`): when `true`,
+  enhancement-layer frames are not sent at all — RTP sequence numbers are not
+  consumed, so the receiver sees a gapless base-layer stream at the reduced
+  rate. Mirror-mode recording still receives every frame (full rate on disk).
+  Turning thinning **off** issues an IDR so the re-appearing enhancement layer
+  starts from a clean reference chain. Independent of `enhance_port` (works
+  with or without the split; with both set, thinned frames simply never reach
+  the enhance channel).
 
 ### Live FPS Control — Behavior Details
 
@@ -1332,6 +1383,16 @@ divergence is listed.  As of `contract_version: 0.10.1`:
 | `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
 
 ## Change Log (Contract)
+- `0.11.0`:
+  - Added `outgoing.enhance_port` (alias `enhancePort`, `restart_required`,
+    default `0` = off): SVC-T per-layer FEC split — enhancement-layer frames
+    are routed to a second UDP port (or `<name>_enh` SHM ring) on the same
+    host, sharing one RTP session (SSRC + seq space), so wfb-ng can apply
+    per-layer FEC.  Validated against collisions with the server/audio/
+    sidecar ports (409).  Available on both backends.
+  - Added `outgoing.thin_enhance` (alias `thinEnhance`, `live`, default
+    `false`): drop SVC-T enhancement-layer frames from the live output
+    (recorder unaffected); IDR issued when re-enabling the layer.
 - `0.10.1` (additive, no version bump):
   - Re-exposed `video0.stab_crop_pct` + `video0.stab_recenter_speed`
     (aliases `stabCropPct`/`stabRecenterSpeed`, both `restart_required`) as

@@ -933,6 +933,42 @@ static int maruko_apply_output_enabled(bool on)
 /* ── Live server change (Step 3C) ────────────────────────────────────── */
 
 static MarukoOutput *g_maruko_output_ptr;
+static MarukoOutput *g_maruko_output_enh_ptr;
+static volatile sig_atomic_t *g_maruko_enh_active_ptr;
+
+/* Follow a live base-output retarget on the SVC-T enhance channel: same
+ * new host, the configured enhancePort.  When the new URI cannot host the
+ * split (non-UDP, or its port collides with enhancePort) the split is
+ * disabled rather than failing the base retarget.  Star6E parity:
+ * apply_server_enhance_follow in star6e_controls.c. */
+static void maruko_apply_server_enhance_follow(const char *uri)
+{
+	VencOutputUri parsed;
+	char enh_uri[160];
+
+	if (!g_maruko_enh_active_ptr || !*g_maruko_enh_active_ptr ||
+	    !g_maruko_output_enh_ptr || !g_ctx.backend_cfg)
+		return;
+
+	if (venc_config_parse_output_uri(uri, &parsed) != 0 ||
+	    parsed.type != VENC_OUTPUT_URI_UDP ||
+	    parsed.port == g_ctx.backend_cfg->enhance_port) {
+		*g_maruko_enh_active_ptr = 0;
+		fprintf(stderr, "> SVC-T enhance split disabled (new server "
+			"cannot host it)\n");
+		return;
+	}
+
+	snprintf(enh_uri, sizeof(enh_uri), "udp://%s:%u", parsed.host,
+		(unsigned)g_ctx.backend_cfg->enhance_port);
+	if (maruko_output_apply_server(g_maruko_output_enh_ptr, enh_uri) != 0) {
+		*g_maruko_enh_active_ptr = 0;
+		fprintf(stderr, "> SVC-T enhance retarget failed — split "
+			"disabled\n");
+		return;
+	}
+	printf("> SVC-T enhance destination changed to %s\n", enh_uri);
+}
 
 static int maruko_apply_server(const char *uri)
 {
@@ -941,8 +977,25 @@ static int maruko_apply_server(const char *uri)
 	if (maruko_output_apply_server(g_maruko_output_ptr, uri) != 0)
 		return -1;
 
+	maruko_apply_server_enhance_follow(uri);
 	maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
 	printf("> Destination changed to %s\n", uri);
+	return 0;
+}
+
+static int maruko_apply_thin_enhance(bool on)
+{
+	if (!g_ctx.backend_cfg)
+		return -1;
+
+	/* The frame loop reads cfg.thin_enhance each frame (plain int store,
+	 * atomic on ARM).  Turning thinning OFF re-admits enhancement frames
+	 * whose references may never have been sent — request an IDR so the
+	 * layer restarts from a clean chain. */
+	g_ctx.backend_cfg->thin_enhance = on ? 1 : 0;
+	if (!on)
+		maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
+	fprintf(stderr, "> thin_enhance %s (live)\n", on ? "on" : "off");
 	return 0;
 }
 
@@ -1113,6 +1166,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_zoom = maruko_apply_zoom,
 	.apply_isp_bin = maruko_apply_isp_bin,
 	.apply_snapshot_quality = venc_jpeg_set_quality,
+	.apply_thin_enhance = maruko_apply_thin_enhance,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
@@ -1140,6 +1194,8 @@ void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
 	g_ctx.output_enabled_ptr = &backend->output_enabled;
 	g_ctx.stored_fps_ptr = &backend->stored_fps;
 	g_maruko_output_ptr = &backend->output;
+	g_maruko_output_enh_ptr = &backend->output_enh;
+	g_maruko_enh_active_ptr = &backend->enh_active;
 }
 
 const VencApplyCallbacks *maruko_controls_callbacks(void)

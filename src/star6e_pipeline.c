@@ -95,6 +95,7 @@ static void star6e_pipeline_reset(Star6ePipelineState *state)
 	star6e_video_reset(&state->video);
 	memset(state, 0, sizeof(*state));
 	star6e_output_reset(&state->output);
+	star6e_output_reset(&state->output_enh);
 }
 
 /* VPE SCL clock workaround — written at shutdown, effective on next start.
@@ -1582,6 +1583,9 @@ static void star6e_pipeline_set_hw_clocks(int oc_level, int verbose)
  * remaining helpers and the main orchestrator. */
 typedef struct {
 	Star6eOutputSetup  output_setup;
+	Star6eOutputSetup  output_setup_enh; /* SVC-T enhance channel (valid
+	                                      * when enh_requested) */
+	int                enh_requested;
 	SensorSelectConfig sensor_cfg;
 	SensorUnlockConfig sensor_unlock;
 	SensorStrategy     sensor_strategy;
@@ -1633,6 +1637,29 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	    vcfg->outgoing.stream_mode,
 	    vcfg->outgoing.connected_udp) != 0)
 		return -1;
+
+	/* SVC-T per-layer FEC split: derive the enhance-layer channel from
+	 * the base output.  Only meaningful when a resilience preset enables
+	 * refPred (ref_base > 0) — otherwise no frame ever classifies as
+	 * enhancement and the second channel would sit idle. */
+	if (vcfg->outgoing.enhance_port > 0 && pconf->output_setup.has_server) {
+		if (vcfg->video0.ref_base == 0) {
+			printf("> enhancePort %u set but resilience preset has "
+				"no SVC-T layer — split disabled\n",
+				(unsigned)vcfg->outgoing.enhance_port);
+		} else {
+			pconf->output_setup_enh = pconf->output_setup;
+			if (venc_config_derive_enhance_uri(&pconf->output_setup.uri,
+			    vcfg->outgoing.enhance_port,
+			    &pconf->output_setup_enh.uri) == 0) {
+				pconf->enh_requested = 1;
+			} else {
+				fprintf(stderr, "WARNING: enhancePort: split not "
+					"supported for this transport — "
+					"single channel\n");
+			}
+		}
+	}
 
 	/* Auto-cap exposure to frame period so the AE shutter never exceeds
 	 * the frame period.  Without this, the AE converges on a long
@@ -2031,6 +2058,26 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		return -1;
 	}
 
+	/* SVC-T enhance channel — non-fatal: the base video link must not
+	 * die because the auxiliary channel could not open. */
+	if (pconf->enh_requested) {
+		const VencOutputUri *eu = &pconf->output_setup_enh.uri;
+		if (star6e_output_init(&state->output_enh,
+		    &pconf->output_setup_enh) == 0) {
+			state->enh_active = 1;
+			if (eu->type == VENC_OUTPUT_URI_SHM)
+				printf("> SVC-T enhance output: shm://%s\n",
+					eu->endpoint);
+			else
+				printf("> SVC-T enhance output: udp://%s:%u\n",
+					eu->host, (unsigned)eu->port);
+		} else {
+			star6e_output_teardown(&state->output_enh);
+			fprintf(stderr, "WARNING: SVC-T enhance output init "
+				"failed — single channel\n");
+		}
+	}
+
 	star6e_video_init(&state->video, vcfg, pconf->sensor_framerate,
 		&state->output);
 
@@ -2244,6 +2291,8 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 
 	star6e_audio_teardown(&state->audio);
 	star6e_output_teardown(&state->output);
+	state->enh_active = 0;
+	star6e_output_teardown(&state->output_enh);
 	if (state->dual)
 		star6e_output_teardown(&state->dual->output);
 

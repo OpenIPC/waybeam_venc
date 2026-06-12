@@ -22,6 +22,7 @@
 #include "venc_api.h"
 #include "venc_httpd.h"
 #include "venc_jpeg.h"
+#include "venc_svct.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -2012,6 +2013,53 @@ static void assign_maruko_ports(MarukoBackendContext *ctx,
 	};
 }
 
+/* SVC-T per-layer FEC split: bring up the enhance-layer channel derived
+ * from the base output (same host, enhancePort / "_enh" SHM ring).
+ * Non-fatal: the base video link must not die because the auxiliary
+ * channel could not open.  Gated on ref_base > 0 — without refPred no
+ * frame ever classifies as enhancement.  Star6E parity:
+ * star6e_pipeline_init_enhance_output region in star6e_pipeline.c. */
+static void maruko_init_enhance_output(MarukoBackendContext *ctx)
+{
+	VencOutputUri enh_uri;
+	int rc;
+
+	if (ctx->cfg.enhance_port == 0)
+		return;
+	if (ctx->cfg.ref_base == 0) {
+		printf("> [maruko] enhancePort %u set but resilience preset "
+			"has no SVC-T layer — split disabled\n",
+			(unsigned)ctx->cfg.enhance_port);
+		return;
+	}
+	if (venc_config_derive_enhance_uri(&ctx->cfg.output_uri,
+	    ctx->cfg.enhance_port, &enh_uri) != 0) {
+		fprintf(stderr, "WARNING: [maruko] enhancePort: split not "
+			"supported for this transport — single channel\n");
+		return;
+	}
+
+	if (enh_uri.type == VENC_OUTPUT_URI_SHM)
+		rc = maruko_output_init_shm(&ctx->output_enh, enh_uri.endpoint);
+	else
+		rc = maruko_output_init(&ctx->output_enh, &enh_uri,
+			ctx->cfg.connected_udp);
+	if (rc != 0) {
+		maruko_output_teardown(&ctx->output_enh);
+		fprintf(stderr, "WARNING: [maruko] SVC-T enhance output init "
+			"failed — single channel\n");
+		return;
+	}
+
+	ctx->enh_active = 1;
+	if (enh_uri.type == VENC_OUTPUT_URI_SHM)
+		printf("> [maruko] SVC-T enhance output: shm://%s\n",
+			enh_uri.endpoint);
+	else
+		printf("> [maruko] SVC-T enhance output: udp://%s:%u\n",
+			enh_uri.host, (unsigned)enh_uri.port);
+}
+
 static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 {
 	uint32_t out_w = ctx->cfg.image_width;
@@ -2245,6 +2293,8 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		    ctx->cfg.connected_udp) != 0)
 			return -1;
 	}
+
+	maruko_init_enhance_output(ctx);
 
 	return 0;
 }
@@ -3271,14 +3321,13 @@ static void maruko_pipeline_log_verbose_frame(MarukoBackendContext *ctx,
  * → optional sidecar trailer + verbose log.  Mirrors
  * star6e_runtime_process_stream().  Returns: -1 fatal, 0 ok, 1 retry
  * outer loop. */
-/* HEVC NAL type / SDK eRefType constants — mirror star6e_runtime.c.
- * SigmaStar i6c VENC firmware has the same gap as i6e: it computes the
- * SVC-T pyramid and labels each frame's eRefType correctly, but writes
- * every NAL as TRAIL_R (type 1).  Generic HEVC decoders need TRAIL_N
- * (type 0) to know which frames are non-reference. */
+/* HEVC NAL type constants — mirror star6e_runtime.c.  SigmaStar i6c VENC
+ * firmware has the same gap as i6e: it computes the SVC-T pyramid and
+ * labels each frame's eRefType correctly (constants in venc_svct.h), but
+ * writes every NAL as TRAIL_R (type 1).  Generic HEVC decoders need
+ * TRAIL_N (type 0) to know which frames are non-reference. */
 #define HEVC_NAL_TRAIL_N 0
 #define HEVC_NAL_TRAIL_R 1
-#define MARUKO_REFTYPE_ENHANCE_P_NOTFORREF 4
 
 static size_t maruko_nal_header_idx(const uint8_t *buf, size_t len)
 {
@@ -3376,8 +3425,10 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	 * correct internally but every NAL is emitted as TRAIL_R, leaving
 	 * generic decoders unable to identify non-reference frames.  See
 	 * star6e_runtime.c for the matching helper. */
-	if (ctx->cfg.ref_base > 0 &&
-	    stream.h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF) {
+	int is_enh = venc_svct_frame_is_enhance(ctx->cfg.ref_base,
+		stream.h265Info.refType);
+	if (venc_svct_frame_is_notforref(ctx->cfg.ref_base,
+	    stream.h265Info.refType)) {
 		maruko_patch_stream_to_trail_n(&stream);
 	}
 
@@ -3490,13 +3541,23 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	size_t total_bytes = 0;
 	HevcRtpStats frame_pktzr = {0};
 	int sidecar_subscribed = rtp_sidecar_is_subscribed(&rt->sidecar);
-	if (ctx->output_enabled) {
+	/* SVC-T per-layer FEC split: route enhancement frames through the
+	 * second output (same RTP session — rt->rtp_state holds the SSRC/seq
+	 * — so the receiver merges by seq).  With thin_enhance the
+	 * enhancement frame is not sent at all: seq is not consumed and the
+	 * recorder below still gets it.  Star6E parity. */
+	MarukoOutput *out = (is_enh && ctx->enh_active) ?
+		&ctx->output_enh : &ctx->output;
+	if (ctx->output_enabled &&
+	    !(is_enh && ctx->cfg.thin_enhance)) {
 		/* Observe pressure only when a sidecar probe is subscribed —
-		 * see star6e_runtime equivalent.  Always sending: post-encode
-		 * skip breaks the H.265 reference chain (HISTORY 0.9.2). */
+		 * see star6e_runtime equivalent.  Observed on the transport
+		 * this frame uses so the sidecar trailer describes the channel
+		 * it rode on.  Always sending: post-encode skip breaks the
+		 * H.265 reference chain (HISTORY 0.9.2). */
 		if (sidecar_subscribed)
-			maruko_output_observe_pressure(&ctx->output);
-		total_bytes = maruko_video_send_frame(&stream, &ctx->output,
+			maruko_output_observe_pressure(out);
+		total_bytes = maruko_video_send_frame(&stream, out,
 			&rt->rtp_state, &rt->param_sets, &ctx->cfg,
 			MARUKO_PKTZR_VERBOSE_ACTIVE(ctx) ? &frame_pktzr : NULL);
 	}
@@ -3584,17 +3645,18 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		/* Producer already cached fill_pct + lifetime stats inside
 		 * maruko_output_observe_pressure() above — read the cache
 		 * instead of re-querying.  One SIOCOUTQ ioctl / ring-fill
-		 * load per frame, not two. */
-		if (ctx->output.ring ||
-		    ((ctx->output.transport == VENC_OUTPUT_URI_UNIX ||
-		      ctx->output.transport == VENC_OUTPUT_URI_UDP) &&
-		     ctx->output.socket_handle >= 0)) {
+		 * load per frame, not two.  `out` is the transport this frame
+		 * actually used (base or SVC-T enhance channel). */
+		if (out->ring ||
+		    ((out->transport == VENC_OUTPUT_URI_UNIX ||
+		      out->transport == VENC_OUTPUT_URI_UDP) &&
+		     out->socket_handle >= 0)) {
 			memset(&tinfo, 0, sizeof(tinfo));
-			tinfo.fill_pct = ctx->output.last_fill_pct;
-			tinfo.in_pressure = ctx->output.in_pressure ? 1 : 0;
-			tinfo.pressure_drops = ctx->output.pressure_drops;
-			tinfo.transport_drops = ctx->output.last_full_drops;
-			tinfo.packets_sent = ctx->output.last_writes;
+			tinfo.fill_pct = out->last_fill_pct;
+			tinfo.in_pressure = out->in_pressure ? 1 : 0;
+			tinfo.pressure_drops = out->pressure_drops;
+			tinfo.transport_drops = out->last_full_drops;
+			tinfo.packets_sent = out->last_writes;
 			tinfo_ptr = &tinfo;
 		}
 		rtp_sidecar_send_frame_transport(&rt->sidecar,
@@ -3722,6 +3784,8 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		ctx->debug_osd = NULL;
 	}
 	maruko_output_teardown(&ctx->output);
+	ctx->enh_active = 0;
+	maruko_output_teardown(&ctx->output_enh);
 	/* Tear down JPEG snapshot subsystem first — its MJPG VENC channel
 	 * is bound to the SCL port we're about to disable.  Idempotent. */
 	venc_jpeg_shutdown();

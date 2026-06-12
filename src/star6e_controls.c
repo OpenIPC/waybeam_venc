@@ -977,6 +977,41 @@ static int apply_output_enabled(bool on)
 	return 0;
 }
 
+/* Follow a live base-output retarget on the SVC-T enhance channel: same
+ * new host, the configured enhancePort.  When the new URI cannot host the
+ * split (non-UDP, or its port collides with enhancePort) the split is
+ * disabled rather than failing the base retarget — the socket stays open
+ * until teardown, harmless. */
+static void apply_server_enhance_follow(const char *uri)
+{
+	Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
+	const VencConfig *vcfg = g_star6e_control_ctx.vcfg;
+	VencOutputUri parsed;
+	char enh_uri[160];
+
+	if (!ps || !ps->enh_active || !vcfg)
+		return;
+
+	if (venc_config_parse_output_uri(uri, &parsed) != 0 ||
+	    parsed.type != VENC_OUTPUT_URI_UDP ||
+	    parsed.port == vcfg->outgoing.enhance_port) {
+		ps->enh_active = 0;
+		fprintf(stderr, "> SVC-T enhance split disabled (new server "
+			"cannot host it)\n");
+		return;
+	}
+
+	snprintf(enh_uri, sizeof(enh_uri), "udp://%s:%u", parsed.host,
+		(unsigned)vcfg->outgoing.enhance_port);
+	if (star6e_output_apply_server(&ps->output_enh, enh_uri) != 0) {
+		ps->enh_active = 0;
+		fprintf(stderr, "> SVC-T enhance retarget failed — split "
+			"disabled\n");
+		return;
+	}
+	printf("> SVC-T enhance destination changed to %s\n", enh_uri);
+}
+
 static int apply_server(const char *uri)
 {
 	if (!g_star6e_control_ctx.pipeline)
@@ -985,9 +1020,25 @@ static int apply_server(const char *uri)
 	    uri) != 0) {
 		return -1;
 	}
+	apply_server_enhance_follow(uri);
 	if (request_idr() != 0)
 		return -1;
 	printf("> Destination changed to %s\n", uri);
+	return 0;
+}
+
+static int apply_thin_enhance(bool on)
+{
+	if (!g_star6e_control_ctx.pipeline)
+		return -1;
+
+	/* The frame loop reads the committed config each frame, so there is
+	 * no backend state to flip here.  Turning thinning OFF re-admits
+	 * enhancement frames whose references may never have been sent —
+	 * request an IDR so the layer restarts from a clean chain. */
+	if (!on && request_idr() != 0)
+		return -1;
+	fprintf(stderr, "> thin_enhance %s (live)\n", on ? "on" : "off");
 	return 0;
 }
 
@@ -1191,6 +1242,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_isp_bin = apply_isp_bin,
 	.apply_snapshot_quality = venc_jpeg_set_quality,
 	.apply_pause_stab = apply_pause_stab,
+	.apply_thin_enhance = apply_thin_enhance,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

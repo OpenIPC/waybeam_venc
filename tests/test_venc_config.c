@@ -66,6 +66,8 @@ static int test_defaults(void)
 	CHECK("defaults_stream_mode", strcmp(cfg.outgoing.stream_mode, "rtp") == 0);
 	CHECK("defaults_payload", cfg.outgoing.max_payload_size == 1400);
 	CHECK("defaults_connected_udp", cfg.outgoing.connected_udp == true);
+	CHECK("defaults_enhance_port_off", cfg.outgoing.enhance_port == 0);
+	CHECK("defaults_thin_enhance_off", cfg.outgoing.thin_enhance == false);
 
 	CHECK("defaults_roi_on", cfg.fpv.roi_enabled == true);
 	CHECK("defaults_roi_qp", cfg.fpv.roi_qp == 0);
@@ -206,7 +208,7 @@ static int test_load_full_json(void)
 		/* "codec" above is intentionally legacy — parser must silently drop it. */
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
 		"    \"frameLost\": false, \"framing\": \"zoom-2x\", \"zoomX\": 0.25, \"zoomY\": 0.75 },"
-		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false },"
+		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false, \"enhancePort\": 5605, \"thinEnhance\": true },"
 		"  \"fpv\": { \"roiEnabled\": true, \"roiQp\": -18, \"roiSteps\": 2, \"noiseLevel\": 5 }"
 		"}";
 
@@ -248,6 +250,8 @@ static int test_load_full_json(void)
 	CHECK("load_stream_mode", strcmp(cfg.outgoing.stream_mode, "compact") == 0);
 	CHECK("load_payload", cfg.outgoing.max_payload_size == 1200);
 	CHECK("load_connected_udp", cfg.outgoing.connected_udp == false);
+	CHECK("load_enhance_port", cfg.outgoing.enhance_port == 5605);
+	CHECK("load_thin_enhance", cfg.outgoing.thin_enhance == true);
 	CHECK("load_roi_on", cfg.fpv.roi_enabled == true);
 	CHECK("load_roi_qp", cfg.fpv.roi_qp == -18);
 	CHECK("load_roi_steps", cfg.fpv.roi_steps == 2);
@@ -381,6 +385,8 @@ static int test_roundtrip(void)
 	strcpy(cfg.video0.framing, "zoom-2x");  /* zoom_pct derived on reload */
 	cfg.video0.zoom_x = 0.25;
 	cfg.video0.zoom_y = 0.75;
+	cfg.outgoing.enhance_port = 5605;
+	cfg.outgoing.thin_enhance = true;
 
 	char *json = venc_config_to_json_string(&cfg);
 	CHECK("serialize_ok", json != NULL);
@@ -408,8 +414,52 @@ static int test_roundtrip(void)
 	CHECK("roundtrip_zoom_pct", cfg2.video0.zoom_pct == 0.5);
 	CHECK("roundtrip_zoom_x", cfg2.video0.zoom_x == 0.25);
 	CHECK("roundtrip_zoom_y", cfg2.video0.zoom_y == 0.75);
+	CHECK("roundtrip_enhance_port", cfg2.outgoing.enhance_port == 5605);
+	CHECK("roundtrip_thin_enhance", cfg2.outgoing.thin_enhance == true);
 	/* Unchanged fields preserved */
 	CHECK("roundtrip_gop", cfg2.video0.gop_size == 1.0);
+
+	return failures;
+}
+
+/* SVC-T enhance-channel URI derivation: udp keeps host + swaps port, shm
+ * appends "_enh", unix has no second-channel convention, oversized shm
+ * names are rejected (must fit /dev/shm NAME_MAX). */
+static int test_enhance_uri_derivation(void)
+{
+	int failures = 0;
+	VencOutputUri base, enh;
+
+	CHECK("derive_parse_udp",
+		venc_config_parse_output_uri("udp://10.0.0.1:5600", &base) == 0);
+	CHECK("derive_udp_ok",
+		venc_config_derive_enhance_uri(&base, 5605, &enh) == 0);
+	CHECK("derive_udp_type", enh.type == VENC_OUTPUT_URI_UDP);
+	CHECK("derive_udp_host", strcmp(enh.host, "10.0.0.1") == 0);
+	CHECK("derive_udp_port", enh.port == 5605);
+
+	CHECK("derive_parse_shm",
+		venc_config_parse_output_uri("shm://venc_wfb", &base) == 0);
+	CHECK("derive_shm_ok",
+		venc_config_derive_enhance_uri(&base, 1, &enh) == 0);
+	CHECK("derive_shm_type", enh.type == VENC_OUTPUT_URI_SHM);
+	CHECK("derive_shm_suffix", strcmp(enh.endpoint, "venc_wfb_enh") == 0);
+
+	CHECK("derive_parse_unix",
+		venc_config_parse_output_uri("unix://waybeam_venc", &base) == 0);
+	CHECK("derive_unix_rejected",
+		venc_config_derive_enhance_uri(&base, 5605, &enh) == -1);
+
+	CHECK("derive_port_zero_rejected",
+		venc_config_derive_enhance_uri(&base, 0, &enh) == -1);
+
+	/* A shm name long enough that "_enh" would not fit NAME_MAX. */
+	memset(&base, 0, sizeof(base));
+	base.type = VENC_OUTPUT_URI_SHM;
+	memset(base.endpoint, 'a', 253);
+	base.endpoint[253] = '\0';
+	CHECK("derive_shm_truncation_rejected",
+		venc_config_derive_enhance_uri(&base, 1, &enh) == -1);
 
 	return failures;
 }
@@ -999,6 +1049,7 @@ int test_venc_config(void)
 	failures += test_load_missing_file();
 	failures += test_load_bad_json();
 	failures += test_uri_parsing();
+	failures += test_enhance_uri_derivation();
 	failures += test_roundtrip();
 	failures += test_overclock_clamping();
 	failures += test_noise_level_clamping();

@@ -16,6 +16,7 @@
 #include "venc_config.h"
 #include "venc_httpd.h"
 #include "venc_respawn.h"
+#include "venc_svct.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -83,7 +84,6 @@ static uint32_t star6e_scene_frame_size(const MI_VENC_Stream_t *s)
 /* HEVC NAL types relevant for non-reference rewriting */
 #define HEVC_NAL_TRAIL_N 0
 #define HEVC_NAL_TRAIL_R 1
-#define SS_REFTYPE_ENHANCE_P_NOTFORREF 4
 
 /* Locate the NAL header byte 0 inside a payload buffer that may or may not
  * begin with a start-code prefix (00 00 01 / 00 00 00 01).  Returns the
@@ -815,8 +815,10 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 *
 	 * Only active when refPred is enabled (ref_base > 0) — otherwise the
 	 * encoder produces a flat single-ref stream and every frame matters. */
-	if (vcfg->video0.ref_base > 0 &&
-	    stream.h265Info.refType == SS_REFTYPE_ENHANCE_P_NOTFORREF) {
+	int is_enh = venc_svct_frame_is_enhance(vcfg->video0.ref_base,
+		stream.h265Info.refType);
+	if (venc_svct_frame_is_notforref(vcfg->video0.ref_base,
+	    stream.h265Info.refType)) {
 		star6e_patch_stream_to_trail_n(&stream);
 	}
 
@@ -829,16 +831,30 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			star6e_scene_request_idr, &ps->venc_channel);
 		scene_fill_sidecar(&ctx->scene, &enc_info);
 
+		/* SVC-T per-layer FEC split: route enhancement frames through
+		 * the second output (same RTP session — `video` holds the
+		 * SSRC/seq state — so the receiver merges by seq).  With
+		 * thin_enhance the enhancement frame is not sent at all: seq
+		 * is not consumed and the recorder below still gets it.  The
+		 * committed config is read per frame, so the live toggle
+		 * takes effect on the next frame. */
+		Star6eOutput *out = (is_enh && ps->enh_active) ?
+			&ps->output_enh : &ps->output;
+		int send_enabled = ps->output_enabled &&
+			!(is_enh && vcfg->outgoing.thin_enhance);
+
 		/* Observe pressure only when a sidecar probe is subscribed
 		 * — it is the only consumer of in_pressure / fill_pct / the
 		 * pressure_drops counter on the producer hot path.  When no
 		 * one is listening, skip the SIOCOUTQ ioctl / ring-fill load
-		 * entirely.  Always sending — a producer-side skip would
-		 * break the H.265 reference chain (see HISTORY 0.9.2). */
+		 * entirely.  Observed on the transport this frame uses so the
+		 * sidecar trailer describes the channel it rode on.  Always
+		 * sending — a producer-side skip would break the H.265
+		 * reference chain (see HISTORY 0.9.2). */
 		if (rtp_sidecar_is_subscribed(&ps->video.sidecar))
-			star6e_output_observe_pressure(&ps->output);
-		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
-			ps->output_enabled, vcfg->system.verbose, &enc_info);
+			star6e_output_observe_pressure(out);
+		(void)star6e_video_send_frame(&ps->video, out, &stream,
+			send_enabled, vcfg->system.verbose, &enc_info);
 	}
 
 	/* Orientation (image.flip / image.mirror) is applied once at bring-up

@@ -39,6 +39,12 @@ typedef struct {
   int bound_vpe_venc;
   int stream_started;
   MarukoOutput output;
+  /* SVC-T per-layer FEC split: enhancement-layer frames leave through this
+   * second transport (same host, outgoing.enhancePort / "_enh" SHM ring) so
+   * wfb_ng can apply weaker FEC to the droppable layer.  Shares the RTP
+   * session state — one SSRC + seq space. */
+  MarukoOutput output_enh;
+  volatile sig_atomic_t enh_active;
   volatile sig_atomic_t output_enabled;
   volatile uint32_t stored_fps;
   MI_VENC_DEV venc_device;

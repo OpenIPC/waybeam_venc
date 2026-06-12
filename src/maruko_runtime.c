@@ -177,6 +177,7 @@ static int maruko_prepare(void *opaque)
 	maruko_pipeline_install_signal_handlers();
 
 	ctx->backend.output.socket_handle = -1;
+	ctx->backend.output_enh.socket_handle = -1;
 	ctx->backend.venc_channel = 0;
 	return 0;
 }

@@ -89,6 +89,9 @@ typedef struct {
 	VencConfigAudio audio;
 	uint16_t audio_port;            /* 0 → share video target */
 	uint16_t max_payload_size;      /* mirrors outgoing.max_payload_size */
+	uint16_t enhance_port;          /* mirrors outgoing.enhance_port; 0 = off */
+	int thin_enhance;               /* mirrors outgoing.thin_enhance — live
+	                                 * toggled via maruko_apply_thin_enhance */
 	/* Digital zoom (mirrors video0.zoom_pct/x/y).  Applied at pipeline
 	 * start through the SCL crop/output config; live x/y pan reissues
 	 * maruko_pipeline_apply_zoom at the same output dim. */

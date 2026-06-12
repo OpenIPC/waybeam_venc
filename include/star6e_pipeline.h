@@ -45,6 +45,12 @@ typedef struct {
 	int bound_vif_vpe;
 	int bound_vpe_venc;
 	Star6eOutput output;
+	/* SVC-T per-layer FEC split: enhancement-layer frames leave through
+	 * this second transport (same host, outgoing.enhancePort / "_enh"
+	 * SHM ring) so wfb_ng can apply weaker FEC to the droppable layer.
+	 * Shares the RTP session state in `video` — one SSRC + seq space. */
+	Star6eOutput output_enh;
+	volatile sig_atomic_t enh_active;
 	Star6eVideoState video;
 	uint32_t image_width;
 	uint32_t image_height;

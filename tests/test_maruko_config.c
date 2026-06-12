@@ -41,6 +41,8 @@ int test_maruko_config(void)
 	strcpy(vcfg.outgoing.server, "udp://192.168.2.20:5602");
 	strcpy(vcfg.outgoing.stream_mode, "compact");
 	vcfg.outgoing.max_payload_size = 900;
+	vcfg.outgoing.enhance_port = 5605;
+	vcfg.outgoing.thin_enhance = true;
 	vcfg.sensor.index = 2;
 	vcfg.sensor.mode = 3;
 	strcpy(vcfg.isp.sensor_bin, "/etc/sensors/imx415.bin");
@@ -70,6 +72,8 @@ int test_maruko_config(void)
 	CHECK("maruko config isp bin", strcmp(cfg.isp_bin_path, "/etc/sensors/imx415.bin") == 0);
 	CHECK("maruko config 3dnr", cfg.vpe_level_3dnr == 4);
 	CHECK("maruko config verbose", cfg.verbose == 1);
+	CHECK("maruko config enhance port", cfg.enhance_port == 5605);
+	CHECK("maruko config thin enhance", cfg.thin_enhance == 1);
 
 	strcpy(vcfg.outgoing.server, "bad://server");
 	CHECK("maruko config bad uri fails", maruko_config_from_venc(&vcfg, &cfg) != 0);

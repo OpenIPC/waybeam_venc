@@ -965,9 +965,12 @@ Notes:
   and stronger refPred presets leave persistent green smear that only
   an IDR can clear.
 - Real-world refPred benefit on a lossy link depends on the sender
-  applying per-NAL-type FEC priority (protecting `TRAIL_R` more
-  aggressively than `TRAIL_N`).  Without that integration the pyramid
-  is roughly neutral on uniform random loss but keeps the bitstream
+  applying per-layer FEC priority (protecting base frames more
+  aggressively than enhancement frames).  That integration is
+  `outgoing.enhancePort` (see *Per-layer FEC with wfb-ng* below):
+  enhancement frames leave on their own UDP port / SHM ring so wfb-ng
+  can give each layer its own FEC setting.  Without it the pyramid is
+  roughly neutral on uniform random loss but keeps the bitstream
   spec-correct (no decoder warping).
 - Unknown `resilience` values fall back to `off` with a warning at
   load time.
@@ -983,12 +986,50 @@ Notes:
 | `outgoing.connected_udp` | bool | restart | Connect UDP socket (applies only to `udp://`) |
 | `outgoing.audio_port` | uint16 | restart | `0` = shared video destination; nonzero = dedicated audio port. With `unix://`, dedicated audio is sent to `127.0.0.1:<audioPort>` |
 | `outgoing.sidecar_port` | uint16 | restart | RTP timing sidecar port (0 = disabled) |
+| `outgoing.enhance_port` | uint16 | restart | SVC-T enhancement-layer channel (0 = off). Same host, dedicated port — see *Per-layer FEC with wfb-ng* |
+| `outgoing.thin_enhance` | bool | live | Drop SVC-T enhancement frames from the live output (recorder keeps full rate); IDR on resume |
 
 `unix://` uses Linux abstract Unix datagram sockets and is available in
 both `rtp` and `compact` mode. On Star6E, `audioPort=0` piggybacks on the
 same active video destination for both `udp://` and `unix://`. `shm://`
 remains RTP-only; it cannot share audio, but a nonzero `audioPort` still
 uses a dedicated local UDP audio destination.
+
+##### Per-layer FEC with wfb-ng (`enhancePort`)
+
+With a refPred resilience preset active (`rally`/`range`/`fpv`), setting
+`outgoing.enhancePort` splits the stream by temporal layer: base frames
+(IDR + parameter sets + base-P) stay on the `outgoing.server` port,
+enhancement frames go to the same host on `enhancePort`.  Both ports
+carry **one RTP session** (shared SSRC and sequence space), so the ground
+side just forwards both tunnels to the same decoder port and RTP
+reordering merges them — no new receiver logic.
+
+wfb-ng applies FEC per stream, which makes unequal error protection a
+pure configuration matter:
+
+```bash
+# Camera: rally preset (1 base + 1 enhance) + port split
+curl "http://<device>/api/v1/set?video0.resilience=rally"
+curl "http://<device>/api/v1/set?outgoing.enhancePort=5605"
+curl "http://<device>/api/v1/set?outgoing.server=udp://127.0.0.1:5600"
+
+# Air unit: strong FEC on the base layer, light FEC on the droppable layer
+wfb_tx -p 0 -u 5600 -K /etc/drone.key -k 8 -n 12 wlan0   # base
+wfb_tx -p 16 -u 5605 -K /etc/drone.key -k 8 -n 9 wlan0   # enhance
+
+# Ground: both streams feed ONE decoder port — the RTP seq space merges them
+wfb_rx -p 0 -u 5600 -K /etc/gs.key wlan1
+wfb_rx -p 16 -u 5600 -K /etc/gs.key wlan1
+```
+
+Under congestion the link can stop tunnelling the enhance stream (or it
+simply degrades first) and the receiver keeps a decodable base-layer
+stream at 1/2 rate (`rally`) or 1/(1+enhance) for the deeper presets.
+With `shm://` output, a nonzero `enhancePort` instead creates a second
+ring `/dev/shm/<name>_enh` for a second `wfb_tx` instance; `unix://`
+does not support the split.  The enhance channel is auxiliary by design:
+if it fails to open, waybeam logs a warning and continues single-channel.
 
 #### FPV
 

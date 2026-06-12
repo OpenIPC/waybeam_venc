@@ -81,6 +81,13 @@ typedef struct {
 	 * HW rebind.  Returns 0 on success, -1 if framing!=stab-fill.  NULL when
 	 * the backend has no stab path (e.g. Maruko). */
 	int (*apply_pause_stab)(bool paused);
+	/* Toggle outgoing.thin_enhance: when on, SVC-T enhancement-layer
+	 * frames are dropped from the live output (the frame loop reads the
+	 * committed config each frame; the recorder is unaffected).  The
+	 * callback's contract: request an IDR when turning thinning OFF so
+	 * the re-appearing enhancement layer starts from a clean reference
+	 * chain.  Returns 0 on success, -1 if the pipeline is down. */
+	int (*apply_thin_enhance)(bool on);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

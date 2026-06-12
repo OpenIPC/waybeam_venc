@@ -238,7 +238,8 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_backend.c \
                 tests/test_debug_osd.c \
                 tests/test_intra_refresh.c \
-                tests/test_venc_jpeg.c
+                tests/test_venc_jpeg.c \
+                tests/test_venc_svct.c
 # Production sources compiled into the test binary (pure-logic modules only).
 # sensor_select.c is included here; its MI_SNR_* deps are stubbed in test_sensor_select.c.
 TEST_LIB_SRCS := src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd_draw.c src/venc_jpeg.c lib/cJSON.c

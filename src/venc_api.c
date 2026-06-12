@@ -402,6 +402,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, connected_udp,     FT_BOOL,   MUT_RESTART),
 	FIELD(outgoing, audio_port,        FT_UINT16, MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
+	FIELD(outgoing, enhance_port,      FT_UINT16, MUT_RESTART),
+	FIELD(outgoing, thin_enhance,      FT_BOOL,   MUT_LIVE),
 
 	FIELD(isp, ae_engine,      FT_STRING, MUT_RESTART),
 	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
@@ -533,6 +535,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
+	{ "outgoing.enhancePort", "outgoing.enhance_port" },
+	{ "outgoing.thinEnhance", "outgoing.thin_enhance" },
 	{ "debug.showOsd", "debug.show_osd" },
 };
 
@@ -833,6 +837,24 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		    v > VENC_OUTPUT_PAYLOAD_CEILING_BYTES)
 			return "outgoing.max_payload_size must be in range [576, 4000]";
 	}
+	if (strcmp(key, "outgoing.enhance_port") == 0 &&
+	    cfg->outgoing.enhance_port != 0) {
+		uint16_t v = cfg->outgoing.enhance_port;
+		VencOutputUri uri;
+		/* The enhance channel shares the video host — it must not
+		 * collide with any port the daemon already sends to. */
+		if (cfg->outgoing.server[0] &&
+		    venc_config_parse_output_uri(cfg->outgoing.server, &uri) == 0 &&
+		    uri.type == VENC_OUTPUT_URI_UDP && uri.port == v)
+			return "outgoing.enhance_port must differ from the "
+				"outgoing.server port";
+		if (v == cfg->outgoing.audio_port)
+			return "outgoing.enhance_port must differ from "
+				"outgoing.audio_port";
+		if (v == cfg->outgoing.sidecar_port)
+			return "outgoing.enhance_port must differ from "
+				"outgoing.sidecar_port";
+	}
 	return NULL;
 }
 
@@ -854,6 +876,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"fpv.roi_steps",
 		"fpv.roi_center",
 		"outgoing.max_payload_size",
+		"outgoing.enhance_port",
 		"snapshot.quality",
 	};
 	size_t i;
@@ -984,6 +1007,7 @@ typedef enum {
 	LIVE_GROUP_ISP_BIN,
 	LIVE_GROUP_SNAPSHOT_QUALITY,
 	LIVE_GROUP_PAUSE_STAB,
+	LIVE_GROUP_THIN_ENHANCE,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1153,6 +1177,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_SNAPSHOT_QUALITY;
 	if (strcmp(canonical_key, "video0.pause_stab") == 0)
 		return LIVE_GROUP_PAUSE_STAB;
+	if (strcmp(canonical_key, "outgoing.thin_enhance") == 0)
+		return LIVE_GROUP_THIN_ENHANCE;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1188,6 +1214,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "snapshot.quality";
 	case LIVE_GROUP_PAUSE_STAB:
 		return "video0.pauseStab";
+	case LIVE_GROUP_THIN_ENHANCE:
+		return "outgoing.thinEnhance";
 	default:
 		return "unknown";
 	}
@@ -1344,6 +1372,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality != NULL;
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab != NULL;
+	case LIVE_GROUP_THIN_ENHANCE:
+		return g_cb->apply_thin_enhance != NULL;
 	default:
 		return 0;
 	}
@@ -1418,6 +1448,9 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_PAUSE_STAB:
 		dst->video0.pause_stab = src->video0.pause_stab;
+		break;
+	case LIVE_GROUP_THIN_ENHANCE:
+		dst->outgoing.thin_enhance = src->outgoing.thin_enhance;
 		break;
 	default:
 		break;
@@ -1523,6 +1556,8 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality(cfg->snapshot.quality);
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab(cfg->video0.pause_stab);
+	case LIVE_GROUP_THIN_ENHANCE:
+		return g_cb->apply_thin_enhance(cfg->outgoing.thin_enhance);
 	default:
 		return -2;
 	}
@@ -2102,7 +2137,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.10.1\","
+		"\"contract_version\":\"0.11.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);

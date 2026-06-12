@@ -46,6 +46,7 @@ typedef struct {
 	int apply_max_payload_calls;
 	int apply_zoom_calls;
 	int apply_isp_bin_calls;
+	int apply_thin_enhance_calls;
 
 	uint32_t last_bitrate;
 	uint32_t last_fps;
@@ -60,6 +61,7 @@ typedef struct {
 	double last_zoom_x;
 	double last_zoom_y;
 	char last_isp_bin[256];
+	bool last_thin_enhance;
 
 	int fail_bitrate;
 	int fail_verbose;
@@ -318,6 +320,13 @@ static int test_apply_isp_bin(const char *path)
 	snprintf(g_api_cb_state.last_isp_bin,
 		sizeof(g_api_cb_state.last_isp_bin), "%s", path ? path : "");
 	return g_api_cb_state.fail_isp_bin ? -1 : 0;
+}
+
+static int test_apply_thin_enhance(bool on)
+{
+	g_api_cb_state.apply_thin_enhance_calls++;
+	g_api_cb_state.last_thin_enhance = on;
+	return 0;
 }
 
 /* Whitebox access to internal functions via extern declarations.
@@ -905,6 +914,98 @@ static int test_live_set_max_payload_size_no_callback(void)
 	return failures;
 }
 
+/* SVC-T enhance_port validation: the enhance channel shares the video
+ * host, so its port must not collide with the server / audio / sidecar
+ * ports.  Uses the camelCase alias to cover alias resolution too. */
+static int test_set_enhance_port_collisions(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	int status = 0;
+	char response[2048];
+
+	venc_config_defaults(&cfg);
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+
+	/* Collides with the server UDP port. */
+	CHECK("enh_port server collision rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"outgoing.enhancePort=5600", &status, response,
+			sizeof(response)) == 0);
+	CHECK("enh_port server collision status", status == 409);
+	CHECK("enh_port server collision msg",
+		strstr(response, "outgoing.server port") != NULL);
+	CHECK("enh_port server collision cfg unchanged",
+		cfg.outgoing.enhance_port == 0);
+
+	/* Collides with audio_port (default 5601). */
+	CHECK("enh_port audio collision rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"outgoing.enhancePort=5601", &status, response,
+			sizeof(response)) == 0);
+	CHECK("enh_port audio collision status", status == 409);
+	CHECK("enh_port audio collision msg",
+		strstr(response, "audio_port") != NULL);
+
+	/* Collides with sidecar_port (default 5602). */
+	CHECK("enh_port sidecar collision rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"outgoing.enhancePort=5602", &status, response,
+			sizeof(response)) == 0);
+	CHECK("enh_port sidecar collision status", status == 409);
+	CHECK("enh_port sidecar collision msg",
+		strstr(response, "sidecar_port") != NULL);
+
+	return failures;
+}
+
+/* thinEnhance is MUT_LIVE: 501 without the backend callback, 200 with
+ * it (callback observes the committed value). */
+static int test_live_set_thin_enhance(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	memset(&cb, 0, sizeof(cb));
+
+	CHECK("thin no-cb rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.thinEnhance=true", &status, response,
+			sizeof(response)) == 0);
+	CHECK("thin no-cb status", status == 501);
+	CHECK("thin no-cb cfg unchanged", cfg.outgoing.thin_enhance == false);
+
+	reset_api_cb_state();
+	cb.apply_thin_enhance = test_apply_thin_enhance;
+
+	CHECK("thin on rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.thinEnhance=true", &status, response,
+			sizeof(response)) == 0);
+	CHECK("thin on status", status == 200);
+	CHECK("thin on cfg", cfg.outgoing.thin_enhance == true);
+	CHECK("thin on callback fired",
+		g_api_cb_state.apply_thin_enhance_calls == 1);
+	CHECK("thin on callback value",
+		g_api_cb_state.last_thin_enhance == true);
+
+	CHECK("thin off rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.thinEnhance=false", &status, response,
+			sizeof(response)) == 0);
+	CHECK("thin off status", status == 200);
+	CHECK("thin off cfg", cfg.outgoing.thin_enhance == false);
+	CHECK("thin off callback value",
+		g_api_cb_state.last_thin_enhance == false);
+
+	return failures;
+}
+
 static int test_live_zoom_pan_applies(void)
 {
 	int failures = 0;
@@ -1222,6 +1323,8 @@ int test_venc_api(void)
 	failures += test_live_set_rejects_out_of_range_roi_values();
 	failures += test_live_set_max_payload_size_bounds();
 	failures += test_live_set_max_payload_size_no_callback();
+	failures += test_set_enhance_port_collisions();
+	failures += test_live_set_thin_enhance();
 	failures += test_live_zoom_pan_applies();
 	failures += test_zoom_validation_rejects_invalid();
 	failures += test_framing_preset_restart();

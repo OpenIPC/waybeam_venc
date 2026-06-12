@@ -191,6 +191,14 @@ typedef struct {
 	                                     * audio and video RTP on one socket causes
 	                                     * video decoder instability at the receiver */
 	uint16_t sidecar_port;              /* 0 = disabled */
+	uint16_t enhance_port;              /* SVC-T enhance-layer UDP port; 0 =
+	                                     * single channel.  Same host as
+	                                     * server; for shm:// any nonzero
+	                                     * value selects a second ring
+	                                     * "<name>_enh".  Lets wfb_ng apply
+	                                     * per-layer FEC. */
+	bool thin_enhance;                  /* drop SVC-T enhance frames from the
+	                                     * live output (recorder unaffected) */
 } VencConfigOutgoing;
 
 typedef struct {
@@ -282,6 +290,14 @@ int venc_config_parse_server_uri(const char *uri, char *host, size_t host_len,
 
 /* Parse outgoing.server into a transport-aware structure. */
 int venc_config_parse_output_uri(const char *uri, VencOutputUri *out);
+
+/* Derive the SVC-T enhance-layer channel from the base output URI:
+ * udp:// keeps the host and swaps in enhance_port; shm:// appends "_enh"
+ * to the ring name (the port value only arms the split).  Returns 0 on
+ * success, -1 for unix:// (no second-channel convention), enhance_port
+ * == 0, or a ring name that would not fit /dev/shm NAME_MAX. */
+int venc_config_derive_enhance_uri(const VencOutputUri *base,
+	uint16_t enhance_port, VencOutputUri *out);
 
 /* Serialize config to a newly allocated JSON string.  Caller must free(). */
 char *venc_config_to_json_string(const VencConfig *cfg);

@@ -48,7 +48,9 @@
     "maxPayloadSize": 1400,
     "connectedUdp": true,
     "audioPort": 5601,
-    "sidecarPort": 5602
+    "sidecarPort": 5602,
+    "enhancePort": 0,
+    "thinEnhance": false
   },
   "fpv": {
     "roiEnabled": true,

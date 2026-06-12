@@ -120,6 +120,8 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->outgoing.stream_mode, sizeof(cfg->outgoing.stream_mode), "rtp");
 	cfg->outgoing.max_payload_size = 1400;
 	cfg->outgoing.connected_udp = true;
+	cfg->outgoing.enhance_port = 0;
+	cfg->outgoing.thin_enhance = false;
 
 	/* fpv */
 	cfg->fpv.roi_enabled = true;
@@ -635,6 +637,9 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 		(int)s->audio_port);
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
 		(int)s->sidecar_port);
+	s->enhance_port = (uint16_t)json_get_int(obj, "enhancePort",
+		(int)s->enhance_port);
+	s->thin_enhance = json_get_bool(obj, "thinEnhance", s->thin_enhance);
 }
 
 static void load_audio(const cJSON *root, VencConfigAudio *a)
@@ -877,6 +882,36 @@ int venc_config_parse_output_uri(const char *uri, VencOutputUri *out)
 	fprintf(stderr, "[venc_config] ERROR: unsupported URI scheme in '%s' "
 		"(expected udp://, unix://, or shm://)\n", uri);
 	return -1;
+}
+
+int venc_config_derive_enhance_uri(const VencOutputUri *base,
+	uint16_t enhance_port, VencOutputUri *out)
+{
+	if (!base || !out || enhance_port == 0)
+		return -1;
+
+	*out = *base;
+	switch (base->type) {
+	case VENC_OUTPUT_URI_UDP:
+		/* Same host, dedicated port — wfb_ng tunnels each port as its
+		 * own stream with independent FEC settings. */
+		out->port = enhance_port;
+		return 0;
+	case VENC_OUTPUT_URI_SHM: {
+		/* Second ring; the port value only arms the split.  Suffix must
+		 * fit /dev/shm NAME_MAX (the ring prepends one '/'). */
+		int n = snprintf(out->endpoint, sizeof(out->endpoint), "%s_enh",
+			base->endpoint);
+		if (n < 0 || (size_t)n >= sizeof(out->endpoint) || n > 254)
+			return -1;
+		return 0;
+	}
+	case VENC_OUTPUT_URI_UNIX:
+	default:
+		/* No second-channel convention for unix:// — caller warns and
+		 * keeps the single channel. */
+		return -1;
+	}
 }
 
 /* ── Hand-rolled pretty printer (used by venc_config_save) ──────────────
@@ -1184,7 +1219,9 @@ static void render_outgoing(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "maxPayloadSize",  cfg->outgoing.max_payload_size,  0);
 	pp_field_bool(p,   2, "connectedUdp",    cfg->outgoing.connected_udp,     0);
 	pp_field_uint(p,   2, "audioPort",       cfg->outgoing.audio_port,        0);
-	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,    1);
+	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,    0);
+	pp_field_uint(p,   2, "enhancePort",    cfg->outgoing.enhance_port,    0);
+	pp_field_bool(p,   2, "thinEnhance",    cfg->outgoing.thin_enhance,    1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1375,6 +1412,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(out, "connectedUdp", cfg->outgoing.connected_udp);
 		cJSON_AddNumberToObject(out, "audioPort", cfg->outgoing.audio_port);
 		cJSON_AddNumberToObject(out, "sidecarPort", cfg->outgoing.sidecar_port);
+		cJSON_AddNumberToObject(out, "enhancePort", cfg->outgoing.enhance_port);
+		cJSON_AddBoolToObject(out, "thinEnhance", cfg->outgoing.thin_enhance);
 	}
 
 	/* fpv */

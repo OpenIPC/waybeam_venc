@@ -1,5 +1,46 @@
 # History
 
+## [0.17.0] - 2026-06-12
+
+SVC-T per-layer FEC split — route the droppable enhancement layer onto its
+own transport channel so wfb-ng can protect each temporal layer differently.
+
+**`outgoing.enhancePort` (restart, default 0 = off).**  With a refPred
+resilience preset active (`rally`/`range`/`fpv`), every frame the encoder
+labels enhancement-layer (`refType` ENHANCE_*) leaves through a second
+output: same host, dedicated UDP port — or, with `shm://`, a second ring
+`/dev/shm/<name>_enh` for a second `wfb_tx`.  Both channels carry **one RTP
+session** (shared SSRC + sequence space), so the ground station forwards
+both `wfb_rx` outputs to one decoder port and RTP seq reordering merges
+them.  This is the missing half of the refPred story: wfb-ng applies FEC
+per stream, so base frames can ride strong FEC (e.g. 8/12) while the
+droppable layer rides light FEC (e.g. 8/9) — dropping the enhance channel
+yields a decodable base-layer stream at 1/2 (`rally`) or 1/(1+enhance)
+rate.  The channel is auxiliary by design: init failure or a live
+`outgoing.server` retarget that can't host the split logs a warning and
+falls back to single-channel; the base link never dies for it.  Validated
+against port collisions with server/audio/sidecar (HTTP 409).  Both
+backends.
+
+**`outgoing.thinEnhance` (live, default false).**  Drop enhancement frames
+from the live output entirely — RTP seq is not consumed (gapless base
+stream at reduced rate) and mirror-mode recording keeps the full rate.
+Turning thinning off issues an IDR so the re-appearing layer starts from a
+clean reference chain.
+
+**Shared SVC-T classifier (`include/venc_svct.h`).**  The per-backend
+`*_REFTYPE_ENHANCE_P_NOTFORREF` defines collapsed into one header with the
+refType constants and `venc_svct_frame_is_enhance()` /
+`venc_svct_frame_is_notforref()`.  TRAIL_N rewriting behaviour is
+unchanged (NOTFORREF only).  `ENHANCE_P_REFBYENHANCE == 3` follows the
+vendor enum layout and only appears with `ref_enhance > 1` — flagged for
+bench confirmation on the deeper presets before trusting the 2-way split
+there.
+
+Sidecar transport trailers now describe the channel each frame actually
+used (base or enhance); `/api/v1/transport/status` keeps reporting the
+base output.  HTTP API contract bumped to 0.11.0.
+
 ## [0.16.0] - 2026-06-06
 
 Sensor-level image orientation — `image.flip` and `image.mirror` now work
