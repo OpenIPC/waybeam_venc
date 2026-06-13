@@ -170,7 +170,8 @@ thin adapter or compatible type boundary.
 
 **Do not force into shared code in this gate unless proven safe:**
 - Star6E SHM RTP-ring output support
-- Star6E HEVC AP aggregation path
+- Star6E HEVC AP aggregation path (later shared in 0.7.1, then removed
+  entirely in 0.17.0 — the wire is single-NAL + FU-A only)
 - Star6E packetizer statistics/debug behavior
 - Star6E-specific adaptive payload policy details
 

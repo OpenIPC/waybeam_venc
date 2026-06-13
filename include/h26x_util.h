@@ -13,10 +13,4 @@ uint8_t h26x_util_h264_nalu_type(const uint8_t *data, size_t len);
 /** Return the HEVC NAL unit type, or 0 for invalid input. */
 uint8_t h26x_util_hevc_nalu_type(const uint8_t *data, size_t len);
 
-/** Return the HEVC layer id, or 0 for invalid input. */
-uint8_t h26x_util_hevc_get_layer_id(const uint8_t *data, size_t len);
-
-/** Return the HEVC temporal id plus 1, or 1 for invalid input. */
-uint8_t h26x_util_hevc_get_tid_plus1(const uint8_t *data, size_t len);
-
 #endif /* H26X_UTIL_H */

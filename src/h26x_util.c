@@ -42,19 +42,3 @@ uint8_t h26x_util_hevc_nalu_type(const uint8_t *data, size_t len)
 	}
 	return (uint8_t)((data[0] >> 1) & 0x3F);
 }
-
-uint8_t h26x_util_hevc_get_layer_id(const uint8_t *data, size_t len)
-{
-	if (!data || len < 2) {
-		return 0;
-	}
-	return (uint8_t)(((data[0] & 0x01) << 5) | (data[1] >> 3));
-}
-
-uint8_t h26x_util_hevc_get_tid_plus1(const uint8_t *data, size_t len)
-{
-	if (!data || len < 2) {
-		return 1;
-	}
-	return (uint8_t)(data[1] & 0x07);
-}

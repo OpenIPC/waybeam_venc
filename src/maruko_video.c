@@ -98,7 +98,6 @@ static size_t maruko_send_frame_hevc(const i6c_venc_strm *stream,
 	size_t max_payload, HevcRtpStats *stats)
 {
 	RtpPacketizerState state;
-	HevcApBuilder ap;
 	size_t total_bytes = 0;
 	unsigned int i;
 
@@ -109,8 +108,6 @@ static size_t maruko_send_frame_hevc(const i6c_venc_strm *stream,
 
 	if (max_payload > RTP_BUFFER_MAX)
 		max_payload = RTP_BUFFER_MAX;
-
-	hevc_rtp_ap_reset(&ap);
 
 	for (i = 0; i < stream->count; ++i) {
 		const i6c_venc_pack *pack = &stream->packet[i];
@@ -171,18 +168,16 @@ static size_t maruko_send_frame_hevc(const i6c_venc_strm *stream,
 
 			if (params) {
 				total_bytes += hevc_rtp_prepend_param_sets(params,
-					nal_type, &ap, &state, maruko_rtp_write,
+					nal_type, &state, maruko_rtp_write,
 					ctx, max_payload, stats);
 			}
 
-			total_bytes += hevc_rtp_send_nal(&ap, nal_ptr, nal_len,
+			total_bytes += hevc_rtp_send_nal(nal_ptr, nal_len,
 				&state, maruko_rtp_write, ctx, last_nal,
 				max_payload, stats);
 		}
 	}
 
-	total_bytes += hevc_rtp_ap_flush(&ap, &state, maruko_rtp_write, ctx, 1,
-		stats);
 	rtp->seq = state.seq;
 	return total_bytes;
 }

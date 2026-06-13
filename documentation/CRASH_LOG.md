@@ -37,7 +37,18 @@ consecutive respawn.  PR #123 proved this is **intrinsic to destroying +
 rebinding a VENC channel against the live VPE port on this SoC, independent
 of process model** — an in-process rebuild storms too.  Neither the teardown
 reorder nor the cold-vif scrub removes it; they remove the teardown-time
-D-state wedge and the cross-mode VIF wedge respectively.  Routing rebuild-
+D-state wedge and the cross-mode VIF wedge respectively.
+
+**SUPERSEDED (2026-06-07):** the MMU storm above is now **fixed** (the
+`debug_osd_destroy` settle, PR #126) — it did not fire on either the respawn
+or the in-process path in the latest bench runs.  The "in-process rebuild
+storms too / intrinsic, independent of process model" claim was about the MMU
+storm specifically; with that fixed, the residual single-PID blocker is a
+different one (kernel VIF/VPE/ISP channel state that only execv releases).
+Full retest and the conclusion that fork+exec respawn is a driver requirement:
+see `documentation/STAR6E_SINGLE_PID_REINIT_FINDINGS.md`.
+
+Routing rebuild-
 class config changes around the storm (live intra/GOP apply, or a cold-boot
 gate) was developed in PR #123 but is deliberately out of scope for this
 cherry-pick.

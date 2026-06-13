@@ -168,8 +168,6 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 	if (star6e_output_is_rtp(output)) {
 		state->verbose_packetizer_interval.total_nals += frame_packetizer.total_nals;
 		state->verbose_packetizer_interval.single_packets += frame_packetizer.single_packets;
-		state->verbose_packetizer_interval.ap_packets += frame_packetizer.ap_packets;
-		state->verbose_packetizer_interval.ap_nals += frame_packetizer.ap_nals;
 		state->verbose_packetizer_interval.fu_packets += frame_packetizer.fu_packets;
 		state->verbose_packetizer_interval.rtp_packets += frame_packetizer.rtp_packets;
 		state->verbose_packetizer_interval.rtp_payload_bytes += frame_packetizer.rtp_payload_bytes;
@@ -192,13 +190,11 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 					? (unsigned int)(state->verbose_packetizer_interval.rtp_payload_bytes /
 						state->verbose_packetizer_interval.rtp_packets) : 0;
 
-				dprintf(ofd, "[pktzr] nals %u | rtp %u | fill %u B | single %u | ap %u/%u | fu %u\n",
+				dprintf(ofd, "[pktzr] nals %u | rtp %u | fill %u B | single %u | fu %u\n",
 					state->verbose_packetizer_interval.total_nals,
 					state->verbose_packetizer_interval.rtp_packets,
 					avg_rtp_payload,
 					state->verbose_packetizer_interval.single_packets,
-					state->verbose_packetizer_interval.ap_packets,
-					state->verbose_packetizer_interval.ap_nals,
 					state->verbose_packetizer_interval.fu_packets);
 			}
 			{

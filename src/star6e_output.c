@@ -427,8 +427,8 @@ int star6e_output_end_frame(Star6eOutput *output)
  * Both the header and payload1 are copied into scratch because both live
  * on the caller's stack and are reused between packets (rtp header is
  * built in rtp_packetizer_send_packet; payload1 is either a 3-byte FU-A
- * header or the HevcApBuilder's payload buffer, reset after each AP
- * packet). payload2, when present, is a slice of the VENC stream buffer
+ * header or a single NAL unit). payload2, when present, is a slice of the
+ * VENC stream buffer
  * which remains valid until MI_VENC_ReleaseStream is called in the
  * pipeline after end_frame(), so we keep it as a zero-copy iovec. */
 static int star6e_batch_enqueue(Star6eOutput *output,
