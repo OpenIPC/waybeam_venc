@@ -34,7 +34,7 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
 ## Features
 
 - H.265 (HEVC) encoding with CBR / VBR / AVBR / FIXQP rate control
-- RTP packetization with adaptive payload sizing; compact UDP raw-NAL mode
+- RTP packetization (single-NAL + FU-A, fixed `maxPayloadSize`); compact UDP raw-NAL mode
 - Built-in web dashboard at `/` for configuration, API docs, and IQ tuning
 - HTTP API for live parameter tuning without pipeline restart
 - ISP IQ parameter system: 60+ params, multi-field structs, JSON export/import (both backends)

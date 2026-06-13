@@ -39,7 +39,7 @@ static int create_udp_receiver(uint16_t *port)
 	return socket_handle;
 }
 
-static int test_star6e_hevc_rtp_sends_idr_with_prepended_ap(void)
+static int test_star6e_hevc_rtp_sends_idr_with_separate_param_sets(void)
 {
 	static const uint8_t vps[] = { 0x40, 0x01, 0xAA };
 	static const uint8_t sps[] = { 0x42, 0x01, 0xBB };
@@ -60,7 +60,10 @@ static int test_star6e_hevc_rtp_sends_idr_with_prepended_ap(void)
 	uint8_t buf[64];
 	char uri[64];
 	size_t sent_bytes;
-	ssize_t received;
+	size_t total_received = 0;
+	unsigned int datagrams = 0;
+	int saw_aggregation = 0;
+	int last_marker = 0;
 	uint16_t port;
 	int recv_socket;
 	int failures = 0;
@@ -91,29 +94,40 @@ static int test_star6e_hevc_rtp_sends_idr_with_prepended_ap(void)
 		&params, 1400, &stats);
 	CHECK("star6e hevc rtp sent bytes",
 		sent_bytes == sizeof(vps) + sizeof(sps) + sizeof(pps) + sizeof(idr));
+	/* VPS, SPS, PPS, IDR each go out as their own single-NAL packet —
+	 * no aggregation packet. */
 	CHECK("star6e hevc rtp stats",
 		stats.total_nals == 4 &&
-		stats.single_packets == 0 &&
-		stats.ap_packets == 1 &&
-		stats.ap_nals == 4 &&
+		stats.single_packets == 4 &&
 		stats.fu_packets == 0 &&
-		stats.rtp_packets == 1 &&
-		stats.rtp_payload_bytes == (2 + 2 + sizeof(vps) + 2 + sizeof(sps) +
-			2 + sizeof(pps) + 2 + sizeof(idr)));
+		stats.rtp_packets == 4 &&
+		stats.rtp_payload_bytes ==
+			(sizeof(vps) + sizeof(sps) + sizeof(pps) + sizeof(idr)));
 	CHECK("star6e hevc rtp state advanced",
-		rtp.seq == 0x1235 && rtp.timestamp == 0x01020EBc);
+		rtp.seq == 0x1238 && rtp.timestamp == 0x01020EBc);
 
-	received = recv(recv_socket, buf, sizeof(buf), 0);
-	CHECK("star6e hevc rtp recv size",
-		received == (ssize_t)(12 + stats.rtp_payload_bytes));
-	CHECK("star6e hevc rtp marker and payload type",
-		received >= 12 &&
-		buf[0] == 0x80 &&
-		buf[1] == (uint8_t)(0x80 | 97));
-	CHECK("star6e hevc rtp ap header",
-		received >= 14 &&
-		buf[12] == 0x60 &&
-		buf[13] == 0x01);
+	/* Drain the four expected datagrams; verify none is a type-48 AP
+	 * packet and the last one carries the marker bit.  All packets were
+	 * sent synchronously by send_frame, so a non-blocking probe is enough
+	 * to assert no extra datagram follows. */
+	while (datagrams < 4) {
+		ssize_t received = recv(recv_socket, buf, sizeof(buf), 0);
+
+		if (received < 12)
+			break;
+		datagrams++;
+		total_received += (size_t)received;
+		last_marker = (buf[1] & 0x80) ? 1 : 0;
+		if (((buf[12] >> 1) & 0x3F) == 48)
+			saw_aggregation = 1;
+	}
+	CHECK("star6e hevc rtp four datagrams", datagrams == 4);
+	CHECK("star6e hevc rtp no extra datagram",
+		recv(recv_socket, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+	CHECK("star6e hevc rtp total bytes",
+		total_received == (size_t)(4 * 12) + stats.rtp_payload_bytes);
+	CHECK("star6e hevc rtp no aggregation packet", saw_aggregation == 0);
+	CHECK("star6e hevc rtp marker on last datagram", last_marker == 1);
 
 	star6e_output_teardown(&output);
 	close(recv_socket);
@@ -124,6 +138,6 @@ int test_star6e_hevc_rtp(void)
 {
 	int failures = 0;
 
-	failures += test_star6e_hevc_rtp_sends_idr_with_prepended_ap();
+	failures += test_star6e_hevc_rtp_sends_idr_with_separate_param_sets();
 	return failures;
 }

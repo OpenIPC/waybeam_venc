@@ -166,8 +166,7 @@ void venc_respawn_after_exit(void)
 				if (fd <= STDERR_FILENO || fd == dfd_keep)
 					continue;
 				/* Bench-localized 2026-05-19 (PR #120): closing
-				 * /dev/mi_sys (and likely other /dev/mi_* SDK
-				 * descriptors) here deadlocks the SigmaStar
+				 * /dev/mi_sys here deadlocks the SigmaStar
 				 * driver after a zoom_pct MUT_RESTART teardown.
 				 * MI_SYS_Exit returns cleanly but does not
 				 * release its kernel-side state for the fd, so
@@ -175,6 +174,16 @@ void venc_respawn_after_exit(void)
 				 * release handler in a half-torn-down state and
 				 * hangs uninterruptibly.  Watchdog escalation
 				 * then sysrq-b's the box.
+				 *
+				 * Scope correction (2026-06-07): the deadlock is
+				 * /dev/mi_sys-SPECIFIC.  Closing /dev/mi_vif and
+				 * /dev/mi_vpe in the SAME process (post-MI_SYS_Exit,
+				 * not just the inherited-fd child case below) was
+				 * retested and does NOT deadlock — so the original
+				 * "and likely other /dev/mi_*" hedge was too broad.
+				 * Still skip the rest of /dev/mi_* defensively; only
+				 * mi_sys is the confirmed hang.  See
+				 * documentation/STAR6E_SINGLE_PID_REINIT_FINDINGS.md.
 				 *
 				 * Skip /dev/mi_* fds — let them be inherited
 				 * into the exec'd image as orphans.  This

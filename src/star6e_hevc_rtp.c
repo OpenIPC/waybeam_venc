@@ -19,15 +19,12 @@ size_t star6e_hevc_rtp_send_frame(const MI_VENC_Stream_t *stream,
 	Star6eHevcRtpStats *stats)
 {
 	size_t total_bytes = 0;
-	HevcApBuilder ap;
 
 	if (!stream || !output || !rtp)
 		return 0;
 
 	if (max_payload > RTP_BUFFER_MAX)
 		max_payload = RTP_BUFFER_MAX;
-
-	hevc_rtp_ap_reset(&ap);
 
 	for (unsigned int i = 0; i < stream->count; ++i) {
 		const MI_VENC_Pack_t *pack = &stream->packet[i];
@@ -88,19 +85,17 @@ size_t star6e_hevc_rtp_send_frame(const MI_VENC_Stream_t *stream,
 
 			if (params) {
 				total_bytes += hevc_rtp_prepend_param_sets(params,
-					nal_type, &ap, rtp,
+					nal_type, rtp,
 					star6e_hevc_rtp_write, output, max_payload,
 					stats);
 			}
 
-			total_bytes += hevc_rtp_send_nal(&ap, nal_ptr, nal_len, rtp,
+			total_bytes += hevc_rtp_send_nal(nal_ptr, nal_len, rtp,
 				star6e_hevc_rtp_write, output, last_nal, max_payload,
 				stats);
 		}
 	}
 
-	total_bytes += hevc_rtp_ap_flush(&ap, rtp, star6e_hevc_rtp_write, output,
-		1, stats);
 	rtp->timestamp += frame_ticks;
 	return total_bytes;
 }

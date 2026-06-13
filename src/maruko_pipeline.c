@@ -3234,8 +3234,6 @@ static void maruko_pipeline_log_verbose_frame(MarukoBackendContext *ctx,
 	if (MARUKO_PKTZR_VERBOSE_ACTIVE(ctx)) {
 		rt->pktzr_interval.total_nals += frame_pktzr->total_nals;
 		rt->pktzr_interval.single_packets += frame_pktzr->single_packets;
-		rt->pktzr_interval.ap_packets += frame_pktzr->ap_packets;
-		rt->pktzr_interval.ap_nals += frame_pktzr->ap_nals;
 		rt->pktzr_interval.fu_packets += frame_pktzr->fu_packets;
 		rt->pktzr_interval.rtp_packets += frame_pktzr->rtp_packets;
 		rt->pktzr_interval.rtp_payload_bytes += frame_pktzr->rtp_payload_bytes;
@@ -3254,13 +3252,11 @@ static void maruko_pipeline_log_verbose_frame(MarukoBackendContext *ctx,
 			? (unsigned int)(rt->pktzr_interval.rtp_payload_bytes /
 				rt->pktzr_interval.rtp_packets) : 0;
 		printf("[pktzr] nals %u | rtp %u | fill %u B"
-			" | single %u | ap %u/%u | fu %u\n",
+			" | single %u | fu %u\n",
 			rt->pktzr_interval.total_nals,
 			rt->pktzr_interval.rtp_packets,
 			avg_rtp_payload,
 			rt->pktzr_interval.single_packets,
-			rt->pktzr_interval.ap_packets,
-			rt->pktzr_interval.ap_nals,
 			rt->pktzr_interval.fu_packets);
 		memset(&rt->pktzr_interval, 0, sizeof(rt->pktzr_interval));
 	}
