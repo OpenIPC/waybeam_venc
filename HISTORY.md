@@ -1,5 +1,26 @@
 # History
 
+## [0.16.1] - 2026-06-13
+
+Fix dual-record mode never engaging under runtime control — the SD-card
+recording bitrate is now independent of the live stream bitrate, as documented.
+
+**Dual-VENC channel creation is gated on `record.mode`, not `record.enabled`.**
+Previously the secondary (ch1) record channel was created at pipeline init only
+when `record.enabled` was true. A runtime-control client (e.g. RubyFPV) that
+sets `record.enabled=false` and starts recording later via
+`/api/v1/record/start` never got the ch1 channel: the record path fell back to
+mirror mode and captured ch0 (the `video0` stream bitrate, typically ~5–12 Mbps
+adaptive) instead of ch1 (`record.bitrate`, e.g. 40 Mbps). Recordings silently
+tracked the link bitrate and the documented "stream low / record high" dual mode
+was unreachable outside the auto-start-at-boot path.
+
+The channel topology now follows `record.mode` alone; `record.enabled` still
+controls only whether recording auto-starts at boot. The ch1 TS writer already
+no-ops while the recorder is closed, so an idle ch1 (mode=dual, not yet
+recording) writes nothing until `/api/v1/record/start` opens the file. Star6E
+only (Maruko has no TS recording).
+
 ## [0.16.0] - 2026-06-06
 
 Sensor-level image orientation — `image.flip` and `image.mirror` now work

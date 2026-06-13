@@ -634,10 +634,20 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	if (vcfg->record.max_mb > 0)
 		ps->ts_recorder.max_bytes = (uint64_t)vcfg->record.max_mb * 1024 * 1024;
 
-	/* Start dual VENC if mode is "dual" or "dual-stream" */
-	if (vcfg->record.enabled &&
-	    (strcmp(vcfg->record.mode, "dual") == 0 ||
-	     strcmp(vcfg->record.mode, "dual-stream") == 0)) {
+	/* Start dual VENC if mode is "dual" or "dual-stream".
+	 *
+	 * Gated on mode ALONE, not record.enabled: the VENC channel topology
+	 * is independent of whether recording auto-starts at boot.  A
+	 * runtime-control client (e.g. RubyFPV) sets record.enabled=false and
+	 * starts recording later via /api/v1/record/start.  ps->dual must
+	 * already exist by then, otherwise the record path falls back to
+	 * mirror mode and captures ch0 (the video0 stream bitrate) instead of
+	 * ch1 (record.bitrate) — the high-bitrate recording channel is silently
+	 * never used.  The ch1 TS writer no-ops while the recorder is closed
+	 * (see star6e_ts_recorder_write_stream), so an idle ch1 records nothing
+	 * until a record/start opens the file. */
+	if (strcmp(vcfg->record.mode, "dual") == 0 ||
+	    strcmp(vcfg->record.mode, "dual-stream") == 0) {
 		star6e_pipeline_start_dual(ps,
 			vcfg->record.bitrate, vcfg->record.fps,
 			vcfg->record.gop_size, vcfg->record.mode,
