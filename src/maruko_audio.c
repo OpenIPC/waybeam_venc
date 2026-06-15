@@ -311,9 +311,10 @@ static void *encode_fn(void *arg)
 				if (st->rec_ring)
 					audio_ring_push(st->rec_ring, enc_buf,
 						(uint16_t)encoded, ts_us);
-				(void)maruko_audio_send(&st->output, enc_buf,
-					(size_t)encoded, &st->rtp,
-					st->rtp_frame_ticks, rtp_mode);
+				if (!st->stream_disabled)
+					(void)maruko_audio_send(&st->output, enc_buf,
+						(size_t)encoded, &st->rtp,
+						st->rtp_frame_ticks, rtp_mode);
 				off += chunk_bytes;
 				ts_us += chunk_us;
 			}
@@ -342,7 +343,7 @@ static void *encode_fn(void *arg)
 			len  = pairs * 2;
 		}
 
-		if (len > 0)
+		if (len > 0 && !st->stream_disabled)
 			(void)maruko_audio_send(&st->output, data, len,
 				&st->rtp, st->rtp_frame_ticks, rtp_mode);
 	}
@@ -505,9 +506,15 @@ int maruko_audio_init(MarukoAudioState *state, const MarukoBackendConfig *cfg,
 	if (open_ai_device(state, cfg->audio.volume, cfg->audio.mute) != 0)
 		goto fail;
 
-	if (maruko_audio_output_init(&state->output, output,
-	    cfg->audio_port, cfg->max_payload_size) != 0)
+	state->stream_disabled = (cfg->audio_port < 0);
+	if (state->stream_disabled) {
+		/* Record-only: capture+encode thread still runs to feed rec_ring,
+		 * but no UDP output socket is created and no packets are sent. */
+		maruko_audio_output_reset(&state->output);
+	} else if (maruko_audio_output_init(&state->output, output,
+	    (uint16_t)cfg->audio_port, cfg->max_payload_size) != 0) {
 		goto fail;
+	}
 
 	if (video_output_is_rtp(output)) {
 		state->rtp.seq       = (uint16_t)(rand() & 0xFFFF);
@@ -533,7 +540,8 @@ int maruko_audio_init(MarukoAudioState *state, const MarukoBackendConfig *cfg,
 			: (state->sample_rate / 50);
 	}
 
-	if (output->transport == VENC_OUTPUT_URI_UDP &&
+	if (!state->stream_disabled &&
+	    output->transport == VENC_OUTPUT_URI_UDP &&
 	    maruko_audio_output_port(&state->output) == 0)
 		fprintf(stderr,
 			"[audio] WARNING: audio output has no destination port\n");
@@ -542,10 +550,15 @@ int maruko_audio_init(MarukoAudioState *state, const MarukoBackendConfig *cfg,
 		goto fail;
 
 	if (state->verbose) {
-		uint16_t port = maruko_audio_output_port(&state->output);
-		printf("[audio] Initialized: %s @ %u Hz, %u ch, port %u\n",
-			cfg->audio.codec, state->sample_rate, state->channels,
-			port);
+		if (state->stream_disabled) {
+			printf("[audio] Initialized: %s @ %u Hz, %u ch, record-only (no stream)\n",
+				cfg->audio.codec, state->sample_rate, state->channels);
+		} else {
+			uint16_t port = maruko_audio_output_port(&state->output);
+			printf("[audio] Initialized: %s @ %u Hz, %u ch, port %u\n",
+				cfg->audio.codec, state->sample_rate, state->channels,
+				port);
+		}
 	}
 	return 0;
 

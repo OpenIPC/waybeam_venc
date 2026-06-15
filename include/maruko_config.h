@@ -87,7 +87,8 @@ typedef struct {
 	/* Audio capture mirror (Phase 5).  Init only runs when
 	 * audio.enabled is set and libmi_ai.so is loaded. */
 	VencConfigAudio audio;
-	uint16_t audio_port;            /* 0 → share video target */
+	int32_t audio_port;             /* <0 → record-only (no stream); 0 → share
+	                                 * video target; >0 → dedicated audio port */
 	uint16_t max_payload_size;      /* mirrors outgoing.max_payload_size */
 	/* Digital zoom (mirrors video0.zoom_pct/x/y).  Applied at pipeline
 	 * start through the SCL crop/output config; live x/y pan reissues

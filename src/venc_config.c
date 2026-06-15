@@ -631,8 +631,7 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 	s->max_payload_size = (uint16_t)json_get_int(obj, "maxPayloadSize",
 		(int)s->max_payload_size);
 	s->connected_udp = json_get_bool(obj, "connectedUdp", s->connected_udp);
-	s->audio_port = (uint16_t)json_get_int(obj, "audioPort",
-		(int)s->audio_port);
+	s->audio_port = json_get_int(obj, "audioPort", s->audio_port);
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
 		(int)s->sidecar_port);
 }
@@ -1183,7 +1182,7 @@ static void render_outgoing(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "streamMode",      cfg->outgoing.stream_mode,       0);
 	pp_field_uint(p,   2, "maxPayloadSize",  cfg->outgoing.max_payload_size,  0);
 	pp_field_bool(p,   2, "connectedUdp",    cfg->outgoing.connected_udp,     0);
-	pp_field_uint(p,   2, "audioPort",       cfg->outgoing.audio_port,        0);
+	pp_field_int(p,    2, "audioPort",       cfg->outgoing.audio_port,        0);
 	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,    1);
 	pp_section_close(p, 1, is_last);
 }

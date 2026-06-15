@@ -48,7 +48,7 @@ Audio is configured via the `audio` section in `venc.json`, plus the
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `audioPort` | int | `0` | UDP port for audio. `0` = same destination as video (demux by RTP payload type). Any non-zero value = dedicated audio port. |
+| `audioPort` | int | `5601` | UDP port for audio. `>0` = dedicated audio port. `0` = same destination as video (demux by RTP payload type). `<0` (e.g. `-1`) = record-only: audio is captured and muxed into recordings but never streamed. |
 
 ## Codecs
 
@@ -134,6 +134,12 @@ Standard RTP packetization with 12-byte header:
   (compact mode).
 - **`audioPort: N`** (N > 0): Audio is sent to a dedicated UDP port on the
   same destination host as video. Clean separation; receivers bind two ports.
+- **`audioPort: -1`** (any negative): Record-only. The capture/encode thread
+  still runs and feeds the recording ring (so audio lands in TS-format
+  recordings), but no output socket is created and no RTP/compact packets are
+  ever sent. Use this to keep audio off the air link while still recording it
+  on the vehicle. Requires `audio.enabled` and a TS-family `record.format`
+  (HEVC recordings carry no audio track).
 
 ## Architecture
 

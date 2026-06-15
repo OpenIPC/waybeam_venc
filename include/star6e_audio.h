@@ -46,6 +46,7 @@ typedef struct {
 	int verbose;
 	AudioRing cap_ring;    /* capture→encode bridge (owned by this struct) */
 	AudioRing *rec_ring;   /* recording ring buffer (NULL if not recording) */
+	int stream_disabled;   /* audio_port < 0: capture+record only, never send */
 	AudioCodecOpus opus;   /* Opus encoder handle (lib==NULL if not Opus) */
 } Star6eAudioState;
 
