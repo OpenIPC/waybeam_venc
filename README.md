@@ -981,7 +981,7 @@ Notes:
 | `outgoing.stream_mode` | string | restart | `"rtp"` or `"compact"` |
 | `outgoing.max_payload_size` | uint16 | restart | Max UDP payload bytes |
 | `outgoing.connected_udp` | bool | restart | Connect UDP socket (applies only to `udp://`) |
-| `outgoing.audio_port` | uint16 | restart | `0` = shared video destination; nonzero = dedicated audio port. With `unix://`, dedicated audio is sent to `127.0.0.1:<audioPort>` |
+| `outgoing.audio_port` | int32 | restart | `>0` = dedicated audio port; `0` = shared video destination; `<0` (e.g. `-1`) = record-only (audio captured + recorded but never streamed). With `unix://`, dedicated audio is sent to `127.0.0.1:<audioPort>` |
 | `outgoing.sidecar_port` | uint16 | restart | RTP timing sidecar port (0 = disabled) |
 
 `unix://` uses Linux abstract Unix datagram sockets and is available in
@@ -989,6 +989,14 @@ both `rtp` and `compact` mode. On Star6E, `audioPort=0` piggybacks on the
 same active video destination for both `udp://` and `unix://`. `shm://`
 remains RTP-only; it cannot share audio, but a nonzero `audioPort` still
 uses a dedicated local UDP audio destination.
+
+A negative `audioPort` (e.g. `-1`) selects **record-only** mode: the audio
+capture/encode thread still runs and feeds the recording, but no output
+socket is created and no audio packets are ever sent. Use this to keep audio
+off the air link while still capturing it into SD recordings. It requires
+`audio.enabled` and a TS-family `record.format` (HEVC recordings carry no
+audio track). Settable via the config file or the runtime API
+(`/api/v1/set?outgoing.audioPort=-1`).
 
 #### FPV
 

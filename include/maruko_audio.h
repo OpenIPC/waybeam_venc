@@ -57,6 +57,7 @@ typedef struct {
 	int             verbose;
 	AudioRing       cap_ring;            /* owned bridge cap → encode */
 	AudioRing      *rec_ring;            /* TS recorder (NULL when off) */
+	int             stream_disabled;     /* audio_port < 0: record only, no send */
 	AudioCodecOpus  opus;
 } MarukoAudioState;
 

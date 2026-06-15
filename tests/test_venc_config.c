@@ -728,6 +728,47 @@ static int test_audio_config(void)
 	return failures;
 }
 
+static int test_audio_port_record_only(void)
+{
+	int failures = 0;
+	const char *json =
+		"{ \"outgoing\": { \"audioPort\": -1 } }";
+
+	char *path = write_temp_json(json);
+	CHECK("audio_ro_tmpfile", path != NULL);
+	if (!path) return failures;
+
+	VencConfig cfg;
+	venc_config_defaults(&cfg);
+	int ret = venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+
+	CHECK("audio_ro_load_ok", ret == 0);
+	/* -1 must survive (not wrap to 65535) so the runtime can route it to
+	 * the record-only path. */
+	CHECK("audio_ro_neg", cfg.outgoing.audio_port == -1);
+
+	/* Round-trip: render to JSON and reload, value preserved (not wrapped). */
+	char *rendered = venc_config_to_json_string(&cfg);
+	CHECK("audio_ro_render_ok", rendered != NULL);
+	if (rendered) {
+		char *path2 = write_temp_json(rendered);
+		free(rendered);
+		if (path2) {
+			VencConfig cfg2;
+			venc_config_defaults(&cfg2);
+			ret = venc_config_load(path2, &cfg2);
+			unlink(path2);
+			free(path2);
+			CHECK("audio_ro_reload_ok", ret == 0);
+			CHECK("audio_ro_roundtrip", cfg2.outgoing.audio_port == -1);
+		}
+	}
+
+	return failures;
+}
+
 static int test_audio_volume_clamping(void)
 {
 	int failures = 0;
@@ -1010,6 +1051,7 @@ int test_venc_config(void)
 	failures += test_audio_volume_clamping();
 	failures += test_audio_channel_clamping();
 	failures += test_audio_roundtrip();
+	failures += test_audio_port_record_only();
 	failures += test_save_layout_byte_equal();
 	failures += test_save_layout_populated_round_trip();
 	failures += test_resilience_preset_expansion();

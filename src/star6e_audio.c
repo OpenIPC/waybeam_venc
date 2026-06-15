@@ -233,9 +233,10 @@ static void *star6e_audio_encode_fn(void *arg)
 				if (state->rec_ring)
 					audio_ring_push(state->rec_ring, enc_buf,
 						(uint16_t)encoded, ts_us);
-				(void)star6e_audio_output_send(&state->output,
-					enc_buf, (size_t)encoded,
-					&state->rtp, state->rtp_frame_ticks);
+				if (!state->stream_disabled)
+					(void)star6e_audio_output_send(&state->output,
+						enc_buf, (size_t)encoded,
+						&state->rtp, state->rtp_frame_ticks);
 				off += chunk_bytes;
 				ts_us += chunk_us;
 			}
@@ -264,7 +265,7 @@ static void *star6e_audio_encode_fn(void *arg)
 			len  = pairs * 2;
 		}
 
-		if (len > 0)
+		if (len > 0 && !state->stream_disabled)
 			(void)star6e_audio_output_send(&state->output, data, len,
 				&state->rtp, state->rtp_frame_ticks);
 	}
@@ -345,9 +346,16 @@ static int start_ai_capture(Star6eAudioState *state, const VencConfig *vcfg)
 static int start_audio_output_and_thread(Star6eAudioState *state,
 	const Star6eOutput *output, const VencConfig *vcfg)
 {
-	if (star6e_audio_output_init(&state->output, output,
-	    vcfg->outgoing.audio_port, vcfg->outgoing.max_payload_size) != 0)
+	state->stream_disabled = (vcfg->outgoing.audio_port < 0);
+	if (state->stream_disabled) {
+		/* Record-only: capture+encode thread still runs to feed rec_ring,
+		 * but no UDP output socket is created and no packets are sent. */
+		star6e_audio_output_reset(&state->output);
+	} else if (star6e_audio_output_init(&state->output, output,
+	    (uint16_t)vcfg->outgoing.audio_port,
+	    vcfg->outgoing.max_payload_size) != 0) {
 		return -1;
+	}
 
 	if (star6e_output_is_rtp(output)) {
 		state->rtp.seq = (uint16_t)(rand() & 0xFFFF);
@@ -383,7 +391,8 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 		state->rtp_frame_ticks = 0;
 	}
 
-	if (output->transport == VENC_OUTPUT_URI_UDP &&
+	if (!state->stream_disabled &&
+	    output->transport == VENC_OUTPUT_URI_UDP &&
 	    star6e_audio_output_port(&state->output) == 0)
 		fprintf(stderr, "[audio] WARNING: audio output has no destination port\n");
 
@@ -495,7 +504,10 @@ int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 
 	if (state->verbose) {
 		uint16_t port = star6e_audio_output_port(&state->output);
-		if (port != 0) {
+		if (state->stream_disabled) {
+			printf("[audio] Initialized: %s @ %u Hz, %u ch, record-only (no stream)\n",
+				vcfg->audio.codec, state->sample_rate, state->channels);
+		} else if (port != 0) {
 			printf("[audio] Initialized: %s @ %u Hz, %u ch, port %u\n",
 				vcfg->audio.codec, state->sample_rate, state->channels,
 				port);

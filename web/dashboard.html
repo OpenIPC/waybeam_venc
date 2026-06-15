@@ -628,7 +628,7 @@ const TOOLTIPS = {
 
 'outgoing.connectedUdp':'Use connected UDP socket for lower kernel overhead. Default: on. Requires restart',
 
-'outgoing.audioPort':'UDP port for audio stream. Default: 5601. Requires restart',
+'outgoing.audioPort':'Audio UDP port. >0 = dedicated port; 0 = share video socket; <0 (e.g. -1) = record-only (capture+record, never streamed). Default: 5601. Requires restart',
 
 'outgoing.sidecarPort':'UDP port for sidecar metadata. Default: 5602. Requires restart',
 
