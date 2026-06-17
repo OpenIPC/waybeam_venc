@@ -50,6 +50,12 @@
     "audioPort": 5601,
     "sidecarPort": 5602
   },
+  "discovery": {
+    "enabled": true,
+    "serviceType": "_waybeam-venc._tcp",
+    "name": "",
+    "bareAlias": true
+  },
   "fpv": {
     "roiEnabled": true,
     "roiQp": 0,

@@ -197,6 +197,13 @@ typedef struct {
 } VencConfigOutgoing;
 
 typedef struct {
+	bool enabled;                              /* mDNS device beacon on/off */
+	char service_type[VENC_CONFIG_STRING_MAX]; /* "_waybeam-venc._tcp"      */
+	char name[VENC_CONFIG_STRING_MAX];         /* instance label; "" = host */
+	bool bare_alias;                           /* also claim waybeam.local  */
+} VencConfigDiscovery;
+
+typedef struct {
 	bool roi_enabled;
 	int roi_qp;            /* signed ROI delta QP, -30..30 */
 	uint16_t roi_steps;    /* 1..4 horizontal band regions */
@@ -249,6 +256,7 @@ typedef struct {
 	VencConfigImage image;
 	VencConfigVideo video0;
 	VencConfigOutgoing outgoing;
+	VencConfigDiscovery discovery;
 	VencConfigFpv fpv;
 	VencConfigAudio audio;
 	VencConfigImu imu;

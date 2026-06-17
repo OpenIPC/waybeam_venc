@@ -1,5 +1,28 @@
 # History
 
+## [0.18.0] - 2026-06-17
+
+Add an mDNS/DNS-SD device beacon so the encoder is discoverable on the LAN
+with no configuration.
+
+**`_waybeam-venc._tcp` service announce.** A lightweight responder (own thread,
+UDP 5353 multicast) advertises PTR/SRV/TXT/A for the encoder. TXT carries only
+`proto` and `version`; stable endpoints/identity are fetched via
+`GET /api/v1/config`. Controlled by a new `discovery` config block
+(`enabled`, `serviceType`, `name`, `bareAlias`; default on).
+
+**Serial-suffix instance naming + `device.serial`.** The announced instance/host
+name is suffixed with the last 6 hex of the SoC die ID; the full die ID is
+exposed read-only as `device.serial` in `GET /api/v1/config`. Falls back
+gracefully on parts without a readable die ID.
+
+**Bare `waybeam.local` alias** (default on) with RFC 6762 §8.2 conflict
+resolution (highest-IP tiebreak; suppression sticky until restart).
+
+The wire codec (`mdns_wire.c`) is bounds-checked against malformed/truncated
+inbound packets (compression-pointer loop cap, per-field length guards).
+DNS-SD helpers adapted from the OpenIPC herald implementation.
+
 ## [0.17.1] - 2026-06-13
 
 Fix dual-record mode never engaging under runtime control — the SD-card

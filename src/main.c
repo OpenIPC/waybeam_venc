@@ -6,6 +6,8 @@
 #include <unistd.h>
 
 #include "backend.h"
+#include "mdns_beacon.h"
+#include "venc_config.h"
 #include "venc_respawn.h"
 
 /* Single-instance gate.  We walk /proc and reject startup if any
@@ -113,7 +115,19 @@ int main(int argc, char* argv[])
 	}
 
 	printf("> SoC backend build: %s\n", backend->name);
+
+	/* mDNS device beacon — announce-only, self-contained thread.  Makes
+	 * the encoder discoverable as _waybeam-venc._tcp independent of the
+	 * optional waybeam-hub.  Inert if discovery is disabled in the config
+	 * or no usable interface exists; never blocks the encode path. */
+	MdnsBeacon beacon;
+	mdns_beacon_start_from_config(&beacon, VENC_CONFIG_DEFAULT_PATH);
+
 	int rc = backend_execute(backend);
+
+	/* Multicast a goodbye and tear down before any SIGHUP-respawn exec so
+	 * peers see the device leave; the successor re-announces on boot. */
+	mdns_beacon_stop(&beacon);
 
 	/* SIGHUP / /api/v1/restart / resilience ref_* delta exits cleanly
 	 * here and forks a successor process for a true cold restart.
