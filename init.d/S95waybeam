@@ -37,6 +37,16 @@ ensure_apfpv_udp_output() {
             fi
             ;;
     esac
+    # Unconnected UDP for the subscribe topology. A connect()ed socket gets
+    # ICMP-poisoned and wedges to 0 bytes (config still looks healthy) when the
+    # subscribe target goes unreachable — e.g. the ground/phone's DHCP lease
+    # churns to a new IP. An unconnected sendto() keeps emitting, so a
+    # re-subscribe recovers the stream without a venc restart.
+    if [ "$(json_cli -g .outgoing.connectedUdp -i /etc/waybeam.json 2>/dev/null)" != "false" ]; then
+        if json_cli -s .outgoing.connectedUdp false -i /etc/waybeam.json; then
+            echo "apfpv: venc outgoing.connectedUdp -> false (unconnected UDP)"
+        fi
+    fi
 }
 
 wait_exit() {
