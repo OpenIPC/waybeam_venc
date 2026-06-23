@@ -5,6 +5,20 @@
  * OpenIPC herald (MIT license), the compact mDNS/DNS-SD stack for the
  * OpenIPC project:
  *   https://github.com/OpenIPC/firmware/tree/master/general/package/herald
+ *
+ * Wire format matches herald exactly (record order PTR/SRV/TXT/A, cache-flush
+ * classes, name compression, TTL=0 goodbye) so the two interoperate.  The
+ * intentional divergences below are policy, not drift:
+ *   - Short record TTL (120 s) + 60 s proactive refresh, vs herald's 4500 s
+ *     reactive-only model.  The camera's IP churns on DHCP and some consumers
+ *     listen passively rather than query, so a fresh, frequently-reasserted
+ *     record propagates address changes without a client round-trip.
+ *   - No probing (RFC 6762 §8.1) for the primary name: it is derived from the
+ *     SoC die ID (waybeam-<serial tail>) and is collision-free by construction.
+ *     The bare "waybeam.local" alias, which CAN collide, still does §8.2
+ *     conflict resolution (herald has no equivalent convenience alias).
+ * Alignments brought back toward herald: IP multicast TTL 255 (RFC 6762 §11)
+ * and 20-119 ms response jitter (§6).
  */
 
 #include "mdns_beacon.h"
@@ -247,7 +261,11 @@ static int beacon_open_socket(MdnsBeacon *b)
 		return -1;
 	}
 
-	uint8_t mc_ttl = 1;
+	/* RFC 6762 §11 mandates an IP multicast TTL of 255 (matching herald) so
+	 * receivers can verify the packet originated on the local link; strict
+	 * mDNS stacks drop TTL != 255.  The 224.0.0.251 group is link-local
+	 * regardless, so this does not widen propagation. */
+	uint8_t mc_ttl = 255;
 	setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &mc_ttl, sizeof(mc_ttl));
 	uint8_t mc_loop = 0;
 	setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, &mc_loop, sizeof(mc_loop));
@@ -414,6 +432,7 @@ static void *beacon_thread(void *arg)
 	int announce_sent = 0;
 	uint64_t next_ms = now_ms();
 	uint8_t rx[MDNS_BEACON_BUF_SIZE];
+	unsigned int rng = (unsigned int)(now_ms() + (uint64_t)b->fd);
 
 	while (!b->stop) {
 		struct pollfd pfd = { .fd = b->fd, .events = POLLIN, .revents = 0 };
@@ -432,6 +451,7 @@ static void *beacon_thread(void *arg)
 		}
 
 		if (pr > 0 && (pfd.revents & POLLIN)) {
+			bool answer_query = false;
 			for (int drain = 0; drain < 8; drain++) {
 				struct sockaddr_in from;
 				socklen_t flen = sizeof(from);
@@ -480,7 +500,16 @@ static void *beacon_thread(void *arg)
 				}
 
 				if (beacon_should_respond(b, rx, (int)n))
-					beacon_send(b, b->response_buf, b->response_len);
+					answer_query = true;
+			}
+
+			/* RFC 6762 §6 / herald: jitter 20-119 ms before answering a
+			 * query to avoid answer storms, and coalesce every query drained
+			 * this cycle into a single response.  Proactive announces and the
+			 * alias-defense re-assert above stay prompt (unjittered). */
+			if (answer_query) {
+				usleep((useconds_t)((20 + (rand_r(&rng) % 100)) * 1000));
+				beacon_send(b, b->response_buf, b->response_len);
 			}
 		}
 	}
