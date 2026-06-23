@@ -1,4 +1,5 @@
 #include "venc_api.h"
+#include "device_id.h"
 #include "idr_rate_limit.h"
 #include "intra_refresh.h"
 #include "pipeline_common.h"
@@ -2133,15 +2134,22 @@ static int handle_config(int fd, const HttpRequest *req, void *ctx)
 		runtime[0] = '\0';
 	}
 
+	/* Stable device identity (SoC die ID) — the fleet key consumers read
+	 * after discovering the mDNS beacon.  Empty string when the SoC exposes
+	 * no die ID (e.g. ssc37x / Maruko). */
+	char device[64];
+	snprintf(device, sizeof(device), ",\"device\":{\"serial\":\"%s\"}",
+		device_id_serial_cached());
+
 	/* Wrap in envelope */
-	size_t len = strlen(cfg_json) + strlen(runtime) + 64;
+	size_t len = strlen(cfg_json) + strlen(runtime) + strlen(device) + 64;
 	char *buf = malloc(len);
 	if (!buf) {
 		free(cfg_json);
 		return httpd_send_error(fd, 500, "internal_error", "out of memory");
 	}
-	snprintf(buf, len, "{\"ok\":true,\"data\":{\"config\":%s%s}}",
-		cfg_json, runtime);
+	snprintf(buf, len, "{\"ok\":true,\"data\":{\"config\":%s%s%s}}",
+		cfg_json, runtime, device);
 	int ret = httpd_send_json(fd, 200, buf);
 	free(buf);
 	free(cfg_json);
