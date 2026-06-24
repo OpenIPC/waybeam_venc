@@ -1,5 +1,23 @@
 # History
 
+## [0.18.1] - 2026-06-24
+
+Expose the mDNS `discovery` config section through the HTTP API and WebUI. The
+fields shipped in 0.18.0 (`discovery.enabled`, `discovery.serviceType`,
+`discovery.name`, `discovery.bareAlias`) were wired into the config
+loader/serializer but never registered in the API field table, so they were
+reachable only by hand-editing `/etc/waybeam.json` — invisible to
+`/api/v1/set`, `/api/v1/capabilities`, and the dashboard.
+
+- Register the four discovery fields in `g_fields[]` (all `restart_required`:
+  the beacon reads config at boot / re-reads on SIGHUP-respawn, with no live
+  re-announce path), plus camelCase aliases for `serviceType`/`bareAlias`.
+- Add a **Discovery** section to the WebUI settings, with per-field tooltips
+  (`web/dashboard.html`; `src/venc_webui.c` regenerated).
+
+No protocol or beacon behavior change — purely makes the existing discovery
+config settable at runtime and visible to operators.
+
 ## [0.18.0] - 2026-06-17
 
 Add an mDNS/DNS-SD device beacon so the encoder is discoverable on the LAN

@@ -154,6 +154,10 @@ Response `200`:
       "outgoing.server": { "mutability": "live", "supported": true },
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
       "outgoing.connected_udp": { "mutability": "restart_required", "supported": true },
+      "discovery.enabled": { "mutability": "restart_required", "supported": true },
+      "discovery.service_type": { "mutability": "restart_required", "supported": true },
+      "discovery.name": { "mutability": "restart_required", "supported": true },
+      "discovery.bare_alias": { "mutability": "restart_required", "supported": true },
       "fpv.roi_qp": { "mutability": "live", "supported": true },
       "video0.stab_crop_pct": {
         "mutability": "restart_required", "supported": true,
