@@ -632,6 +632,11 @@ const TOOLTIPS = {
 
 'outgoing.sidecarPort':'UDP port for sidecar metadata. Default: 5602. Requires restart',
 
+'discovery.enabled':'Announce this encoder as an mDNS service (_waybeam-venc._tcp) so ground/Android clients discover it with no waybeam-hub. Default: on. Requires restart',
+'discovery.serviceType':'mDNS service type advertised on the LAN. Default: _waybeam-venc._tcp — leave as-is unless you know why. Requires restart',
+'discovery.name':'mDNS instance label (the friendly name shown to clients). Empty = derive from the system hostname. Requires restart',
+'discovery.bareAlias':'Also claim the bare waybeam.local hostname (with conflict resolution) for one-name access. Default: on. Requires restart',
+
 'audio.mute':'Mute audio capture. Applied live. No-op if audio not active',
 
 'fpv.roiEnabled':'Enable ROI (Region of Interest) \u2014 allocate more bits to center of frame. Applied live',
@@ -710,6 +715,7 @@ const SECTIONS = [
 {id:'image',title:'Image',keys:['image.mirror','image.flip','image.rotate']},
 {id:'video0',title:'Video',keys:['video0.rcMode','video0.fps','video0.size','video0.bitrate','video0.gopSize','video0.qpDelta','video0.frameLost','video0.sceneThreshold','video0.sceneHoldoff','video0.resilience','video0.zoomX','video0.zoomY','video0.framing']},
 {id:'outgoing',title:'Outgoing',keys:['outgoing.enabled','outgoing.server','outgoing.streamMode','outgoing.maxPayloadSize','outgoing.connectedUdp','outgoing.audioPort','outgoing.sidecarPort']},
+{id:'discovery',title:'Discovery',keys:['discovery.enabled','discovery.serviceType','discovery.name','discovery.bareAlias']},
 {id:'audio',title:'Audio',keys:['audio.enabled','audio.codec','audio.sampleRate','audio.channels','audio.volume','audio.mute']},
 {id:'fpv',title:'FPV',keys:['fpv.roiEnabled','fpv.roiQp','fpv.roiSteps','fpv.roiCenter','fpv.noiseLevel']},
 {id:'imu',title:'IMU',keys:['imu.enabled','imu.i2cDevice','imu.i2cAddr','imu.sampleRateHz','imu.gyroRangeDps','imu.calFile','imu.calSamples']},

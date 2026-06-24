@@ -404,6 +404,13 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, audio_port,        FT_INT,    MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
 
+	/* mDNS device beacon — read at boot / re-read on SIGHUP-respawn, so
+	 * all restart-required (no live re-announce path). */
+	FIELD(discovery, enabled,      FT_BOOL,   MUT_RESTART),
+	FIELD(discovery, service_type, FT_STRING, MUT_RESTART),
+	FIELD(discovery, name,         FT_STRING, MUT_RESTART),
+	FIELD(discovery, bare_alias,   FT_BOOL,   MUT_RESTART),
+
 	FIELD(isp, ae_engine,      FT_STRING, MUT_RESTART),
 	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
 	FIELD(isp, keep_aspect,    FT_BOOL,   MUT_RESTART),
@@ -534,6 +541,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
+	{ "discovery.serviceType", "discovery.service_type" },
+	{ "discovery.bareAlias", "discovery.bare_alias" },
 	{ "debug.showOsd", "debug.show_osd" },
 };
 
