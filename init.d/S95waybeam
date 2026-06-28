@@ -47,6 +47,18 @@ ensure_apfpv_udp_output() {
             echo "apfpv: venc outgoing.connectedUdp -> false (unconnected UDP)"
         fi
     fi
+    # Clamp RTP payload to the wifi-safe 1400. wfb-ng is a special case: its
+    # link_controller sizes venc outgoing.maxPayloadSize up the bitrate tiers
+    # (to ~3200, carried by the 4052 monitor-mode MTU) and persists it into
+    # /etc/waybeam.json. On a plain apfpv wifi link those oversized payloads
+    # fragment / overflow and wedge weaker adapters, so reset to 1400 here.
+    # wfb mode (wfbmode=1) returns early above, leaving link_controller free to
+    # re-size it live.
+    if [ "$(json_cli -g .outgoing.maxPayloadSize -i /etc/waybeam.json 2>/dev/null)" != "1400" ]; then
+        if json_cli -s .outgoing.maxPayloadSize 1400 -i /etc/waybeam.json; then
+            echo "apfpv: venc outgoing.maxPayloadSize -> 1400 (wifi-safe)"
+        fi
+    fi
 }
 
 wait_exit() {
