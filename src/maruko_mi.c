@@ -257,10 +257,6 @@ static int i6c_venc_load(maruko_venc_impl *venc)
 		int (*)(int, int, void *), "MI_VENC_SetRcParam");
 	LOAD_SYM(venc, "libmi_venc.so", fnSetInputSourceConfig,
 		int (*)(int, int, void *), "MI_VENC_SetInputSourceConfig");
-	LOAD_SYM(venc, "libmi_venc.so", fnSetFrameLostStrategy,
-		int (*)(int, int, void *), "MI_VENC_SetFrameLostStrategy");
-	LOAD_SYM(venc, "libmi_venc.so", fnGetFrameLostStrategy,
-		int (*)(int, int, void *), "MI_VENC_GetFrameLostStrategy");
 	/* IntraRefresh is optional — older Maruko drops may lack the symbol.
 	 * Loader does not fail if dlsym misses; callers must NULL-check. */
 	LOAD_SYM(venc, "libmi_venc.so", fnSetIntraRefresh,
@@ -280,8 +276,7 @@ static int i6c_venc_load(maruko_venc_impl *venc)
 	    !venc->fnGetChnAttr || !venc->fnSetChnAttr ||
 	    !venc->fnRequestIdr || !venc->fnSetRoiCfg ||
 	    !venc->fnGetRoiCfg || !venc->fnGetRcParam ||
-	    !venc->fnSetRcParam || !venc->fnSetInputSourceConfig ||
-	    !venc->fnSetFrameLostStrategy || !venc->fnGetFrameLostStrategy) {
+	    !venc->fnSetRcParam || !venc->fnSetInputSourceConfig) {
 		dlclose(venc->handle);
 		memset(venc, 0, sizeof(*venc));
 		return -1;

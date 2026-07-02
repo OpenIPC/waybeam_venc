@@ -134,7 +134,7 @@ void venc_api_get_record_dir(char *buf, size_t buf_size);
  * the dual endpoints.  Call venc_api_dual_unregister() on
  * pipeline stop to disable them. */
 void venc_api_dual_register(int channel, uint32_t bitrate, uint32_t fps,
-	uint32_t gop, bool frame_lost);
+	uint32_t gop);
 void venc_api_dual_unregister(void);
 
 /* Sensor info — set by backend after sensor_select() to expose via /api/v1/modes. */

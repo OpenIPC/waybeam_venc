@@ -118,7 +118,6 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->oc_level = vcfg->system.overclock_level;
 	cfg->scene_threshold = vcfg->video0.scene_threshold;
 	cfg->scene_holdoff = vcfg->video0.scene_holdoff;
-	cfg->frame_lost = vcfg->video0.frame_lost ? 1 : 0;
 	snprintf(cfg->intra_refresh_mode, sizeof(cfg->intra_refresh_mode), "%s",
 		vcfg->video0.intra_refresh_mode);
 	cfg->intra_refresh_lines = vcfg->video0.intra_refresh_lines;
@@ -161,7 +160,6 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->record.gop_size = vcfg->record.gop_size;
 	cfg->record.max_seconds = vcfg->record.max_seconds;
 	cfg->record.max_mb = vcfg->record.max_mb;
-	cfg->record.frame_lost = vcfg->video0.frame_lost ? 1 : 0;
 
 	cfg->snapshot = vcfg->snapshot;
 

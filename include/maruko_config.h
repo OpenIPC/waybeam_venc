@@ -29,7 +29,6 @@ typedef struct {
 	double gop_size;        /* chn 1 GOP in seconds, 0 = match chn 0 */
 	uint32_t max_seconds;   /* segment rotation, 0 = no time limit */
 	uint32_t max_mb;        /* segment rotation, 0 = no size limit */
-	int frame_lost;         /* mirror video0.frame_lost on chn 1 */
 } MarukoBackendConfigRecord;
 
 typedef struct {
@@ -59,7 +58,6 @@ typedef struct {
 	int oc_level;
 	uint16_t scene_threshold;
 	uint8_t scene_holdoff;
-	uint8_t frame_lost;
 	/* IntraRefresh (GDR-style rolling stripe) — applied to ch0 after
 	 * StartRecvPic.  Mirror of VencConfig::video0.intra_refresh_{mode,lines,qp}.
 	 * Mode is parsed in pipeline; carry the raw string for traceability. */

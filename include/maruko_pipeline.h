@@ -115,7 +115,7 @@ void maruko_pipeline_install_signal_handlers(void);
  *  only — non-fatal degradation. */
 int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
   uint32_t bitrate, uint32_t fps, double gop_sec,
-  const char *mode, const char *server, int frame_lost);
+  const char *mode, const char *server);
 
 /** Tear down the secondary VENC channel if active.  Safe to call when
  *  ctx->dual is NULL (no-op). */

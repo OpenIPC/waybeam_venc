@@ -201,6 +201,10 @@ static int maruko_apply_bitrate(uint32_t kbps)
 	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
 	    g_ctx.venc_chn, &attr) != 0)
 		return -1;
+	if (kbps > VENC_BITRATE_MAX_KBPS)
+		kbps = VENC_BITRATE_MAX_KBPS;
+	if (kbps < VENC_BITRATE_MIN_KBPS)
+		kbps = VENC_BITRATE_MIN_KBPS;
 	unsigned int bits = kbps * 1024;
 	switch (attr.rate.mode) {
 	case MARUKO_VENC_RC_H265_CBR:

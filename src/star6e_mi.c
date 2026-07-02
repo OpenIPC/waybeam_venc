@@ -287,10 +287,6 @@ static int i6e_venc_load(star6e_venc_impl *venc)
 		int (*)(int, void *), "MI_VENC_GetRcParam");
 	LOAD_SYM(venc, "libmi_venc.so", fnSetRcParam,
 		int (*)(int, void *), "MI_VENC_SetRcParam");
-	LOAD_SYM(venc, "libmi_venc.so", fnSetFrameLostStrategy,
-		int (*)(int, void *), "MI_VENC_SetFrameLostStrategy");
-	LOAD_SYM(venc, "libmi_venc.so", fnGetFrameLostStrategy,
-		int (*)(int, void *), "MI_VENC_GetFrameLostStrategy");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetChnDevid,
 		int (*)(int, uint32_t *), "MI_VENC_GetChnDevid");
 	/* Optional — older libmi_venc.so may not export these. */
@@ -310,8 +306,7 @@ static int i6e_venc_load(star6e_venc_impl *venc)
 	    !venc->fnGetChnAttr || !venc->fnSetChnAttr ||
 	    !venc->fnRequestIdr || !venc->fnSetRoiCfg ||
 	    !venc->fnGetRoiCfg || !venc->fnGetRcParam ||
-	    !venc->fnSetRcParam || !venc->fnSetFrameLostStrategy ||
-	    !venc->fnGetFrameLostStrategy || !venc->fnGetChnDevid) {
+	    !venc->fnSetRcParam || !venc->fnGetChnDevid) {
 		dlclose(venc->handle);
 		memset(venc, 0, sizeof(*venc));
 		return -1;

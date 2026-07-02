@@ -127,8 +127,6 @@ typedef struct {
 	int (*fnGetRcParam)(int dev, int chn, void *param);
 	int (*fnSetRcParam)(int dev, int chn, void *param);
 	int (*fnSetInputSourceConfig)(int dev, int chn, void *cfg);
-	int (*fnSetFrameLostStrategy)(int dev, int chn, void *strategy);
-	int (*fnGetFrameLostStrategy)(int dev, int chn, void *strategy);
 	/* Optional — Maruko SDK exports these but older drops may not.
 	 * Code paths must NULL-check before invoking. */
 	int (*fnSetIntraRefresh)(int dev, int chn, void *cfg);

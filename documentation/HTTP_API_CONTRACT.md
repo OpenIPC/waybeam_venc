@@ -16,7 +16,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.10.1`
+- `contract_version`: `0.11.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -78,7 +78,7 @@ Response `200`:
   "ok": true,
   "data": {
     "app_version": "0.1.7",
-    "contract_version": "0.10.1",
+    "contract_version": "0.11.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -103,7 +103,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1 },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "frameLost": true, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
+      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -1315,7 +1315,7 @@ Behavior:
 ### Backend Support Matrix
 
 Endpoints that behave the same on both backends are omitted.  Only feature
-divergence is listed.  As of `contract_version: 0.10.1`:
+divergence is listed.  As of `contract_version: 0.11.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1336,6 +1336,16 @@ divergence is listed.  As of `contract_version: 0.10.1`:
 | `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
 
 ## Change Log (Contract)
+- `0.11.0` (breaking — field removed):
+  - Removed `video0.frameLost` (and its `frame_lost` canonical / alias). The
+    SDK VENC frame-lost strategy it drove is gone: on Star6E (i6e) it never
+    fired as a bandwidth throttle — device tests showed a threshold set to ⅛ of
+    the CBR target dropped zero frames — and the `pskip` variant returns
+    `E_MI_ERR_NOT_SUPPORT`.  It only ever acted as an I-frame overshoot guard
+    that the CBR rate controller already covers.  Bandwidth backpressure is
+    driven by `video0.bitrate` (smooth) and `video0.fps` (temporal); a client
+    that still sends `video0.frameLost`/`frameLostMode`/`frameLostThreshold`/
+    `frameLostGap` now gets an unknown-field error instead of a silent accept.
 - `0.10.1` (additive, no version bump):
   - Re-exposed `video0.stab_crop_pct` + `video0.stab_recenter_speed`
     (aliases `stabCropPct`/`stabRecenterSpeed`, both `restart_required`) as
