@@ -28,7 +28,6 @@ BASE_VIDEO0_FPS=""
 BASE_VIDEO0_GOP_SIZE=""
 BASE_VIDEO0_QP_DELTA=""
 BASE_VIDEO0_RC_MODE=""
-BASE_VIDEO0_FRAME_LOST=""
 BASE_ISP_EXPOSURE=""
 BASE_ISP_AWB_MODE=""
 BASE_ISP_AWB_CT=""
@@ -161,7 +160,6 @@ capture_baseline() {
 	snapshot_field BASE_VIDEO0_GOP_SIZE video0.gop_size
 	snapshot_field BASE_VIDEO0_QP_DELTA video0.qp_delta
 	snapshot_field BASE_VIDEO0_RC_MODE video0.rc_mode
-	snapshot_field BASE_VIDEO0_FRAME_LOST video0.frame_lost
 	snapshot_field BASE_ISP_EXPOSURE isp.exposure
 	snapshot_field BASE_ISP_AWB_MODE isp.awb_mode
 	snapshot_field BASE_ISP_AWB_CT isp.awb_ct
@@ -527,7 +525,6 @@ assert_get "video0.size" size
 assert_get "video0.bitrate" uint
 assert_get "video0.gop_size" double
 assert_get "video0.qp_delta" int
-assert_get "video0.frame_lost" bool
 assert_get "video0.resilience" string
 # Outgoing
 assert_get "outgoing.enabled" bool
@@ -870,7 +867,7 @@ section "19. RESTART-REQUIRED FIELDS (verify reinit_pending)"
 
 # These fields should return reinit_pending=true but we do NOT trigger
 # a restart here — that would tear down the pipeline. Just verify the flag.
-for field_val in "video0.rc_mode=cbr" "video0.frame_lost=true" \
+for field_val in "video0.rc_mode=cbr" \
                  "outgoing.stream_mode=rtp" "outgoing.max_payload_size=1400"; do
 	field="${field_val%%=*}"
 	value="${field_val#*=}"
@@ -888,7 +885,6 @@ for field_val in "video0.rc_mode=cbr" "video0.frame_lost=true" \
 done
 
 assert_set "video0.rc_mode" "${BASE_VIDEO0_RC_MODE}" "RESTORE video0.rc_mode=${BASE_VIDEO0_RC_MODE}"
-assert_set "video0.frame_lost" "${BASE_VIDEO0_FRAME_LOST}" "RESTORE video0.frame_lost=${BASE_VIDEO0_FRAME_LOST}"
 assert_set "outgoing.stream_mode" "${BASE_OUTGOING_STREAM_MODE}" "RESTORE outgoing.stream_mode=${BASE_OUTGOING_STREAM_MODE}"
 assert_set "outgoing.max_payload_size" "${BASE_OUTGOING_MAX_PAYLOAD_SIZE}" "RESTORE outgoing.max_payload_size=${BASE_OUTGOING_MAX_PAYLOAD_SIZE}"
 

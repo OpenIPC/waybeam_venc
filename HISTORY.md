@@ -1,5 +1,35 @@
 # History
 
+## [0.19.0] - 2026-07-02
+
+Remove the SDK VENC frame-lost strategy entirely — config field, live plumbing,
+and the `MI_VENC_SetFrameLostStrategy` dlopen bindings on both backends.
+
+Device testing on Star6E (SSC338Q i6e, .13) showed the feature never did its
+advertised job: as a bandwidth throttle it is inert — a `frameLostThreshold`
+set to ⅛ of the CBR target dropped **zero** frames over 10 s of steady
+streaming — and the `E_MI_VENC_FRMLOST_PSKIP` placeholder-frame variant is
+rejected by the driver with `E_MI_ERR_NOT_SUPPORT` (declared in the SDK header
+but unimplemented in `libmi_venc`).  In practice it only acted as an I-frame
+overshoot guard, a role the CBR rate controller already fills.  The real
+backpressure levers are `video0.bitrate` (smooth, quality) and `video0.fps`
+(coarse, temporal — a genuine frame-skip via VPE→VENC bind decimation).
+
+- Drop `video0.frameLost` (`frame_lost`) from `VencConfig`, the API field
+  table, aliases, defaults, JSON load/render/serialize, and both default
+  configs.
+- Remove `star6e_controls_apply_frame_lost_threshold`,
+  `pipeline_common_frame_lost_threshold`, the boot/dual frame-lost blocks in
+  both pipelines, and the `frame_lost` params threaded through
+  `*_pipeline_start_dual` / `venc_api_dual_register`.
+- Remove the `MI_VENC_{Set,Get}FrameLostStrategy` bindings, macros, and
+  `MI_VENC_ParamFrameLost_t`/`MI_VENC_FrameLostMode_e` decls from the star6e
+  and maruko SDK shims.
+- Contract `0.10.1` → `0.11.0` (breaking: field removed); in-binary
+  `/api/v1/version` bumped to match.
+- Supersedes the abandoned PR #153 (which had tried to expose the PSKIP mode
+  and make the strategy live-tunable).
+
 ## [0.18.1] - 2026-06-24
 
 Expose the mDNS `discovery` config section through the HTTP API and WebUI. The

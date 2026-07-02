@@ -55,7 +55,7 @@ static int g_api_routes_registered = 0;
  * Hold-time policy: keep this mutex hot — backends register their own
  * VencConfig pointer as g_cfg (e.g. &ctx->vcfg), and apply_*
  * callbacks may read additional vcfg fields beyond the value they were
- * passed (apply_bitrate reads vcfg->video0.frame_lost, etc.).  So
+ * passed.  So
  * apply_live_group_for_cfg() commits the staged value to g_cfg before
  * each callback, and the mutex must remain held across the whole
  * apply sequence to keep that commit + read pair coherent.  The
@@ -395,7 +395,6 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, bitrate,         FT_UINT,   MUT_LIVE),
 	FIELD(video0, gop_size,        FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
-	FIELD(video0, frame_lost,      FT_BOOL,   MUT_RESTART),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
 	FIELD(outgoing, server,            FT_STRING, MUT_LIVE),
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
@@ -508,7 +507,6 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.rcMode", "video0.rc_mode" },
 	{ "video0.gopSize", "video0.gop_size" },
 	{ "video0.qpDelta", "video0.qp_delta" },
-	{ "video0.frameLost", "video0.frame_lost" },
 	{ "outgoing.maxPayloadSize", "outgoing.max_payload_size" },
 	{ "outgoing.audioPort", "outgoing.audio_port" },
 	{ "fpv.roiEnabled", "fpv.roi_enabled" },
@@ -2112,7 +2110,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.10.1\","
+		"\"contract_version\":\"0.11.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2635,7 +2633,6 @@ static struct {
 	uint32_t bitrate;   /* current kbps (may differ from config after adaptive) */
 	uint32_t fps;
 	uint32_t gop;
-	bool frame_lost;
 } g_dual;
 
 /* Mutex protecting g_dual field access from the httpd thread.
@@ -2646,14 +2643,13 @@ static struct {
 static pthread_mutex_t g_dual_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void venc_api_dual_register(int channel, uint32_t bitrate, uint32_t fps,
-	uint32_t gop, bool frame_lost)
+	uint32_t gop)
 {
 	pthread_mutex_lock(&g_dual_mutex);
 	g_dual.channel = (MI_VENC_CHN)channel;
 	g_dual.bitrate = bitrate;
 	g_dual.fps = fps;
 	g_dual.gop = gop;
-	g_dual.frame_lost = frame_lost;
 	g_dual.active = 1;
 	pthread_mutex_unlock(&g_dual_mutex);
 }
@@ -2707,8 +2703,10 @@ static int dual_apply_bitrate(uint32_t kbps)
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bits;
 
-	if (kbps > 200000)
-		kbps = 200000;
+	if (kbps > VENC_BITRATE_MAX_KBPS)
+		kbps = VENC_BITRATE_MAX_KBPS;
+	if (kbps < VENC_BITRATE_MIN_KBPS)
+		kbps = VENC_BITRATE_MIN_KBPS;
 	bits = kbps * 1024;
 
 	if (MI_VENC_GetChnAttr(g_dual.channel, &attr) != 0)
@@ -2733,11 +2731,6 @@ static int dual_apply_bitrate(uint32_t kbps)
 
 	if (MI_VENC_SetChnAttr(g_dual.channel, &attr) != 0)
 		return -1;
-#if HAVE_BACKEND_STAR6E
-	if (star6e_controls_apply_frame_lost_threshold(g_dual.channel,
-	    g_dual.frame_lost, kbps) != 0)
-		return -1;
-#endif
 	g_dual.bitrate = kbps;
 	return 0;
 }

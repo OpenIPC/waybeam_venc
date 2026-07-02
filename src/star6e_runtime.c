@@ -651,8 +651,7 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		star6e_pipeline_start_dual(ps,
 			vcfg->record.bitrate, vcfg->record.fps,
 			vcfg->record.gop_size, vcfg->record.mode,
-			vcfg->record.server[0] ? vcfg->record.server : "",
-			vcfg->video0.frame_lost);
+			vcfg->record.server[0] ? vcfg->record.server : "");
 
 		/* For dual-stream: init second RTP output */
 		if (ps->dual && strcmp(vcfg->record.mode, "dual-stream") == 0 &&
@@ -682,7 +681,7 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			dual_rec_thread_start(ps->dual);
 			venc_api_dual_register(ps->dual->channel,
 				ps->dual->bitrate, ps->dual->fps,
-				ps->dual->gop, vcfg->video0.frame_lost);
+				ps->dual->gop);
 		}
 	}
 

@@ -26,6 +26,16 @@ extern "C" {
 #define VENC_OUTPUT_PAYLOAD_CEILING_BYTES 4000
 #define VENC_OUTPUT_PAYLOAD_MIN_BYTES 576
 
+/* Practical VENC bitrate bounds (kbps).  The min floor guards against
+ * impractically low targets the encoder can't honor — below ~1 Mbit/s the
+ * H.26x stream collapses (decoder drops SVC-T, RC oscillates).  Enforced as a
+ * clamp (not a /set reject, so adaptive-link controllers that push low targets
+ * keep working, just floored) on both the live apply_bitrate() paths and the
+ * boot/reinit pipeline paths, so a persisted sub-floor bitrate can't birth the
+ * encoder collapsed. */
+#define VENC_BITRATE_MIN_KBPS 1000
+#define VENC_BITRATE_MAX_KBPS 200000
+
 /* ── Sub-structs mirroring JSON sections ─────────────────────────────── */
 
 typedef struct {
@@ -92,7 +102,6 @@ typedef struct {
 	uint32_t bitrate;      /* kbps */
 	double gop_size;       /* seconds between keyframes; 0 = all-intra */
 	int qp_delta;              /* relative I/P QP delta, -12..12 */
-	bool frame_lost;           /* enable frame-lost safety net */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
 	/* Derived from `resilience` preset only.  Not part of the JSON

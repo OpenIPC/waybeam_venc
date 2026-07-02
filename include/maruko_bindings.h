@@ -73,10 +73,6 @@ typedef int (*maruko_isp_disable_userspace3a_fn_t)(MI_U32 dev_id, MI_U32 channel
   g_mi_venc.fnSetRcParam((dev), (chn), (param))
 #define maruko_mi_venc_request_idr(dev, chn, inst) \
   g_mi_venc.fnRequestIdr((dev), (chn), (inst))
-#define maruko_mi_venc_set_frame_lost(dev, chn, strat) \
-  g_mi_venc.fnSetFrameLostStrategy((dev), (chn), (strat))
-#define maruko_mi_venc_get_frame_lost(dev, chn, strat) \
-  g_mi_venc.fnGetFrameLostStrategy((dev), (chn), (strat))
 #define maruko_mi_venc_set_intra_refresh(dev, chn, cfg) \
   g_mi_venc.fnSetIntraRefresh((dev), (chn), (cfg))
 #define maruko_mi_venc_get_intra_refresh(dev, chn, cfg) \

@@ -92,8 +92,6 @@ typedef struct {
 	int (*fnGetRoiCfg)(int chn, uint32_t idx, void *cfg);
 	int (*fnGetRcParam)(int chn, void *param);
 	int (*fnSetRcParam)(int chn, void *param);
-	int (*fnSetFrameLostStrategy)(int chn, void *p);
-	int (*fnGetFrameLostStrategy)(int chn, void *p);
 	int (*fnGetChnDevid)(int chn, uint32_t *dev_id);
 	/* Optional — may be NULL on older libmi_venc.so builds. */
 	int (*fnSetIntraRefresh)(int chn, void *cfg);

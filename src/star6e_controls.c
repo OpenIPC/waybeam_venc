@@ -175,34 +175,16 @@ static int apply_rc_qp_delta(const MI_VENC_ChnAttr_t *attr, MI_VENC_RcParam_t *p
 	}
 }
 
-int star6e_controls_apply_frame_lost_threshold(MI_VENC_CHN chn, bool enabled,
-	uint32_t kbps)
-{
-	MI_VENC_ParamFrameLost_t lost = {0};
-
-	if (!enabled)
-		return 0;
-
-	lost.bFrmLostOpen = 1;
-	lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
-	lost.u32FrmLostBpsThr = pipeline_common_frame_lost_threshold(kbps);
-	lost.u32EncFrmGaps = 0;
-
-	return MI_VENC_SetFrameLostStrategy(chn, &lost) == 0 ? 0 : -1;
-}
-
 static int apply_bitrate(uint32_t kbps)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bits;
-	bool frame_lost_enabled = true;
 
-	if (kbps > 200000)
-		kbps = 200000;
+	if (kbps > VENC_BITRATE_MAX_KBPS)
+		kbps = VENC_BITRATE_MAX_KBPS;
+	if (kbps < VENC_BITRATE_MIN_KBPS)
+		kbps = VENC_BITRATE_MIN_KBPS;
 	bits = kbps * 1024;
-
-	if (g_star6e_control_ctx.vcfg)
-		frame_lost_enabled = g_star6e_control_ctx.vcfg->video0.frame_lost;
 
 	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
 		return -1;
@@ -231,9 +213,6 @@ static int apply_bitrate(uint32_t kbps)
 	}
 
 	if (MI_VENC_SetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
-		return -1;
-	if (star6e_controls_apply_frame_lost_threshold(g_star6e_control_ctx.venc_chn,
-	    frame_lost_enabled, kbps) != 0)
 		return -1;
 	/* Force an IDR after a bitrate change so the decoder resyncs against
 	 * the new rate-control state.  Goes through the rate-limit gate so

@@ -451,23 +451,6 @@ typedef struct {
 	void *pRcParam;
 } MI_VENC_RcParam_t;
 
-/* Frame-lost strategy types — identical layout on star6e (i6) and maruko
- * (i6c), declared once here so both backends compile with or without dlopen.
- * ABI guard: a future SDK update that changes this layout on either platform
- * would silently corrupt at runtime, so assert the expected size. */
-typedef enum {
-	E_MI_VENC_FRMLOST_NORMAL = 0,
-	E_MI_VENC_FRMLOST_PSKIP  = 1,
-} MI_VENC_FrameLostMode_e;
-typedef struct {
-	MI_BOOL                  bFrmLostOpen;
-	MI_U32                   u32FrmLostBpsThr;
-	MI_VENC_FrameLostMode_e  eFrmLostMode;
-	MI_U32                   u32EncFrmGaps;
-} MI_VENC_ParamFrameLost_t;
-_Static_assert(sizeof(MI_VENC_ParamFrameLost_t) == 16,
-	"MI_VENC_ParamFrameLost_t layout changed — verify SDK match");
-
 /* Intra refresh (GDR-style rolling stripe) — identical layout on star6e and
  * maruko (mi_venc_datatype.h:992 for both).  Only the function arity differs
  * (maruko adds VeDev), handled by the per-backend macros below. */
@@ -525,8 +508,6 @@ _Static_assert(sizeof(MI_VENC_ParamRef_t) == 12,
 #define MI_VENC_RequestIdr(chn, inst) g_mi_venc.fnRequestIdr((chn), (inst))
 #define MI_VENC_SetRoiCfg(chn, cfg)   g_mi_venc.fnSetRoiCfg((chn), (cfg))
 #define MI_VENC_GetRoiCfg(chn, idx, cfg) g_mi_venc.fnGetRoiCfg((chn), (idx), (cfg))
-#define MI_VENC_SetFrameLostStrategy(chn, p) g_mi_venc.fnSetFrameLostStrategy((chn), (p))
-#define MI_VENC_GetFrameLostStrategy(chn, p) g_mi_venc.fnGetFrameLostStrategy((chn), (p))
 #define MI_VENC_GetChnDevid(chn, dev) g_mi_venc.fnGetChnDevid((chn), (dev))
 #define MI_VENC_SetIntraRefresh(chn, cfg) \
 	(g_mi_venc.fnSetIntraRefresh ? \
@@ -558,8 +539,6 @@ MI_S32 MI_VENC_RequestIdr(MI_VENC_CHN chn, MI_BOOL instant);
 MI_S32 MI_VENC_SetRoiCfg(MI_VENC_CHN chn, MI_VENC_RoiCfg_t *cfg);
 MI_S32 MI_VENC_GetRoiCfg(MI_VENC_CHN chn, MI_U32 idx, MI_VENC_RoiCfg_t *cfg);
 
-MI_S32 MI_VENC_SetFrameLostStrategy(MI_VENC_CHN chn, MI_VENC_ParamFrameLost_t *p);
-MI_S32 MI_VENC_GetFrameLostStrategy(MI_VENC_CHN chn, MI_VENC_ParamFrameLost_t *p);
 MI_S32 MI_VENC_GetChnDevid(MI_VENC_CHN chn, MI_U32* device_id);
 MI_S32 MI_VENC_SetRefParam(MI_VENC_CHN chn, MI_VENC_ParamRef_t *p);
 MI_S32 MI_VENC_GetRefParam(MI_VENC_CHN chn, MI_VENC_ParamRef_t *p);

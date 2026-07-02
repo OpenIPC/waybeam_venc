@@ -1205,15 +1205,20 @@ static int star6e_pipeline_pre_start_apply_ref_pred(MI_VENC_CHN chn,
 
 static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 	uint32_t bitrate, uint32_t framerate, uint32_t gop, PAYLOAD_TYPE_E codec,
-	int rc_mode, bool frame_lost_enabled, const VencConfig *vcfg,
+	int rc_mode, const VencConfig *vcfg,
 	MI_VENC_CHN *chn)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bit_rate_bits;
 	MI_S32 ret;
 
-	if (bitrate > 200000)
-		bitrate = 200000;
+	/* Same practical bitrate bounds as the live apply_bitrate() path, so a
+	 * persisted sub-floor video0.bitrate can't birth the encoder collapsed
+	 * at boot / SIGHUP re-exec. */
+	if (bitrate > VENC_BITRATE_MAX_KBPS)
+		bitrate = VENC_BITRATE_MAX_KBPS;
+	if (bitrate < VENC_BITRATE_MIN_KBPS)
+		bitrate = VENC_BITRATE_MIN_KBPS;
 	bit_rate_bits = bitrate * 1024;
 
 	if (codec == PT_H265) {
@@ -1327,12 +1332,6 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 		MI_VENC_DestroyChn(*chn);
 		return ret;
 	}
-
-	/* Frame lost strategy — see star6e_controls_apply_frame_lost_threshold. */
-	if (star6e_controls_apply_frame_lost_threshold(*chn,
-	    frame_lost_enabled, bitrate) != 0)
-		fprintf(stderr, "[waybeam] WARNING: SetFrameLostStrategy"
-			" failed\n");
 
 	return 0;
 }
@@ -2436,7 +2435,7 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	ret = star6e_pipeline_start_venc(pconf.image_width, pconf.image_height,
 		pconf.venc_max_rate, venc_fps, pconf.venc_gop_size,
 		pconf.rc_codec, pconf.rc_mode,
-		vcfg->video0.frame_lost, vcfg, &state->venc_channel);
+		vcfg, &state->venc_channel);
 	if (ret != 0)
 		goto fail_vpe;
 
@@ -2468,7 +2467,7 @@ fail_sensor:
 
 int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	uint32_t bitrate, uint32_t fps, double gop_sec,
-	const char *mode, const char *server, bool frame_lost)
+	const char *mode, const char *server)
 {
 	Star6eDualVenc *d;
 	MI_U32 dev = 0;
@@ -2523,7 +2522,7 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	 * SVC-T is less impactful; revisit if needed. */
 	ret = star6e_pipeline_start_venc(state->image_width,
 		state->image_height, bitrate, fps, gop,
-		PT_H265, 3 /* CBR */, frame_lost, NULL, &d->channel);
+		PT_H265, 3 /* CBR */, NULL, &d->channel);
 	if (ret != 0) {
 		fprintf(stderr, "WARNING: dual VENC ch1 create failed (%d), "
 			"falling back to mirror mode\n", ret);
