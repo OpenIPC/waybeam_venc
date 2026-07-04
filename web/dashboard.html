@@ -137,6 +137,9 @@ code,pre,.mono{font-family:'JetBrains Mono',monospace;font-size:.85em}
 .badge-live{color:var(--live);background:var(--live-bg)}
 
 .badge-restart{color:var(--restart);background:var(--restart-bg)}
+.badge-na{color:#9ca3af;background:rgba(156,163,175,.15)}
+.field-na{opacity:.5}
+.field-na input,.field-na select,.field-na .toggle{pointer-events:none}
 
 /* ── Inputs ── */
 
@@ -646,9 +649,9 @@ const TOOLTIPS = {
 'fpv.roiCenter':'Center region fraction (0.1-0.9). Smaller = tighter center focus. Applied live',
 
 'fpv.noiseLevel':'3D noise reduction level (0-7). Higher = more NR. 0 = off. Requires restart',
-'isp.aeEngine':'AE engine: sdk (default) lets ISP firmware run AE on both backends; custom runs userspace cus3a (Maruko also installs the no-op adaptor for ~24% CPU saving at 120fps). Requires restart',
-'isp.aeFps':'Custom AE calculation rate in Hz. Used when aeEngine=custom. Default: 15. Requires restart',
-'isp.keepAspect':'true = center-crop sensor to encode aspect ratio (preserves geometry). false = stretch full sensor area. Star6E only. Requires restart',
+'isp.aeEngine':'AE engine: sdk (default) lets ISP firmware run AE. custom runs userspace cus3a — Star6E only; on Maruko custom is retired and ignored (paced native 3A is always used). Requires restart',
+'isp.aeFps':'AE monitoring rate in Hz. Star6E: custom AE calc rate when aeEngine=custom. Maruko: drives the supervisory limits thread (any aeEngine). Default: 15. Requires restart',
+'isp.keepAspect':'Star6E: true = center-crop the sensor to the encode aspect ratio (preserves geometry); false = stretch/fill the full sensor area. Maruko/I6C: always center-crops — this flag is ignored and the control is disabled, because the I6C SCL cannot anamorphically stretch/squeeze a single axis. Requires restart',
 'audio.enabled':'Enable audio capture and streaming. Requires restart',
 'audio.sampleRate':'Audio sample rate in Hz (8000, 16000, 48000). Default: 48000. Requires restart',
 'audio.channels':'Audio channels (1=mono, 2=stereo). Default: 1. Requires restart',
@@ -1062,7 +1065,21 @@ function renderSettings(){
 
       }
 
-      row.innerHTML = `<div class="field-label" title="${(TOOLTIPS[key]||'').replace(/"/g,'&quot;')}">${label} <span class="badge ${badgeClass}">${badgeText}</span></div><div>${input}</div>`;
+      // Grey out (do not hide) any field the backend reports unsupported —
+      // e.g. isp.keepAspect on Maruko, which always center-crops. Keeps the
+      // control visible with an explanatory tooltip in case a HW path later
+      // restores the functionality.
+      const unsupported = capabilities[key] && capabilities[key].supported === false;
+
+      if(unsupported){ input = input.replace(/<(input|select)\b/, '<$1 disabled'); }
+
+      let tip = (TOOLTIPS[key]||'');
+
+      if(unsupported) tip = 'Not adjustable on this backend. ' + tip;
+
+      if(unsupported) row.className += ' field-na';
+
+      row.innerHTML = `<div class="field-label" title="${tip.replace(/"/g,'&quot;')}">${label} <span class="badge ${badgeClass}">${badgeText}</span>${unsupported?' <span class="badge badge-na">N/A</span>':''}</div><div>${input}</div>`;
 
       body.appendChild(row);
 

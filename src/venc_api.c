@@ -562,9 +562,18 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 {
 	const char *canonical_key;
 
-	(void)backend_name;
 	canonical_key = canonicalize_field_key(field_key);
 	if (!canonical_key)
+		return 0;
+
+	/* isp.keep_aspect is a no-op on Maruko/I6C: the SCL cannot perform a
+	 * single-axis (anamorphic) squeeze, so the pipeline always centre-crops
+	 * to the output aspect ratio regardless of this flag.  Advertise it
+	 * unsupported so the WebUI greys the control and the set-path rejects
+	 * changes.  Kept in the schema (not removed) so a future HW path can
+	 * re-enable it without a config migration. */
+	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
+	    strcmp(canonical_key, "isp.keep_aspect") == 0)
 		return 0;
 
 	return 1;
@@ -805,14 +814,22 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		uint32_t h = cfg->video0.height;
 		/* w==0 && h==0 means "auto" (use sensor native) — allowed. */
 		if (w != 0 || h != 0) {
-			if (w < 128 || h < 128 || w > 4096 || h > 4096)
-				return "video0.size width/height must be 128-4096";
-			/* HEVC CTU alignment: width must be multiple of 16,
-			 * height multiple of 8.  MI_VENC_CreateChn rejects
-			 * misaligned widths with MI_ERR_VENC_ILLEGAL_PARAM
-			 * (-1610473469) and the daemon cannot recover. */
-			if (w % 16 != 0)
-				return "video0.size width must be a multiple of 16";
+			if (w < 128 || h < 128 || w > 4096 || h > 2176)
+				return "video0.size must be 128-4096 wide and 128-2176 tall (SigmaStar VENC device limit 4096x2176)";
+			/* HEVC min-CU alignment: both width and height must be a
+			 * multiple of 8.  The encoder's conformance window handles
+			 * the remainder up to the CTU, so /8 (not /16) is the real
+			 * constraint — native sensor widths like 2952 (÷8, not ÷16)
+			 * create the VENC channel and stream fine (the auto path
+			 * uses exactly these).  A width below /8 (e.g. 854×480, which
+			 * is only ÷2) makes MI_VENC_CreateChn fail with
+			 * MI_ERR_VENC_ILLEGAL_PARAM (-1610473469) and the daemon
+			 * cannot recover — that is what this gate blocks.  The former
+			 * /16 rule needlessly forced `video0.size auto` for 2952-wide
+			 * modes; setting the nearest /16 (2944) instead made the SCL
+			 * anamorphically downscale 2952→2944 and cost ~7 fps. */
+			if (w % 8 != 0)
+				return "video0.size width must be a multiple of 8";
 			if (h % 8 != 0)
 				return "video0.size height must be a multiple of 8";
 		}
@@ -1475,8 +1492,21 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		}
 		if (!(cfg->video0.scene_threshold > 0) &&
 		    touched && (touched->video_fps || touched->video_gop)) {
+			/* Base the GOP frame count on the fps the encoder is
+			 * actually running at, not the committed request: a live
+			 * fps above the current sensor mode's max is clamped to
+			 * sensor_fps for the bind (see PIPELINE_LIVE_FPS_MAX), so
+			 * using the unclamped request here would stretch the
+			 * I-frame interval (GOP frames for 144 while the encoder
+			 * is pinned at 100 -> 1.44s instead of the intended 1s). */
+			uint32_t gop_fps = cfg->video0.fps;
+			if (g_cb->query_live_fps) {
+				uint32_t live_fps = g_cb->query_live_fps();
+				if (live_fps > 0)
+					gop_fps = live_fps;
+			}
 			gop_frames = pipeline_common_gop_frames(
-				cfg->video0.gop_size, cfg->video0.fps);
+				cfg->video0.gop_size, gop_fps);
 			rc = g_cb->apply_gop(gop_frames);
 			if (rc != 0)
 				return -1;

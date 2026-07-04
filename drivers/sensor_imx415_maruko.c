@@ -136,18 +136,24 @@ static struct { // LINEAR
     struct _senstr {
         const char* strResDesc;
     } senstr;
+    // MIPI link rate in Mbps/lane (keys the CSI-MAC clock in pCus_poweron;
+    // the _1485 name suffix separately keys the FRAMEBASE bind in
+    // maruko_pipeline.c)
+    u32 link_mbps;
 } imx415_mipi_linear[] = {
-    /* Maruko (SSC378QE) — sorted by FPS, lowest to highest.
-     * Mode 0: 3760x2116@30fps  non-binned, 97% FOV, best quality
-     * Mode 1: 3760x1024@59fps  non-binned superwide, 97% H FOV
-     * Mode 2: 1920x1080@60fps  binned, 99% FOV
-     * Mode 3: 1920x1080@90fps  binned, 99% FOV
-     * Mode 4: 1472x816@120fps  binned, 76% FOV, ultra-low latency */
-    { LINEAR_RES_1, { 3760, 2116, 3, 30 }, { 0, 0, 3760, 2116 }, { "3760x2116@30fps" } },  /* non-binned */
-    { LINEAR_RES_2, { 3760, 1024, 3, 59 }, { 0, 0, 3760, 1024 }, { "3760x1024@59fps" } },  /* non-binned superwide */
-    { LINEAR_RES_3, { 1920, 1080, 3, 60 }, { 0, 0, 1920, 1080 }, { "1920x1080@60fps" } },  /* binned */
-    { LINEAR_RES_4, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },  /* binned */
-    { LINEAR_RES_5, { 1472, 816, 3, 120 }, { 0, 0, 1472, 816 }, { "1472x816@120fps" } },   /* binned */
+    /* Maruko (SSC378QE) — one best mode per FPS tier, all non-binned and
+     * ~16:9 (sensor native aspect), sorted by FPS.  The 1485 modes are sized
+     * to the measured ISP m2m ceiling T ~= 1.7ms + 3.65ns/px and deliver
+     * their full nominal rate; mode 0 stays on the 891 link for the
+     * REALTIME (lowest-latency) VIF->ISP bind.  The retired vendor binned /
+     * superwide tables are parked under #if 0 below — see
+     * documentation/MARUKO_IMX415_1485_MODES.md for why they were dropped
+     * (binned tables burst 393 MPix/s > the 384 MPix/s ISP drain). */
+    { LINEAR_RES_1, { 3760, 2116, 3, 30 }, { 0, 0, 3760, 2116 }, { "3760x2116@30fps" }, 891 },        /* best IQ, REALTIME */
+    { LINEAR_RES_2, { 2952, 1656, 3, 50 }, { 0, 0, 2952, 1656 }, { "2952x1656@50fps_1485" }, 1485 },  /* 1:1 5MP readout */
+    { LINEAR_RES_3, { 2688, 1512, 3, 60 }, { 0, 0, 2688, 1512 }, { "2688x1512@60fps_1485" }, 1485 },  /* ISP-ceiling max 16:9 @60 */
+    { LINEAR_RES_4, { 2112, 1184, 3, 90 }, { 0, 0, 2112, 1184 }, { "2112x1184@90fps_1485" }, 1485 },  /* ISP-ceiling max @90 */
+    { LINEAR_RES_5, { 1920, 1080, 3, 100 }, { 0, 0, 1920, 1080 }, { "1920x1080@100fps_1485" }, 1485 },/* low-latency 100 */
 };
 
 u32 vts_30fps = 2250;
@@ -244,11 +250,15 @@ static int pCus_SetAEUSecs(ms_cus_sensor* handle, u32 us);
 //                                                           //
 ///////////////////////////////////////////////////////////////
 
-// 3840x2160@30fps
-
-// 2952x1656@60fps
-
-// 1920x1080@90fps
+/* ── RETIRED VENDOR MODES (kept for posterity, not selectable) ──────────
+ * The binned vendor tables run HMAX=365 (4.882us line): a 1920px line
+ * bursts at 393 MPix/s, above the 384 MPix/s ISP REALTIME drain — chronic
+ * FIFO pressure (the 120fps mode only ever delivered 115-118 fps).  The
+ * surfaced lineup replaced them with non-binned ~16:9 1485 modes; see
+ * documentation/MARUKO_IMX415_1485_MODES.md and git history for the full
+ * story (including the HMAX=550 ispsafe 1080p60 rework). ── */
+#if 0
+// 1920x1080@90fps binned
 const static I2C_ARRAY Sensor_2m_90fps_init_table_4lane_linear[] = {
     { 0x3000, 0x01 }, // Standby
     { 0x3002, 0x01 }, // Master mode stop
@@ -488,6 +498,7 @@ const static I2C_ARRAY Sensor_1m_120fps_init_table_4lane_linear[] = {
     { 0xFFFF, 0x10 },
     { 0x3000, 0x00 }, // Operating
 };
+#endif /* retired vendor binned tables */
 
 const static I2C_ARRAY Sensor_id_table[] = {
     { 0x3F12, 0x14 }, // {address of ID, ID },
@@ -572,7 +583,16 @@ static int pCus_poweron(ms_cus_sensor* handle, u32 idx)
     sensor_if->PowerOff(idx, handle->pwdn_POLARITY); // Powerdn Pull Low
     sensor_if->Reset(idx, handle->reset_POLARITY); // Rst Pull Low
     sensor_if->SetIOPad(idx, handle->sif_bus, handle->interface_attr.attr_mipi.mipi_lane_num);
-    sensor_if->SetCSI_Clk(idx, CUS_CSI_CLK_216M);
+    /* CSI-MAC clock (1485Mbps modes): 216M is borderline at 1485 line
+     * rates — taller/wider crops (e.g. 2952x1848) yield ZERO frames at
+     * 216M. Enum 12 "432M" is NOT a real csi-mac parent (mux tops out at
+     * 288M per infinity6c-clks.dtsi) and behaved oddly (~250MPix/s flat cap).
+     * 288M (enum 5) is the highest real parent — use it for all 1485 modes;
+     * keep proven 216M for the 891 modes. */
+    if (imx415_mipi_linear[handle->video_res_supported.ulcur_res].link_mbps >= 1485)
+        sensor_if->SetCSI_Clk(idx, CUS_CSI_CLK_288M);
+    else
+        sensor_if->SetCSI_Clk(idx, CUS_CSI_CLK_216M);
     sensor_if->SetCSI_Lane(idx, handle->interface_attr.attr_mipi.mipi_lane_num, ENABLE);
     sensor_if->SetCSI_LongPacketType(idx, 0, 0x1C00, 0);
 
@@ -712,6 +732,7 @@ static int imx415_SetPatternMode(ms_cus_sensor* handle, u32 mode)
     return SUCCESS;
 }
 
+#if 0 /* retired vendor binned mode (see banner above Sensor_2m_90fps table) */
 static int pCus_init_2m_90fps_mipi4lane_linear(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
@@ -738,6 +759,7 @@ static int pCus_init_2m_90fps_mipi4lane_linear(ms_cus_sensor* handle)
 
     return SUCCESS;
 }
+#endif /* retired pCus_init_2m_90fps */
 
 /* Non-binned base register table — HMAX=1100, WINMODE=crop, no PIX regs.
  * PIX registers are computed dynamically from the mode table resolution. */
@@ -759,6 +781,8 @@ const static I2C_ARRAY Sensor_nobinned_base_init_table[] = {
     { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
     { 0x3050, 0x08 }, // SHR0
     { 0x30C1, 0x00 },
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel; explicit — stale binned value
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel)   survives teardown/warm reboot)
     { 0x3116, 0x23 }, // INCKSEL2
     { 0x3118, 0xC6 }, // INCKSEL3 (I6C clock)
     { 0x311A, 0xE7 }, // INCKSEL4
@@ -846,6 +870,7 @@ static int pCus_init_nobinned_dynamic(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
+#if 0 /* retired vendor binned mode (see banner above Sensor_2m_90fps table) */
 static int pCus_init_1m_120fps_mipi4lane_linear(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
@@ -872,7 +897,661 @@ static int pCus_init_1m_120fps_mipi4lane_linear(ms_cus_sensor* handle)
 
     return SUCCESS;
 }
+#endif /* retired pCus_init_1m_120fps */
 
+/* Mode 1: 2952x1656@50fps NON-BINNED, 1485Mbps MIPI — port of the stock SSC378QE
+ * (Infinity6C) IMX415 driver's Sensor_5m_60fps_init_table_4lane_linear (which proved
+ * 1485Mbps locks on I6C: the vendor ships this exact table, so the legacy "1485
+ * stalls on I6C" finding was an incomplete-attempt artifact — the old hybrid grafted
+ * 1485 D-PHY timing onto the 891 analog front-end and omitted this mode's analog
+ * block, 0x32D4..0x3BCA).  Only VMAX differs from the vendor table: 1720 -> 2289
+ * paces the sensor to 50.0 fps, the ISP m2m ceiling for 4.89 MPix.  Everything else
+ * byte-for-byte — do not hand-tune.  HMAX=0x028C=652, SYS_MODE=0x08, INCKSEL3=0xA5.
+ * PIX: HST=0x01BC, HWIDTH=0x0B88(2952), VST=0x01F8, VWIDTH=0x0CF0(1656*2 non-binned). */
+const static I2C_ARRAY Sensor_5m_50fps_1485_init_table_4lane_linear[] = {
+    { 0x3000, 0x01 }, // Standby
+    { 0x3002, 0x01 }, // Master mode stop
+    { 0x3008, 0x5D }, // BCWAIT_TIME[9:0]
+    { 0x300A, 0x42 }, // CPWAIT_TIME[9:0]
+    { 0x301C, 0x04 }, // WINMODE (cropping mode)
+    { 0x3024, 0xF1 }, // VMAX = 0x08F1 = 2289 (50.0 fps @ 8.736us line)
+    { 0x3025, 0x08 }, //
+    { 0x3028, 0x8C }, // HMAX = 0x028C = 652
+    { 0x3029, 0x02 }, //
+    { 0x3031, 0x00 }, // ADBIT (10bit)
+    { 0x3032, 0x01 }, // must be 0x01 (vendor table ships 0x00 = dark image; same bug as the 2026-05-14 891-table fix, live-poke verified)
+    { 0x3033, 0x08 }, // SYS_MODE (1485Mbps)
+    { 0x3020, 0x00 }, // HADD (all-pixel)
+    { 0x3021, 0x00 }, // VADD (all-pixel)
+    { 0x3022, 0x00 }, // ADDMODE (all-pixel) — must be explicit: a prior binned-mode
+                      // run leaves these =1, and the sensor keeps that state across
+                      // pipeline teardown AND warm reboot (chip stays powered; the
+                      // RESET-pin toggle does not clear it). Stale binning breaks
+                      // every warm 1485 bring-up until a power-cycle.
+    { 0x3040, 0xBC }, // PIX_HST = 0x01BC = 444
+    { 0x3041, 0x01 }, //
+    { 0x3042, 0x88 }, // PIX_HWIDTH = 0x0B88 = 2952
+    { 0x3043, 0x0B }, //
+    { 0x3044, 0xF8 }, // PIX_VST = 0x01F8 = 504
+    { 0x3045, 0x01 }, //
+    { 0x3046, 0xF0 }, // PIX_VWIDTH = 0x0CF0 = 3312 (1656*2)
+    { 0x3047, 0x0C }, //
+    { 0x3050, 0x08 }, // SHR0[19:0]
+    { 0x30C1, 0x00 }, // XVS_DRV[1:0]
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel; binned tables set 0x02 — explicit
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel; binned 0x01)   for same reason as HADD)
+    { 0x3116, 0x23 }, // INCKSEL2
+    { 0x3118, 0xA5 }, // INCKSEL3 (1485Mbps)
+    { 0x311A, 0xE7 }, // INCKSEL4
+    { 0x311E, 0x23 }, // INCKSEL5
+    { 0x32D4, 0x21 }, // analog front-end (1485-specific block begins)
+    { 0x32EC, 0xA1 }, //
+    { 0x3452, 0x7F }, //
+    { 0x3453, 0x03 }, //
+    { 0x358A, 0x04 }, //
+    { 0x35A1, 0x02 }, //
+    { 0x36BC, 0x0C }, //
+    { 0x36CC, 0x53 }, //
+    { 0x36CD, 0x00 }, //
+    { 0x36CE, 0x3C }, //
+    { 0x36D0, 0x8C }, //
+    { 0x36D1, 0x00 }, //
+    { 0x36D2, 0x71 }, //
+    { 0x36D4, 0x3C }, //
+    { 0x36D6, 0x53 }, //
+    { 0x36D7, 0x00 }, //
+    { 0x36D8, 0x71 }, //
+    { 0x36DA, 0x8C }, //
+    { 0x36DB, 0x00 }, //
+    { 0x3701, 0x00 }, // ADBIT1[7:0]
+    { 0x3724, 0x02 }, //
+    { 0x3726, 0x02 }, //
+    { 0x3732, 0x02 }, //
+    { 0x3734, 0x03 }, //
+    { 0x3736, 0x03 }, //
+    { 0x3742, 0x03 }, //
+    { 0x3862, 0xE0 }, //
+    { 0x38CC, 0x30 }, //
+    { 0x38CD, 0x2F }, //
+    { 0x395C, 0x0C }, //
+    { 0x3A42, 0xD1 }, //
+    { 0x3A4C, 0x77 }, //
+    { 0x3AE0, 0x02 }, //
+    { 0x3AEC, 0x0C }, //
+    { 0x3B00, 0x2E }, //
+    { 0x3B06, 0x29 }, //
+    { 0x3B98, 0x25 }, //
+    { 0x3B99, 0x21 }, //
+    { 0x3B9B, 0x13 }, //
+    { 0x3B9C, 0x13 }, //
+    { 0x3B9D, 0x13 }, //
+    { 0x3B9E, 0x13 }, //
+    { 0x3BA1, 0x00 }, //
+    { 0x3BA2, 0x06 }, //
+    { 0x3BA3, 0x0B }, //
+    { 0x3BA4, 0x10 }, //
+    { 0x3BA5, 0x14 }, //
+    { 0x3BA6, 0x18 }, //
+    { 0x3BA7, 0x1A }, //
+    { 0x3BA8, 0x1A }, //
+    { 0x3BA9, 0x1A }, //
+    { 0x3BAC, 0xED }, //
+    { 0x3BAD, 0x01 }, //
+    { 0x3BAE, 0xF6 }, //
+    { 0x3BAF, 0x02 }, //
+    { 0x3BB0, 0xA2 }, //
+    { 0x3BB1, 0x03 }, //
+    { 0x3BB2, 0xE0 }, //
+    { 0x3BB3, 0x03 }, //
+    { 0x3BB4, 0xE0 }, //
+    { 0x3BB5, 0x03 }, //
+    { 0x3BB6, 0xE0 }, //
+    { 0x3BB7, 0x03 }, //
+    { 0x3BB8, 0xE0 }, //
+    { 0x3BBA, 0xE0 }, //
+    { 0x3BBC, 0xDA }, //
+    { 0x3BBE, 0x88 }, //
+    { 0x3BC0, 0x44 }, //
+    { 0x3BC2, 0x7B }, //
+    { 0x3BC4, 0xA2 }, //
+    { 0x3BC8, 0xBD }, //
+    { 0x3BCA, 0xBD }, // analog front-end (1485-specific block ends)
+    { 0x4004, 0xC0 }, // TXCLKESC_FREQ[15:0]
+    { 0x4005, 0x06 }, //
+    { 0x400C, 0x01 }, // INCKSEL6 (1485)
+    { 0x4018, 0xA7 }, // TCLKPOST (1485)
+    { 0x401A, 0x57 }, // TCLKPREPARE (1485)
+    { 0x401C, 0x5F }, // TCLKTRAIL (1485)
+    { 0x401E, 0x97 }, // TCLKZERO (1485)
+    { 0x401F, 0x01 }, //
+    { 0x4020, 0x5F }, // THSPREPARE (1485)
+    { 0x4022, 0xAF }, // THSZERO (1485)
+    { 0x4024, 0x5F }, // THSTRAIL (1485)
+    { 0x4026, 0x9F }, // THSEXIT (1485)
+    { 0x4028, 0x4F }, // TLPX (1485)
+    { 0x4074, 0x00 }, // INCKSEL7 (1485)
+    { 0xFFFF, 0x24 }, // sleep 36ms
+    { 0x3002, 0x00 }, // Master mode start
+    { 0xFFFF, 0x10 }, // sleep 16ms
+    { 0x3000, 0x00 }, // Operating
+};
+
+static int pCus_init_5m_50fps_1485_mipi4lane_linear(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+    pCus_HardwareReset(handle);
+    if (pCus_CheckSensorProductID(handle) == FAIL) {
+        return FAIL;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(Sensor_5m_50fps_1485_init_table_4lane_linear); i++) {
+        if (Sensor_5m_50fps_1485_init_table_4lane_linear[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_5m_50fps_1485_init_table_4lane_linear[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_5m_50fps_1485_init_table_4lane_linear[i].reg,
+                    Sensor_5m_50fps_1485_init_table_4lane_linear[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+
+    return SUCCESS;
+}
+
+/* Mode 2: 2688x1512@60 — ISP-ceiling-sized max non-binned 16:9 @60 (4.06 MPix).
+ * Replaces the earlier 2952x1368 (19.4:9) sizing with the sensor-native 16:9
+ * aspect at the same pixel budget.  Generated from the 5m 1485 skeleton:
+ * VMAX=1908 (60.0fps @ 8.736us line), crop HST=(3864-2688)/2=588,
+ * HWIDTH=2688, VST=2192-1512=680, VWIDTH=2*1512=3024. */
+const static I2C_ARRAY Sensor_2688x1512_60_init_table_4lane_linear[] = {
+    { 0x3000, 0x01 }, // Standby
+    { 0x3002, 0x01 }, // Master mode stop
+    { 0x3008, 0x5D }, // BCWAIT_TIME[9:0]
+    { 0x300A, 0x42 }, // CPWAIT_TIME[9:0]
+    { 0x301C, 0x04 }, // WINMODE (cropping mode)
+    { 0x3024, 0x74 },
+    { 0x3025, 0x07 },
+    { 0x3028, 0x8C }, // HMAX = 0x028C = 652
+    { 0x3029, 0x02 }, //
+    { 0x3031, 0x00 }, // ADBIT (10bit)
+    { 0x3032, 0x01 }, // must be 0x01 (vendor table ships 0x00 = dark image; same bug as the 2026-05-14 891-table fix, live-poke verified)
+    { 0x3033, 0x08 }, // SYS_MODE (1485Mbps)
+    { 0x3020, 0x00 }, // HADD (all-pixel)
+    { 0x3021, 0x00 }, // VADD (all-pixel)
+    { 0x3022, 0x00 }, // ADDMODE (all-pixel) — must be explicit: a prior binned-mode
+                      // run leaves these =1, and the sensor keeps that state across
+                      // pipeline teardown AND warm reboot (chip stays powered; the
+                      // RESET-pin toggle does not clear it). Stale binning breaks
+                      // every warm 1485 bring-up until a power-cycle.
+    { 0x3040, 0x4C }, // PIX_HST = 588 = 0x024C (centered 2688 in 3864)
+    { 0x3041, 0x02 },
+    { 0x3042, 0x80 }, // PIX_HWIDTH = 2688 = 0x0A80
+    { 0x3043, 0x0A },
+    { 0x3044, 0xA8 }, // PIX_VST = 680 = 0x02A8 (2192 - 1512)
+    { 0x3045, 0x02 },
+    { 0x3046, 0xD0 }, // PIX_VWIDTH = 3024 = 0x0BD0 (1512*2 non-binned)
+    { 0x3047, 0x0B },
+    { 0x3050, 0x08 }, // SHR0[19:0]
+    { 0x30C1, 0x00 }, // XVS_DRV[1:0]
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel; binned tables set 0x02 — explicit
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel; binned 0x01)   for same reason as HADD)
+    { 0x3116, 0x23 }, // INCKSEL2
+    { 0x3118, 0xA5 }, // INCKSEL3 (1485Mbps)
+    { 0x311A, 0xE7 }, // INCKSEL4
+    { 0x311E, 0x23 }, // INCKSEL5
+    { 0x32D4, 0x21 }, // analog front-end (1485-specific block begins)
+    { 0x32EC, 0xA1 }, //
+    { 0x3452, 0x7F }, //
+    { 0x3453, 0x03 }, //
+    { 0x358A, 0x04 }, //
+    { 0x35A1, 0x02 }, //
+    { 0x36BC, 0x0C }, //
+    { 0x36CC, 0x53 }, //
+    { 0x36CD, 0x00 }, //
+    { 0x36CE, 0x3C }, //
+    { 0x36D0, 0x8C }, //
+    { 0x36D1, 0x00 }, //
+    { 0x36D2, 0x71 }, //
+    { 0x36D4, 0x3C }, //
+    { 0x36D6, 0x53 }, //
+    { 0x36D7, 0x00 }, //
+    { 0x36D8, 0x71 }, //
+    { 0x36DA, 0x8C }, //
+    { 0x36DB, 0x00 }, //
+    { 0x3701, 0x00 }, // ADBIT1[7:0]
+    { 0x3724, 0x02 }, //
+    { 0x3726, 0x02 }, //
+    { 0x3732, 0x02 }, //
+    { 0x3734, 0x03 }, //
+    { 0x3736, 0x03 }, //
+    { 0x3742, 0x03 }, //
+    { 0x3862, 0xE0 }, //
+    { 0x38CC, 0x30 }, //
+    { 0x38CD, 0x2F }, //
+    { 0x395C, 0x0C }, //
+    { 0x3A42, 0xD1 }, //
+    { 0x3A4C, 0x77 }, //
+    { 0x3AE0, 0x02 }, //
+    { 0x3AEC, 0x0C }, //
+    { 0x3B00, 0x2E }, //
+    { 0x3B06, 0x29 }, //
+    { 0x3B98, 0x25 }, //
+    { 0x3B99, 0x21 }, //
+    { 0x3B9B, 0x13 }, //
+    { 0x3B9C, 0x13 }, //
+    { 0x3B9D, 0x13 }, //
+    { 0x3B9E, 0x13 }, //
+    { 0x3BA1, 0x00 }, //
+    { 0x3BA2, 0x06 }, //
+    { 0x3BA3, 0x0B }, //
+    { 0x3BA4, 0x10 }, //
+    { 0x3BA5, 0x14 }, //
+    { 0x3BA6, 0x18 }, //
+    { 0x3BA7, 0x1A }, //
+    { 0x3BA8, 0x1A }, //
+    { 0x3BA9, 0x1A }, //
+    { 0x3BAC, 0xED }, //
+    { 0x3BAD, 0x01 }, //
+    { 0x3BAE, 0xF6 }, //
+    { 0x3BAF, 0x02 }, //
+    { 0x3BB0, 0xA2 }, //
+    { 0x3BB1, 0x03 }, //
+    { 0x3BB2, 0xE0 }, //
+    { 0x3BB3, 0x03 }, //
+    { 0x3BB4, 0xE0 }, //
+    { 0x3BB5, 0x03 }, //
+    { 0x3BB6, 0xE0 }, //
+    { 0x3BB7, 0x03 }, //
+    { 0x3BB8, 0xE0 }, //
+    { 0x3BBA, 0xE0 }, //
+    { 0x3BBC, 0xDA }, //
+    { 0x3BBE, 0x88 }, //
+    { 0x3BC0, 0x44 }, //
+    { 0x3BC2, 0x7B }, //
+    { 0x3BC4, 0xA2 }, //
+    { 0x3BC8, 0xBD }, //
+    { 0x3BCA, 0xBD }, // analog front-end (1485-specific block ends)
+    { 0x4004, 0xC0 }, // TXCLKESC_FREQ[15:0]
+    { 0x4005, 0x06 }, //
+    { 0x400C, 0x01 }, // INCKSEL6 (1485)
+    { 0x4018, 0xA7 }, // TCLKPOST (1485)
+    { 0x401A, 0x57 }, // TCLKPREPARE (1485)
+    { 0x401C, 0x5F }, // TCLKTRAIL (1485)
+    { 0x401E, 0x97 }, // TCLKZERO (1485)
+    { 0x401F, 0x01 }, //
+    { 0x4020, 0x5F }, // THSPREPARE (1485)
+    { 0x4022, 0xAF }, // THSZERO (1485)
+    { 0x4024, 0x5F }, // THSTRAIL (1485)
+    { 0x4026, 0x9F }, // THSEXIT (1485)
+    { 0x4028, 0x4F }, // TLPX (1485)
+    { 0x4074, 0x00 }, // INCKSEL7 (1485)
+    { 0xFFFF, 0x24 }, // sleep 36ms
+    { 0x3002, 0x00 }, // Master mode start
+    { 0xFFFF, 0x10 }, // sleep 16ms
+    { 0x3000, 0x00 }, // Operating
+};
+
+static int pCus_init_2688x1512_60_mipi4lane_linear(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+    pCus_HardwareReset(handle);
+    if (pCus_CheckSensorProductID(handle) == FAIL) {
+        return FAIL;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(Sensor_2688x1512_60_init_table_4lane_linear); i++) {
+        if (Sensor_2688x1512_60_init_table_4lane_linear[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_2688x1512_60_init_table_4lane_linear[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_2688x1512_60_init_table_4lane_linear[i].reg,
+                    Sensor_2688x1512_60_init_table_4lane_linear[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+
+    return SUCCESS;
+}
+
+/* Mode 3: 2112x1184@90 — ISP-ceiling-sized max non-binned @90 (2.50 MPix).
+ * Generated from the 5m 1485 skeleton: VMAX=1272 (90.0fps @ 8.736us line),
+ * crop HST=(3864-2112)/2=876, HWIDTH=2112, VST=2192-1184=1008, VWIDTH=2*1184=2368. */
+const static I2C_ARRAY Sensor_2112x1184_90_init_table_4lane_linear[] = {
+    { 0x3000, 0x01 }, // Standby
+    { 0x3002, 0x01 }, // Master mode stop
+    { 0x3008, 0x5D }, // BCWAIT_TIME[9:0]
+    { 0x300A, 0x42 }, // CPWAIT_TIME[9:0]
+    { 0x301C, 0x04 }, // WINMODE (cropping mode)
+    { 0x3024, 0xF8 },
+    { 0x3025, 0x04 },
+    { 0x3028, 0x8C }, // HMAX = 0x028C = 652
+    { 0x3029, 0x02 }, //
+    { 0x3031, 0x00 }, // ADBIT (10bit)
+    { 0x3032, 0x01 }, // must be 0x01 (vendor table ships 0x00 = dark image; same bug as the 2026-05-14 891-table fix, live-poke verified)
+    { 0x3033, 0x08 }, // SYS_MODE (1485Mbps)
+    { 0x3020, 0x00 }, // HADD (all-pixel)
+    { 0x3021, 0x00 }, // VADD (all-pixel)
+    { 0x3022, 0x00 }, // ADDMODE (all-pixel) — must be explicit: a prior binned-mode
+                      // run leaves these =1, and the sensor keeps that state across
+                      // pipeline teardown AND warm reboot (chip stays powered; the
+                      // RESET-pin toggle does not clear it). Stale binning breaks
+                      // every warm 1485 bring-up until a power-cycle.
+    { 0x3040, 0x6C },
+    { 0x3041, 0x03 },
+    { 0x3042, 0x40 },
+    { 0x3043, 0x08 },
+    { 0x3044, 0xF0 },
+    { 0x3045, 0x03 },
+    { 0x3046, 0x40 },
+    { 0x3047, 0x09 },
+    { 0x3050, 0x08 }, // SHR0[19:0]
+    { 0x30C1, 0x00 }, // XVS_DRV[1:0]
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel; binned tables set 0x02 — explicit
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel; binned 0x01)   for same reason as HADD)
+    { 0x3116, 0x23 }, // INCKSEL2
+    { 0x3118, 0xA5 }, // INCKSEL3 (1485Mbps)
+    { 0x311A, 0xE7 }, // INCKSEL4
+    { 0x311E, 0x23 }, // INCKSEL5
+    { 0x32D4, 0x21 }, // analog front-end (1485-specific block begins)
+    { 0x32EC, 0xA1 }, //
+    { 0x3452, 0x7F }, //
+    { 0x3453, 0x03 }, //
+    { 0x358A, 0x04 }, //
+    { 0x35A1, 0x02 }, //
+    { 0x36BC, 0x0C }, //
+    { 0x36CC, 0x53 }, //
+    { 0x36CD, 0x00 }, //
+    { 0x36CE, 0x3C }, //
+    { 0x36D0, 0x8C }, //
+    { 0x36D1, 0x00 }, //
+    { 0x36D2, 0x71 }, //
+    { 0x36D4, 0x3C }, //
+    { 0x36D6, 0x53 }, //
+    { 0x36D7, 0x00 }, //
+    { 0x36D8, 0x71 }, //
+    { 0x36DA, 0x8C }, //
+    { 0x36DB, 0x00 }, //
+    { 0x3701, 0x00 }, // ADBIT1[7:0]
+    { 0x3724, 0x02 }, //
+    { 0x3726, 0x02 }, //
+    { 0x3732, 0x02 }, //
+    { 0x3734, 0x03 }, //
+    { 0x3736, 0x03 }, //
+    { 0x3742, 0x03 }, //
+    { 0x3862, 0xE0 }, //
+    { 0x38CC, 0x30 }, //
+    { 0x38CD, 0x2F }, //
+    { 0x395C, 0x0C }, //
+    { 0x3A42, 0xD1 }, //
+    { 0x3A4C, 0x77 }, //
+    { 0x3AE0, 0x02 }, //
+    { 0x3AEC, 0x0C }, //
+    { 0x3B00, 0x2E }, //
+    { 0x3B06, 0x29 }, //
+    { 0x3B98, 0x25 }, //
+    { 0x3B99, 0x21 }, //
+    { 0x3B9B, 0x13 }, //
+    { 0x3B9C, 0x13 }, //
+    { 0x3B9D, 0x13 }, //
+    { 0x3B9E, 0x13 }, //
+    { 0x3BA1, 0x00 }, //
+    { 0x3BA2, 0x06 }, //
+    { 0x3BA3, 0x0B }, //
+    { 0x3BA4, 0x10 }, //
+    { 0x3BA5, 0x14 }, //
+    { 0x3BA6, 0x18 }, //
+    { 0x3BA7, 0x1A }, //
+    { 0x3BA8, 0x1A }, //
+    { 0x3BA9, 0x1A }, //
+    { 0x3BAC, 0xED }, //
+    { 0x3BAD, 0x01 }, //
+    { 0x3BAE, 0xF6 }, //
+    { 0x3BAF, 0x02 }, //
+    { 0x3BB0, 0xA2 }, //
+    { 0x3BB1, 0x03 }, //
+    { 0x3BB2, 0xE0 }, //
+    { 0x3BB3, 0x03 }, //
+    { 0x3BB4, 0xE0 }, //
+    { 0x3BB5, 0x03 }, //
+    { 0x3BB6, 0xE0 }, //
+    { 0x3BB7, 0x03 }, //
+    { 0x3BB8, 0xE0 }, //
+    { 0x3BBA, 0xE0 }, //
+    { 0x3BBC, 0xDA }, //
+    { 0x3BBE, 0x88 }, //
+    { 0x3BC0, 0x44 }, //
+    { 0x3BC2, 0x7B }, //
+    { 0x3BC4, 0xA2 }, //
+    { 0x3BC8, 0xBD }, //
+    { 0x3BCA, 0xBD }, // analog front-end (1485-specific block ends)
+    { 0x4004, 0xC0 }, // TXCLKESC_FREQ[15:0]
+    { 0x4005, 0x06 }, //
+    { 0x400C, 0x01 }, // INCKSEL6 (1485)
+    { 0x4018, 0xA7 }, // TCLKPOST (1485)
+    { 0x401A, 0x57 }, // TCLKPREPARE (1485)
+    { 0x401C, 0x5F }, // TCLKTRAIL (1485)
+    { 0x401E, 0x97 }, // TCLKZERO (1485)
+    { 0x401F, 0x01 }, //
+    { 0x4020, 0x5F }, // THSPREPARE (1485)
+    { 0x4022, 0xAF }, // THSZERO (1485)
+    { 0x4024, 0x5F }, // THSTRAIL (1485)
+    { 0x4026, 0x9F }, // THSEXIT (1485)
+    { 0x4028, 0x4F }, // TLPX (1485)
+    { 0x4074, 0x00 }, // INCKSEL7 (1485)
+    { 0xFFFF, 0x24 }, // sleep 36ms
+    { 0x3002, 0x00 }, // Master mode start
+    { 0xFFFF, 0x10 }, // sleep 16ms
+    { 0x3000, 0x00 }, // Operating
+};
+
+static int pCus_init_2112x1184_90_mipi4lane_linear(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+    pCus_HardwareReset(handle);
+    if (pCus_CheckSensorProductID(handle) == FAIL) {
+        return FAIL;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(Sensor_2112x1184_90_init_table_4lane_linear); i++) {
+        if (Sensor_2112x1184_90_init_table_4lane_linear[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_2112x1184_90_init_table_4lane_linear[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_2112x1184_90_init_table_4lane_linear[i].reg,
+                    Sensor_2112x1184_90_init_table_4lane_linear[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+
+    return SUCCESS;
+}
+
+/* Mode 4: 1920x1080@100 — low-latency non-binned 1080p (2.07 MPix).
+ * Sized ~8% under the ISP m2m ceiling (capacity ~108 fps) so the FRAMEBASE
+ * queue stays empty at 100 fps — minimum latency, no ceiling shortfall.
+ * Generated from the 5m 1485 skeleton: VMAX=1144 (100.06fps @ 8.736us line;
+ * 64 blanking lines >= the ~42-line floor), crop HST=968 (centered,
+ * 8-aligned), HWIDTH=1920, VST=2192-1080=1112, VWIDTH=2*1080=2160. */
+const static I2C_ARRAY Sensor_1920x1080_100_init_table_4lane_linear[] = {
+    { 0x3000, 0x01 }, // Standby
+    { 0x3002, 0x01 }, // Master mode stop
+    { 0x3008, 0x5D }, // BCWAIT_TIME[9:0]
+    { 0x300A, 0x42 }, // CPWAIT_TIME[9:0]
+    { 0x301C, 0x04 }, // WINMODE (cropping mode)
+    { 0x3024, 0x78 }, // VMAX = 0x0478 = 1144
+    { 0x3025, 0x04 },
+    { 0x3028, 0x8C }, // HMAX = 0x028C = 652
+    { 0x3029, 0x02 }, //
+    { 0x3031, 0x00 }, // ADBIT (10bit)
+    { 0x3032, 0x01 }, // must be 0x01 (vendor table ships 0x00 = dark image; same bug as the 2026-05-14 891-table fix, live-poke verified)
+    { 0x3033, 0x08 }, // SYS_MODE (1485Mbps)
+    { 0x3020, 0x00 }, // HADD (all-pixel)
+    { 0x3021, 0x00 }, // VADD (all-pixel)
+    { 0x3022, 0x00 }, // ADDMODE (all-pixel) — must be explicit: a prior binned-mode
+                      // run leaves these =1, and the sensor keeps that state across
+                      // pipeline teardown AND warm reboot (chip stays powered; the
+                      // RESET-pin toggle does not clear it). Stale binning breaks
+                      // every warm 1485 bring-up until a power-cycle.
+    { 0x3040, 0xC8 }, // PIX_HST = 968 = 0x03C8 (centered 1920 in 3864, 8-aligned)
+    { 0x3041, 0x03 },
+    { 0x3042, 0x80 }, // PIX_HWIDTH = 1920 = 0x0780
+    { 0x3043, 0x07 },
+    { 0x3044, 0x58 }, // PIX_VST = 1112 = 0x0458 (2192 - 1080)
+    { 0x3045, 0x04 },
+    { 0x3046, 0x70 }, // PIX_VWIDTH = 2160 = 0x0870 (1080*2 non-binned)
+    { 0x3047, 0x08 },
+    { 0x3050, 0x08 }, // SHR0[19:0]
+    { 0x30C1, 0x00 }, // XVS_DRV[1:0]
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel; binned tables set 0x02 — explicit
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel; binned 0x01)   for same reason as HADD)
+    { 0x3116, 0x23 }, // INCKSEL2
+    { 0x3118, 0xA5 }, // INCKSEL3 (1485Mbps)
+    { 0x311A, 0xE7 }, // INCKSEL4
+    { 0x311E, 0x23 }, // INCKSEL5
+    { 0x32D4, 0x21 }, // analog front-end (1485-specific block begins)
+    { 0x32EC, 0xA1 }, //
+    { 0x3452, 0x7F }, //
+    { 0x3453, 0x03 }, //
+    { 0x358A, 0x04 }, //
+    { 0x35A1, 0x02 }, //
+    { 0x36BC, 0x0C }, //
+    { 0x36CC, 0x53 }, //
+    { 0x36CD, 0x00 }, //
+    { 0x36CE, 0x3C }, //
+    { 0x36D0, 0x8C }, //
+    { 0x36D1, 0x00 }, //
+    { 0x36D2, 0x71 }, //
+    { 0x36D4, 0x3C }, //
+    { 0x36D6, 0x53 }, //
+    { 0x36D7, 0x00 }, //
+    { 0x36D8, 0x71 }, //
+    { 0x36DA, 0x8C }, //
+    { 0x36DB, 0x00 }, //
+    { 0x3701, 0x00 }, // ADBIT1[7:0]
+    { 0x3724, 0x02 }, //
+    { 0x3726, 0x02 }, //
+    { 0x3732, 0x02 }, //
+    { 0x3734, 0x03 }, //
+    { 0x3736, 0x03 }, //
+    { 0x3742, 0x03 }, //
+    { 0x3862, 0xE0 }, //
+    { 0x38CC, 0x30 }, //
+    { 0x38CD, 0x2F }, //
+    { 0x395C, 0x0C }, //
+    { 0x3A42, 0xD1 }, //
+    { 0x3A4C, 0x77 }, //
+    { 0x3AE0, 0x02 }, //
+    { 0x3AEC, 0x0C }, //
+    { 0x3B00, 0x2E }, //
+    { 0x3B06, 0x29 }, //
+    { 0x3B98, 0x25 }, //
+    { 0x3B99, 0x21 }, //
+    { 0x3B9B, 0x13 }, //
+    { 0x3B9C, 0x13 }, //
+    { 0x3B9D, 0x13 }, //
+    { 0x3B9E, 0x13 }, //
+    { 0x3BA1, 0x00 }, //
+    { 0x3BA2, 0x06 }, //
+    { 0x3BA3, 0x0B }, //
+    { 0x3BA4, 0x10 }, //
+    { 0x3BA5, 0x14 }, //
+    { 0x3BA6, 0x18 }, //
+    { 0x3BA7, 0x1A }, //
+    { 0x3BA8, 0x1A }, //
+    { 0x3BA9, 0x1A }, //
+    { 0x3BAC, 0xED }, //
+    { 0x3BAD, 0x01 }, //
+    { 0x3BAE, 0xF6 }, //
+    { 0x3BAF, 0x02 }, //
+    { 0x3BB0, 0xA2 }, //
+    { 0x3BB1, 0x03 }, //
+    { 0x3BB2, 0xE0 }, //
+    { 0x3BB3, 0x03 }, //
+    { 0x3BB4, 0xE0 }, //
+    { 0x3BB5, 0x03 }, //
+    { 0x3BB6, 0xE0 }, //
+    { 0x3BB7, 0x03 }, //
+    { 0x3BB8, 0xE0 }, //
+    { 0x3BBA, 0xE0 }, //
+    { 0x3BBC, 0xDA }, //
+    { 0x3BBE, 0x88 }, //
+    { 0x3BC0, 0x44 }, //
+    { 0x3BC2, 0x7B }, //
+    { 0x3BC4, 0xA2 }, //
+    { 0x3BC8, 0xBD }, //
+    { 0x3BCA, 0xBD }, // analog front-end (1485-specific block ends)
+    { 0x4004, 0xC0 }, // TXCLKESC_FREQ[15:0]
+    { 0x4005, 0x06 }, //
+    { 0x400C, 0x01 }, // INCKSEL6 (1485)
+    { 0x4018, 0xA7 }, // TCLKPOST (1485)
+    { 0x401A, 0x57 }, // TCLKPREPARE (1485)
+    { 0x401C, 0x5F }, // TCLKTRAIL (1485)
+    { 0x401E, 0x97 }, // TCLKZERO (1485)
+    { 0x401F, 0x01 }, //
+    { 0x4020, 0x5F }, // THSPREPARE (1485)
+    { 0x4022, 0xAF }, // THSZERO (1485)
+    { 0x4024, 0x5F }, // THSTRAIL (1485)
+    { 0x4026, 0x9F }, // THSEXIT (1485)
+    { 0x4028, 0x4F }, // TLPX (1485)
+    { 0x4074, 0x00 }, // INCKSEL7 (1485)
+    { 0xFFFF, 0x24 }, // sleep 36ms
+    { 0x3002, 0x00 }, // Master mode start
+    { 0xFFFF, 0x10 }, // sleep 16ms
+    { 0x3000, 0x00 }, // Operating
+};
+
+static int pCus_init_1920x1080_100_mipi4lane_linear(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+    pCus_HardwareReset(handle);
+    if (pCus_CheckSensorProductID(handle) == FAIL) {
+        return FAIL;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(Sensor_1920x1080_100_init_table_4lane_linear); i++) {
+        if (Sensor_1920x1080_100_init_table_4lane_linear[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_1920x1080_100_init_table_4lane_linear[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_1920x1080_100_init_table_4lane_linear[i].reg,
+                    Sensor_1920x1080_100_init_table_4lane_linear[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+
+    return SUCCESS;
+}
+
+
+
+
+
+
+#if 0 /* retired vendor binned 1080p modes (plain + HMAX=550 ispsafe rework).
+       * Kept for posterity — the ispsafe variant device-verified 60.0fps but
+       * is superseded by the non-binned 2688x1512@60_1485 mode.  The binned
+       * VMAX-counts-PHYSICAL-lines trap it documents lives on in
+       * documentation/MARUKO_IMX415_1485_MODES.md. */
 /* Maruko 1920x1080@30fps binned — full 1080p via crop+binning.
  * PIX_HWIDTH=3840(1920×2), PIX_VWIDTH=4320(1080×4).
  * PIX_HST=12, PIX_VST=0. */
@@ -965,6 +1644,68 @@ static int pCus_init_1080p_binned_mipi4lane_linear(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
+/*
+ * ISP-safe 1920x1080@60 (binned). Same registers as the binned table but with
+ * HMAX widened 365 -> 1100 (line period 4882 -> 14815ns) so the I6C ISP input
+ * FIFO can drain each line. The binned table copied HMAX from the 120fps mode,
+ * delivering lines ~3x faster than the ISP sustains (~254 MPix/s per line) ->
+ * "ISP P0 FIFO FULL". HMAX comes ONLY from the init table (SetFPS/AE write VMAX
+ * via tVts_reg every frame, never HMAX), so HMAX MUST be programmed BEFORE the
+ * stream-start tail — a post-stream write does not latch. At HMAX=1100 the AE's
+ * VMAX=1125 @60fps gives 1080 active lines in 16.67ms, matching working modes 0/1.
+ */
+#define IMX415_1080P_BINNED_TAIL 4 /* trailing {sleep, XMSTA=0, sleep, STBY=0} */
+static int pCus_init_1080p60_ispsafe_mipi4lane_linear(ms_cus_sensor* handle)
+{
+    int i, cnt;
+    const int n = ARRAY_SIZE(Sensor_1080p_binned_init_table_4lane_linear);
+    pCus_HardwareReset(handle);
+    if (pCus_CheckSensorProductID(handle) == FAIL)
+        return FAIL;
+    /* All config registers except the stream-start tail. */
+    for (i = 0; i < n - IMX415_1080P_BINNED_TAIL; i++) {
+        if (Sensor_1080p_binned_init_table_4lane_linear[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_1080p_binned_init_table_4lane_linear[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_1080p_binned_init_table_4lane_linear[i].reg,
+                    Sensor_1080p_binned_init_table_4lane_linear[i].data) != SUCCESS) {
+                if (++cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+    /* ISP-safe HMAX = 0x0226 (550, 7.407us line) BEFORE stream-start
+     * (overrides table 0x016D=365).  365 puts the line burst at 393 MPix/s,
+     * above the 384 MPix/s ISP drain -> FIFO FULL; 550 gives 259 MPix/s
+     * with margin, and VMAX=2250 (>= 2192 physical lines in 2x2 binning;
+     * binned VMAX counts PHYSICAL lines, 2x the output lines) then lands
+     * exactly 60.0 fps.  HMAX=1100 was tried first but caps the mode at
+     * 30 fps: 60 fps would need VMAX=1125 < the physical readout length,
+     * which the sensor answers with zero frames. */
+    SensorReg_Write(0x3028, 0x26);
+    SensorReg_Write(0x3029, 0x02);
+    /* Stream-start tail (XMSTA + standby cancel). */
+    for (i = n - IMX415_1080P_BINNED_TAIL; i < n; i++) {
+        if (Sensor_1080p_binned_init_table_4lane_linear[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_1080p_binned_init_table_4lane_linear[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_1080p_binned_init_table_4lane_linear[i].reg,
+                    Sensor_1080p_binned_init_table_4lane_linear[i].data) != SUCCESS) {
+                if (++cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+    return SUCCESS;
+}
+#endif /* retired vendor binned 1080p modes */
+
 static int pCus_GetVideoResNum(ms_cus_sensor* handle, u32* ulres_num)
 {
     *ulres_num = handle->video_res_supported.num_res;
@@ -1017,7 +1758,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
     handle->data_prec = CUS_DATAPRECISION_12;
 
     switch (res_idx) {
-    case 0: // 3760x2116@30fps — non-binned, 97% FOV, best quality
+    case 0: // 3760x2116@30fps — non-binned, 97% FOV, best quality, 891/REALTIME
         handle->video_res_supported.ulcur_res = 0;
         handle->pCus_sensor_init = pCus_init_nobinned_dynamic;
         vts_30fps = 2250; // VTS at 30fps with HMAX=1100
@@ -1026,40 +1767,43 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 14815; // HMAX=1100 at INCKSEL3=0xC6
         break;
 
-    case 1: // 3760x1024@59fps — non-binned superwide, 97% H FOV
+    case 1: // 2952x1656@50fps — NON-BINNED 1485Mbps, 1:1 full 5MP readout (no SCL scale).
+        // 50 fps is the honest rate: the ISP m2m ceiling caps 4.89 MPix at ~51 fps,
+        // so the sensor is paced to 50.0 (VMAX=2289) for even frame cadence instead
+        // of dropping ~10 of 60 sensor frames at the VIF->ISP handoff.
         handle->video_res_supported.ulcur_res = 1;
-        handle->pCus_sensor_init = pCus_init_nobinned_dynamic;
-        vts_30fps = 1143; // VTS at 59fps: 2250*30/59 ≈ 1143
+        handle->pCus_sensor_init = pCus_init_5m_50fps_1485_mipi4lane_linear;
+        vts_30fps = 2289; // VMAX @50fps, 8.736us line (HMAX=652 @1485)
         params->expo.vts = vts_30fps;
-        params->expo.fps = 59;
-        Preview_line_period = 14815; // HMAX=1100 at INCKSEL3=0xC6
+        params->expo.fps = 50;
+        Preview_line_period = 8736;
         break;
 
-    case 2: // 1920x1080@60fps — binned, 99% FOV
+    case 2: // 2688x1512@60 — ISP-ceiling-sized max non-binned 16:9 @60 (4.06 MPix)
         handle->video_res_supported.ulcur_res = 2;
-        handle->pCus_sensor_init = pCus_init_1080p_binned_mipi4lane_linear;
-        vts_30fps = 3400; // 1700 * 120/60
+        handle->pCus_sensor_init = pCus_init_2688x1512_60_mipi4lane_linear;
+        vts_30fps = 1908; // VMAX @60fps, 8.736us line
         params->expo.vts = vts_30fps;
         params->expo.fps = 60;
-        Preview_line_period = 4882;
+        Preview_line_period = 8736;
         break;
 
-    case 3: // 1920x1080@90fps — binned, 99% FOV
+    case 3: // 2112x1184@90 — ISP-ceiling-sized max non-binned @90 (2.50 MPix)
         handle->video_res_supported.ulcur_res = 3;
-        handle->pCus_sensor_init = pCus_init_1080p_binned_mipi4lane_linear;
-        vts_30fps = 2267; // 1700 * 120/90
+        handle->pCus_sensor_init = pCus_init_2112x1184_90_mipi4lane_linear;
+        vts_30fps = 1272; // VMAX @90fps, 8.736us line
         params->expo.vts = vts_30fps;
         params->expo.fps = 90;
-        Preview_line_period = 4882;
+        Preview_line_period = 8736;
         break;
 
-    case 4: // 1472x816@120fps — binned, 76% FOV, ultra-low latency
+    case 4: // 1920x1080@100 — low-latency non-binned 1080p, ~8% under the ISP ceiling
         handle->video_res_supported.ulcur_res = 4;
-        handle->pCus_sensor_init = pCus_init_1m_120fps_mipi4lane_linear;
-        vts_30fps = 1700;
+        handle->pCus_sensor_init = pCus_init_1920x1080_100_mipi4lane_linear;
+        vts_30fps = 1144; // VMAX @100fps, 8.736us line
         params->expo.vts = vts_30fps;
-        params->expo.fps = 120;
-        Preview_line_period = 4882;
+        params->expo.fps = 100;
+        Preview_line_period = 8736;
         break;
 
     default:

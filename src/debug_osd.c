@@ -1,5 +1,68 @@
 #include "debug_osd.h"
 
+/* ── CPU usage sampler (shared, /proc/stat) ────────────────────────────
+ * Snapshot ring at 500ms cadence; CPU% is computed over the span from
+ * the oldest retained snapshot (~1s with OSD_CPU_RING=2 — the oldest of
+ * two 500ms-spaced snapshots is one full interval back at steady state),
+ * so the OSD readout is a sliding 1-second average instead of a jumpy
+ * 500ms delta, while still refreshing every 500ms. */
+#if defined(PLATFORM_STAR6E) || defined(PLATFORM_MARUKO)
+
+#include <stdio.h>
+#include <time.h>
+
+#define OSD_CPU_RING 2
+
+typedef struct {
+	struct { unsigned long long total, idle; } ring[OSD_CPU_RING];
+	int count;                 /* snapshots stored (saturates at RING) */
+	int head;                  /* next write index; oldest when full */
+	int pct;                   /* last computed CPU% */
+	struct timespec ts;        /* last snapshot time */
+} OsdCpuSampler;
+
+static void osd_cpu_sample(OsdCpuSampler *cs)
+{
+	struct timespec now;
+	unsigned long long user, nice, sys, idle, iowait, irq, softirq;
+	unsigned long long total, idle_all;
+	FILE *f;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	long ms = (now.tv_sec - cs->ts.tv_sec) * 1000 +
+	          (now.tv_nsec - cs->ts.tv_nsec) / 1000000;
+	if (cs->count > 0 && ms < 500) return;
+
+	f = fopen("/proc/stat", "r");
+	if (!f) return;
+	if (fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu",
+	           &user, &nice, &sys, &idle, &iowait, &irq, &softirq) != 7) {
+		fclose(f);
+		return;
+	}
+	fclose(f);
+
+	total = user + nice + sys + idle + iowait + irq + softirq;
+	idle_all = idle + iowait;
+
+	if (cs->count > 0) {
+		/* When the ring is full, head (about to be overwritten) is the
+		 * oldest retained snapshot; while filling, index 0 is. */
+		int oldest = (cs->count == OSD_CPU_RING) ? cs->head : 0;
+		unsigned long long dt = total - cs->ring[oldest].total;
+		unsigned long long di = idle_all - cs->ring[oldest].idle;
+		cs->pct = dt > 0 ? (int)((dt - di) * 100 / dt) : 0;
+	}
+
+	cs->ring[cs->head].total = total;
+	cs->ring[cs->head].idle = idle_all;
+	cs->head = (cs->head + 1) % OSD_CPU_RING;
+	if (cs->count < OSD_CPU_RING) cs->count++;
+	cs->ts = now;
+}
+
+#endif /* PLATFORM_STAR6E || PLATFORM_MARUKO */
+
 /* Maruko build flags set BOTH PLATFORM_STAR6E and PLATFORM_MARUKO (see
  * Makefile:39 — the Star6E backend's MI shim headers are reused for
  * type compatibility on Maruko), so the Star6E branch must explicitly
@@ -125,10 +188,7 @@ struct DebugOsdState {
 	                           * dim > encoded dim (e.g. image stab) so
 	                           * panel lands inside the encoded view */
 
-	/* CPU usage sampler (from /proc/stat) */
-	unsigned long long cpu_prev_total, cpu_prev_idle;
-	int cpu_pct;               /* last sampled CPU% */
-	struct timespec cpu_ts;    /* last sample time */
+	OsdCpuSampler cpu;         /* shared /proc/stat sampler (top of file) */
 
 	int (*fnInit)(i6_rgn_pal *);
 	int (*fnDeinit)(void);
@@ -198,41 +258,6 @@ static int rgn_load(DebugOsdState *ctx)
 
 #undef LOAD_SYM
 	return 0;
-}
-
-/* ── CPU usage sampler ─────────────────────────────────────────────── */
-
-static void cpu_sample(DebugOsdState *osd)
-{
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	long ms = (now.tv_sec - osd->cpu_ts.tv_sec) * 1000 +
-	          (now.tv_nsec - osd->cpu_ts.tv_nsec) / 1000000;
-	if (ms < 500) return;  /* sample at most 2 Hz */
-
-	FILE *f = fopen("/proc/stat", "r");
-	if (!f) return;
-
-	unsigned long long user, nice, sys, idle, iowait, irq, softirq;
-	if (fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu",
-	           &user, &nice, &sys, &idle, &iowait, &irq, &softirq) != 7) {
-		fclose(f);
-		return;
-	}
-	fclose(f);
-
-	unsigned long long total = user + nice + sys + idle + iowait + irq + softirq;
-	unsigned long long idle_all = idle + iowait;
-
-	if (osd->cpu_prev_total > 0) {
-		unsigned long long dt = total - osd->cpu_prev_total;
-		unsigned long long di = idle_all - osd->cpu_prev_idle;
-		osd->cpu_pct = dt > 0 ? (int)((dt - di) * 100 / dt) : 0;
-	}
-
-	osd->cpu_prev_total = total;
-	osd->cpu_prev_idle = idle_all;
-	osd->cpu_ts = now;
 }
 
 /* ── Public API ────────────────────────────────────────────────────── */
@@ -451,12 +476,12 @@ void debug_osd_set_panel_offset(DebugOsdState *osd, int off_x, int off_y)
 void debug_osd_sample_cpu(DebugOsdState *osd)
 {
 	if (!osd) return;
-	cpu_sample(osd);
+	osd_cpu_sample(&osd->cpu);
 }
 
 int debug_osd_get_cpu(DebugOsdState *osd)
 {
-	return osd ? osd->cpu_pct : 0;
+	return osd ? osd->cpu.pct : 0;
 }
 
 void debug_osd_rect(DebugOsdState *osd, uint16_t x, uint16_t y,
@@ -626,9 +651,7 @@ struct DebugOsdState {
 	OsdDirty dirty;
 	int font_scale;
 
-	unsigned long long cpu_prev_total, cpu_prev_idle;
-	int cpu_pct;
-	struct timespec cpu_ts;
+	OsdCpuSampler cpu;         /* shared /proc/stat sampler (top of file) */
 
 	/* Maruko v3 API.  The vendor's official IPC demo
 	 * (common/osd/osd.cpp) uses MI_RGN_Init/DeInit (palette as
@@ -701,39 +724,6 @@ static int rgn_load(DebugOsdState *ctx)
 
 #undef LOAD_SYM
 	return 0;
-}
-
-static void cpu_sample(DebugOsdState *osd)
-{
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	long ms = (now.tv_sec - osd->cpu_ts.tv_sec) * 1000 +
-	          (now.tv_nsec - osd->cpu_ts.tv_nsec) / 1000000;
-	if (ms < 500) return;
-
-	FILE *f = fopen("/proc/stat", "r");
-	if (!f) return;
-
-	unsigned long long user, nice, sys, idle, iowait, irq, softirq;
-	if (fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu",
-	           &user, &nice, &sys, &idle, &iowait, &irq, &softirq) != 7) {
-		fclose(f);
-		return;
-	}
-	fclose(f);
-
-	unsigned long long total = user + nice + sys + idle + iowait + irq + softirq;
-	unsigned long long idle_all = idle + iowait;
-
-	if (osd->cpu_prev_total > 0) {
-		unsigned long long dt = total - osd->cpu_prev_total;
-		unsigned long long di = idle_all - osd->cpu_prev_idle;
-		osd->cpu_pct = dt > 0 ? (int)((dt - di) * 100 / dt) : 0;
-	}
-
-	osd->cpu_prev_total = total;
-	osd->cpu_prev_idle = idle_all;
-	osd->cpu_ts = now;
 }
 
 DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
@@ -900,12 +890,12 @@ void debug_osd_text(DebugOsdState *osd, int row, const char *label,
 void debug_osd_sample_cpu(DebugOsdState *osd)
 {
 	if (!osd) return;
-	cpu_sample(osd);
+	osd_cpu_sample(&osd->cpu);
 }
 
 int debug_osd_get_cpu(DebugOsdState *osd)
 {
-	return osd ? osd->cpu_pct : 0;
+	return osd ? osd->cpu.pct : 0;
 }
 
 void debug_osd_rect(DebugOsdState *osd, uint16_t x, uint16_t y,
