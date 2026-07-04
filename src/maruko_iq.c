@@ -294,9 +294,16 @@ int maruko_iq_init(void)
 	typedef int (*bypass_fn_t)(uint32_t, uint32_t, void *);
 	bypass_fn_t fn_bypass = (bypass_fn_t)dlsym(g_isp_handle,
 		"MI_ISP_IQ_SetApiBypassMode");
-	if (fn_bypass) {
+	/* Forcing api-bypass OFF on ALL modules pins the whole IQ pipeline
+	 * (incl. the NR family, CCM, LSC, gamma) to manual API buffers instead
+	 * of the bin's gain-adaptive tables — which, with ApiCmdLoadBinFile
+	 * skipped, kills NR (grain) and adds per-frame IspMidThreadWq shadow
+	 * work (CPU).  majestic and our own Star6E leave modules adaptive.
+	 * Default: DO NOT run the global loop (majestic parity).  Per-module
+	 * bypass-OFF is applied on demand in maruko_iq_set() instead.  Set
+	 * MARUKO_IQ_BYPASS_ALL=1 to restore the old global behaviour for A/B. */
+	if (fn_bypass && getenv("MARUKO_IQ_BYPASS_ALL")) {
 		int bypass_ok = 0;
-		/* Iterate all API module IDs (0..62) */
 		for (uint32_t api_id = 0; api_id <= 62; api_id++) {
 			struct { uint32_t enable; uint32_t index; } bp;
 			bp.enable = 0;  /* E_SS_BYPASS_OFF */
@@ -304,7 +311,10 @@ int maruko_iq_init(void)
 			int r = fn_bypass(0, 0, &bp);
 			if (r == 0) bypass_ok++;
 		}
-		printf("[iq] API bypass OFF set for %d modules\n", bypass_ok);
+		printf("[iq] API bypass OFF set for %d modules (global, legacy)\n",
+			bypass_ok);
+	} else {
+		printf("[iq] API bypass left adaptive (majestic parity)\n");
 	}
 
 	printf("[iq] Maruko IQ parameter API ready (%d/%d params resolved)\n",

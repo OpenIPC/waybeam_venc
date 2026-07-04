@@ -20,3 +20,6 @@ bench_logs/
 
 # Stray gcc dep files in cwd (e.g. from one-shot multi-source builds)
 a-*.d
+
+# Serena LSP tooling config — local developer machine only, not shipped
+/.serena/

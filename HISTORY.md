@@ -1,5 +1,245 @@
 # History
 
+## [0.24.1] - 2026-07-04
+
+Pre-upstream-squash cleanup: adversarial review of the 0.22.0–0.24.0 range
+(PRs #157–#160) surfaced a handful of straggling defects, all fixed here.
+No functional feature changes.
+
+- **GOP frame count now tracks the *actual* encoder fps, not the committed
+  request** (`src/venc_api.c`) — a live `video0.fps` above the current sensor
+  mode's max is clamped to `sensor_fps` for the bind, but the GOP was computed
+  from the unclamped value, stretching the I-frame interval (e.g. GOP for 144
+  while the encoder is pinned at 100 → 1.44 s instead of 1 s). Now uses
+  `query_live_fps()`; the 120→144 ceiling raise had widened this drift.
+- **Star6E debug-OSD "enc" row no longer shows `0x0`** (`src/star6e_runtime.c`)
+  — it printed the raw `video0.width/height` config (default `0/0` = auto)
+  instead of the resolved `image_width/height`; Maruko already did it right.
+- **AE pacer teardown join is now bounded** (`src/maruko_pipeline.c`) — the
+  pacer's steady-state loop calls `CUS3A_RunOnce`, which can stall inside the
+  SDK during an ISP fault; the previous unbounded `pthread_join` would then
+  wedge teardown/respawn. Now `pthread_timedjoin_np` (300 ms) + detach-on-
+  timeout. Device-verified: 0 spurious timeouts across mode-cycle teardowns.
+- **Star6E fps rebind restores on encoder-apply failure**
+  (`src/star6e_controls.c`) — a post-bind encoder/scene fps write failure no
+  longer leaves VPE→VENC bound at the new fps while the caller rolls back.
+- **CPU% debug-OSD window corrected to the documented ~1 s**
+  (`src/debug_osd.c`, `OSD_CPU_RING` 3→2 — was a 1.5 s span).
+- **Removed the retired `throttle_mode` AE controller** (`src/maruko_cus3a.c`,
+  `include/maruko_cus3a.h`) — the 0.9.12 "aeEngine=custom" log-domain IIR
+  controller and its `MarukoAeResult`/`SetAeParam` plumbing were dead
+  (`throttle_mode` hard-wired off since paced native 3A superseded it). The
+  supervisory thread is now cleanly limits-only. Device-verified on I6C: native
+  AE still enforces `isp.gainMax`, reads stats, adapts exposure, and tears down
+  clean across mode cycles.
+- **Upstream hygiene**: dropped `.serena/` tooling config from tracking (now
+  gitignored) and four transient handoff/investigation docs.
+
+## [0.24.0] - 2026-07-04
+
+IMX335 gets a **144fps ultra-low-latency mode** + a `WAYBEAM_NO_3A` debug
+toggle. Full mode detail: `documentation/MARUKO_IMX335_MODES.md`.
+
+- **New mode 5 = 1536x864@144 (16:9)** — device-verified clean end-to-end on
+  SSC378QE + IMX335: SCL 144.0 fps, VENC 143.4 fps, **0 DropCnt / 0 FIFO-FULL /
+  0 Skip-IQ**. Reuses the proven 120fps analog window (HMAX=275, `imx335_geo_
+  1536x864`), VMAX paced to 144 (`vts_30fps=1875`). The lowest-latency mode in
+  the lineup (6.94 ms frame period).
+
+- **Why 1536x864 and not larger** — 144fps is bound by TWO independent ISP
+  walls, both device-proven: (a) **bandwidth** ~274 MPix/s — 1920x1080@144 =
+  298 MPix/s overflows the ISP P0 FIFO and collapses to ~26 fps; (b) **per-frame
+  time** T ≈ 1.7 ms fixed + 3.65 ns/px vs the 6.94 ms frame period — 1600x900
+  (1.44 MP, ~6.96 ms) misses by ~1% and Skip-IQ stalls. Both limits are at the
+  ISP *input*, so an output/SCL downscale rescues neither; the sensor readout
+  window itself must shrink. 1536x864 (1.33 MP) sits under both.
+
+- **`WAYBEAM_NO_3A=1` env var** (`src/maruko_pipeline.c`) — freezes 3A entirely
+  (`CUS3A_SetRunMode(OFF)`, no pacer/supervisory) for bench diagnosis. Used to
+  prove the fixed per-frame ISP cost is **not** reclaimable by disabling 3A
+  (1600x900@144 still stalls with 3A frozen — the ~1.7 ms is vendor ISP pixel
+  processing, not 3A). Exposure is static when set; bench use only.
+
+- **Live `video0.fps` accepts up to 144** (`PIPELINE_LIVE_FPS_MAX`,
+  `include/pipeline_common.h`; `maruko_apply_fps`, star6e `apply_fps`) — the
+  live-apply path previously hard-rejected any `fps > 120`, making it
+  impossible to *pre-stage* fps=144 while parked in a lower-fps mode (so the
+  next respawn's auto sensor-select could pick the 144 mode). The request is no
+  longer rejected: the requested value is committed to config, and each
+  platform's existing clamp-to-`sensor_fps` caps the actual VPE→VENC rebind to
+  the current mode's max — so a 100fps mode still binds at 100, but the config
+  now carries 144 for `sensor.mode:-1` to resolve on the next mode switch
+  (`sensor_mode_clamp_fps` re-clamps there too). 144 is the ceiling because it
+  is the highest fps any mode offers; above it is still a client error.
+
+## [0.23.0] - 2026-07-04
+
+Maruko IMX335 best-per-fps mode lineup + debug-OSD readouts. Full mode
+detail: `documentation/MARUKO_IMX335_MODES.md`.
+
+- **IMX335 gets a 5-mode best-per-fps lineup**, porting the IMX415 method
+  to the 4:3 5MP sensor. One mode per fps tier, native 4:3 aspect for
+  0–3, 16:9 low-latency hero at 100 fps:
+
+  | idx | resolution | fps | aspect | role |
+  |---|---|---|---|---|
+  | 0 | 2592x1944 | 30 | 4:3 | full-res all-pixel (best IQ / full FOV) |
+  | 1 | 2496x1872 | 50 | 4:3 | center crop |
+  | 2 | 2272x1704 | 60 | 4:3 | center crop |
+  | 3 | 1792x1344 | 90 | 4:3 | center crop |
+  | 4 | 1920x1080 | 100 | 16:9 | low-latency hero (REALTIME) |
+
+  All device-verified on SSC378QE + IMX335. **Window mode works on I6C** —
+  the old "windowed readout hangs the ISP" claim was a stale-register
+  artifact. Each crop writes its full readout geometry
+  (HTRIM/HNUM/Y_OUT/AREA3/HMAX) explicitly in standby
+  (`imx335_init_window_crop`), reusing the proven 120fps analog config;
+  geometry is derived exact from the 1920x1080 window mode. Crop sizes sit
+  ~5–8% under the ISP throughput ceiling (~245–274 MPix/s); all bind
+  REALTIME for minimum latency.
+- **BREAKING `sensor.mode` remap** — dropped the two redundant 16:9
+  1920x1080@60/@90 modes (60/90 are now the higher-res 4:3 crops) and
+  renumbered. Pinned `sensor.mode` configs must be updated; `sensor.mode:
+  -1` (auto) resolves by target dims and needs no change.
+- **Cold-boot enum wedge documented**: repeated `reboot -f` after a hung
+  teardown can leave IMX335 i2c enumeration wedged (`QueryResCount → 0`,
+  every mode fails "not available on pad", mode-independent). Recovery is a
+  power-cycle; graceful `reboot` avoids it. Not a geometry bug.
+- **Debug OSD gains sensor + encode readouts** (both Maruko and Star6E):
+  two fixed rows below `cpu` — `snr <WxH>@<fps> m<idx>` (sensor readout +
+  mode index) and `enc <WxH> <codec>` — so a tester can read the live mode
+  straight off the overlay. Inserted at rows 2–3; the AE/AWB/exp block
+  shifts down, nothing clobbered.
+
+## [0.22.0] - 2026-07-04
+
+Maruko AE rework: **paced native 3A** replaces both historical AE engines.
+Full investigation: `documentation/MARUKO_CUS3A_INJECT_HANDOFF.md`.
+
+- **Maruko now runs ONE AE mode**: the vendor AE+AWB converge at full rate
+  for ~3 s after pipeline start, then the CUS3A per-frame auto-run is
+  paused (`CUS3A_SetRunMode(OFF)`) and a pacer thread re-runs the same
+  converged algo via `CUS3A_RunOnce` at `sensor_fps/3` (floor 30 Hz).
+  Applies keep flowing through the stock ISP-API agent path.
+  Device-measured @1080p100: 70.0% of the core (old `sdk` full-rate) /
+  52.8% (old `custom` throttle) → **39.4%**, at full vendor image quality
+  (exposure + AWB convergence verified live, below majestic's 42.9%).
+- **`isp.aeEngine` is retired on Maruko** (still honored on Star6E). The
+  key still parses so existing configs load; `custom` logs a notice and
+  behaves as paced. The 0.9.12 no-op AE adaptor + P1 throttle controller
+  path is removed. `isp.aeFps` keeps governing only the supervisory
+  limits thread (Star6E semantics unchanged).
+- Pacer rate is auto-derived — no user knob: 100 fps → 33 Hz,
+  90 fps → 30 Hz, ≤90 fps → 30 Hz floor (full-rate quality at low fps).
+- **`isp.gainMax` fixes** (found live-testing gain headroom): (1) the
+  supervisory limits thread now compares against a fresh
+  `GetExposureLimit` read each tick instead of a local cache — the CUS3A
+  AE init was silently resetting limits to bin values right after the
+  startup push, so a config `gainMax` above the bin ceiling never stuck;
+  (2) the live `isp.gainMax` API setter now routes through the
+  supervisory target (`maruko_cus3a_set_gain_max`) instead of writing
+  the raw limit — writing `0` ("bin default") used to push a literal
+  0 limit and slam the image black.  Verified live on-device:
+  32000 → sgain rises past the bin's 8192 (to the algo's internal
+  ~11470 cap), 2048 → clamps down, 0 → returns to bin default 8192.
+- Findings for posterity: CUS3A INJECT run-mode makes the agent mid-layer
+  silently drop every exposure apply (do not revisit); `CUS3A_RunOnceEn`
+  only arms algo selection while `CUS3A_RunOnce` executes synchronously in
+  the caller; `MI_ISP_RegisterIspApiAgent` is pure userspace fp tables.
+- **Debug OSD: smoothed CPU% + live AE/AWB readouts.** The CPU% readout
+  is now a sliding ~1 s average (snapshot ring at 500 ms cadence) instead
+  of a jumpy 500 ms delta; the duplicated per-platform `/proc/stat`
+  sampler in `debug_osd.c` is folded into one shared implementation
+  (both Star6E and Maruko). Maruko additionally gains three OSD rows,
+  refreshed at 1 Hz, to watch the paced 3A adapt live:
+  `exp` (shutter µs, sensor gain/limit, ISP gain), `ae` (measured luma
+  vs scene target, stable/adj/bound state, pacer Hz), and `awb`
+  (R/B gains, color temp, stable/adj) — backed by a new
+  `maruko_controls_ae_osd_status()` reusing the `/api/v1/ae/info` +
+  `/api/v1/awb/info` SDK queries.
+- **Review-pass hardening** (adversarial multi-agent review of the above):
+  (1) the `ae` OSD row is now gated on a distinct `ae_info_valid` flag so
+  it no longer renders fabricated zeros when only the sensor-plane query
+  answers (the `exp` row keeps its sensor-plane fallback); (2) the AE
+  pacer now requires all three CUS3A symbols (`RunOnceEn`/`RunOnce`/
+  `SetRunMode`) before engaging — a missing `RunOnceEn` falls back to
+  vendor full-rate instead of pausing auto-run and ticking an unarmed
+  `RunOnce` (frozen 3A); (3) the pacer's 3 s convergence wait is now an
+  interruptible 50 ms poll of `g_inj_run`, so a teardown/respawn in the
+  first 3 s joins in ≤50 ms instead of blocking the whole window — matters
+  on this restart-latency-sensitive SoC. Device-verified: pacer
+  re-derives 33 Hz on live switch to 1080p100, both OSD rows show valid
+  data, ~48% busy with OSD active.
+
+## [0.21.0] - 2026-07-03
+
+Maruko IMX415 mode-lineup rework: one best mode per FPS tier, all non-binned
+and ~16:9 (sensor native aspect). See `documentation/MARUKO_IMX415_1485_MODES.md`.
+
+- **BREAKING: `sensor.mode` index remap** (Maruko IMX415). New lineup:
+  0 = `3760x2116@30fps` (891, REALTIME), 1 = `2952x1656@50fps_1485`,
+  2 = `2688x1512@60fps_1485` (NEW — exact 16:9, replaces 2952x1368 19.4:9),
+  3 = `2112x1184@90fps_1485`, 4 = `1920x1080@100fps_1485` (NEW).
+  Old→new: 0→0, 5→1, 7→3. Configs with a pinned mode index must be updated;
+  `sensor.mode: -1` (auto) resolves correctly unchanged.
+- **New 100 fps tier replaces the vendor 120 fps mode**: `1920x1080@100_1485`
+  is non-binned, exact 16:9, and sized ~8% under the ISP m2m ceiling
+  (capacity ~108 fps) so the FRAMEBASE queue stays empty — minimum latency
+  at full nominal rate. The old binned 1472x816@120 never delivered 120
+  (115–118 measured): its HMAX=365 table bursts 393 MPix/s, above the
+  384 MPix/s ISP REALTIME drain.
+- **Vendor superwide + binned modes unsurfaced** (superwide 3760x1024@59,
+  binned 1080p60-ispsafe, binned 1080p90, 1472x816@120): tables parked
+  under `#if 0` in the driver for posterity; all suffered either non-16:9
+  geometry or the 393 MPix/s FIFO-pressure defect.
+- CSI-MAC clock selection now keyed on a per-mode `link_mbps` field instead
+  of a hardcoded index threshold (renumber-safe; the FRAMEBASE bind was
+  already keyed on the `_1485` name suffix).
+- **`video0.size` width alignment relaxed /16 → /8.** The former rule
+  (#63/#55, derived from an 854×480 failure that is only ÷2) needlessly
+  rejected native ÷8 widths like 2952. Mode 1's `2952x1656` may now be set
+  explicitly instead of only via `auto`; forcing the nearest /16 (2944)
+  anamorphically downscaled 2952→2944 and cost ~7 fps (43 vs 50, device-
+  verified). Height /8 unchanged. HEVC's conformance window covers the
+  sub-CTU remainder, so /8 is the correct minimum.
+
+## [0.20.0] - 2026-07-03
+
+Maruko (Infinity6C/SSC378QE) IMX415 1485 Mbps non-binned sensor modes, plus
+the operational fixes discovered while bringing them up on hardware. Full
+platform notes in `documentation/MARUKO_IMX415_1485_MODES.md`.
+
+- **Three new sensor modes** (indexes 5–7): `2952x1656@50fps_1485` (1:1 5MP),
+  `2952x1368@60fps_1485` (ISP-ceiling max @60), `2112x1184@90fps_1485`
+  (ISP-ceiling max @90). Requires CSI-MAC clock 288 MHz (set in `poweron`
+  for mode index ≥ 5) and a mode-conditional VIF→ISP bind: FRAMEBASE for
+  `_1485` modes (REALTIME overflows the ISP input FIFO at 594 MPix/s line
+  bursts), REALTIME retained for 891 modes (minimum latency).
+- **Sensor register-state hardening**: 1485 and non-binned 891 tables now
+  write the readout-mode registers explicitly (`0x3020/21/22`, `0x30D9/DA`)
+  — the IMX415 latches binning across teardown and warm reboot, which
+  previously wedged every warm binned→1485 switch until a power-cycle.
+  Vendor 1485 table's `0x3032=0x00` dark-image bug fixed (`0x01`).
+- **Mode 2 (1920x1080@60 binned) frame-rate fix**: the ISP-safe HMAX
+  rework (HMAX=1100) could not deliver 60 fps at all — in 2x2 binning
+  VMAX counts physical lines (~2250 minimum for 1080p output), which at
+  a 14.8 µs line is 30 fps; the stored `vts_30fps=2250` shipped exactly
+  that under a 60 fps label. Now HMAX=550 (7.407 µs line): VMAX=2250 →
+  device-measured 60.0 fps, line burst 259 MPix/s (safely under the
+  384 MPix/s ISP drain that FIFO-FULLed the vendor HMAX=365 table).
+- **Teardown drain**: poll SCL/ISP output-port task counts (worst row
+  across all ports) before unbind so the kernel's unbounded REALTIME/RING
+  flush isn't entered with in-flight tasks that can no longer complete
+  (D-state hang observed after long runs; drain is bounded + advisory).
+- **Honest keep_aspect on Maruko**: true width crops are impossible on the
+  I6C camera path (SCL output crop must match ring stride; RDMA input crop
+  needs a FRAMEBASE producer bind that mi_sys refuses on ISP→SCL) — wide →
+  narrow-AR now anamorphically squeezes full sensor width with a one-line
+  startup notice (>2% width delta), height crops still honored, AE zoom
+  crop normalized against full ISP dims, zoom windows confined to the
+  keep_aspect framing surface. Star6E is unaffected (VIF capture-window
+  crop remains a real crop there).
+
 ## [0.19.0] - 2026-07-02
 
 Remove the SDK VENC frame-lost strategy entirely — config field, live plumbing,
@@ -48,28 +288,59 @@ reachable only by hand-editing `/etc/waybeam.json` — invisible to
 No protocol or beacon behavior change — purely makes the existing discovery
 config settable at runtime and visible to operators.
 
-## [0.18.0] - 2026-06-17
+## [0.18.0] - 2026-06-16
 
-Add an mDNS/DNS-SD device beacon so the encoder is discoverable on the LAN
-with no configuration.
+Add an mDNS device beacon (discovery migration, Phase 1). waybeam_venc now
+announces itself as a `_waybeam-venc._tcp.local` service on the multicast
+group 224.0.0.251:5353, so ground stations and Android clients can discover
+the encoder directly — independent of the optional waybeam-hub, which is the
+only thing that previously advertised the vehicle.
 
-**`_waybeam-venc._tcp` service announce.** A lightweight responder (own thread,
-UDP 5353 multicast) advertises PTR/SRV/TXT/A for the encoder. TXT carries only
-`proto` and `version`; stable endpoints/identity are fetched via
-`GET /api/v1/config`. Controlled by a new `discovery` config block
-(`enabled`, `serviceType`, `name`, `bareAlias`; default on).
+**Announce-only, self-contained, off the hot path.** The beacon runs on its
+own thread (`src/mdns_beacon.c`), started from `main()` and torn down (with a
+multicast goodbye) before any SIGHUP-respawn exec. It responds to PTR queries
+for its own service type and re-announces periodically; it does **not**
+discover peers or feed any trust layer. The RFC 6762/6763 wire codec lives in
+`src/mdns_wire.c` (`MDNS_WIRE_VERSION 1`) — the source of truth that
+waybeam-hub will vendor; keep both in sync. The wire codec and multicast
+socket handling are derived from
+[OpenIPC herald](https://github.com/OpenIPC/firmware/tree/master/general/package/herald)
+(MIT), the compact mDNS/DNS-SD stack for the OpenIPC project.
 
-**Serial-suffix instance naming + `device.serial`.** The announced instance/host
-name is suffixed with the last 6 hex of the SoC die ID; the full die ID is
-exposed read-only as `device.serial` in `GET /api/v1/config`. Falls back
-gracefully on parts without a readable die ID.
+TXT is kept **deliberately minimal**: the service type `_waybeam-venc._tcp`
+is itself the recognition signal ("an OpenIPC camera running the waybeam
+encoder"), so TXT carries only `proto` (wire-schema version) and `version`
+(waybeam version). The hostname/IP/port travel in the standard SRV/A/instance
+records; live state (bitrate/fps/mode) is never advertised. The sidecar port,
+backend/SoC, codec, full serial, and hub presence are left for the consumer to
+fetch with one `GET /api/v1/config` after discovery — the beacon announces an
+always-true device fact, capabilities are queried on demand.
 
-**Bare `waybeam.local` alias** (default on) with RFC 6762 §8.2 conflict
-resolution (highest-IP tiebreak; suppression sticky until restart).
+**Serial-suffix naming.** The instance/host name is `waybeam-<suffix>.local`,
+where `<suffix>` is the tail of the SigmaStar SoC **die ID** read natively
+from RIU registers via `/dev/mem` (`src/device_id.c`, method lifted from
+OpenIPC `ipctool` and device-verified against `ipcinfo -i`). This gives every
+Star6E a stable, collision-free name with no RFC 6762 rename churn. SoCs with
+no die ID (ssc37x / Maruko, verified) fall back to `discovery.name` or bare
+`waybeam`. The full 12-hex die ID is the fleet key, exposed read-only at
+`GET /api/v1/config` → `data.device.serial`.
 
-The wire codec (`mdns_wire.c`) is bounds-checked against malformed/truncated
-inbound packets (compression-pointer loop cap, per-field length guards).
-DNS-SD helpers adapted from the OpenIPC herald implementation.
+**Bare `waybeam.local` alias.** Because most setups run a single vehicle, the
+beacon also claims the bare host name `waybeam.local` (config
+`discovery.bareAlias`, default true) so it can be reached as
+`http://waybeam.local` without the suffix. It publishes A records for both
+names and answers `A` queries for either. If a second waybeam device contests
+`waybeam.local`, the conflict is resolved on the existing RX socket by an
+RFC 6762 §8.2 IP tiebreak (higher IP keeps it; the lower IP yields with a
+goodbye and keeps only its unique suffixed name) — no flapping, every device
+still reachable by `waybeam-<suffix>.local`.
+
+New `discovery` config section (`enabled` default true, `serviceType`,
+`name`, `bareAlias`). The beacon is inert when disabled, when no usable
+interface exists, or if the socket can't bind — it never blocks the encode
+path.
+
+Design: `documentation/DISCOVERY_TRUST_MIGRATION_SPEC.md`.
 
 ## [0.17.1] - 2026-06-13
 

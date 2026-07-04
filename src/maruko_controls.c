@@ -3,6 +3,7 @@
 #include "idr_rate_limit.h"
 #include "maruko_audio.h"
 #include "maruko_bindings.h"
+#include "maruko_cus3a.h"
 #include "maruko_iq.h"
 #include "maruko_output.h"
 #include "maruko_pipeline.h"
@@ -282,9 +283,12 @@ static int maruko_apply_fps(uint32_t fps)
 	MI_S32 bind_ret;
 	uint32_t sensor_fps;
 
-	if (fps == 0 || fps > 120)
+	if (fps == 0 || fps > PIPELINE_LIVE_FPS_MAX)
 		return -1;
 
+	/* A request above the current mode's max is clamped for the rebind (see
+	 * PIPELINE_LIVE_FPS_MAX) — the caller's config still holds the requested
+	 * value so a later respawn can select a higher-fps sensor mode for it. */
 	sensor_fps = g_ctx.sensor_fps;
 	if (fps > sensor_fps) {
 		printf("> FPS %u exceeds sensor mode max %u, clamping\n", fps,
@@ -774,7 +778,27 @@ static int maruko_apply_awb_mode(int mode, uint32_t ct)
 
 static int maruko_apply_gain_max(uint32_t gain)
 {
-	/* Set max sensor gain via SetExposureLimit. */
+	/* Route through the supervisory thread when it runs: it re-reads
+	 * the limit every tick and pushes the effective ceiling (config
+	 * value, or the ISP bin default when gain==0).  Writing the raw
+	 * value here instead is wrong twice over: gain==0 becomes a
+	 * literal 0 limit (image slams to 1x gain = black), and the
+	 * supervisory would fight any direct write with its own target. */
+	maruko_cus3a_set_gain_max(gain);
+	if (maruko_cus3a_running()) {
+		printf("> [maruko] Gain max -> %u (0 = bin default; applied "
+			"by supervisory within one tick)\n", gain);
+		return 0;
+	}
+
+	/* Fallback (supervisory disabled, isp.aeFps=0): direct write.
+	 * gain==0 means "bin default", which we cannot know here — leave
+	 * the current limit untouched. */
+	if (gain == 0) {
+		printf("> [maruko] Gain max -> 0 ignored (supervisory off; "
+			"keeping current limit)\n");
+		return 0;
+	}
 	typedef int (*ae_get_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
 	typedef int (*ae_set_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
 	void *h = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
@@ -1154,4 +1178,52 @@ const VencApplyCallbacks *maruko_controls_callbacks(void)
 const VencConfig *maruko_controls_vcfg(void)
 {
 	return g_ctx.vcfg;
+}
+
+void maruko_controls_ae_osd_status(MarukoAeOsdStatus *out)
+{
+	MarukoAeDiagSnapshot s;
+
+	memset(out, 0, sizeof(*out));
+	ae_diag_collect(&s);
+
+	/* Sensor plane shutter/gain remain valid even if the AE query
+	 * fails, so surface those as long as either source answered. */
+	out->ae_valid = (s.info_ret == 0 || s.plane_ret == 0);
+	out->shutter_us = ae_diag_exposure_us(&s);
+	out->sgain_x1024 = ae_diag_sensor_gain(&s);
+	out->igain_x1024 = ae_diag_isp_gain(&s);
+	if (s.limit_ret == 0) {
+		out->max_shutter_us = s.limit.maxShutterUs;
+		out->max_sgain = s.limit.maxSensorGain;
+	}
+	if (s.info_ret == 0) {
+		out->ae_info_valid = 1;
+		out->luma_y = s.info.stHistWeightY.u32LumY;
+		out->scene_target = s.info.u32SceneTarget;
+		out->stable = s.info.bIsStable ? 1 : 0;
+		out->boundary = s.info.bIsReachBoundary ? 1 : 0;
+	}
+
+	{
+		typedef MI_S32 (*fn_awb_query_t)(uint32_t, uint32_t,
+			MarukoAwbQueryInfo *);
+		void *handle = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+		if (handle) {
+			fn_awb_query_t fn = (fn_awb_query_t)dlsym(handle,
+				"MI_ISP_AWB_QueryInfo");
+			if (fn) {
+				MarukoAwbQueryInfo qi;
+				memset(&qi, 0, sizeof(qi));
+				if (fn(0, 0, &qi) == 0) {
+					out->awb_valid = 1;
+					out->rgain = qi.u16Rgain;
+					out->bgain = qi.u16Bgain;
+					out->color_temp = qi.u16ColorTemp;
+					out->awb_stable = qi.bIsStable ? 1 : 0;
+				}
+			}
+			dlclose(handle);
+		}
+	}
 }

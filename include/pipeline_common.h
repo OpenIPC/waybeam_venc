@@ -73,4 +73,19 @@ static inline int pipeline_common_scale_roi_qp(int qp, int level, int steps)
 /** Maximum number of ROI band regions. */
 #define PIPELINE_ROI_MAX_STEPS 4
 
+/** Upper bound the live-apply path accepts for video0.fps.
+ *
+ * A live `fps` request above the current sensor mode's max is intentionally
+ * NOT rejected: the per-platform apply_fps() clamps it down to the mode's
+ * sensor_fps for the actual VPE->VENC rebind, while the requested value is
+ * still committed to the config so a subsequent respawn/sensor_select can
+ * pick a higher-fps mode for it (sensor_mode_clamp_fps() re-clamps there too).
+ * This lets a client pre-stage e.g. fps=144 while parked in a 100fps mode so
+ * the auto sensor-select lands on the 144fps mode on the next mode switch,
+ * instead of the mode being clamped down before it is ever entered.
+ *
+ * 144 is the ceiling because it is the highest fps any current mode offers;
+ * anything above it is a client error and still rejected. */
+#define PIPELINE_LIVE_FPS_MAX 144u
+
 #endif /* PIPELINE_COMMON_H */

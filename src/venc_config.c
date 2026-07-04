@@ -267,9 +267,11 @@ static void load_sensor(const cJSON *root, VencConfigSensor *s)
  *   "sdk"    → legacy_ae=true   (ISP firmware AE; skip start_custom_ae)
  *   "custom" → legacy_ae=false  (start_custom_ae spins cus3a)
  *
- * Maruko:
- *   "sdk"    → ae_mode="native"   (SDK runs AE at sensor rate)
- *   "custom" → ae_mode="throttle" (no-op adaptor + supervisory thread)
+ * Maruko: IGNORED since 0.22.0 — paced native 3A is the only AE mode
+ *   (vendor AE+AWB, RunOnce pacer at sensor_fps/3, floor 30 Hz; beats
+ *   both historical modes on CPU and image quality).  The field is still
+ *   parsed so existing configs load cleanly; "custom" logs a retirement
+ *   notice at pipeline init.
  *
  * Unknown values fall back to "sdk".  Returns 0 on recognised value,
  * -1 if `name` is unrecognised (caller warns and falls back). */

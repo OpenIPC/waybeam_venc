@@ -119,8 +119,15 @@ Set `"aeEngine": "custom"` to switch to the supervisory thread.
 
 Maruko keeps CUS3A enabled (1,1,1) permanently — the ISP pipeline requires
 it for frame processing at >=60fps (without it, the ISP FIFO stalls).
-The supervisory thread is Star6E-only.  Maruko uses the ISP's internal AE/AWB
-at all times.
+
+> **Correction (2026-07):** the sentence that used to follow — "The
+> supervisory thread is Star6E-only; Maruko uses the ISP's internal AE/AWB at
+> all times" — is **wrong**. With `isp.aeEngine=custom` Maruko DOES run a
+> supervisory thread that drives AE in userspace (a hand-rolled 15 Hz loop in
+> `src/maruko_cus3a.c`); only in `sdk`/native mode does the SDK's per-frame
+> AE run untouched. That custom path is the CPU-saving "throttle" measured in
+> `MARUKO_CPU_PROFILE.md`, and its quality defects (colour shift + AE steps)
+> and fixes are in `MARUKO_AE_IMPROVEMENT_BRAINSTORM.md`.
 
 ## Automatic Exposure Cap
 
