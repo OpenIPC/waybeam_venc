@@ -3,6 +3,7 @@
 #include "venc_recordings.h"
 
 #include <stddef.h>
+#include <unistd.h>
 
 static const unsigned char dashboard_gz[] = {
 	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0xed, 0xbd, 0xeb, 0x76, 0xe3, 0x36,
@@ -1251,9 +1252,17 @@ static const unsigned char dashboard_gz[] = {
 	0x03, 0x7d, 0xb7, 0x87, 0x5b, 0xff, 0x3f, 0x05, 0x92, 0x2d, 0xea, 0xb1, 0x16, 0x01, 0x00,
 };
 
+/* When present, this file replaces the built-in dashboard at runtime, so the
+ * UI can be changed without recompiling.  If it is absent or unreadable the
+ * embedded copy is served. */
+#define DASHBOARD_OVERRIDE_PATH "/usr/share/www/dashboard.html"
+
 static int handle_dashboard(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
+	if (access(DASHBOARD_OVERRIDE_PATH, R_OK) == 0)
+		return httpd_send_file(fd, DASHBOARD_OVERRIDE_PATH,
+			"text/html; charset=utf-8", NULL);
 	return httpd_send_html_gz(fd, 200, dashboard_gz,
 		(int)sizeof(dashboard_gz));
 }
