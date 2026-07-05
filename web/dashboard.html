@@ -562,6 +562,7 @@ let serverConfig = {};
 let localConfig = {};
 
 let capabilities = {};
+let backendName = '';   // 'star6e' | 'maruko' — from /api/v1/version, gates per-option UI (e.g. framing stab on Maruko)
 
 const changedFields = new Set();
 
@@ -615,7 +616,7 @@ const TOOLTIPS = {
 
 'video0.zoomY':'Digital zoom crop center Y, 0 = top and 1 = bottom. Applied live',
 
-'video0.framing':'Framing mode — what the VPE crop does. off = full image. stab = image stabilization, crop+shrink (Star6E only; centered 80% crop, source auto-clamped to <=1920x1080 to keep fps; stabilizes ch0 only; zoomX/zoomY are ignored — stab is always centered; live pauseStab toggle). stab-fill = image stabilization, floating image on a black border (Star6E only; encode stays full-res, stabCropPct sets the shift/border budget; live pauseStab toggle). zoom-1.25x/1.50x/1.75x/2x/3x/4x = pure digital zoom (both backends; zoomX/zoomY pan the crop live; no upscale — higher zoom emits a smaller frame). Requires restart',
+'video0.framing':'Framing mode — what the VPE crop does. off = full image. stab = image stabilization, crop+shrink (Star6E only; centered 80% crop, source auto-clamped to <=1920x1080 to keep fps; stabilizes ch0 only; zoomX/zoomY are ignored — stab is always centered; live pauseStab toggle). stab-fill = image stabilization, floating image on a black border (Star6E only; encode stays full-res, stabCropPct sets the shift/border budget; live pauseStab toggle). zoom-1.25x/1.50x/1.75x/2x/3x/4x = pure digital zoom (both backends; zoomX/zoomY pan the crop live; no upscale — higher zoom emits a smaller frame). Requires restart. Maruko/I6C: stab and stab-fill are unavailable (stabilization needs the IVE block, absent on this SoC) — those two options are disabled there; off/zoom work on both backends',
 
 'debug.showOsd':'Enable debug OSD overlay on the live stream (Star6E composites at the VPE port; with stabilization on, the stats panel anchor tracks the moving crop window so it stays put in the encoded view). Requires restart',
 
@@ -1045,7 +1046,16 @@ function renderSettings(){
       } else if(ft === 'enum'){
 
         const labels = (key==='sensor.mode' && window._modeLabels) ? window._modeLabels : null;
-        const opts = ENUMS[key].map(o => `<option value="${o}" ${o===String(val)?'selected':''}>${labels?labels[o]||o:o}</option>`).join('');
+        // On Maruko the framing stab / stab-fill presets are inert (no IVE
+        // block) — disable those two options so they can't be selected. The
+        // field stays enabled; off/zoom presets work on both backends.
+        const optDisabled = (key==='video0.framing' && backendName==='maruko')
+          ? new Set(['stab','stab-fill']) : null;
+        const opts = ENUMS[key].map(o => {
+          const na = optDisabled && optDisabled.has(o);
+          const lbl = (labels?labels[o]||o:o) + (na ? ' (N/A — no IVE)' : '');
+          return `<option value="${o}" ${o===String(val)?'selected':''}${na?' disabled':''}>${lbl}</option>`;
+        }).join('');
         const coerce = typeof val === 'number' ? 'parseInt(this.value)' : 'this.value';
 
         input = `<select data-key="${key}" onchange="fieldChanged('${key}',${coerce})">${opts}</select>`;
@@ -1102,7 +1112,9 @@ function renderSettings(){
       if(!cap || !cap.ui) continue;
       if(key.includes('_')) continue;            // skip snake_case dup key
       if(rendered.has(key)) continue;            // already in a static section
-      if(cap.supported === false) continue;       // backend doesn't support it
+      // NOTE: unsupported fields are NOT skipped here — like the static pass
+      // above they render greyed-out (disabled) with an explanatory tooltip,
+      // e.g. the Stabilization group on Maruko (no IVE block). Grey, not hide.
       const g = cap.ui.group || 'Module';
       (groups[g] = groups[g] || []).push([key, cap]);
     }
@@ -1133,11 +1145,19 @@ function renderSettings(){
         } else {
           input = `<input type="text" data-key="${key}" value="${val}" onchange="fieldChanged('${key}',this.value)">`;
         }
-        const tip = (ui.tooltip||'').replace(/"/g,'&quot;');
+        // Grey out (do not hide) fields the backend reports unsupported —
+        // mirrors the static pass above (e.g. the Stabilization group on
+        // Maruko, which has no IVE block). The field's own tooltip carries the
+        // backend-specific reason; we prepend a generic prefix + an N/A badge.
+        const unsupported = cap.supported === false;
+        if(unsupported){ input = input.replace(/<(input|select)\b/, '<$1 disabled'); }
+        let tip = (ui.tooltip||'');
+        if(unsupported) tip = 'Not adjustable on this backend. ' + tip;
+        tip = tip.replace(/"/g,'&quot;');
         const row = document.createElement('div');
-        row.className = 'field';
+        row.className = unsupported ? 'field field-na' : 'field';
         row.id = 'field-'+key;
-        row.innerHTML = `<div class="field-label" title="${tip}">${label} <span class="badge ${badgeClass}">${badgeText}</span></div><div>${input}</div>`;
+        row.innerHTML = `<div class="field-label" title="${tip}">${label} <span class="badge ${badgeClass}">${badgeText}</span>${unsupported?' <span class="badge badge-na">N/A</span>':''}</div><div>${input}</div>`;
         body.appendChild(row);
       }
       form.appendChild(div);
@@ -1675,6 +1695,8 @@ async function init(){
     if(verR.ok){
 
       document.getElementById('tbar-version').innerHTML = 'v<b>'+verR.data.app_version+'</b>';
+
+      backendName = verR.data.backend || '';
 
       document.getElementById('tbar-backend').innerHTML = '<b>'+verR.data.backend+'</b>';
 
