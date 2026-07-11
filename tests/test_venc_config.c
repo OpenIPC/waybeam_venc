@@ -604,6 +604,32 @@ static int test_framing_presets(void)
 	CHECK("framing bogus no zoom", cfg.video0.zoom_pct == 0.0);
 	CHECK("framing bogus no stab", cfg.video0.stab_crop_pct == 0);
 
+	/* stab_accuracy: defaults to "auto"; parses the camelCase key under a stab
+	 * preset; an unrecognised value falls back to "auto" (lenient load). */
+	venc_config_defaults(&cfg);
+	CHECK("stab_accuracy default auto",
+		strcmp(cfg.video0.stab_accuracy, "auto") == 0);
+
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\", "
+		"\"stabAccuracy\": \"medium\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("stab_accuracy load medium",
+		strcmp(cfg.video0.stab_accuracy, "medium") == 0);
+
+	path = write_temp_json("{ \"video0\": { \"framing\": \"stab\", "
+		"\"stabAccuracy\": \"ludicrous\" } }");
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("stab_accuracy bad value -> auto",
+		strcmp(cfg.video0.stab_accuracy, "auto") == 0);
+
 	return failures;
 }
 

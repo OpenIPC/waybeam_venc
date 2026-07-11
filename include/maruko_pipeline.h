@@ -130,6 +130,18 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
   double pct, double x, double y);
 void maruko_pipeline_zoom_status(MarukoZoomStatus *out);
 
+/** Framing module (video0.framing, e.g. "stab") bring-up / teardown.
+ *  framing_setup is called after configure_graph (scl_crop set, VENC bound);
+ *  it selects the module for vcfg and starts it, returning 0 whether or not one
+ *  engaged.  framing_stop joins the detector + disables its tap and MUST run
+ *  before the SCL port0 is torn down (it is, from teardown_graph). */
+int maruko_pipeline_framing_setup(MarukoBackendContext *ctx,
+  const VencConfig *vcfg);
+void maruko_pipeline_framing_stop(void);
+/** Live pause for the active framing module (video0.pause_stab). Returns 0 on
+ *  success, -1 if no framing module is active. */
+int maruko_pipeline_set_pause_stab(bool paused);
+
 /** Reload the ISP tuning bin against the running pipeline.
  *  configured_path is the new bin location (NULL/empty falls back to
  *  /etc/sensors/<sensor>.bin keyed off ctx->sensor.plane.sensName).

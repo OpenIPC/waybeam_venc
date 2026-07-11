@@ -101,6 +101,12 @@ typedef struct {
 	 * bind_maruko_pipeline() to fill VencJpegConfig; width=0/height=0
 	 * inherits main stream dims. */
 	VencConfigSnapshot snapshot;
+	/* Mirror of video0.framing ("off"/"zoom"/"stab"/"stab-fill").  Read by
+	 * the pipeline graph builder: "stab-fill" switches the SCL→VENC leg from
+	 * the RING bind to the manual-compose bridge (SCL chn 1 → VENC
+	 * FRAME_BASE) — see bind_maruko_pipeline().  The framing MODULE still
+	 * selects off VencConfig; this mirror only steers graph topology. */
+	char framing[16];
 } MarukoBackendConfig;
 
 /** Fill config with compiled-in defaults for Maruko backend. */

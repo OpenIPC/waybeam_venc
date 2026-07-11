@@ -18,6 +18,16 @@
 
 struct DebugOsdState; /* forward declaration — see debug_osd.h */
 
+/* Hard VENC encoder-input frame-rate ceiling on Infinity6E.  The SDK's
+ * _MI_VENC_VerifyFps rejects any input FPS > 120 and silently resets it to
+ * 30/1 ("Input invalid FPS:144/1 is over 120, set 30/1 by default"), which
+ * makes CBR rate control budget for 30fps while ~143 frames/s actually arrive
+ * -> ~4.7x bitrate overshoot.  Clamp the VPE->VENC bind dst AND the encoder
+ * rate-control fps to this so a >120 sensor mode (e.g. 1600x900@144) encodes
+ * cleanly at 120fps instead of overshooting.  Sensor/VIF may still run 143;
+ * the framebase bind drops the surplus. */
+#define STAR6E_VENC_INPUT_FPS_MAX 120u
+
 typedef struct {
 	uint16_t x;
 	uint16_t y;

@@ -11,7 +11,11 @@
 #include "maruko_controls.h"
 #include "maruko_cus3a.h"
 #include "maruko_output.h"
+#include "maruko_framing.h"
+#include "maruko_framing_host.h"
 #include "maruko_recorder.h"
+#include "maruko_stab_bench.h"
+#include "maruko_stabfill_probe.h"
 #include "maruko_ts_recorder.h"
 #include "maruko_video.h"
 #include "output_socket.h"
@@ -36,6 +40,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <string.h>
+#include <sys/reboot.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -72,6 +77,15 @@ static int g_mi_scl_chn_created = 0;
  * snapshot backend.  Configured + enabled in configure_maruko_scl, bound
  * to MJPG VENC dev 8 by venc_jpeg_backend_init (src/maruko_jpeg.c). */
 static int g_mi_scl_port1_enabled = 0;
+/* stab-fill graph mode (cfg.framing == "stab-fill", latched per bring-up in
+ * maruko_pipeline_configure_graph).  stab-fill swaps the SCL→VENC leg: SCL(0,0)
+ * port0 becomes RAW + UNBOUND (drained by the fill module), and the VENC is
+ * created in NORMAL_FRMBASE with NO bind — the fill module manually pushes the
+ * composed frames into its input port (MI_SYS_ChnInputPortGetBuf/PutBuf),
+ * device-proven at 50 fps.  off/zoom/stab keep the zero-copy RING leg
+ * untouched.  (Phase 5a's "i6c VENC cannot be pushed" was an ABI artifact —
+ * see maruko_setup_stabfill_venc.) */
+static int g_stab_fill_graph = 0;
 /* Mirrors MI_SYS_WindowRect_t.  Defined up here because both the SCL
  * configure path and the zoom helpers below use it. */
 typedef struct {
@@ -856,7 +870,9 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	scl_port.output.width = (unsigned short)out_width;
 	scl_port.output.height = (unsigned short)out_height;
 	scl_port.pixFmt = I6_PIXFMT_YUV420SP;
-	scl_port.compress = (i6_common_compr)6; /* IFC */
+	/* IFC for the zero-copy VENC RING leg; RAW in stab-fill, where port0 is
+	 * unbound and the fill module CPU-reads + PA-blits the frames. */
+	scl_port.compress = (i6_common_compr)(g_stab_fill_graph ? 0 : 6);
 	printf("> [maruko] SCL port: crop(%u,%u %ux%u) out(%ux%u) "
 		"fmt=%d compress=%d\n",
 		scl_port.crop.x, scl_port.crop.y,
@@ -1043,10 +1059,12 @@ static int maruko_wait_output_idle(const char *proc_path, int timeout_ms,
 #define MARUKO_PROC_ISP "/proc/mi_modules/mi_isp/mi_isp0"
 #define MARUKO_PROC_SCL "/proc/mi_modules/mi_scl/mi_scl0"
 
-/* Stop VPE channels only — keep devices and dlopen handles alive.
- * Used during reinit to avoid kernel mutex destruction. */
-/* Stop VPE channels only — skip ISP DestroyChannel which crashes
- * with "Mutex not initialized" when CUS3A state persists in kernel. */
+/* Stop the VPE channels (ISP quiesce + SCL destroy).  Reached only via
+ * teardown_graph (full shutdown) — Maruko fork+exec respawns on every
+ * reinit, so there is no in-process channel-recreate to guard.  The ISP
+ * DestroyChannel is skipped deliberately: the kernel ISP retains CUS3A
+ * mutex state that crashes a destroy+recreate cycle, and MI_SYS_Exit
+ * reclaims the channel on process exit. */
 static void maruko_stop_vpe_channels(void)
 {
 	/* Stop the producer (ISP) before destroying the consumer (SCL).
@@ -1068,23 +1086,6 @@ static void maruko_stop_vpe_channels(void)
 		(void)g_mi_scl.fnStopChannel(0, 0);
 		(void)g_mi_scl.fnDestroyChannel(0, 0);
 		g_mi_scl_chn_created = 0;
-	}
-}
-
-/* Full VPE stop — destroy devices and unload libs.
- * Used during final shutdown only. */
-static void maruko_stop_vpe(void)
-{
-	maruko_stop_vpe_channels();
-	g_mi_isp_chn_created = 0;
-	g_mi_scl_chn_created = 0;
-	if (g_mi_scl_dev_created) {
-		(void)g_mi_scl.fnDestroyDevice(0);
-		g_mi_scl_dev_created = 0;
-	}
-	if (g_mi_isp_dev_created) {
-		(void)g_mi_isp.fnDestroyDevice(0);
-		g_mi_isp_dev_created = 0;
 	}
 }
 
@@ -1657,6 +1658,120 @@ static void maruko_pan_ramp_stop(void)
 		pthread_join(th, NULL);
 }
 
+/* ── Framing-module registry (parallel of star6e_pipeline.c:60-88) ─────────── */
+#define MARUKO_FRAMING_MAX 4
+static const MarukoFramingModule *g_maruko_framing_registry[MARUKO_FRAMING_MAX];
+static int g_maruko_framing_count;
+static const MarukoFramingModule *g_maruko_framing;
+
+void maruko_framing_register(const MarukoFramingModule *m)
+{
+	if (m && g_maruko_framing_count < MARUKO_FRAMING_MAX)
+		g_maruko_framing_registry[g_maruko_framing_count++] = m;
+}
+
+const MarukoFramingModule *maruko_framing_select(const VencConfig *vcfg)
+{
+	int i;
+	for (i = 0; i < g_maruko_framing_count; i++)
+		if (g_maruko_framing_registry[i]->enabled(vcfg))
+			return g_maruko_framing_registry[i];
+	return NULL;
+}
+
+void maruko_framing_register_builtins(void)
+{
+	if (g_maruko_framing_count > 0)
+		return;   /* idempotent */
+#if HAVE_FRAMING_STAB
+	{
+		extern const MarukoFramingModule maruko_framing_stab;
+		extern const MarukoFramingModule maruko_framing_stab_fill;
+		maruko_framing_register(&maruko_framing_stab);
+		maruko_framing_register(&maruko_framing_stab_fill);
+	}
+#endif
+}
+
+/* Host callbacks for framing modules — thin wrappers over the file-static
+ * helpers above (see include/maruko_framing_host.h). */
+void maruko_framing_apply_ae_crop(MarukoBackendContext *ctx,
+	double pct, double x, double y)
+{
+	maruko_apply_ae_crop(ctx, pct, x, y);
+}
+int maruko_framing_fill_graph_ready(void)
+{
+	return g_stab_fill_graph;
+}
+
+void maruko_framing_pan_ramp_stop(void)
+{
+	maruko_pan_ramp_stop();
+}
+
+/* Select + bring up the framing module for this run.  Called after
+ * configure_graph — scl_crop is set, VENC is bound, the SCL ports are up.
+ * Returns 0 whether or not a module engaged (g_maruko_framing == NULL if not). */
+int maruko_pipeline_framing_setup(MarukoBackendContext *ctx,
+	const VencConfig *vcfg)
+{
+	const MarukoFramingModule *m;
+	uint32_t ew = 0, eh = 0;
+
+	g_maruko_framing = NULL;
+	if (!ctx || !vcfg)
+		return 0;
+	m = maruko_framing_select(vcfg);
+	/* In stab-fill the framing module is the frame-base VENC's ONLY producer
+	 * — the graph was built with port0 unbound and no RING leg, so degrading
+	 * to "off" here would ship a healthy-looking daemon that streams nothing,
+	 * forever.  Any fill bring-up failure is therefore FATAL (the daemon
+	 * exits visibly; a config fix or respawn retries).  Other presets keep
+	 * the graceful degrade: the RING leg is intact without them. */
+	if (!m)
+		return g_stab_fill_graph ? -1 : 0;
+	if (m->prepare)
+		(void)m->prepare(vcfg, ctx->scl_crop_w, ctx->scl_crop_h, &ew, &eh);
+	if (m->setup_ports &&
+	    m->setup_ports(ctx, ctx->sensor.fps, ctx->sensor.fps) != 0) {
+		fprintf(stderr,
+			"> [maruko] framing '%s' setup_ports failed — %s\n",
+			m->preset_name, g_stab_fill_graph ? "FATAL" : "off");
+		return g_stab_fill_graph ? -1 : 0;
+	}
+	if (m->start && m->start() != 0) {
+		fprintf(stderr, "> [maruko] framing '%s' start failed — %s\n",
+			m->preset_name, g_stab_fill_graph ? "FATAL" : "off");
+		if (m->stop)
+			m->stop();
+		return g_stab_fill_graph ? -1 : 0;
+	}
+	g_maruko_framing = m;
+	printf("> [maruko] framing '%s' active\n", m->preset_name);
+	return 0;
+}
+
+/* Stop the active framing module (join detector, disable tap) — MUST run before
+ * teardown_graph disables the SCL port0 the module drives. */
+void maruko_pipeline_framing_stop(void)
+{
+	if (g_maruko_framing) {
+		if (g_maruko_framing->stop)
+			g_maruko_framing->stop();
+		g_maruko_framing = NULL;
+	}
+}
+
+/* Live pause for the active framing module (video0.pause_stab).  Mirrors
+ * star6e_pipeline_set_pause_stab. */
+int maruko_pipeline_set_pause_stab(bool paused)
+{
+	if (g_maruko_framing && g_maruko_framing->set_live)
+		return g_maruko_framing->set_live("pause", paused ? "1" : "0");
+	return -1;
+}
+
 /* Live pan: zoom_pct is MUT_RESTART (encoder dim change), so the live path
  * only updates x/y.  Updates the *target*; the ramp thread tweens
  * `current` toward it via maruko_pan_apply_locked.  pct is accepted to
@@ -1667,6 +1782,17 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 	if (!ctx) return -1;
 	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
 		return -1;
+
+	/* A framing module (stab) owns the SCL port-0 crop and runs its own pan
+	 * ramp-free.  Route x/y pan to it and swallow the zoom/ramp path so the
+	 * two never fight over port 0 (R2).  Mirrors star6e_pipeline.c's
+	 * active()->set_pan override. */
+	if (g_maruko_framing && g_maruko_framing->active &&
+	    g_maruko_framing->active()) {
+		if (g_maruko_framing->set_pan)
+			g_maruko_framing->set_pan(x, y);
+		return 0;
+	}
 	if (pct <= 0.0 || pct >= 1.0) {
 		maruko_pipeline_clear_zoom_status();
 		pthread_mutex_lock(&g_maruko_pan_ramp.lock);
@@ -1908,14 +2034,18 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	}
 
 	/* Ring pool MUST be configured before CreateChannel (matching
-	 * majestic i6c_hal.c order: pool → CreateChn → SetSource → Start) */
-	MI_U16 venc_ring = (MI_U16)height;
-	if (venc_ring == 0)
-		venc_ring = 1;
-	MI_S32 pool_ret = maruko_config_dev_ring_pool(I6C_SYS_MOD_VENC,
-		(MI_U32)venc_dev, (MI_U16)width, (MI_U16)height, venc_ring);
-	printf("> [maruko] VENC ring pool: %ux%u ring=%u ret=%d\n",
-		width, height, venc_ring, pool_ret);
+	 * majestic i6c_hal.c order: pool → CreateChn → SetSource → Start).
+	 * stab-fill skips it: the ring is the RING-DMA input backing store; the
+	 * NORMAL_FRMBASE input allocates its own ~3-buffer handshake pool. */
+	if (!g_stab_fill_graph) {
+		MI_U16 venc_ring = (MI_U16)height;
+		if (venc_ring == 0)
+			venc_ring = 1;
+		MI_S32 pool_ret = maruko_config_dev_ring_pool(I6C_SYS_MOD_VENC,
+			(MI_U32)venc_dev, (MI_U16)width, (MI_U16)height, venc_ring);
+		printf("> [maruko] VENC ring pool: %ux%u ring=%u ret=%d\n",
+			width, height, venc_ring, pool_ret);
+	}
 
 	i6c_venc_chn attr = {0};
 	if (cfg->rc_codec == PT_H265) {
@@ -1952,7 +2082,12 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 		return ret;
 	}
 
-	i6c_venc_src_conf input_mode = I6C_VENC_SRC_CONF_RING_DMA;
+	/* stab-fill: NORMAL (frame-base) input — required for the manual
+	 * ChnInputPortGetBuf/PutBuf feed (NORMAL == E_MI_VENC_INPUT_MODE_
+	 * NORMAL_FRMBASE = 0).  Everything else: RING_DMA fed by the zero-copy
+	 * SCL ring. */
+	i6c_venc_src_conf input_mode = g_stab_fill_graph ?
+		I6C_VENC_SRC_CONF_NORMAL : I6C_VENC_SRC_CONF_RING_DMA;
 	ret = maruko_mi_venc_set_input_source(venc_dev, *chn, &input_mode);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -1964,6 +2099,12 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	 * call silently no-ops if invoked after StartRecvPic.  Apply here
 	 * between CreateChn and StartRecvPic for both backends. */
 	(void)maruko_apply_ref_pred(venc_dev, *chn, cfg);
+
+	/* stab-fill: StartRecvPic (+ IntraRefresh, which must follow it) is
+	 * deferred to maruko_setup_stabfill_venc — after the rest of the graph
+	 * is assembled, before the fill module's first push. */
+	if (g_stab_fill_graph)
+		return 0;
 
 	ret = maruko_mi_venc_start_recv(venc_dev, *chn);
 	if (ret != 0) {
@@ -2035,6 +2176,11 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 		printf("> [maruko][probe] dual-VENC SDK probe END\n");
 	}
 
+	/* Phase 5a stab-fill go/no-go: does the i6c VENC accept manual
+	 * ChnInputPort pushes? (env-gated; see maruko_stabfill_probe.h). */
+	if (getenv("MARUKO_STABFILL_PROBE"))
+		maruko_stabfill_probe_run((int)venc_dev, &attr, width, height);
+
 	return 0;
 }
 
@@ -2100,6 +2246,9 @@ int maruko_pipeline_init(MarukoBackendContext *ctx)
 		return ret;
 	}
 	ctx->system_initialized = 1;
+
+	/* Register compiled-in framing modules (idempotent). */
+	maruko_framing_register_builtins();
 
 	/* Set HW clocks AFTER MI_SYS_Init (kernel modules now loaded)
 	 * but BEFORE ISP/SCL device creation (which locks clocks). */
@@ -2239,6 +2388,35 @@ static void assign_maruko_ports(MarukoBackendContext *ctx,
 	};
 }
 
+/* stab-fill: finish the manual-feed VENC bring-up.  The fill module pushes the
+ * composed frames straight into the (NORMAL_FRMBASE, unbound) VENC input port
+ * — device-proven at 50 fps.  Phase 5a's "the i6c VENC cannot be manually
+ * pushed" device result was an ABI artifact (its BufConf used eBufType=0,
+ * which is BUFDATA_RAW on i6c, plus a Star6E-shaped union offset); with the
+ * corrected MI_SYS_BufConf_t the direct push encodes fine, no SCL bridge or
+ * FRAME_BASE bind needed.  StartRecvPic is deferred here from
+ * maruko_start_venc (after the graph is assembled, before the first push). */
+static int maruko_setup_stabfill_venc(MarukoBackendContext *ctx)
+{
+	MI_S32 ret;
+
+	ret = maruko_mi_venc_start_recv(ctx->venc_device, ctx->venc_channel);
+	if (ret != 0) {
+		fprintf(stderr, "ERROR: [maruko] stab-fill StartRecvPic "
+			"failed %d\n", (int)ret);
+		return -1;
+	}
+	(void)maruko_apply_intra_refresh(ctx->venc_device, ctx->venc_channel,
+		&ctx->cfg, ctx->cfg.image_height, ctx->sensor.fps,
+		ctx->cfg.rc_codec);
+
+	printf("> [maruko] stab-fill: VENC(%d,%d) NORMAL_FRMBASE manual-feed "
+		"@ %ux%u (port0 RAW unbound -> compose -> push)\n",
+		(int)ctx->venc_device, (int)ctx->venc_channel,
+		ctx->cfg.image_width, ctx->cfg.image_height);
+	return 0;
+}
+
 static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 {
 	uint32_t out_w = ctx->cfg.image_width;
@@ -2285,14 +2463,21 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	}
 	ctx->bound_isp_vpe = 1;
 
-	ret = MI_SYS_BindChnPort2(&ctx->vpe_port, &ctx->venc_port,
-		ctx->sensor.fps, ctx->sensor.fps, I6_SYS_LINK_RING, 0);
-	if (ret != 0) {
-		fprintf(stderr,
-			"ERROR: [maruko] bind SCL->VENC failed %d\n", ret);
-		return -1;
+	if (!g_stab_fill_graph) {
+		ret = MI_SYS_BindChnPort2(&ctx->vpe_port, &ctx->venc_port,
+			ctx->sensor.fps, ctx->sensor.fps, I6_SYS_LINK_RING, 0);
+		if (ret != 0) {
+			fprintf(stderr,
+				"ERROR: [maruko] bind SCL->VENC failed %d\n", ret);
+			return -1;
+		}
+		ctx->bound_vpe_venc = 1;
+	} else {
+		/* stab-fill: port0 stays UNBOUND (the fill module drains it) and the
+		 * module manually feeds the frame-base VENC input per frame. */
+		if (maruko_setup_stabfill_venc(ctx) != 0)
+			return -1;
 	}
-	ctx->bound_vpe_venc = 1;
 
 	/* Set output port buffer depths to allow pipelining between
 	 * stages.  Without this, the pipeline has zero frame buffering
@@ -2306,7 +2491,10 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	 * (depth 8 = ~83MB MMA). */
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vif_port, 0, 4);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->isp_port, 1, 3);
-	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
+	/* stab-fill: port0 is a userspace-drained port; the fill module sets its
+	 * own (4,8) user-frame queue in setup_ports — don't shrink it here. */
+	if (!g_stab_fill_graph)
+		(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->venc_port, 1, 3);
 
 	/* JPEG snapshot backend on Maruko: dedicated MJPG VENC dev 8 chn 0
@@ -3072,6 +3260,18 @@ void maruko_pipeline_stop_dual(MarukoBackendContext *ctx)
 
 int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 {
+	/* Latch the stab-fill graph mode for this bring-up (also re-evaluated on
+	 * every MUT_RESTART reinit, so leaving stab-fill restores the RING leg).
+	 * Only meaningful when the fill module is compiled in — without it the
+	 * frame-base VENC would have no producer and the stream would starve. */
+#if HAVE_FRAMING_STAB
+	g_stab_fill_graph = strcmp(ctx->cfg.framing, "stab-fill") == 0;
+#else
+	g_stab_fill_graph = 0;
+#endif
+	if (g_stab_fill_graph)
+		printf("> [maruko] framing=stab-fill: manual-feed graph "
+			"(port0 RAW unbound -> compose -> VENC NORMAL_FRMBASE push)\n");
 
 	if (setup_maruko_graph_dimensions(ctx) != 0)
 		return -1;
@@ -3289,7 +3489,15 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	 *
 	 * Phase 6: also recognises "dual" (chn 1 → TS file) in addition to
 	 * the existing "dual-stream" (chn 1 → UDP). */
-	if (ctx->cfg.record.enabled &&
+	if (g_stab_fill_graph && ctx->cfg.record.enabled &&
+	    (strcmp(ctx->cfg.record.mode, "dual-stream") == 0 ||
+	     strcmp(ctx->cfg.record.mode, "dual") == 0)) {
+		/* Dual chn 1 is RING-fed from port0 — port0 is unbound in stab-fill
+		 * and RING+FRAME_BASE cannot mix on the one H26x device (F0a). */
+		fprintf(stderr, "WARNING: [maruko] record.mode=%s is not available "
+			"with framing=stab-fill — recording disabled this run\n",
+			ctx->cfg.record.mode);
+	} else if (ctx->cfg.record.enabled &&
 	    (strcmp(ctx->cfg.record.mode, "dual-stream") == 0 ||
 	     strcmp(ctx->cfg.record.mode, "dual") == 0) &&
 	    !ctx->dual) {
@@ -3312,7 +3520,11 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	 * same disk-space / rotation / sync_file_range plumbing. */
 	if (ctx->cfg.record.enabled && ctx->cfg.record.dir[0] &&
 	    (strcmp(ctx->cfg.record.mode, "mirror") == 0 ||
-	     strcmp(ctx->cfg.record.mode, "dual") == 0)) {
+	     /* dual is refused under stab-fill (see the start_dual guard) —
+	      * don't open a file its absent chn-1 drain thread would never
+	      * feed.  mirror (chn 0 → file) works fine under stab-fill. */
+	     (strcmp(ctx->cfg.record.mode, "dual") == 0 &&
+	      !g_stab_fill_graph))) {
 		if (strcmp(ctx->cfg.record.format, "hevc") == 0) {
 			if (star6e_recorder_start(&ctx->recorder,
 			    ctx->cfg.record.dir) == 0) {
@@ -3442,11 +3654,19 @@ static void maruko_pipeline_init_streaming(MarukoBackendContext *ctx,
 	rt->venc_fd = maruko_mi_venc_get_fd(ctx->venc_device, ctx->venc_channel);
 	rt->last_activity_us = wb_monotonic_us();
 	rt->last_warn_us = rt->last_activity_us;
+
+	/* Phase-1 stab SCL bench (development builds only; no-op stub in
+	 * production).  Runs once, inert unless WAYBEAM_STAB_BENCH is set. */
+	maruko_stab_bench_maybe_start(ctx);
 }
 
 static void maruko_pipeline_cleanup_streaming(MarukoBackendContext *ctx,
 	MarukoStreamRuntime *rt)
 {
+	/* Join the bench thread before tearing down ports (mirrors the stab
+	 * teardown ordering rule: never disable a tapped port with the reader
+	 * still live). */
+	maruko_stab_bench_stop();
 	if (rt->venc_fd >= 0) {
 		maruko_mi_venc_close_fd(ctx->venc_device, ctx->venc_channel);
 		rt->venc_fd = -1;
@@ -3755,6 +3975,23 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 					ctx->scl_crop_w, ctx->scl_crop_h,
 					ctx->scl_crop_x, ctx->scl_crop_y);
 
+#if HAVE_FRAMING_STAB
+			/* Stabilization telemetry: Kalman correction (a) + raw
+			 * detector measurement (m), in stab pixels.  "sfil" =
+			 * stab-fill (correction applied as the compose shift),
+			 * "stab" = HW-crop.  Hidden when no stab thread runs. */
+			{
+				int sx, sy, mx, my, sp, sf;
+				if (maruko_framing_stab_osd_status(&sx, &sy,
+				    &mx, &my, &sp, &sf))
+					debug_osd_text(ctx->debug_osd, osd_row++,
+						sf ? "sfil" : "stab",
+						"a%+d%+d m%+d%+d%s",
+						sx, sy, mx, my,
+						sp ? " paused" : "");
+			}
+#endif
+
 			if (osd_ae.ae_valid) {
 				debug_osd_text(ctx->debug_osd, osd_row++,
 					"exp", "%uus sg%u/%u ig%u",
@@ -4013,10 +4250,53 @@ cleanup:
 	return result;
 }
 
+/* Teardown watchdog.  The i6c MI teardown can wedge in an UNBOUNDED kernel
+ * flush (MI_SYS_IMPL_FlushRealTimeOutputBuf, uninterruptible D-state) when an
+ * SCL/ISP working task is pinned at unbind time — a long-standing SDK race
+ * (first logged 2026-07-03; reproduced from stab, stab-fill AND the factory
+ * binary on 2026-07-09).  The stab two-phase drain removes the dominant
+ * trigger, but the residual race cannot be closed from userspace ordering
+ * alone.  A wedged teardown is unrecoverable (no sysrq on I6C; SIGKILL leaves
+ * an MI zombie): the only outcome is a silent dead encoder until the HARDWARE
+ * watchdog eventually resets.  So: arm a deadline at teardown entry — if
+ * teardown hasn't completed in time, log and reboot(RB_AUTOBOOT) for a
+ * bounded, deterministic recovery instead of open-ended limbo. */
+#define MARUKO_TEARDOWN_WATCHDOG_S 12
+static volatile int g_teardown_done;
+
+static void *maruko_teardown_watchdog_main(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < MARUKO_TEARDOWN_WATCHDOG_S * 10; i++) {
+		if (g_teardown_done)
+			return NULL;
+		usleep(100000);
+	}
+	fprintf(stderr, "ERROR: [maruko] teardown wedged for %ds (MI flush "
+		"D-state) — forcing reboot for deterministic recovery\n",
+		MARUKO_TEARDOWN_WATCHDOG_S);
+	sync();
+	(void)reboot(RB_AUTOBOOT);
+	return NULL;
+}
+
 void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 {
+	pthread_t wdt;
+	int wdt_armed;
+
 	if (!ctx)
 		return;
+
+	g_teardown_done = 0;
+	wdt_armed = pthread_create(&wdt, NULL,
+		maruko_teardown_watchdog_main, NULL) == 0;
+
+	/* Stop the framing module FIRST: it joins its detector thread and
+	 * disables its SCL tap port before we tear down port0 / the SCL channel
+	 * below (R6 — never disable the tapped port with the reader still live). */
+	maruko_pipeline_framing_stop();
 
 	venc_api_clear_active_precrop();
 	maruko_pipeline_clear_zoom_status();
@@ -4119,6 +4399,21 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		(void)g_mi_scl.fnDisablePort(0, 0, 0);
 		(void)maruko_wait_output_idle(MARUKO_PROC_SCL, 100, 1);
 	}
+#if HAVE_FRAMING_STAB
+	/* stab-fill teardown phase 2: the drain-only fill thread (armed by
+	 * maruko_pipeline_framing_stop above) kept consuming port0 WHILE the
+	 * port was disabled, so the SCL/ISP working queues could quiesce — an
+	 * unconsumed port0 pins them and wedges the ISP→SCL REALTIME unbind
+	 * flush in unbounded D-state (MI_SYS_IMPL_FlushRealTimeOutputBuf →
+	 * zombie or watchdog reset; both device-reproduced on reinit switches,
+	 * 2026-07-09).  Join it and sweep the residue now.  No-op unless the
+	 * fill module armed phase 1. */
+	maruko_framing_stab_finish_stop();
+#endif
+
+	/* stab-fill: the VENC's only producer (the fill compose thread) was
+	 * joined by maruko_pipeline_framing_stop above, so the manual-feed leg is
+	 * already quiescent; there is no SCL→VENC bind to unwind. */
 
 	if (ctx->venc_started)
 		(void)maruko_mi_venc_stop_recv(ctx->venc_device,
@@ -4143,6 +4438,7 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		pthread_mutex_unlock(&g_intra_status_mutex);
 		maruko_pipeline_clear_zoom_status();
 	}
+
 
 	if (ctx->vpe_started) {
 		maruko_stop_vpe_channels();
@@ -4173,6 +4469,11 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		(void)MI_SNR_Disable(ctx->sensor.pad_id);
 		ctx->sensor_enabled = 0;
 	}
+
+	/* Teardown completed within the deadline — disarm the watchdog. */
+	g_teardown_done = 1;
+	if (wdt_armed)
+		(void)pthread_join(wdt, NULL);
 }
 
 void maruko_pipeline_teardown(MarukoBackendContext *ctx)

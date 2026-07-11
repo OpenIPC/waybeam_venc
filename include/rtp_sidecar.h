@@ -32,13 +32,23 @@
 #define RTP_SIDECAR_MSG_FRAME       2  /* venc → probe: frame metadata       */
 #define RTP_SIDECAR_MSG_SYNC_REQ    3  /* probe → venc: clock sync request   */
 #define RTP_SIDECAR_MSG_SYNC_RESP   4  /* venc → probe: clock sync response  */
+#define RTP_SIDECAR_MSG_LINK_STATE  5  /* hub → hub: link/encoder snapshot
+                                        * (waybeam-hub mod_link_log, its own
+                                        * port — kept here so the message-
+                                        * type space has one owner) */
 
 /* Subscription timeout: venc stops sending if no message from probe      */
 #define RTP_SIDECAR_SUB_TTL_US    (5 * 1000000ULL)   /* 5 seconds          */
 
+/* Concurrent subscriber slots (protocols/rtp-sidecar.md): the vehicle-
+ * local hub attitude consumer, the wfb link_controller and a debug probe
+ * must coexist on one port without stealing each other's feed. */
+#define RTP_SIDECAR_MAX_SUBS        4
+
 #define RTP_SIDECAR_FLAG_KEYFRAME       0x01
 #define RTP_SIDECAR_FLAG_ENC_INFO       0x02
 #define RTP_SIDECAR_FLAG_TRANSPORT_INFO 0x04 /* transport stats trailer follows */
+#define RTP_SIDECAR_FLAG_ATTITUDE       0x08 /* attitude trailer follows */
 
 /*
  * Frame type values carried in the optional encoder-feedback trailer.
@@ -153,6 +163,29 @@ typedef struct {
 	uint32_t packets_sent;      /* lifetime delivery count (low 32)       */
 } RtpSidecarTransportInfoWire; /* 16 bytes */
 
+/**
+ * Optional attitude trailer — venc → probe, 12 bytes.
+ *
+ * Appended after TRANSPORT_INFO (last in flag-bit order, sliding up when
+ * lower-bit trailers are absent) when RTP_SIDECAR_FLAG_ATTITUDE is set.
+ *
+ * Values come from the encoder-local complementary filter fed by the
+ * BMI270 sample stream (attitude.enabled, requires imu.enabled).
+ * Consumers MUST drop the trailer when status bit0 (valid) is 0.
+ * yaw is gyro-integrated and drifts — relative heading only.
+ */
+#define RTP_SIDECAR_ATT_VALID    0x0001
+#define RTP_SIDECAR_ATT_SETTLED  0x0002
+
+typedef struct {
+	int16_t  roll_cdeg;        /* 0.1°, right-wing-down positive          */
+	int16_t  pitch_cdeg;       /* 0.1°, nose-up positive                  */
+	int16_t  yaw_cdeg;         /* 0.1°, relative (integrated, drifts)     */
+	uint16_t status;           /* RTP_SIDECAR_ATT_*                       */
+	uint16_t imu_age_ms;       /* newest-sample age at capture, saturating */
+	uint16_t reserved;         /* 0                                        */
+} RtpSidecarAttitudeWire;     /* 12 bytes */
+
 typedef struct {
 	RtpSidecarFrame       frame;
 	RtpSidecarEncInfoWire enc;
@@ -163,6 +196,13 @@ typedef struct {
 	RtpSidecarEncInfoWire        enc;
 	RtpSidecarTransportInfoWire  transport;
 } RtpSidecarFrameExtTransport; /* 80 bytes */
+
+typedef struct {
+	RtpSidecarFrame              frame;
+	RtpSidecarEncInfoWire        enc;
+	RtpSidecarTransportInfoWire  transport;
+	RtpSidecarAttitudeWire       attitude;
+} RtpSidecarFrameExtFull;      /* 92 bytes */
 
 /** Clock sync request — probe → venc, 16 bytes */
 typedef struct {
@@ -207,14 +247,31 @@ typedef struct {
 	uint32_t packets_sent;
 } RtpSidecarTransportInfo;
 
+/* Host-order attitude snapshot passed to rtp_sidecar_send_frame_full(). */
+typedef struct {
+	int16_t  roll_cdeg;
+	int16_t  pitch_cdeg;
+	int16_t  yaw_cdeg;
+	uint16_t status;          /* RTP_SIDECAR_ATT_* */
+	uint16_t imu_age_ms;
+} RtpSidecarAttitudeInfo;
+
 /* ── Sender state (embedded in backend, not used by probe) ───────────── */
 
 typedef struct {
-	int                fd;              /* UDP socket bound to sidecar_port */
-	                                    /*   -1 = disabled                  */
-	struct sockaddr_in subscriber;      /* active probe address             */
-	uint64_t           sub_expires_us; /* subscriber expiry (monotonic µs) */
-	                                    /*   0 = no subscriber              */
+	struct sockaddr_in addr;           /* consumer address                 */
+	uint64_t           expires_us;     /* slot expiry (monotonic µs)       */
+	                                   /*   0 = slot free                  */
+} RtpSidecarSub;
+
+typedef struct {
+	int                fd;             /* UDP socket bound to sidecar_port */
+	                                   /*   -1 = disabled                  */
+	RtpSidecarSub      subs[RTP_SIDECAR_MAX_SUBS]; /* subscriber table:
+	                                    * SUBSCRIBE/SYNC_REQ claims or
+	                                    * refreshes the matching slot;
+	                                    * FRAME fans out to all live slots
+	                                    * (protocols/rtp-sidecar.md) */
 	uint64_t           frame_id;       /* monotonic frame counter          */
 } RtpSidecarSender;
 
@@ -287,5 +344,18 @@ int rtp_sidecar_send_frame_transport(RtpSidecarSender *s,
 	uint64_t capture_us, uint64_t frame_ready_us,
 	const RtpSidecarEncInfo *enc_info,
 	const RtpSidecarTransportInfo *transport_info);
+
+/**
+ * Same as rtp_sidecar_send_frame_transport but optionally appends the
+ * attitude trailer (RTP_SIDECAR_FLAG_ATTITUDE) after TRANSPORT_INFO.
+ * attitude_info == NULL → identical to send_frame_transport.
+ */
+int rtp_sidecar_send_frame_full(RtpSidecarSender *s,
+	uint32_t ssrc, uint32_t rtp_ts,
+	uint16_t seq_first, uint16_t seq_count,
+	uint64_t capture_us, uint64_t frame_ready_us,
+	const RtpSidecarEncInfo *enc_info,
+	const RtpSidecarTransportInfo *transport_info,
+	const RtpSidecarAttitudeInfo *attitude_info);
 
 #endif /* RTP_SIDECAR_H */

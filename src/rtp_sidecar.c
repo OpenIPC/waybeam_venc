@@ -28,11 +28,24 @@ static inline uint64_t sidecar_htobe64(uint64_t v)
 	return r;
 }
 
-/* ── Subscriber helpers ──────────────────────────────────────────────── */
+/* ── Subscriber table (protocols/rtp-sidecar.md) ─────────────────────────
+ *
+ * Up to RTP_SIDECAR_MAX_SUBS consumers keyed by (addr, port), each with
+ * its own TTL. SUBSCRIBE/SYNC_REQ claims or refreshes the matching slot;
+ * FRAME fans out to every live slot. A single subscriber behaves exactly
+ * like the historical single-slot implementation. */
+
+static int slot_live_at(const RtpSidecarSub *sub, uint64_t now)
+{
+	return sub->expires_us != 0 && now < sub->expires_us;
+}
 
 static int sub_active_at(const RtpSidecarSender *s, uint64_t now)
 {
-	return s->sub_expires_us != 0 && now < s->sub_expires_us;
+	for (int i = 0; i < RTP_SIDECAR_MAX_SUBS; i++)
+		if (slot_live_at(&s->subs[i], now))
+			return 1;
+	return 0;
 }
 
 int rtp_sidecar_is_subscribed(const RtpSidecarSender *s)
@@ -42,11 +55,43 @@ int rtp_sidecar_is_subscribed(const RtpSidecarSender *s)
 	return sub_active_at(s, wb_monotonic_us());
 }
 
-static void sub_refresh_at(RtpSidecarSender *s, const struct sockaddr_in *src,
+static int addr_eq(const struct sockaddr_in *a, const struct sockaddr_in *b)
+{
+	return a->sin_addr.s_addr == b->sin_addr.s_addr &&
+	       a->sin_port == b->sin_port;
+}
+
+/* Claim or refresh the slot for src. Returns 1 if this is a NEW
+ * subscriber (for logging), 0 on refresh or table-full drop. */
+static int sub_refresh_at(RtpSidecarSender *s, const struct sockaddr_in *src,
 	uint64_t now)
 {
-	s->subscriber    = *src;
-	s->sub_expires_us = now + RTP_SIDECAR_SUB_TTL_US;
+	RtpSidecarSub *free_slot = NULL;
+
+	for (int i = 0; i < RTP_SIDECAR_MAX_SUBS; i++) {
+		RtpSidecarSub *sub = &s->subs[i];
+		if (slot_live_at(sub, now)) {
+			if (addr_eq(&sub->addr, src)) {
+				sub->expires_us = now + RTP_SIDECAR_SUB_TTL_US;
+				return 0;
+			}
+		} else if (!free_slot) {
+			free_slot = sub;
+		}
+	}
+	if (!free_slot) {
+		static int full_warned;
+		if (!full_warned) {
+			full_warned = 1;
+			fprintf(stderr, "[sidecar] subscriber table full (%d); "
+			        "ignoring %s:%u\n", RTP_SIDECAR_MAX_SUBS,
+			        inet_ntoa(src->sin_addr), ntohs(src->sin_port));
+		}
+		return 0;
+	}
+	free_slot->addr       = *src;
+	free_slot->expires_us = now + RTP_SIDECAR_SUB_TTL_US;
+	return 1;
 }
 
 /* ── Lifecycle ───────────────────────────────────────────────────────── */
@@ -56,10 +101,9 @@ int rtp_sidecar_sender_init(RtpSidecarSender *s, uint16_t sidecar_port)
 	if (!s)
 		return -1;
 
-	s->fd             = -1;
-	s->frame_id       = 0;
-	s->sub_expires_us = 0;
-	memset(&s->subscriber, 0, sizeof(s->subscriber));
+	s->fd       = -1;
+	s->frame_id = 0;
+	memset(s->subs, 0, sizeof(s->subs));
 
 	if (sidecar_port == 0)
 		return 0;  /* disabled — not an error */
@@ -161,10 +205,9 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 
 		case RTP_SIDECAR_MSG_SUBSCRIBE:
 			/* Any subscribe (including keepalive) refreshes the TTL */
-			if (!sub_active_at(s, now))
+			if (sub_refresh_at(s, &src, now))
 				fprintf(stderr, "[sidecar] probe subscribed from %s:%u\n",
 				        inet_ntoa(src.sin_addr), ntohs(src.sin_port));
-			sub_refresh_at(s, &src, now);
 			break;
 
 		case RTP_SIDECAR_MSG_SYNC_REQ:
@@ -198,12 +241,13 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 
 /* ── Frame metadata sender ───────────────────────────────────────────── */
 
-int rtp_sidecar_send_frame_transport(RtpSidecarSender *s,
+int rtp_sidecar_send_frame_full(RtpSidecarSender *s,
 	uint32_t ssrc, uint32_t rtp_ts,
 	uint16_t seq_first, uint16_t seq_count,
 	uint64_t capture_us, uint64_t frame_ready_us,
 	const RtpSidecarEncInfo *enc_info,
-	const RtpSidecarTransportInfo *transport_info)
+	const RtpSidecarTransportInfo *transport_info,
+	const RtpSidecarAttitudeInfo *attitude_info)
 {
 	if (!s || s->fd < 0)
 		return 0;  /* disabled */
@@ -217,7 +261,7 @@ int rtp_sidecar_send_frame_transport(RtpSidecarSender *s,
 	if (!sub_active_at(s, now))
 		return 0;  /* no subscriber — channel stays silent */
 
-	RtpSidecarFrameExtTransport msg;
+	RtpSidecarFrameExtFull msg;
 	size_t msg_len = sizeof(msg.frame);
 
 	memset(&msg, 0, sizeof(msg));
@@ -249,7 +293,7 @@ int rtp_sidecar_send_frame_transport(RtpSidecarSender *s,
 		msg.enc.gop_state = enc_info->gop_state;
 		msg.enc.idr_inserted = enc_info->idr_inserted;
 		msg.enc.frames_since_idr = htons(enc_info->frames_since_idr);
-		msg_len = offsetof(RtpSidecarFrameExtTransport, transport);
+		msg_len = offsetof(RtpSidecarFrameExtFull, transport);
 	}
 
 	if (transport_info) {
@@ -271,20 +315,55 @@ int rtp_sidecar_send_frame_transport(RtpSidecarSender *s,
 
 		msg.frame.flags |= RTP_SIDECAR_FLAG_TRANSPORT_INFO;
 		trailer_offset = enc_info
-			? offsetof(RtpSidecarFrameExtTransport, transport)
+			? offsetof(RtpSidecarFrameExtFull, transport)
 			: sizeof(RtpSidecarFrame);
 		memcpy((uint8_t *)&msg + trailer_offset, &wire, sizeof(wire));
 		msg_len = trailer_offset + sizeof(wire);
 	}
 
-	ssize_t sent = sendto(s->fd, &msg, msg_len, MSG_DONTWAIT,
-		(struct sockaddr *)&s->subscriber,
-		sizeof(s->subscriber));
-	if (sent < 0 && errno != EAGAIN) {
-		fprintf(stderr, "[sidecar] sendto: %s\n", strerror(errno));
-		return -1;
+	if (attitude_info) {
+		/* Last in flag-bit order: slides up over absent enc/transport
+		 * trailers, same scheme as TRANSPORT_INFO above. */
+		RtpSidecarAttitudeWire wire;
+
+		memset(&wire, 0, sizeof(wire));
+		wire.roll_cdeg  = (int16_t)htons((uint16_t)attitude_info->roll_cdeg);
+		wire.pitch_cdeg = (int16_t)htons((uint16_t)attitude_info->pitch_cdeg);
+		wire.yaw_cdeg   = (int16_t)htons((uint16_t)attitude_info->yaw_cdeg);
+		wire.status     = htons(attitude_info->status);
+		wire.imu_age_ms = htons(attitude_info->imu_age_ms);
+		wire.reserved   = 0;
+
+		msg.frame.flags |= RTP_SIDECAR_FLAG_ATTITUDE;
+		memcpy((uint8_t *)&msg + msg_len, &wire, sizeof(wire));
+		msg_len += sizeof(wire);
 	}
-	return 0;
+
+	int rc = 0;
+	for (int i = 0; i < RTP_SIDECAR_MAX_SUBS; i++) {
+		if (!slot_live_at(&s->subs[i], now))
+			continue;
+		ssize_t sent = sendto(s->fd, &msg, msg_len, MSG_DONTWAIT,
+			(struct sockaddr *)&s->subs[i].addr,
+			sizeof(s->subs[i].addr));
+		if (sent < 0 && errno != EAGAIN) {
+			fprintf(stderr, "[sidecar] sendto: %s\n", strerror(errno));
+			rc = -1;
+		}
+	}
+	return rc;
+}
+
+int rtp_sidecar_send_frame_transport(RtpSidecarSender *s,
+	uint32_t ssrc, uint32_t rtp_ts,
+	uint16_t seq_first, uint16_t seq_count,
+	uint64_t capture_us, uint64_t frame_ready_us,
+	const RtpSidecarEncInfo *enc_info,
+	const RtpSidecarTransportInfo *transport_info)
+{
+	return rtp_sidecar_send_frame_full(s, ssrc, rtp_ts,
+		seq_first, seq_count, capture_us, frame_ready_us,
+		enc_info, transport_info, NULL);
 }
 
 int rtp_sidecar_send_frame(RtpSidecarSender *s,
@@ -293,7 +372,7 @@ int rtp_sidecar_send_frame(RtpSidecarSender *s,
 	uint64_t capture_us, uint64_t frame_ready_us,
 	const RtpSidecarEncInfo *enc_info)
 {
-	return rtp_sidecar_send_frame_transport(s, ssrc, rtp_ts,
+	return rtp_sidecar_send_frame_full(s, ssrc, rtp_ts,
 		seq_first, seq_count, capture_us, frame_ready_us,
-		enc_info, NULL);
+		enc_info, NULL, NULL);
 }

@@ -1962,6 +1962,9 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		bind_dst_fps = vcfg->video0.fps;
 		if (bind_dst_fps == 0 || bind_dst_fps > bind_src_fps)
 			bind_dst_fps = bind_src_fps;
+		/* Deliver the TRUE sensor rate to VENC (e.g. ~143 for the 144 mode) so
+		 * the encoder actually outputs it.  The RC fpsNum is separately capped
+		 * to STAR6E_VENC_INPUT_FPS_MAX below — see venc_fps. */
 
 		ret = g_framing->setup_ports(state, bind_src_fps, bind_dst_fps);
 		if (ret != 0) {
@@ -1991,6 +1994,9 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		bind_dst_fps = vcfg->video0.fps;
 		if (bind_dst_fps == 0 || bind_dst_fps > bind_src_fps)
 			bind_dst_fps = bind_src_fps;
+		/* Deliver the TRUE sensor rate to VENC (e.g. ~143 for the 144 mode) so
+		 * the encoder actually outputs it.  The RC fpsNum is separately capped
+		 * to STAR6E_VENC_INPUT_FPS_MAX below — see venc_fps. */
 
 		ret = MI_SYS_BindChnPort2(&state->vpe_port, &state->venc_port,
 			bind_src_fps, bind_dst_fps, I6_SYS_LINK_FRAMEBASE, 0);
@@ -2417,9 +2423,42 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	}
 
 	state->venc_channel = 0;
-	venc_fps = vcfg->video0.fps;
-	if (venc_fps == 0 || venc_fps > pconf.sensor_framerate)
-		venc_fps = pconf.sensor_framerate;
+	/* Encoder rate control must budget for the frame rate that actually
+	 * reaches VENC — the VPE->VENC framebase bind's delivered rate =
+	 * min(mode.maxFps, video0.fps), then capped to the VENC input ceiling.
+	 * Do NOT clamp to pconf.sensor_framerate: a SetFps fallback can record
+	 * state->sensor.fps well below the mode's real (fixed-timing) rate.  And
+	 * do NOT let it exceed STAR6E_VENC_INPUT_FPS_MAX: the VENC rejects >120
+	 * and resets to 30, so the 1600x900@144 mode must encode at 120 (the bind
+	 * below drops the sensor's ~143 down to match).  Both mismatches otherwise
+	 * make CBR overshoot the configured bitrate several-fold. */
+	{
+		uint32_t delivered = state->sensor.mode.maxFps ?
+			state->sensor.mode.maxFps : pconf.sensor_framerate;
+		uint32_t delivered_true = delivered;
+		if (delivered > STAR6E_VENC_INPUT_FPS_MAX)
+			delivered = STAR6E_VENC_INPUT_FPS_MAX;
+		venc_fps = vcfg->video0.fps;
+		if (venc_fps == 0 || venc_fps > delivered)
+			venc_fps = delivered;
+		/* Exact-CBR: the bind delivers delivered_true frames while the
+		 * RC budgets at venc_fps (capped 120) — scale the encoder budget
+		 * by venc_fps/delivered_true so the wire rate lands on the
+		 * configured bitrate (x120/144 for the 144 mode).  Mirrors
+		 * rc_compensate_kbps() in star6e_controls.c for the live paths. */
+		if (vcfg->video0.fps && vcfg->video0.fps < delivered_true)
+			delivered_true = vcfg->video0.fps;
+		if (delivered_true > venc_fps && venc_fps > 0)
+			pconf.venc_max_rate = (uint32_t)((uint64_t)
+				pconf.venc_max_rate * venc_fps / delivered_true);
+	}
+
+	/* GOP frame count must track the encoder's real fps (venc_fps), not
+	 * pconf.sensor_framerate which may hold the stale SetFps-fallback value;
+	 * otherwise the I-frame interval desyncs on modes whose delivered rate
+	 * exceeds the recorded sensor.fps (e.g. GOP=60 instead of 288 @144). */
+	pconf.venc_gop_size = pipeline_common_gop_frames(vcfg->video0.gop_size,
+		venc_fps);
 
 	/* IntraRefresh auto-GOP: when intraRefreshMode != off and the user did
 	 * not pin gopSize, override the GOP frame count so each IDR aligns with

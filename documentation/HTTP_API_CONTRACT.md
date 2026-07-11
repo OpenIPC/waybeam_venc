@@ -16,7 +16,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.11.0`
+- `contract_version`: `0.12.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -78,7 +78,7 @@ Response `200`:
   "ok": true,
   "data": {
     "app_version": "0.1.7",
-    "contract_version": "0.11.0",
+    "contract_version": "0.12.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -583,6 +583,48 @@ Response `200`:
 ```json
 {"ok":true,"data":{"reinit":true}}
 ```
+
+### `GET /api/v1/attitude`
+
+Live fused attitude from the on-board IMU (complementary filter feeding the
+RTP sidecar ATTITUDE trailer). Star6E only; requires `attitude.enabled` and
+`imu.enabled`. Angles in degrees, camera frame after the `attitude.axisFwd`/
+`axisDown` remap and boresight trims.
+
+```bash
+curl http://<device-ip>/api/v1/attitude
+```
+
+Response `200`:
+```json
+{"ok":true,"data":{"valid":true,"settled":true,"rollDeg":0.5,"pitchDeg":-0.2,"yawDeg":1.9}}
+```
+
+`{"valid":false}` until the estimator has a gravity reference. `501` on
+backends without an attitude path (Maruko).
+
+### `GET /api/v1/attitude/calibrate_level`
+
+The "it's laying flat now" calibration. Hold the camera level and still;
+venc averages the level-pose accelerometer samples — ODR-independent: it
+completes early once it has the sample target, otherwise it takes whatever
+the ≤2 s window gathered (as long as ≥32 samples arrived). It then solves
+the boresight trims exactly (input-side rotation, not an output Euler
+subtraction) and persists `attitude.trimRollDeg`/`trimPitchDeg` through the
+standard restart-set path. Call `/api/v1/restart` afterwards to apply.
+
+```bash
+curl http://<device-ip>/api/v1/attitude/calibrate_level
+```
+
+Response `200`:
+```json
+{"ok":true,"data":{"trimRollDeg":-2.60,"trimPitchDeg":20.43,"restartRequired":true}}
+```
+
+`409 calibration_failed` when fewer than 32 IMU samples arrive in the ≤2 s
+window (`attitude.enabled`/`imu.enabled` off) or the averaged gravity
+magnitude is implausible (<0.5 g / >1.5 g — device moving). `501` on Maruko.
 
 ### `GET /api/v1/defaults`
 
@@ -1315,7 +1357,7 @@ Behavior:
 ### Backend Support Matrix
 
 Endpoints that behave the same on both backends are omitted.  Only feature
-divergence is listed.  As of `contract_version: 0.11.0`:
+divergence is listed.  As of `contract_version: 0.12.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1336,6 +1378,17 @@ divergence is listed.  As of `contract_version: 0.11.0`:
 | `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
 
 ## Change Log (Contract)
+- `0.12.0` (additive — new endpoints):
+  - `GET /api/v1/attitude` — live fused attitude snapshot (Star6E only;
+    `{"valid":false}` until `attitude.enabled` + `imu.enabled` are on).
+  - `GET /api/v1/attitude/calibrate_level` — level-pose boresight
+    calibration: averages the level-pose accel (ODR-independent sample
+    window), solves and persists `attitude.trimRollDeg`/`trimPitchDeg`,
+    returns them with `restartRequired:true`. 409 when the IMU is off or
+    gravity is implausible; 501 on Maruko.
+  - New `attitude.*` config section (0.39.1/0.40.0): `enabled`,
+    `axisFwd`, `axisDown`, `trimRollDeg`, `trimPitchDeg`, `mountDeg`,
+    `invertRoll`, `invertPitch` — all restart-required.
 - `0.11.0` (breaking — field removed):
   - Removed `video0.frameLost` (and its `frame_lost` canonical / alias). The
     SDK VENC frame-lost strategy it drove is gone: on Star6E (i6e) it never

@@ -125,17 +125,23 @@ typedef struct {
 	 * fall back to "off".  See apply_resilience_preset() in
 	 * src/venc_config.c for the canonical table. */
 	char resilience[16];
-	/* Framing mode — the single user-facing knob for what the VPE crop does
+	/* Framing mode — the single user-facing knob for what the crop path does
 	 * (replaces the old standalone stab/zoom fields).  Recognised values:
 	 *   "off"                              full image, no crop manipulation
-	 *   "low" | "medium" | "high"          digital image stabilization
-	 *                                      (Star6E only; no-op on Maruko)
+	 *   "stab"                             digital image stabilization (HW crop
+	 *                                      on both backends; Maruko via SCL crop,
+	 *                                      Star6E via VPE crop)
+	 *   "stab-fill"                        stabilization with a floating window
+	 *                                      on a black border (Star6E; Maruko
+	 *                                      planned)
 	 *   "zoom-1.25x" | "zoom-1.50x" |      pure digital zoom (no stab) on
-	 *   "zoom-1.75x" | "zoom-2x"           both backends; zoom_x/y pan live
-	 * Each preset expands at load time via apply_framing_preset() into the
-	 * derived stab_crop_pct + stab_recenter_speed (stab presets) or zoom_pct
-	 * (zoom presets); the two are mutually exclusive by construction.
-	 * Unknown values fall back to "off".  Requires restart. */
+	 *   "zoom-1.75x" | "zoom-2x" | ...     both backends; zoom_x/y pan live
+	 * The detector accuracy of the stab presets is a SEPARATE knob
+	 * (stab_accuracy below), not a framing value.  Each preset expands at load
+	 * time via apply_framing_preset() into the derived stab_crop_pct +
+	 * stab_recenter_speed (stab presets) or zoom_pct (zoom presets); the two are
+	 * mutually exclusive by construction.  Unknown values fall back to "off".
+	 * Requires restart. */
 	char framing[16];
 	/* Derived from the `framing` preset only — NOT part of the JSON schema or
 	 * HTTP API.  Written exclusively by apply_framing_preset() at load time.
@@ -171,6 +177,13 @@ typedef struct {
 	                               * smoother but laggier; preset default 2.0.
 	                               * (Loader clamp-fallback bound is wider,
 	                               * 0.01..200.) */
+	/* Shift_Detector accuracy level (MUT_RESTART, shared by stab + stab-fill;
+	 * inert under off/zoom).  "auto"|"high"|"medium"|"low" — the ONE detector
+	 * geometry table lives in framing_stab_accuracy.h so Star6E and Maruko
+	 * cannot drift.  "auto" (default) resolves per-backend: high on Star6E, low
+	 * on single-core Maruko, so an unset field preserves each backend's
+	 * historical behaviour.  Higher = smoother but costlier CPU. */
+	char stab_accuracy[8];
 	/* Runtime "stab-fill" bypass (MUT_LIVE).  Set true via
 	 * /api/v1/set?pauseStab=true to glide the floating image back to centre
 	 * (software ramp — no HW rebind); false resumes shake compensation.
@@ -248,6 +261,22 @@ typedef struct {
 	bool show_osd;
 } VencConfigDebug;
 
+/* Attitude export over the rtp_sidecar ATTITUDE trailer
+ * (protocols/rtp-sidecar.md). Requires imu.enabled; Star6E only for
+ * now (Maruko's IMU push path is not wired). Lives in its own TRAILING
+ * VencConfig member — the config ABI is append-only and VencConfigImu
+ * is not the last member. */
+typedef struct {
+	bool enabled;        /* emit the sidecar attitude trailer          */
+	int  mount_deg;      /* sensor yaw vs camera: 0/90/180/270         */
+	bool invert_roll;    /* flip sign after mount rotation             */
+	bool invert_pitch;
+	char axis_fwd[4];    /* sensor axis out of the lens: "+x".."-z"    */
+	char axis_down[4];   /* sensor axis pointing down when level       */
+	float trim_roll_deg;  /* roll/pitch the estimator reads while the  */
+	float trim_pitch_deg; /* camera is held level — undone input-side  */
+} VencConfigAttitude;
+
 typedef struct {
 	bool enabled;       /* false → snapshot subsystem skipped entirely */
 	uint32_t quality;   /* 1..100 MJPEG q-factor; clamped (0 → default 80) */
@@ -272,6 +301,7 @@ typedef struct {
 	VencConfigRecord record;
 	VencConfigSnapshot snapshot;
 	VencConfigDebug debug;
+	VencConfigAttitude attitude;  /* trailing — ABI append-only */
 } VencConfig;
 
 typedef enum {

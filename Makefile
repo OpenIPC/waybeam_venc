@@ -17,6 +17,13 @@ CC_MARUKO_BIN := $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 # SDK and pass it on the command line.
 KSRC_MARUKO ?=
 
+# Infinity6E kernel source for building the Star6E sensor .ko via
+# drivers/Makefile. KSRC_STAR6E must point at an Infinity6E 4.9.84 kernel
+# source tree (arch/arm + top-level Makefile), matching the target device's
+# running kernel. Not hosted in this repo; pass it on the command line, e.g.
+# the OpenIPC builder output at builder/openipc/output/build/linux-custom.
+KSRC_STAR6E ?=
+
 STAR6E_CC ?= $(TOOLCHAIN_DIR)/bin/arm-openipc-linux-gnueabihf-gcc
 MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
@@ -34,8 +41,8 @@ VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
 # LDFLAGS only (it's a link-time strip flag; not valid during -c).
 COMMON_CFLAGS := -Os -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VERSION=\"$(VENC_VERSION)\" -D_GNU_SOURCE -MMD -MP
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c lib/cJSON.c
-HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_respawn.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c
-MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c
+HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_respawn.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c
+MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c src/maruko_stabfill_probe.c
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c
 # Image-stabilization framing module (Star6E).  STAB=1 (default) compiles it
 # in; STAB=0 drops the source + the -DHAVE_FRAMING_STAB define, so the binary
@@ -43,6 +50,15 @@ STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c 
 STAB ?= 1
 ifeq ($(STAB),1)
 STAR6E_ONLY_SRC += src/star6e_framing_stab.c
+MARUKO_ONLY_SRC += src/maruko_framing_stab.c
+endif
+# Phase-1 SCL bench for the Maruko stab port (DEVELOPMENT ONLY).  STAB_BENCH=1
+# compiles src/maruko_stab_bench.c + defines HAVE_STAB_BENCH; the default 0
+# keeps it out of production images entirely.  Even when compiled in, the bench
+# is inert unless WAYBEAM_STAB_BENCH is set in the environment at launch.
+STAB_BENCH ?= 0
+ifeq ($(STAB_BENCH),1)
+MARUKO_ONLY_SRC += src/maruko_stab_bench.c
 endif
 RECORDER_SRC := src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c
 LIB_RUNPATH ?= /usr/lib
@@ -58,6 +74,12 @@ DRV := vendor-libs/maruko
 DRV_EXTRA :=
 SOC_CFLAGS :=
 SOC_DEFS := -DPLATFORM_STAR6E -DPLATFORM_MARUKO -DHAVE_BACKEND_MARUKO=1
+ifeq ($(STAB),1)
+SOC_DEFS += -DHAVE_FRAMING_STAB=1
+endif
+ifeq ($(STAB_BENCH),1)
+SOC_DEFS += -DHAVE_STAB_BENCH=1
+endif
 SOC_LDFLAGS :=
 SOC_LIBS := -lm
 BASE_LIBS := -Wl,--start-group -lpthread -ldl -lrt -Wl,--end-group
@@ -86,7 +108,7 @@ CFLAGS += $(COMMON_CFLAGS) $(SOC_CFLAGS) $(SOC_DEFS)
 LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
 
 .PHONY: help all build lint stage clean toolchain toolchain-maruko ksrc-maruko \
-        drivers-maruko maruko-pull maruko-deploy maruko-full json_cli regscan \
+        drivers-maruko ksrc-star6e drivers-star6e maruko-pull maruko-deploy maruko-full json_cli regscan \
         remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
         webui webui-check
@@ -105,6 +127,8 @@ help:
 	@echo "  make toolchain-maruko Ensure Maruko cross-toolchain is present"
 	@echo "  make ksrc-maruko KSRC_MARUKO=/path/to/kernel  Validate Infinity6C kernel source tree"
 	@echo "  make drivers-maruko KSRC_MARUKO=/path/to/kernel  Build sensors/maruko/sensor_imx*_maruko.ko"
+	@echo "  make ksrc-star6e KSRC_STAR6E=/path/to/kernel  Validate Infinity6E 4.9.84 kernel source tree"
+	@echo "  make drivers-star6e KSRC_STAR6E=/path/to/kernel  Build sensors/star6e/sensor_imx*_star6e.ko"
 	@echo "  make json_cli SOC_BUILD=maruko  Build out/<soc>/json_cli (vendored from waybeam-hub)"
 	@echo "  make regscan SOC_BUILD=maruko   Build out/<soc>/regscan (IMX335/IMX415 i2c register dumper)"
 	@echo "  make maruko-pull HOST=root@<ip>  Pull libs/drivers/isp-bins from a device"
@@ -239,13 +263,16 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_debug_osd.c \
                 tests/test_intra_refresh.c \
                 tests/test_venc_jpeg.c \
-                tests/test_mdns_beacon.c
+                tests/test_mdns_beacon.c \
+                tests/test_framing_kalman.c \
+                tests/test_attitude_est.c \
+                tests/test_framing_stab_accuracy.c
 # Production sources compiled into the test binary (pure-logic modules only).
 # sensor_select.c is included here; its MI_SNR_* deps are stubbed in test_sensor_select.c.
-TEST_LIB_SRCS := src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c lib/cJSON.c
+TEST_LIB_SRCS := src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c lib/cJSON.c
 
 $(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/h26x_param_sets.h include/hevc_rtp.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h
-	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $@
 
 test: $(TEST_RUNNER)
 	./$(TEST_RUNNER)
@@ -255,11 +282,11 @@ test-werror: $(TEST_RUNNER)
 	./$(TEST_RUNNER)
 
 test-asan:
-	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=address,undefined $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -o $(TEST_RUNNER)
+	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=address,undefined $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $(TEST_RUNNER)
 	./$(TEST_RUNNER)
 
 test-tsan:
-	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=thread $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -o $(TEST_RUNNER)
+	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=thread $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $(TEST_RUNNER)
 	./$(TEST_RUNNER)
 
 test-ci: test test-asan test-tsan
@@ -317,6 +344,40 @@ drivers-maruko: toolchain-maruko ksrc-maruko
 	@echo ""
 	@echo "Built modules in sensors/maruko/:"
 	@ls -lh sensors/maruko/*.ko 2>/dev/null || echo "  (none — check drivers/ build output)"
+
+# ── Star6E drivers ────────────────────────────────────────────────────
+#
+# Validate that KSRC_STAR6E points at a usable Infinity6E 4.9.84 kernel
+# tree.  It must match the target device's running kernel build (vermagic),
+# so prefer the exact OpenIPC builder output that produced the device
+# firmware, e.g. builder/openipc/output/build/linux-custom:
+#
+#   make drivers-star6e KSRC_STAR6E=/path/to/infinity6e-kernel
+#
+ksrc-star6e:
+	@if [ -z "$(KSRC_STAR6E)" ]; then \
+		echo "ERROR: KSRC_STAR6E is not set."; \
+		echo "       Pass KSRC_STAR6E=/path/to/infinity6e-kernel on the command line."; \
+		echo "       The Infinity6E 4.9.84 kernel source is not hosted by this repo."; \
+		echo "       Use the OpenIPC builder output (linux-custom) that built the"; \
+		echo "       device firmware so module vermagic matches the target."; \
+		exit 1; \
+	fi
+	@if [ ! -d "$(KSRC_STAR6E)" ] || [ ! -f "$(KSRC_STAR6E)/Makefile" ] || [ ! -d "$(KSRC_STAR6E)/arch/arm" ]; then \
+		echo "ERROR: KSRC_STAR6E=$(KSRC_STAR6E) is not a valid kernel source tree"; \
+		echo "       (need a directory containing Makefile and arch/arm/)."; \
+		exit 1; \
+	fi
+	@echo "Using Star6E kernel source at $(KSRC_STAR6E)"
+
+drivers-star6e: toolchain ksrc-star6e
+	$(MAKE) -C drivers sensor SOC=star6e KSRC="$(KSRC_STAR6E)" \
+		CROSS="$(abspath $(TOOLCHAIN_DIR))/bin/arm-openipc-linux-gnueabihf-"
+	@mkdir -p sensors/star6e
+	@cp -f drivers/sensor_imx*_star6e.ko sensors/star6e/ 2>/dev/null || true
+	@echo ""
+	@echo "Built modules in sensors/star6e/:"
+	@ls -lh sensors/star6e/*_star6e.ko 2>/dev/null || echo "  (none — check drivers/ build output)"
 
 # ── Maruko deploy convenience wrappers ────────────────────────────────
 

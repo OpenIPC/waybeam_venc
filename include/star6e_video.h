@@ -33,10 +33,12 @@ void star6e_video_reset(Star6eVideoState *state);
 void star6e_video_init(Star6eVideoState *state, const VencConfig *vcfg,
 	uint32_t sensor_framerate, const Star6eOutput *output);
 
-/** Send one encoded frame via configured output mode. */
+/** Send one encoded frame via configured output mode. att_info (optional,
+ *  NULL = none) rides the sidecar FRAME as the ATTITUDE trailer. */
 size_t star6e_video_send_frame(Star6eVideoState *state,
 	Star6eOutput *output, const MI_VENC_Stream_t *stream,
 	int output_enabled, int verbose_enabled,
-	const RtpSidecarEncInfo *enc_info);
+	const RtpSidecarEncInfo *enc_info,
+	const RtpSidecarAttitudeInfo *att_info);
 
 #endif /* STAR6E_VIDEO_H */

@@ -80,7 +80,8 @@ void star6e_video_init(Star6eVideoState *state, const VencConfig *vcfg,
 size_t star6e_video_send_frame(Star6eVideoState *state,
 	Star6eOutput *output, const MI_VENC_Stream_t *stream,
 	int output_enabled, int verbose_enabled,
-	const RtpSidecarEncInfo *enc_info)
+	const RtpSidecarEncInfo *enc_info,
+	const RtpSidecarAttitudeInfo *att_info)
 {
 	size_t total_bytes = 0;
 	Star6eHevcRtpStats frame_packetizer = {0};
@@ -153,11 +154,12 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 				tinfo_ptr = &tinfo;
 			}
 
-			rtp_sidecar_send_frame_transport(&state->sidecar,
+			rtp_sidecar_send_frame_full(&state->sidecar,
 				state->rtp_state.ssrc, frame_rtp_ts,
 				seq_before,
 				(uint16_t)(state->rtp_state.seq - seq_before),
-				capture_us, ready_us, enc_info, tinfo_ptr);
+				capture_us, ready_us, enc_info, tinfo_ptr,
+				att_info);
 		}
 	}
 

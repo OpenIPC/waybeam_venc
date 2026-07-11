@@ -396,6 +396,8 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
 <tr><td class="api-method">GET</td><td class="api-path">/api/v1/set?<i>key=value</i></td><td class="api-desc">Set config field. Live fields apply immediately; restart fields set reinit_pending</td><td class="api-example">{"ok":true,"data":{"field":"video0.bitrate","value":4000}}</td></tr>
 
 <tr><td class="api-method">GET</td><td class="api-path">/api/v1/restart</td><td class="api-desc">Reload config from disk and reinit the full encoder pipeline</td><td class="api-example">{"ok":true,"data":{"reinit":true}}</td></tr>
+<tr><td class="api-method">GET</td><td class="api-path">/api/v1/attitude</td><td class="api-desc">Live fused attitude (needs attitude.enabled + imu.enabled; Star6E only)</td><td class="api-example">{"ok":true,"data":{"valid":true,"settled":true,"rollDeg":0.5,"pitchDeg":-0.2,"yawDeg":1.9}}</td></tr>
+<tr><td class="api-method">GET</td><td class="api-path">/api/v1/attitude/calibrate_level</td><td class="api-desc">Hold the camera level: averages ~1.3s of accel, solves and persists attitude.trimRollDeg/trimPitchDeg (restart required)</td><td class="api-example">{"ok":true,"data":{"trimRollDeg":-2.60,"trimPitchDeg":20.43,"restartRequired":true}}</td></tr>
 
 </tbody></table>
 
@@ -616,7 +618,7 @@ const TOOLTIPS = {
 
 'video0.zoomY':'Digital zoom crop center Y, 0 = top and 1 = bottom. Applied live',
 
-'video0.framing':'Framing mode — what the VPE crop does. off = full image. stab = image stabilization, crop+shrink (Star6E only; centered 80% crop, source auto-clamped to <=1920x1080 to keep fps; stabilizes ch0 only; zoomX/zoomY are ignored — stab is always centered; live pauseStab toggle). stab-fill = image stabilization, floating image on a black border (Star6E only; encode stays full-res, stabCropPct sets the shift/border budget; live pauseStab toggle). zoom-1.25x/1.50x/1.75x/2x/3x/4x = pure digital zoom (both backends; zoomX/zoomY pan the crop live; no upscale — higher zoom emits a smaller frame). Requires restart. Maruko/I6C: stab and stab-fill are unavailable (stabilization needs the IVE block, absent on this SoC) — those two options are disabled there; off/zoom work on both backends',
+'video0.framing':'Framing mode — the crop the pipeline applies. off = full image. stab = image stabilization, crop+shrink (both backends: Star6E via VPE crop, Maruko via SCL crop; centered crop, source auto-clamped to <=1920x1080 to keep fps; stabilizes ch0 only; zoomX/zoomY pan the stabilized window; live pauseStab toggle). stab-fill = image stabilization, floating image on a black border (both backends; encode stays full-res, stabCropPct sets the shift/border budget; live pauseStab toggle; Maruko composes in software+HW-blit and manually feeds the encoder). zoom-1.25x/1.50x/1.75x/2x/3x/4x = pure digital zoom (both backends; zoomX/zoomY pan the crop live; no upscale — higher zoom emits a smaller frame). Requires restart',
 
 'debug.showOsd':'Enable debug OSD overlay on the live stream (Star6E composites at the VPE port; with stabilization on, the stats panel anchor tracks the moving crop window so it stays put in the encoded view). Requires restart',
 
@@ -665,6 +667,14 @@ const TOOLTIPS = {
 'imu.gyroRangeDps':'Gyroscope full-scale range in degrees/sec. Default: 1000. Requires restart',
 'imu.calFile':'Path to IMU calibration file. Default: /etc/imu.cal. Requires restart',
 'imu.calSamples':'Number of samples for gyro bias calibration at startup. Default: 400. Requires restart',
+'attitude.enabled':'Emit roll/pitch/yaw in the RTP sidecar ATTITUDE trailer (needs imu.enabled; Star6E only). Requires restart',
+'attitude.axisFwd':'Sensor axis pointing out of the lens: +x, -x, +y, -y, +z, -z. Calibrate: point the lens straight down — the axis gravity lands on is axisFwd. Default: +x. Requires restart',
+'attitude.axisDown':'Sensor axis pointing down when the camera is level. Calibrate: hold the camera level — the axis gravity lands on is axisDown. Must differ from axisFwd. Default: +z. Requires restart',
+'attitude.trimRollDeg':'Boresight trim: the ROLL the estimator reads while the camera is held level (after axisFwd/axisDown are set). Corrects a board tilted inside the housing. Default: 0. Requires restart',
+'attitude.trimPitchDeg':'Boresight trim: the PITCH the estimator reads while the camera is held level. E.g. reads +20.4 when level → set 20.4. Default: 0. Requires restart',
+'attitude.mountDeg':'Legacy output-side rotation about the camera axis (0/90/180/270). Prefer axisFwd/axisDown; leave 0 after axis calibration. Requires restart',
+'attitude.invertRoll':'Flip roll sign after mount rotation (use if the AHI tilts the wrong way). Requires restart',
+'attitude.invertPitch':'Flip pitch sign after mount rotation. Requires restart',
 'record.enabled':'Enable recording on startup. Requires restart',
 'record.dir':'Recording output directory. Default: /tmp. Requires restart',
 'record.format':'Recording container format: ts (MPEG-TS) or hevc (raw). Default: ts. Requires restart',
@@ -721,6 +731,7 @@ const SECTIONS = [
 {id:'audio',title:'Audio',keys:['audio.enabled','audio.codec','audio.sampleRate','audio.channels','audio.volume','audio.mute']},
 {id:'fpv',title:'FPV',keys:['fpv.roiEnabled','fpv.roiQp','fpv.roiSteps','fpv.roiCenter','fpv.noiseLevel']},
 {id:'imu',title:'IMU',keys:['imu.enabled','imu.i2cDevice','imu.i2cAddr','imu.sampleRateHz','imu.gyroRangeDps','imu.calFile','imu.calSamples']},
+{id:'attitude',title:'Attitude',keys:['attitude.enabled','attitude.axisFwd','attitude.axisDown','attitude.trimRollDeg','attitude.trimPitchDeg','attitude.mountDeg','attitude.invertRoll','attitude.invertPitch']},
 {id:'record',title:'Recording',keys:['record.enabled','record.mode','record.format','record.dir','record.maxSeconds','record.maxMB','record.bitrate','record.fps','record.gopSize','record.server']}
 ];
 
@@ -1015,6 +1026,17 @@ function renderSettings(){
 
     const body = div.querySelector('.section-body');
 
+    if(sec.id === 'attitude'){
+      const live = document.createElement('div');
+      live.className = 'field';
+      live.innerHTML = `<div class="field-label">live attitude <span class="badge badge-live">LIVE</span></div>
+        <div style="display:flex;gap:.8rem;align-items:center">
+          <span id="att-live" style="font-family:monospace">&mdash;</span>
+          <button class="btn btn-apply" style="margin-left:auto" onclick="calibrateLevelTrims()" title="Hold the camera level, then click: venc averages ~1.3s of accel, solves trimRollDeg/trimPitchDeg exactly, persists them and restarts.">Capture level trims</button>
+        </div>`;
+      body.appendChild(live);
+    }
+
     for(const key of sec.keys){
 
       if(!(key in localConfig)) continue;
@@ -1046,15 +1068,9 @@ function renderSettings(){
       } else if(ft === 'enum'){
 
         const labels = (key==='sensor.mode' && window._modeLabels) ? window._modeLabels : null;
-        // On Maruko the framing stab / stab-fill presets are inert (no IVE
-        // block) — disable those two options so they can't be selected. The
-        // field stays enabled; off/zoom presets work on both backends.
-        const optDisabled = (key==='video0.framing' && backendName==='maruko')
-          ? new Set(['stab','stab-fill']) : null;
         const opts = ENUMS[key].map(o => {
-          const na = optDisabled && optDisabled.has(o);
-          const lbl = (labels?labels[o]||o:o) + (na ? ' (N/A — no IVE)' : '');
-          return `<option value="${o}" ${o===String(val)?'selected':''}${na?' disabled':''}>${lbl}</option>`;
+          const lbl = labels?labels[o]||o:o;
+          return `<option value="${o}" ${o===String(val)?'selected':''}>${lbl}</option>`;
         }).join('');
         const coerce = typeof val === 'number' ? 'parseInt(this.value)' : 'this.value';
 
@@ -1262,6 +1278,35 @@ async function applyChanges(){
 
   updateButtons();
 
+}
+
+async function pollAttitude(){
+  const el = document.getElementById('att-live');
+  if(!el) return;
+  try{
+    const r = await api('/api/v1/attitude');
+    const d = r.data || {};
+    el.textContent = d.valid
+      ? `roll ${d.rollDeg>=0?'+':''}${d.rollDeg.toFixed(1)}°  pitch ${d.pitchDeg>=0?'+':''}${d.pitchDeg.toFixed(1)}°  yaw ${d.yawDeg>=0?'+':''}${d.yawDeg.toFixed(1)}°${d.settled?'':' (settling…)'}`
+      : 'no data — needs attitude.enabled + imu.enabled';
+  }catch(e){ el.textContent = 'unavailable'; }
+}
+
+async function calibrateLevelTrims(){
+  if(!confirm('Hold the camera LEVEL (lens at the horizon, image upright) and keep it still.\n\nvenc will average ~1.3s of accel, solve the boresight trims, persist them and restart the pipeline. Continue?')) return;
+  try{
+    const r = await api('/api/v1/attitude/calibrate_level');
+    const d = r.data || {};
+    toast(`Trims captured: roll ${d.trimRollDeg}°, pitch ${d.trimPitchDeg}° — restarting…`);
+    localConfig['attitude.trimRollDeg'] = d.trimRollDeg;
+    localConfig['attitude.trimPitchDeg'] = d.trimPitchDeg;
+    serverConfig['attitude.trimRollDeg'] = d.trimRollDeg;
+    serverConfig['attitude.trimPitchDeg'] = d.trimPitchDeg;
+    renderSettings();
+    await api('/api/v1/restart');
+  }catch(e){
+    toast('Calibration failed: '+e.message, false);
+  }
 }
 
 async function saveAndRestart(){
@@ -1724,6 +1769,8 @@ async function init(){
     pollTelemetry();
 
     setInterval(pollTelemetry, 2000);
+
+    setInterval(pollAttitude, 1000);
 
   }catch(e){
 

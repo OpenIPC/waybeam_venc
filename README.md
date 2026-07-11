@@ -40,7 +40,8 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
 - ISP IQ parameter system: 60+ params, multi-field structs, JSON export/import (both backends)
 - Custom 3A: built-in AE and AWB with configurable gain limits and convergence
 - ROI-based QP gradient for FPV center-priority encoding
-- Sensor FPS unlock for IMX415 / IMX335 (up to 120 fps)
+- Sensor FPS unlock for IMX415 / IMX335 (in-tree drivers; up to 144 fps
+  on Star6E IMX335, 100 fps on IMX415)
 - Optional audio capture (Opus / G.711a / G.711µ / raw PCM) on both
   backends, RTP or compact UDP output, mute via live API
 - SD card recording: MPEG-TS mux (HEVC + audio in TS, PCM / A-law / µ-law / Opus
@@ -686,7 +687,7 @@ curl "http://<device>/api/v1/set?video0.pauseStab=1"   # freeze (glide to centre
 curl "http://<device>/api/v1/set?video0.pauseStab=0"   # resume
 ```
 
-Three **tuning** knobs shape the stabilization (all restart-required; all inert
+Four **tuning** knobs shape the stabilization (all restart-required; all inert
 under `off`/`zoom-*`; shared identically by `stab` and `stab-fill`; re-selecting
 the preset resets them to the defaults, so **set `framing` first, then the
 overrides**):
@@ -703,6 +704,10 @@ overrides**):
   range `0.1..50.0`). **The primary feel knob.** Higher = smoother but laggier
   (the frame trails your real motion); lower = snappier but more jitter passes
   through.
+- `stab_accuracy` — **motion-estimator effort** (`auto` / `high` / `medium` /
+  `low`, default `auto`). Sets the IVE block-matching detector level: higher =
+  finer motion tracking at more CPU; `auto` picks a level from the mode. Shared
+  by `stab` and `stab-fill`.
 
 (`stab_recenter_speed` only sets the `pauseStab` glide-home rate; during normal
 stabilization the Kalman handles recentering.)
@@ -1254,26 +1259,77 @@ optionally — when Star6E adaptive encoder control is active — per-frame
 size, QP, complexity, scene-change flag, IDR decision, and
 frames-since-IDR.
 
-See `include/rtp_sidecar.h` and `tools/rtp_timing_probe.c` for the
-full wire protocol and reference probe.
+The sender supports up to 4 concurrent subscribers (keyed by
+addr:port, per-slot 5 s TTL) so a vehicle-local hub consumer, the wfb
+link_controller and a debug probe can coexist on one port.
+
+With `attitude.enabled=true` (requires `imu.enabled`, Star6E only) each
+FRAME also carries a 12-byte ATTITUDE trailer — roll/pitch/yaw from an
+on-device complementary filter, int16 0.1° units — consumed by the
+vehicle hub for the HUD artificial horizon.
+
+**Mounting correction** is two-stage, all restart-required:
+
+- `attitude.axisFwd` / `attitude.axisDown` (`+x`..`-z`, defaults `+x`/`+z`)
+  — a signed axis remap applied to gyro+accel *before* the estimator, so a
+  board mounted in any of the 24 axis-aligned orientations reads correctly.
+  Identified once per hardware design with the two-pose procedure (camera
+  level → gravity axis is `axisDown`; lens straight down → gravity axis is
+  `axisFwd`).
+- `attitude.trimRollDeg` / `attitude.trimPitchDeg` — boresight trims: the
+  residual roll/pitch the estimator reads while the camera is held level,
+  undone input-side. Capture them automatically by holding the camera level
+  and calling `GET /api/v1/attitude/calibrate_level` (or the WebUI Attitude
+  section's "Capture level trims" button), which averages the level-pose
+  accel, solves the trims, and persists them via the restart path.
+- `attitude.mountDeg` (0/90/180/270) + `attitude.invertRoll` /
+  `attitude.invertPitch` remain as a coarse legacy alternative to the axis
+  remap.
+
+`GET /api/v1/attitude` returns the live fused snapshot (works standalone —
+no sidecar subscriber needed) for the WebUI readout and field setup.
+
+See `include/rtp_sidecar.h`, the canonical cross-repo spec
+`protocols/rtp-sidecar.md` (waybeam-coordination), and
+`tools/rtp_timing_probe.c` for the full wire protocol and reference
+probe.
 
 ## Sensor Driver Sources
 
-Full sensor driver source code is available in the `sensors-src/`
-submodule (from [OpenIPC/sensors](https://github.com/OpenIPC/sensors)).
-This includes drivers for IMX335, IMX415, GC4653, and other SigmaStar
-Infinity6E sensors.
+This repo ships **in-tree, mode-unlocked** IMX335 / IMX415 driver sources
+for both backends under `drivers/` — `sensor_imx{335,415}_star6e.c` and
+`sensor_imx{335,415}_maruko.c` — with the mode lineups documented in
+`drivers/SENSOR_MODE_GUIDE.md` and the per-SoC deep-dives in
+`documentation/STAR6E_IMX335_MODES.md`, `STAR6E_IMX415_MODES.md`, and
+`MARUKO_IMX335_MODES.md`. Pre-built `.ko` for each backend live in
+`sensors/star6e/` and `sensors/maruko/`.
+
+The full upstream sensor catalogue (GC4653 and other SigmaStar Infinity6E
+sensors) is available in the `sensors-src/` submodule (from
+[OpenIPC/sensors](https://github.com/OpenIPC/sensors)):
 
 ```sh
-# Fetch the sensor sources (not cloned by default)
+# Fetch the upstream sensor sources (not cloned by default)
 git submodule update --init sensors-src
-
-# Driver sources for Infinity6E
 ls sensors-src/sigmastar/infinity6e/sensor/
 ```
 
-Pre-built kernel modules (`.ko`) for IMX335 and IMX415 remain in
-`sensors/`.
+### Building Star6E sensor drivers from source
+
+`drivers/sensor_imx{335,415}_star6e.c` needs the Infinity6E kernel source
+tree (SigmaStar BSP, not hosted here). Supply it on the command line:
+
+```sh
+make drivers-star6e KSRC_STAR6E=/path/to/infinity6e-kernel
+# → sensors/star6e/sensor_imx{335,415}_star6e.ko
+```
+
+The Star6E IMX335 lineup adds window-crop tiers up to **144 fps**
+(1600×900) and IMX415 up to **100 fps**, over the stock linear modes.
+Both drivers apply a **fixed-framerate exposure policy** — the AE shutter
+is pinned at the 1/fps ceiling and VMAX is held (nominal-fps vts trims) so
+frame rate no longer sags with scene brightness. See the mode docs above
+for the full geometry / VMAX tables.
 
 ### Maruko IMX335 Sensor Modes
 

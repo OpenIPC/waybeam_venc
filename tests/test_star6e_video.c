@@ -145,7 +145,7 @@ static int test_star6e_video_send_frame_rtp(void)
 	stream.count = 1;
 	stream.packet = &pack;
 
-	total_bytes = star6e_video_send_frame(&state, &output, &stream, 1, 0, NULL);
+	total_bytes = star6e_video_send_frame(&state, &output, &stream, 1, 0, NULL, NULL);
 	CHECK("star6e video send bytes", total_bytes == sizeof(nal));
 	CHECK("star6e video send frame counter", state.frame_counter == 1);
 	CHECK("star6e video send seq advanced",
@@ -197,7 +197,7 @@ static int test_star6e_video_send_frame_disabled(void)
 	stream.count = 1;
 	stream.packet = &pack;
 
-	total_bytes = star6e_video_send_frame(&state, &output, &stream, 0, 0, NULL);
+	total_bytes = star6e_video_send_frame(&state, &output, &stream, 0, 0, NULL, NULL);
 	CHECK("star6e video disabled bytes", total_bytes == 0);
 	CHECK("star6e video disabled frame counter", state.frame_counter == 1);
 	CHECK("star6e video disabled seq stable", state.rtp_state.seq == seq_before);
@@ -270,7 +270,7 @@ static int test_star6e_video_sidecar_ext(void)
 	enc_info.idr_inserted = 1;
 	enc_info.frames_since_idr = 15;
 
-	(void)star6e_video_send_frame(&state, &output, &stream, 1, 0, &enc_info);
+	(void)star6e_video_send_frame(&state, &output, &stream, 1, 0, &enc_info, NULL);
 
 	received = recv(probe_socket, &wire, sizeof(wire), 0);
 	CHECK("star6e sidecar recv size",

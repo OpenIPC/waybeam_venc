@@ -96,5 +96,15 @@
   },
   "debug": {
     "showOsd": false
+  },
+  "attitude": {
+    "enabled": false,
+    "mountDeg": 0,
+    "invertRoll": false,
+    "invertPitch": false,
+    "axisFwd": "+x",
+    "axisDown": "+z",
+    "trimRollDeg": 0.0,
+    "trimPitchDeg": 0.0
   }
 }

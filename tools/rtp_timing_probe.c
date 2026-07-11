@@ -161,6 +161,26 @@ static void cache_store_frame(const uint8_t *buf, size_t len, uint64_t recv_us)
 		e->idr_inserted = ext->enc.idr_inserted;
 		e->has_enc_info = 1;
 	}
+	/* Walk trailers in flag order to locate ATTITUDE (last trailer). */
+	if ((wire->flags & RTP_SIDECAR_FLAG_ATTITUDE) != 0) {
+		size_t off = sizeof(RtpSidecarFrame);
+		if (wire->flags & RTP_SIDECAR_FLAG_ENC_INFO)
+			off += sizeof(RtpSidecarEncInfoWire);
+		if (wire->flags & RTP_SIDECAR_FLAG_TRANSPORT_INFO)
+			off += sizeof(RtpSidecarTransportInfoWire);
+		if (len >= off + sizeof(RtpSidecarAttitudeWire)) {
+			RtpSidecarAttitudeWire att;
+			memcpy(&att, buf + off, sizeof(att));
+			fprintf(stderr,
+				"ATT frame=%" PRIu64 " roll=%+.1f pitch=%+.1f "
+				"yaw=%+.1f status=0x%04x age=%ums\n",
+				be64toh(wire->frame_id),
+				(int16_t)ntohs((uint16_t)att.roll_cdeg) / 10.0,
+				(int16_t)ntohs((uint16_t)att.pitch_cdeg) / 10.0,
+				(int16_t)ntohs((uint16_t)att.yaw_cdeg) / 10.0,
+				ntohs(att.status), ntohs(att.imu_age_ms));
+		}
+	}
 	e->valid             = 1;
 }
 
