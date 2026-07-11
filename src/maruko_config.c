@@ -163,5 +163,8 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 
 	cfg->snapshot = vcfg->snapshot;
 
+	snprintf(cfg->framing, sizeof(cfg->framing), "%s",
+		vcfg->video0.framing);
+
 	return 0;
 }

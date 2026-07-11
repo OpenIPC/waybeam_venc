@@ -1,5 +1,6 @@
 #include "venc_config.h"
 #include "venc_api.h"
+#include "framing_stab_accuracy.h"
 #include "pipeline_common.h"
 #include "star6e_recorder.h"
 #include "intra_refresh.h"
@@ -186,6 +187,11 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->video0.framing, sizeof(cfg->video0.framing), "off");
 	(void)venc_config_apply_framing_preset("off", &cfg->video0);
 
+	/* Shift_Detector accuracy — "auto" resolves per-backend (high on Star6E,
+	 * low on Maruko); an unset field thus preserves each backend's default. */
+	safe_strcpy(cfg->video0.stab_accuracy,
+		sizeof(cfg->video0.stab_accuracy), "auto");
+
 	/* Runtime-only "stab-fill" bypass — always boots false; not parsed or
 	 * serialized (a fresh stab-fill run always comes up composing). */
 	cfg->video0.pause_stab = false;
@@ -208,6 +214,18 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* debug */
 	cfg->debug.show_osd = false;
+
+	/* attitude (sidecar trailer export; requires imu.enabled) */
+	cfg->attitude.enabled      = false;
+	cfg->attitude.mount_deg    = 0;
+	cfg->attitude.invert_roll  = false;
+	cfg->attitude.invert_pitch = false;
+	safe_strcpy(cfg->attitude.axis_fwd,
+		sizeof(cfg->attitude.axis_fwd), "+x");
+	safe_strcpy(cfg->attitude.axis_down,
+		sizeof(cfg->attitude.axis_down), "+z");
+	cfg->attitude.trim_roll_deg  = 0.0f;
+	cfg->attitude.trim_pitch_deg = 0.0f;
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -463,7 +481,8 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 	 * low/medium/high presets traded border vs magnification and only the
 	 * middle one felt right, so they were collapsed into one.  Unknown values
 	 * (incl. the never-shipped low/medium/high) fall back to "off" on load.
-	 * Star6E only; no-op on Maruko.  Source auto-clamps to <=1920x1080.
+	 * Both backends (Star6E via VPE crop, Maruko via SCL crop —
+	 * src/maruko_framing_stab.c).  Source auto-clamps to <=1920x1080.
 	 *
 	 * Zoom presets — zoom_pct = 1 / magnification (e.g. 2x -> 0.50).  Both
 	 * backends; zoom_x/zoom_y pan live (stab is always centered).
@@ -611,6 +630,18 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 				"stabKalmanQ", v->stab_kalman_q);
 			v->stab_kalman_r = json_get_double(obj,
 				"stabKalmanR", v->stab_kalman_r);
+			/* Detector accuracy level (shared table in
+			 * framing_stab_accuracy.h).  Lenient on load — an
+			 * unrecognised hand-edited value falls back to "auto"
+			 * (the resolver also treats unknown as auto). */
+			{
+				const char *acc = json_get_string(obj,
+					"stabAccuracy", v->stab_accuracy);
+				if (!framing_stab_accuracy_valid(acc))
+					acc = "auto";
+				safe_strcpy(v->stab_accuracy,
+					sizeof(v->stab_accuracy), acc);
+			}
 			/* Harden stab_crop_pct to [60, 100] for the active stab preset.
 			 * A stab preset must have a usable crop budget; clamping here
 			 * also self-heals a stale stabCropPct (e.g. a 0 saved while
@@ -793,6 +824,34 @@ int venc_config_load(const char *path, VencConfig *cfg)
 		if (obj)
 			cfg->debug.show_osd = json_get_bool(obj, "showOsd",
 				cfg->debug.show_osd);
+	}
+	{
+		const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root,
+			"attitude");
+		if (obj) {
+			cfg->attitude.enabled = json_get_bool(obj, "enabled",
+				cfg->attitude.enabled);
+			cfg->attitude.mount_deg = json_get_int(obj, "mountDeg",
+				cfg->attitude.mount_deg);
+			cfg->attitude.invert_roll = json_get_bool(obj,
+				"invertRoll", cfg->attitude.invert_roll);
+			cfg->attitude.invert_pitch = json_get_bool(obj,
+				"invertPitch", cfg->attitude.invert_pitch);
+			safe_strcpy(cfg->attitude.axis_fwd,
+				sizeof(cfg->attitude.axis_fwd),
+				json_get_string(obj, "axisFwd",
+					cfg->attitude.axis_fwd));
+			safe_strcpy(cfg->attitude.axis_down,
+				sizeof(cfg->attitude.axis_down),
+				json_get_string(obj, "axisDown",
+					cfg->attitude.axis_down));
+			cfg->attitude.trim_roll_deg = (float)json_get_double(
+				obj, "trimRollDeg",
+				cfg->attitude.trim_roll_deg);
+			cfg->attitude.trim_pitch_deg = (float)json_get_double(
+				obj, "trimPitchDeg",
+				cfg->attitude.trim_pitch_deg);
+		}
 	}
 
 	cJSON_Delete(root);
@@ -1289,6 +1348,22 @@ static void render_debug(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_section_close(p, 1, is_last);
 }
 
+static void render_attitude(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "attitude");
+	pp_field_bool(p, 2, "enabled",     cfg->attitude.enabled,      0);
+	pp_field_int(p,  2, "mountDeg",    cfg->attitude.mount_deg,    0);
+	pp_field_bool(p, 2, "invertRoll",  cfg->attitude.invert_roll,  0);
+	pp_field_bool(p, 2, "invertPitch", cfg->attitude.invert_pitch, 0);
+	pp_field_string(p, 2, "axisFwd",   cfg->attitude.axis_fwd,     0);
+	pp_field_string(p, 2, "axisDown",  cfg->attitude.axis_down,    0);
+	pp_field_double(p, 2, "trimRollDeg",
+		cfg->attitude.trim_roll_deg,  0);
+	pp_field_double(p, 2, "trimPitchDeg",
+		cfg->attitude.trim_pitch_deg, 1);
+	pp_section_close(p, 1, is_last);
+}
+
 /* Top-level: build the canonical pretty layout into a malloc'd string.
  * Caller must free.  Returns NULL on allocation failure. */
 static char *config_render_pretty(const VencConfig *cfg)
@@ -1309,7 +1384,8 @@ static char *config_render_pretty(const VencConfig *cfg)
 	render_imu(&p,      cfg, 0);
 	render_record(&p,   cfg, 0);
 	render_snapshot(&p, cfg, 0);
-	render_debug(&p,    cfg, 1);
+	render_debug(&p,    cfg, 0);
+	render_attitude(&p, cfg, 1);
 	pp_str(&p, "}");
 
 	if (p.oom) {
@@ -1391,6 +1467,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 			cfg->video0.stab_kalman_q);
 		cJSON_AddNumberToObject(vid, "stabKalmanR",
 			cfg->video0.stab_kalman_r);
+		cJSON_AddStringToObject(vid, "stabAccuracy",
+			cfg->video0.stab_accuracy);
 	}
 
 	/* outgoing */
@@ -1478,6 +1556,26 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	cJSON *dbg = cJSON_AddObjectToObject(root, "debug");
 	if (dbg)
 		cJSON_AddBoolToObject(dbg, "showOsd", cfg->debug.show_osd);
+
+	/* attitude */
+	cJSON *att = cJSON_AddObjectToObject(root, "attitude");
+	if (att) {
+		cJSON_AddBoolToObject(att, "enabled", cfg->attitude.enabled);
+		cJSON_AddNumberToObject(att, "mountDeg",
+			cfg->attitude.mount_deg);
+		cJSON_AddBoolToObject(att, "invertRoll",
+			cfg->attitude.invert_roll);
+		cJSON_AddBoolToObject(att, "invertPitch",
+			cfg->attitude.invert_pitch);
+		cJSON_AddStringToObject(att, "axisFwd",
+			cfg->attitude.axis_fwd);
+		cJSON_AddStringToObject(att, "axisDown",
+			cfg->attitude.axis_down);
+		cJSON_AddNumberToObject(att, "trimRollDeg",
+			cfg->attitude.trim_roll_deg);
+		cJSON_AddNumberToObject(att, "trimPitchDeg",
+			cfg->attitude.trim_pitch_deg);
+	}
 
 	return root;
 }

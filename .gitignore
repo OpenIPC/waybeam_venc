@@ -7,6 +7,14 @@ out/
 
 tools/ioctl_trace_preload.so
 
+# Host-arch build output of tools/rtp_timing_probe.c (see Makefile clean:)
+/rtp_timing_probe
+
+# Compiled on-device IVE probe tools (sources tracked, binaries are not)
+tools/ive_i6c_probe
+tools/ive_i6c_shift
+tools/ive_i6c_hwop
+
 tests/test_runner
 tests/test_imu_ring
 

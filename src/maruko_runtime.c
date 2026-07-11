@@ -98,6 +98,18 @@ static int maruko_runner_init(void *opaque)
 	if (ret != 0)
 		return ret;
 
+	/* Bring up the framing module (video0.framing="stab"/"stab-fill") now
+	 * that the SCL base crop is set and VENC is up.  No-op when framing is
+	 * off; non-fill module failures degrade gracefully (RING leg intact).
+	 * A stab-fill failure is FATAL: the fill module is the frame-base VENC's
+	 * only producer, so continuing would stream nothing forever. */
+	ret = maruko_pipeline_framing_setup(backend, &ctx->vcfg);
+	if (ret != 0) {
+		fprintf(stderr, "ERROR: [maruko] stab-fill framing bring-up "
+			"failed — aborting init (no VENC producer)\n");
+		return ret;
+	}
+
 	maruko_iq_init();
 	maruko_bind_controls(ctx);
 	maruko_reset_scene(backend);

@@ -1,5 +1,7 @@
 #include "venc_api.h"
+#include "attitude_est.h"
 #include "device_id.h"
+#include "framing_stab_accuracy.h"
 #include "idr_rate_limit.h"
 #include "intra_refresh.h"
 #include "pipeline_common.h"
@@ -339,33 +341,36 @@ static const FieldUi ui_stab_crop_pct = {
 	"Stabilization", "Stab crop %", "number", 60, 100, 1, NULL,
 	"Kept-frame percentage for framing=stab / stab-fill. 0 = preset default "
 	"(80, API only); 60..100 = explicit crop %. Smaller = bigger dead border "
-	"= more room to absorb motion but more zoomed-in. Requires restart. "
-	"Maruko/I6C: unavailable — stabilization needs the IVE block, absent on "
-	"this SoC; disabled here."
+	"= more room to absorb motion but more zoomed-in. Requires restart."
 };
 static const FieldUi ui_stab_recenter_speed = {
 	"Stabilization", "Recenter speed", "number", 0, 3600, 5, NULL,
 	"How fast the stabilized window glides back to centre after motion "
 	"(decay time-constant in frames). 0 = stick (never recenters); higher = "
-	"slower, gentler return. Production default 180 (~3s @60fps). Requires restart. "
-	"Maruko/I6C: unavailable — stabilization needs the IVE block, absent on "
-	"this SoC; disabled here."
+	"slower, gentler return. Production default 180 (~3s @60fps). Requires restart."
 };
 static const FieldUi ui_stab_kalman_q = {
 	"Stabilization", "Pan response (Q)", "number", 0.001, 1.0, 0.005, NULL,
 	"Kalman process noise — how fast the view follows slow pans. Higher = "
 	"tracks pans sooner / weaker hold; lower = holds tighter, more locked. "
-	"Shared by stab + stab-fill. Default 0.03. Requires restart. "
-	"Maruko/I6C: unavailable — stabilization needs the IVE block, absent on "
-	"this SoC; disabled here."
+	"Shared by stab + stab-fill. Default 0.03. Requires restart."
 };
 static const FieldUi ui_stab_kalman_r = {
 	"Stabilization", "Smoothness (R)", "number", 0.1, 50.0, 0.1, NULL,
 	"Kalman measurement noise — output smoothness. Higher = smoother but "
 	"laggier; lower = snappier, more jitter passes through. Shared by stab + "
-	"stab-fill. Default 2.0. Requires restart. "
-	"Maruko/I6C: unavailable — stabilization needs the IVE block, absent on "
-	"this SoC; disabled here."
+	"stab-fill. Default 2.0. Requires restart."
+};
+static const char *const stab_accuracy_opts[] = {
+	"auto", "high", "medium", "low", NULL
+};
+static const FieldUi ui_stab_accuracy = {
+	"Stabilization", "Detector accuracy", "select", 0, 0, 0, stab_accuracy_opts,
+	"Motion-detector geometry / CPU cost (the NEON detector is the dominant "
+	"per-frame stab cost). high=384/256/3 smoothest; medium=320/192/3; "
+	"low=256/128/2 cheapest. auto = per-backend default (high on Star6E, low on "
+	"single-core Maruko). Higher costs more CPU — pick to fit your resolution / "
+	"fps. Shared by stab + stab-fill. Requires restart."
 };
 
 /* UI descriptor for video0.pause_stab — the live stab pause.  Rendered as a
@@ -375,9 +380,7 @@ static const FieldUi ui_pause_stab = {
 	"Stabilization", "Pause stab", "toggle", 0, 0, 0, NULL,
 	"Live pause for framing=stab and stab-fill: glide the stabilized window / "
 	"floating image back to centre (software ramp, no rebind). No effect under "
-	"framing=off or zoom. "
-	"Maruko/I6C: unavailable — stabilization needs the IVE block, absent on "
-	"this SoC; disabled here."
+	"framing=off or zoom."
 };
 
 static const FieldDesc g_fields[] = {
@@ -484,11 +487,23 @@ static const FieldDesc g_fields[] = {
 	FIELD_UI(video0, stab_kalman_q,       FT_DOUBLE, MUT_RESTART, &ui_stab_kalman_q),
 	FIELD_UI(video0, stab_kalman_r,       FT_DOUBLE, MUT_RESTART, &ui_stab_kalman_r),
 	FIELD_UI(video0, stab_recenter_speed, FT_UINT,   MUT_RESTART, &ui_stab_recenter_speed),
+	FIELD_UI(video0, stab_accuracy,       FT_STRING, MUT_RESTART, &ui_stab_accuracy),
 	/* Runtime stab pause (D13 software ramp) — MUT_LIVE, not persisted.  Carries
 	 * UI metadata so the dashboard renders it data-driven (no static SECTIONS
 	 * row; it isn't in /api/v1/config). */
 	FIELD_UI(video0, pause_stab,       FT_BOOL,   MUT_LIVE, &ui_pause_stab),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
+	/* Attitude export over the rtp_sidecar trailer (requires imu.enabled;
+	 * Star6E only). MUT_RESTART: the estimator + trailer wiring is set up
+	 * at pipeline init. */
+	FIELD(attitude, enabled,      FT_BOOL, MUT_RESTART),
+	FIELD(attitude, mount_deg,    FT_INT,  MUT_RESTART),
+	FIELD(attitude, invert_roll,  FT_BOOL, MUT_RESTART),
+	FIELD(attitude, invert_pitch, FT_BOOL, MUT_RESTART),
+	FIELD(attitude, axis_fwd,     FT_STRING, MUT_RESTART),
+	FIELD(attitude, axis_down,    FT_STRING, MUT_RESTART),
+	FIELD(attitude, trim_roll_deg,  FT_FLOAT, MUT_RESTART),
+	FIELD(attitude, trim_pitch_deg, FT_FLOAT, MUT_RESTART),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -545,6 +560,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.stabRecenterSpeed", "video0.stab_recenter_speed" },
 	{ "video0.stabKalmanQ", "video0.stab_kalman_q" },
 	{ "video0.stabKalmanR", "video0.stab_kalman_r" },
+	{ "video0.stabAccuracy", "video0.stab_accuracy" },
 	{ "video0.pauseStab", "video0.pause_stab" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
@@ -552,6 +568,13 @@ static const FieldAlias g_field_aliases[] = {
 	{ "discovery.serviceType", "discovery.service_type" },
 	{ "discovery.bareAlias", "discovery.bare_alias" },
 	{ "debug.showOsd", "debug.show_osd" },
+	{ "attitude.mountDeg", "attitude.mount_deg" },
+	{ "attitude.invertRoll", "attitude.invert_roll" },
+	{ "attitude.invertPitch", "attitude.invert_pitch" },
+	{ "attitude.axisFwd", "attitude.axis_fwd" },
+	{ "attitude.axisDown", "attitude.axis_down" },
+	{ "attitude.trimRollDeg", "attitude.trim_roll_deg" },
+	{ "attitude.trimPitchDeg", "attitude.trim_pitch_deg" },
 };
 
 static const char *canonicalize_field_key(const char *key)
@@ -586,23 +609,11 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	    strcmp(canonical_key, "isp.keep_aspect") == 0)
 		return 0;
 
-	/* Image stabilization is unavailable on Maruko/I6C: the motion detector
-	 * needs the IVE (MVE) hardware block, which fails to initialise on this
-	 * SoC (MI_IVE_Create -> MI_MVE_Init mmap/IC-check fault, all libs).  The
-	 * framing=stab / stab-fill presets are therefore inert here, so advertise
-	 * the whole stabilization tuning group unsupported: the WebUI greys the
-	 * controls and the set-path rejects changes.  Kept in the schema (not
-	 * removed) so a future CPU/NEON block-matcher can re-enable them without a
-	 * config migration.  (video0.framing itself stays supported — its off/zoom
-	 * presets work on both backends; only its stab options are gated, in the
-	 * dashboard.) */
-	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
-	    (strcmp(canonical_key, "video0.stab_crop_pct") == 0 ||
-	     strcmp(canonical_key, "video0.stab_recenter_speed") == 0 ||
-	     strcmp(canonical_key, "video0.stab_kalman_q") == 0 ||
-	     strcmp(canonical_key, "video0.stab_kalman_r") == 0 ||
-	     strcmp(canonical_key, "video0.pause_stab") == 0))
-		return 0;
+	/* Image stabilization (video0.framing=stab + the stab_* / pause_stab tuning
+	 * group) is now supported on Maruko/I6C: the IVE motion detector works once
+	 * the BSP-matched libmi_ive.so is installed (see the builder osdrv override),
+	 * driven by src/maruko_framing_stab.c.  No backend gate — the knobs are live
+	 * on both SoCs.  (stab-fill remains Star6E-only, gated in the dashboard.) */
 
 	return 1;
 }
@@ -796,6 +807,32 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 				"zoom-1.25x, zoom-1.50x, zoom-1.75x, zoom-2x, "
 				"zoom-3x, zoom-4x";
 	}
+	if (strcmp(key, "attitude.mount_deg") == 0) {
+		int v = cfg->attitude.mount_deg;
+		if (v != 0 && v != 90 && v != 180 && v != 270)
+			return "mount_deg must be 0, 90, 180, or 270";
+	}
+	if (strcmp(key, "attitude.trim_roll_deg") == 0) {
+		float v = cfg->attitude.trim_roll_deg;
+		if (!isfinite(v) || v < -180.0f || v > 180.0f)
+			return "trim_roll_deg must be finite, in range [-180, 180]";
+	}
+	if (strcmp(key, "attitude.trim_pitch_deg") == 0) {
+		float v = cfg->attitude.trim_pitch_deg;
+		if (!isfinite(v) || v < -180.0f || v > 180.0f)
+			return "trim_pitch_deg must be finite, in range [-180, 180]";
+	}
+	if (strcmp(key, "attitude.axis_fwd") == 0 ||
+	    strcmp(key, "attitude.axis_down") == 0) {
+		/* Reject unparseable or non-orthogonal fwd/down at set time —
+		 * otherwise the estimator silently falls back to identity at
+		 * init and reports a wrong-but-"valid" attitude. */
+		AttitudeAxisMap probe;
+		if (attitude_axis_map_init(&probe, cfg->attitude.axis_fwd,
+		        cfg->attitude.axis_down, 0.0f, 0.0f) != 0)
+			return "axis_fwd/axis_down must each be one of "
+				"+x,-x,+y,-y,+z,-z and be non-parallel";
+	}
 	if (strcmp(key, "video0.stab_crop_pct") == 0) {
 		uint32_t v = cfg->video0.stab_crop_pct;
 		/* Floor 60: below it the kept window is too small (huge border /
@@ -819,6 +856,10 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (v < 0.1 || v > 50.0)
 			return "stab_kalman_r must be in range [0.1, 50.0] "
 				"(smoothness; higher = smoother but laggier)";
+	}
+	if (strcmp(key, "video0.stab_accuracy") == 0) {
+		if (!framing_stab_accuracy_valid(cfg->video0.stab_accuracy))
+			return "stab_accuracy must be one of: auto, high, medium, low";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
@@ -2168,7 +2209,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.11.0\","
+		"\"contract_version\":\"0.12.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2566,6 +2607,80 @@ static int handle_restart(int fd, const HttpRequest *req, void *ctx)
 	 * /api/v1/set level (LIVE and RESTART both now save per set). */
 	venc_api_request_reinit();
 	return httpd_send_ok(fd, "{\"reinit\":true}");
+}
+
+/* ── Attitude endpoints ──────────────────────────────────────────────── */
+
+static int handle_attitude(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+	if (!g_cb || !g_cb->query_attitude)
+		return httpd_send_error(fd, 501, "not_implemented",
+			"attitude not supported on this backend");
+	char *json = g_cb->query_attitude();
+	if (!json)
+		return httpd_send_error(fd, 500, "internal_error",
+			"out of memory");
+	size_t len = strlen(json) + 32;
+	char *buf = malloc(len);
+	if (!buf) {
+		free(json);
+		return httpd_send_error(fd, 500, "internal_error",
+			"out of memory");
+	}
+	snprintf(buf, len, "{\"ok\":true,\"data\":%s}", json);
+	int rc = httpd_send_json(fd, 200, buf);
+	free(buf);
+	free(json);
+	return rc;
+}
+
+/* GET /api/v1/attitude/calibrate_level — the "it's laying flat now"
+ * calibration: average the level-pose accel (ODR-independent — completes
+ * early at the sample target, else takes the <=2 s window's samples once
+ * >=32 are in), solve the boresight trims, persist them through the
+ * standard restart-set path (config file write; the running estimator
+ * picks them up on the next restart). */
+static int handle_attitude_calibrate(int fd, const HttpRequest *req,
+	void *ctx)
+{
+	float roll = 0.0f, pitch = 0.0f;
+	char q[64], buf[192];
+	int status = 0;
+	char *resp = NULL;
+
+	(void)req; (void)ctx;
+	if (!g_cb || !g_cb->attitude_calibrate_level)
+		return httpd_send_error(fd, 501, "not_implemented",
+			"attitude calibration not supported on this backend");
+	if (g_cb->attitude_calibrate_level(&roll, &pitch) != 0)
+		return httpd_send_error(fd, 409, "calibration_failed",
+			"no IMU samples (attitude.enabled + imu.enabled?) "
+			"or implausible gravity — hold the camera still");
+
+	snprintf(q, sizeof(q), "attitude.trim_roll_deg=%.2f",
+		(double)roll);
+	if (process_set_query(q, &status, &resp) != 0 || status != 200) {
+		free(resp);
+		return httpd_send_error(fd, 500, "internal_error",
+			"failed to persist trim_roll_deg");
+	}
+	free(resp);
+	resp = NULL;
+	snprintf(q, sizeof(q), "attitude.trim_pitch_deg=%.2f",
+		(double)pitch);
+	if (process_set_query(q, &status, &resp) != 0 || status != 200) {
+		free(resp);
+		return httpd_send_error(fd, 500, "internal_error",
+			"failed to persist trim_pitch_deg");
+	}
+	free(resp);
+
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"trimRollDeg\":%.2f,"
+		"\"trimPitchDeg\":%.2f,\"restartRequired\":true}}",
+		(double)roll, (double)pitch);
+	return httpd_send_json(fd, 200, buf);
 }
 
 static int handle_idr(int fd, const HttpRequest *req, void *ctx)
@@ -3192,6 +3307,11 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/fps/config",   handle_fps_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/fps/live",     handle_fps_live, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/restart",      handle_restart, NULL);
+	/* longer prefix first — routing is first-match prefix */
+	r |= venc_httpd_route("GET", "/api/v1/attitude/calibrate_level",
+		handle_attitude_calibrate, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/attitude",
+		handle_attitude, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/defaults",     handle_defaults, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/ae",           handle_ae, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/awb",          handle_awb, NULL);

@@ -1025,6 +1025,27 @@ static int test_framing_preset_restart(void)
 	CHECK("framing reject unchanged",
 		strcmp(cfg.video0.framing, "stab-fill") == 0);
 
+	/* stab_accuracy: a valid level applies via the camelCase alias on BOTH
+	 * backends (no maruko gate); garbage is rejected 409 and leaves it unchanged. */
+	CHECK("stab_accuracy medium rc (maruko)",
+		apply_set_query_http(&cfg, "maruko", &cb,
+			"video0.stabAccuracy=medium", &status, response,
+			sizeof(response)) == 0);
+	CHECK("stab_accuracy medium status", status == 200);
+	CHECK("stab_accuracy medium cfg",
+		strcmp(cfg.video0.stab_accuracy, "medium") == 0);
+	venc_api_clear_reinit();
+
+	CHECK("stab_accuracy reject rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.stab_accuracy=ludicrous", &status, response,
+			sizeof(response)) == 0);
+	CHECK("stab_accuracy reject status", status == 409);
+	CHECK("stab_accuracy reject error",
+		strstr(response, "stab_accuracy must be one of") != NULL);
+	CHECK("stab_accuracy reject unchanged",
+		strcmp(cfg.video0.stab_accuracy, "medium") == 0);
+
 	return failures;
 }
 

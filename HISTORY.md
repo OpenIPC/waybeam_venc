@@ -1,5 +1,479 @@
 # History
 
+## [0.40.1] - 2026-07-11
+
+Pre-upstream hardening (adversarial review of the #167–175 workstreams).
+
+- **Attitude estimator: reject corrupt IMU samples.** A single NaN/Inf
+  accel/gyro value used to poison the complementary filter permanently
+  (the accel gate stays false so it never recovers) while
+  `attitude_frame_update` still stamped `ATTITUDE.status = valid` — the
+  HUD AHI would show a stuck, "valid", perfectly-level horizon. `wrap_pi`
+  also spun forever on an Inf argument, hanging the encode thread.
+  `attitude_est_update` now drops non-finite samples, `wrap_pi` guards
+  non-finite, and the sidecar trailer is gated on a new
+  `attitude_est_healthy()` so a non-finite state emits no trailer.
+- **Level calibration works at any IMU ODR.** `calibrate_level` required
+  256 samples but waited only ≤3 s, so at ODR ≤ ~85 Hz it always timed
+  out. It now completes early at the sample target and otherwise accepts
+  the ≤2 s window's samples once ≥ 32 are in (and the shorter window
+  bounds how long the calibration holds the HTTP dispatch lock).
+- **Maruko plain-stab: skip un-mapped tap frames.** The detector ran
+  `IveShift` even when the tap copy was skipped (unmapped/short frame),
+  correlating a stale or all-black buffer into a bogus shift and a
+  one-frame crop jump; it now retries without advancing (parity with the
+  stab-fill thread).
+- **Fix `make test-werror`/`test-asan`/`test-tsan`.** `test_attitude_est`
+  called `fabsf()` on `int16_t` returns → `-Werror=absolute-value`; the
+  strict test targets did not build. Added NaN/Inf-hardening regression
+  coverage.
+- **Remove committed host binary.** `rtp_timing_probe` (an x86-64 build
+  artifact) was tracked at the repo root; removed and gitignored.
+
+## [0.40.0] - 2026-07-10
+
+One-click attitude calibration + live attitude API (contract 0.12.0).
+
+- **`GET /api/v1/attitude`** — live fused roll/pitch/yaw snapshot
+  (camera frame, post-remap/trims). The estimator now runs whenever
+  `attitude.enabled` + `imu.enabled` — no sidecar subscriber needed —
+  so the WebUI readout works standalone.
+- **`GET /api/v1/attitude/calibrate_level`** — hold the camera level:
+  averages ~1.3 s of accel in the frame loop, solves the boresight
+  trims exactly (`attitude_axis_map_solve_trims`, unit-tested), and
+  persists `attitude.trimRollDeg`/`trimPitchDeg` via the standard
+  restart-set path. 409 on no-IMU/moving, 501 on Maruko.
+- **WebUI Attitude section**: live roll/pitch/yaw readout (1 Hz poll)
+  and a "Capture level trims" button that calibrates, updates the
+  fields, and restarts the pipeline.
+
+## [0.39.1] - 2026-07-10
+
+- **Sensor→camera axis remap** (`attitude.axisFwd` / `attitude.axisDown`,
+  MUT_RESTART, defaults `+x`/`+z` = identity). A signed permutation
+  applied to gyro+accel BEFORE the estimator, correcting boards mounted
+  in any of the 24 axis-aligned orientations (the output-side
+  `mountDeg`/invert trims only rotate about the camera axis and cannot
+  fix a vertical board). Set from a two-pose bench calibration: axisDown
+  = the sensor axis reading "down" with the camera level, axisFwd = the
+  one reading "down" with the camera nose pointed at the floor. Invalid
+  or parallel axes log once and fall back to identity.
+
+## [0.39.0] - 2026-07-10
+
+RTP sidecar: multi-subscriber sender + ATTITUDE trailer (cross-repo spec
+`protocols/rtp-sidecar.md`, multi-telemetry HUD group 6).
+
+- **Multi-subscriber sidecar.** The sender now keeps 4 subscriber slots
+  keyed by addr:port with per-slot 5 s TTLs; MSG_FRAME fans out to every
+  live slot and SYNC_RESP goes only to the requester. Removes the
+  single-slot hijack where any MSG_SUBSCRIBE stole the feed from the
+  wfb link_controller or ground pipeline-stats consumer.
+- **ATTITUDE trailer (flag 0x08, 12 B).** Optional roll/pitch/yaw
+  (int16 0.1°) + status + imu_age_ms appended last in flag order.
+  Fed by a new complementary-filter estimator (`src/attitude_est.c`,
+  unit-tested) running on the BMI270 ring in the Star6E frame loop;
+  computed only when `attitude.enabled` AND a subscriber is live.
+  Maruko builds carry the config but never emit the trailer (its IMU
+  push path is not wired yet).
+- **New `attitude` config section** (trailing struct, ABI append-only):
+  `enabled`, `mountDeg` (0/90/180/270), `invertRoll`, `invertPitch` —
+  all MUT_RESTART, full 7-touch (defaults/parse/pretty/JSON/fields/
+  aliases/docs).
+- `tools/rtp_timing_probe` decodes and prints the ATTITUDE trailer.
+
+## [0.38.0] - 2026-07-09
+
+Star6E sensor-driver mode quality: **fixed-framerate exposure policy + exact
+nominal fps landing** for the in-tree IMX335/IMX415 drivers. Device-verified
+on SSC338Q at 192.168.2.201 (IMX335).
+
+- **IMX335: exposure clamp instead of VMAX extension.** The stock
+  `SetAEUSecs`/`SetFPS` paths stretched VMAX whenever AE requested more than
+  the frame budget — with AE pinned at the 1/144s shutter ceiling (any
+  indoor scene) mode 5 ran at VMAX 1887 instead of 1880, delivering a
+  brightness-dependent 142–143.5fps instead of 144. Both sites now clamp
+  exposure to `vts - 9` (SHR floor); VMAX is pinned by construction.
+  Verified: encoder `Fps_1s` 144.00 sustained, VMAX register at seed.
+- **IMX335: empirical vts trims** — the real pixel clock runs ~0.2–0.5%
+  below the K constant; modes 2/3/4/5 seeds trimmed (3016→3001, 2707→2701,
+  2256→2250, 1880→1875) so delivered fps lands at/just above the label.
+- **IMX335: orientation (flip) rewrites fixed for the new lineup** — the
+  inherited M0F1/M1F1 block used stock indices: our idx 3 got the stock
+  1080p AREA3 value and idx 4/5 got no flip writes at all. Extended using
+  the verified `AREA3_ST_flipped = 4288 − normal` relation (idx3 3392,
+  idx4 3248, idx5 3068 + cropped-mode OB values). Not yet camera-verified
+  (bench runs flip=off).
+- **IMX335: mode 2 label corrected** to 2560×1440@90 (row said 2400×1350,
+  hardware reads out 2560×1440, Y_OUT=1460).
+- **IMX415: same fixed-framerate exposure clamp** in `SetAEUSecs`.
+- **IMX415: idx 1 retimed 4K@40 → 4K@~33.3** (VMAX 2250→2700 at HMAX=825):
+  the 40fps probe sat within ~5% of both the ISP throughput wall and the
+  analog HMAX floor; 33.3 keeps margin and still beats stock 4K@30 by ~11%.
+  Retime not yet device-verified (no IMX415 on the bench).
+- **Exact-CBR compensation for >120fps modes** (closes the deferred
+  follow-up in the 2026-07-06 spec): the RC budgets at the 120 fpsNum cap
+  while the bind delivers the true rate, so the wire ran ~1.19× the set
+  bitrate at 144. The encoder budget is now scaled ×rc_fps/delivered at
+  the three sites (pipeline create `venc_max_rate`, live `apply_bitrate`,
+  re-applied on `apply_fps` when the factor changes). Device-verified:
+  19.6 Mbps wire against a 20 Mbps config at Fps_1s 143.99 (was 23.8).
+
+## [0.37.0] - 2026-07-09
+
+Stabilization: **Maruko `video0.framing = stab-fill`** — full-FOV
+stabilization (the whole frame floats on a moving black border, no crop-in) on
+the Infinity6C, completing stab parity with Star6E. Device-verified on
+SSC378QE at IMX415 1080×720@50 (visual + 5-cycle teardown soak, 0 MMU resets).
+
+- **The Phase 5a "i6c VENC cannot be manually pushed" device result is
+  OVERTURNED** — it was an ABI artifact. The i6c `MI_SYS_BufConf_t` differs
+  from Star6E's in three load-bearing ways: `E_MI_SYS_BUFDATA_FRAME` is **1**
+  (0 is `RAW`!), the struct carries `bDirectBuf`+`bCrcCheck` before the config
+  union (union at offset 24, not 16), and `BufFrameConfig` has no embedded
+  extra-conf. With the corrected layout, `MI_SYS_ChnInputPortGetBuf/PutBuf`
+  straight into a `NORMAL_FRMBASE` VENC input **encodes at the full sensor
+  rate** — so Maruko stab-fill uses the same manual-feed shape as Star6E; no
+  SCL bridge or FRAME_BASE bind needed.
+- Graph rewire (only when `framing == "stab-fill"`): SCL port0 → RAW +
+  unbound, drained by the fill thread; VENC created `NORMAL` (frame-base)
+  with `StartRecvPic` deferred to post-graph; no VENC ring pool. `off`/`zoom`/
+  `stab` keep the zero-copy RING leg untouched. Requires the unbound VENC
+  input port to be given `MI_SYS_SetChnInputPortFrc(USERINJECT, fps/fps)`.
+- Fill loop (in `maruko_framing_stab.c`, second registered module sharing the
+  detector/Kalman/`stab_accuracy` with `stab`): drain port0 → detect on the
+  centre patch → Kalman → compose (shift + Y=16/UV=128 borders) via
+  `MI_SYS_BufBlitPa`/`BufFillPa` (present on i6c, leading-SocId signatures) →
+  push. Measured: detect 5.2 ms + compose 3.0 ms ≈ **5.8 ms/frame thread CPU**
+  (~29% of the single A7 at 50 fps) at `stab_accuracy=low`.
+- `stab_crop_pct` is the float/border budget (max_off = enc·(100−pct)/200 per
+  side); `pause_stab` glide-home works unchanged.
+- WebUI: `stab-fill` un-gated on Maruko (reverses the #165 disable); tooltip
+  updated. `record.mode=dual` is refused under stab-fill (chn 1 is RING-fed —
+  can't mix with a frame-base chn 0 on the one H26x device).
+- The 5a probe's BufConf ABI is corrected in-tree so the archived bench now
+  reports the true answer.
+
+Reinit hardening (found by adversarial resolution/sensor-mode switch testing
+with the stab presets active — ~40 API-driven reinit switches on `.233`):
+
+- **Two-phase stab teardown (BOTH presets).** Joining the consumer thread of a
+  user-drained SCL port (fill: port0; stab: the port-2 tap) while the camera
+  still produces pins SCL/ISP working tasks, and the ISP→SCL REALTIME unbind's
+  UNBOUNDED kernel flush then wedges in uninterruptible D-state
+  (`MI_SYS_IMPL_FlushRealTimeOutputBuf`) — ending as a zombie process or a
+  hardware-watchdog reset.  Device-reproduced from stab-fill AND plain stab on
+  size/preset switches; retroactively explains the 2026-07-03 teardown hangs.
+  Now: `framing_stop` flips the thread to drain-only (no IVE/compose, pure
+  GetBuf/PutBuf) so consumption continues while the ports are disabled;
+  teardown joins + sweeps the residue afterwards (`finish_stop`).  Cut the
+  wedge incidence from ~1-in-2 (fill) to <1-in-20 across the switch barrage.
+- **Teardown watchdog (roadmap item, now shipped).** The residual SDK race is
+  GENERIC and pre-existing — control test: `framing=off` wedged on its first
+  size-change reinit, no stab code in the path (matches the 2026-07-03 hangs
+  and the factory binary wedging identically).  It cannot be closed from
+  userspace ordering, so a watchdog armed at teardown entry forces
+  `reboot(RB_AUTOBOOT)` after 12 s if teardown has not completed — a bounded,
+  logged, self-recovering ~45 s reboot instead of open-ended D-state limbo
+  (no sysrq on I6C; SIGKILL leaves an MI zombie).  Benefits every mode, not
+  just the stab presets.
+- **Live fps change under stab-fill fixed.** `maruko_apply_fps` re-bound
+  SCL→VENC RING as its fps divider — on the frame-base manual-fed VENC that
+  stalls the encoder dead (instant "no encoder data" abort, device-reproduced).
+  In fill mode the divider is now the VENC input port's USERINJECT FRC
+  (src:dst), applied live with no graph change.
+
+## [0.36.0] - 2026-07-09
+
+Stabilization: **`video0.stab_accuracy` — a shared high/medium/low detector
+level, replacing the silent per-backend divergence.** The Shift_Detector
+geometry (crop/box/pyramid/search) was hardcoded differently in each backend
+(Star6E 384/256/3, Maruko 256/128/2) — invisible to users and impossible to
+tune per sensor mode.
+
+- New enum field `video0.stab_accuracy = auto | high | medium | low`, shared by
+  both backends and by both stab presets (`stab` + `stab-fill`). One geometry
+  table in `include/framing_stab_accuracy.h` — the two backends now resolve
+  through it, so they cannot drift again.
+  - **high** 384/256/3/96 (smoothest) · **medium** 320/192/3/80 (new middle
+    step) · **low** 256/128/2/64 (cheapest). All keep margin = (crop−box)/2 =
+    64px. The detector is NEON software, so the level is the CPU/quality lever.
+- **`auto` (default) resolves per-backend** — high on Star6E, low on
+  single-core Maruko — so an unset field reproduces each backend's previous
+  behaviour exactly (zero regression on upgrade).
+- Data-driven WebUI: the field carries `FieldUi` metadata (`control:"select"`),
+  so the dashboard renders the dropdown straight from `/api/v1/capabilities` —
+  no `dashboard.html` edit or webui-blob rebuild. Supported on both backends
+  (no Maruko gate); MUT_RESTART.
+- Tests: `tests/test_framing_stab_accuracy.c` pins the level table, the 64px
+  margin invariant, per-backend `auto` resolution and lenient unknown→fallback;
+  plus config load + API set/validate guards. Suite 1744/0.
+
+## [0.35.0] - 2026-07-09
+
+Maruko (Infinity6C): **`video0.framing = "stab"` — IVE stabilization on i6c,
+at parity with Star6E.** The motion detector (`MI_IVE_Shift_Detector`) was
+previously dead on Maruko (`MI_IVE_Create` failed); the root cause was a
+userspace blob vintage mismatch, not a kernel bug.
+
+- **Blob unblock:** swap **only** `libmi_ive.so` for the BSP uClibc build
+  (md5 `d608368e`, ive tag `c6a1e30`), which does its IC-version check via
+  `/dev/mstar_ive0` ioctls instead of raw-mmapping `/dev/mem` (which EINVALs
+  on this firmware). Do **not** also swap `libmi_sys`/`libmi_common` — the BSP
+  variants segfault on the musl rootfs. Delivered as a builder osdrv override
+  (builder#24).
+- **Cost model, stated honestly:** the detector is SigmaStar's NEON software
+  vision lib (`Simd::Neon`), **not** HW-accelerated — ~17 ms/call on one A7.
+  i6c is single-core, so the config is cheapened to 256 tap / 128 box / 2-level
+  pyramid (core 100%→55%, keeps 50 fps) at a documented noise cost.
+- **Shared Kalman:** the control law is extracted to `framing_kalman.{c,h}`,
+  linked by both backends; the Star6E refactor onto it is proven bit-identical
+  by `tests/test_framing_kalman.c`. Maruko stabilizes in the SCL-input domain
+  (crop + center-tap share one surface — simpler than Star6E's precrop path).
+- **Teardown:** the detector thread is joined **before** the tap port is
+  disabled (avoids an MI_SYS MMU-callback storm → watchdog); verified clean
+  across repeated start/stop cycles, zero MMU resets.
+- **Knobs un-gated on Maruko:** `stab_crop_pct`, `recenter_speed`,
+  `stab_kalman_q`, `stab_kalman_r`, `pause_stab` now validate/apply and the
+  WebUI no longer greys them out. `pause_stab` glides the frame home.
+- **`framing = "stab-fill"` is planned, not yet shipped** on Maruko — it hinges
+  on whether the i6c VENC accepts manually pushed input frames (RING_DMA-fed
+  today); see `specs/2026-07-08-maruko-stab/plan.md` Phase 5.
+
+## [0.34.1] - 2026-07-09
+
+Star6E IMX335: **true 144fps encode — decouple VENC delivery from the RC
+fpsNum parameter.** Supersedes the earlier cap-to-120 approach.
+
+- The i6e VENC encodes 143fps fine; the 120 ceiling is only on the
+  rate-control `fpsNum` parameter — `_MI_VENC_VerifyFps` rejects RC fps > 120
+  and silently resets it to 30, wrecking CBR (3000 kbps → ~15 Mbps at 143fps).
+- Fix: deliver the **true** sensor rate to VENC (encodes 143) but cap only the
+  RC `fpsNum` to `STAR6E_VENC_INPUT_FPS_MAX` (120) so `VerifyFps` never resets.
+  `rc_fps=120` vs `143` delivered = ~1.19× CBR overshoot (QP normal regime)
+  instead of 4.7×.
+- `star6e_pipeline.c`: create-path `venc_fps` (RC) capped to 120; both
+  `bind_dst` deliver the true rate; GOP from the capped RC fps (240).
+  `star6e_controls.c`: `apply_fps()` bind dst = true fps,
+  `apply_encoder_fps(rc_fps)`.
+- Device-verified (fps=144): RC SrcFrmRate 120/1, actual Fps_1s 143.0, no
+  VerifyFps reset, wire ~4080–4188 kbps. Optional follow-up: bitrate
+  compensation ×120/143 for exact CBR.
+
+## [0.34.0] - 2026-07-06
+
+Star6E IMX415: **hide four modes from the SDK/WebUI enumeration while keeping
+them compiled in the driver.**
+
+- New `imx415_linear_visible[] = {1, 2, 4, 6, 8}` maps table indices to the
+  SDK-enumerated list. The capability loop enumerates only those (so `num_res`
+  = 5) and `pCus_SetVideoRes()` maps the SDK index back to the table index,
+  re-asserting `ulcur_res`. All 9 mode tables and dispatch cases stay compiled
+  — re-enabling a hidden mode is a one-line edit (add its table index back).
+- **Visible (5, fps-ordered):** 0:3840×2160@40, 1:2816×1584@60, 2:1920×1080@90,
+  3:1728×972@100, 4:1728×816@120.
+- **Hidden (4, kept in driver):** table idx 0 (4K@30), 3 (3840×1152@60),
+  5 (2304×1296@100), 7 (1472×816@120).
+- **Note:** the SDK-enumerated indices shifted (now 0–4). Configs referencing
+  the old 0–8 indices must be remapped — e.g. the bench box `/etc/waybeam.json`
+  moved `"mode": 6` → `"mode": 3` to keep 1728×972@100. Device-verified on .13:
+  enumerates 5 modes, mode 3 runs clean at 100fps, 0 drops.
+
+## [0.33.0] - 2026-07-05
+
+Star6E IMX415: **removed the two image-corrupt full-FOV binned modes** and settled
+on a clean 9-mode fps-ordered lineup.
+
+- Removed **1920×1080@100** and **1920×1080@120** (full-FOV 2×2-binned). They
+  reported correct fps but rendered black + colored horizontal lines on the I6E
+  ISP — to reach 100/120fps their HMAX drops to 328/275, below the wide binned
+  line's WINMODE=0x04 crop floor (~365). Init tables, thunks, enum entries, mode
+  rows and dispatch cases all deleted (no dead code).
+- **Kept 1920×1080@90** (full-FOV 2×2-binned, idx4): at 90fps HMAX stays above the
+  crop floor, so it renders a clean image — device-confirmed.
+- Final lineup (idx : res@fps): 0:4K@30, 1:4K@40, 2:2816×1584@60, 3:3840×1152@60,
+  4:1920×1080@90, 5:2304×1296@100, 6:1728×972@100, 7:1472×816@120, 8:1728×816@120.
+  Every mode renders a valid image; still strict fps order.
+- Docs (`STAR6E_IMX415_MODES.md`, `HEADROOM.md` §5.6) updated to match.
+
+## [0.32.0] - 2026-07-05
+
+Star6E IMX415: **strict fps ordering** of the full 11-mode lineup. No behaviour
+change per mode — only the resolution-table order and dispatch case indices were
+permuted so `sensor.mode` steps monotonically in frame rate.
+
+New index map (old → new): 0→0, 1→2, 2→4, 3→5, 4→6, 5→8, 6→9, 7→3, 8→1, 9→7,
+10→10. Resulting order (idx : res@fps): 0:4K@30, 1:4K@40, 2:2816×1584@60,
+3:3840×1152@60, 4:1920×1080@90, 5:2304×1296@100, 6:1920×1080@100, 7:1728×972@100,
+8:1472×816@120, 9:1920×1080@120, 10:1728×816@120.
+
+- The `imx415_mipi_linear[]` rows and the `pCus_SetVideoRes` cases were reordered
+  together; each case keeps its exact init table / vts_30fps / fps / line_period /
+  data_prec. Verified: `.ko` mode strings now enumerate in fps-ascending order.
+- The full-FOV binned corruption warning (idx4/6/9 in the new numbering) is
+  restated in the driver header and docs.
+- Doc tables (`STAR6E_IMX415_MODES.md`) re-sorted to match; narrative
+  sub-sections retain original-order idx labels (flagged inline) and identify
+  modes by resolution.
+
+## [0.31.0] - 2026-07-05
+
+Star6E IMX415: two **binned wide-crop** modes (idx9/idx10) that give the widest
+2×2-binned FOV which renders *clean* at 100/120fps, plus the diagnosis of why
+full-FOV 1920×1080 binned is corrupt on the I6E ISP.
+
+- **1728×972@100fps 2×2-binned wide crop** (`Sensor_bc1728_100fps_init_table_
+  4lane_linear`, idx9) — widest binned FOV (~80% of full-4K linear) that renders
+  clean at 100fps. HMAX=365, VMAX=2034, 891 link. Image-verified on the display.
+- **1728×816@120fps 2×2-binned wide crop** (`Sensor_bc1728_120fps_init_table_
+  4lane_linear`, idx10) — same 1728 width at 120fps. Height capped at 816 because
+  120fps forces HMAX=365/VMAX=1700 and a taller frame drops HMAX below the crop
+  floor. 17% wider than the idx5 1472×816 crop. Image-verified.
+- **Root-caused the black+colored-lines corruption**: the full-FOV 1920×1080
+  binned modes (idx2/4/6) report correct fps but render garbage on the I6E ISP —
+  the `WINMODE=0x04` crop path needs `HMAX ≥ ~365` for a wide binned line. A
+  1728-wide crop clears this; the 1920-wide full-FOV readout does not (its
+  reduced-HMAX≈308/328 falls below the floor → malformed readout). The binned
+  wide-crops keep HMAX=365 and stay clean. idx2/4/6 retained only for
+  stock-index compatibility; use idx9/idx10 for high-FOV binned video.
+- Both new modes clone the device-proven idx5 1472×816 crop (`WINMODE=0x04` +
+  explicit centered window) and widen it, changing only the window + VMAX/HMAX.
+
+## [0.30.0] - 2026-07-05
+
+Star6E IMX415: a **native 3840×2160@40fps** full-4K mode (idx8), appended
+alongside the lineup (indices 0–7 unchanged), plus the resolution of the
+ISP/CSI-clock investigation.
+
+- **3840×2160@40fps full 4K** (`Sensor_8m_40fps_init_table_4lane_linear`, idx8)
+  — native 4K at 40fps, +33% over the stock idx0 4K@30. Non-binned on the 1485
+  link, full-height window (VST=0/VWIDTH=4320), VMAX=2250, HMAX=825 (332 MPix/s).
+  Device-verified on `.13`: sensor=enqueue=delivered=40.8fps, 0 drops, 0
+  steady-state FIFO-FULL.
+- This is the **clean full-4K ceiling**. Bench probes established the two walls
+  just above it: 4K@42 (HMAX=779, 352 MPix/s) hits the ISP throughput wall
+  (FIFO-FULL, ~7% loss); 4K@45 (HMAX=733) breaches the sensor's analog HMAX
+  floor (733<floor≤779) with a clean silent halve. Neither is clock-fixable.
+- **ISP/CSI-clock lever — resolved as unavailable on i6e.** The Maruko/i6c 288MHz
+  CSI-MAC lever does not port: this SoC's vendor CSI driver rejects
+  `CUS_CSI_CLK_288M` (dmesg `[Drv_CSISetClk] Not supported CSI CLK 288000` →
+  sensor never powers on). 216M is the hard CSI ceiling; the driver pins it for
+  all modes with an explanatory comment. See
+  `documentation/STAR6E_IMX415_HEADROOM.md` §5.3-5.4.
+
+## [0.29.0] - 2026-07-05
+
+Star6E IMX415: an **ultrawide 3840×1152@60fps** mode (idx7) — full sensor
+*width* at 60fps, appended alongside the lineup (indices 0–6 unchanged).
+
+- **3840×1152@60fps ultrawide** (`Sensor_uw_3840x1152_60_init_table_4lane_linear`,
+  idx7) — 100% horizontal FOV, letterboxed to 1152 lines (3.33:1), non-binned
+  on the 1485 link. Built on idx1's 1485 base with the window widened to full
+  3840 and height cropped to 1152; HMAX=1022 (idx0's proven full-width line, so
+  no analog-floor risk), VMAX=1211 → 60fps, which clears the vertical wall
+  (1211 ≥ 1152 physical + vblank) and the ISP wall (265 MPix/s). Device-verified
+  59.98fps, 0 drops, 0 FIFO-FULL over a 15 s soak (`incrop 0,0,3840,1152`).
+  Height is HMAX-bounded to ~1160; a taller 3840×1296 (2.96:1) would need
+  HMAX≈917 (below idx0's line, ISP at ~299 MPix/s) — a riskier stretch, left
+  out. See `STAR6E_IMX415_HEADROOM.md`.
+
+## [0.28.0] - 2026-07-05
+
+Star6E IMX415: a **full-FOV 2×2-binned 1920×1080@120fps** mode (idx6), added
+alongside the existing lineup (indices 0–5 unchanged).
+
+- **1920×1080@120fps full-FOV binned** (`Sensor_2m_120fps_init_table_4lane_linear`,
+  appended at idx6) — the full sensor FOV at 120fps (soft), a full-FOV
+  alternative to the stock 1472×816@120 crop (idx5, kept). Same reduced-HMAX
+  approach as idx4, one notch faster: HMAX=275 (line 3712 ns) with VMAX=2250,
+  which sits just above the full-width binned analog HMAX floor (~250–275;
+  HMAX=229 halves at 144fps). This is the practical full-FOV binned ceiling —
+  the ISP (249 MPix/s) would allow more, but the sensor's line-readout floor
+  caps it near 120–130fps. Device-verified 120.15fps, 0 drops, 0 FIFO-FULL over
+  a 20 s soak. See `STAR6E_IMX415_HEADROOM.md` for the full model.
+
+## [0.27.0] - 2026-07-05
+
+Star6E IMX415: a **full-FOV 2×2-binned 1920×1080@100fps** mode, and a **widened
+2816×1584@60fps** replacing the old 2560×1440. Both device-verified on .13.
+
+- **1920×1080@100fps full-FOV binned** (`drivers/sensor_imx415_star6e.c`,
+  `Sensor_2m_100fps_init_table_4lane_linear`, inserted fps-ordered at idx4) —
+  the *full sensor FOV* at 100fps (soft/binned), complementing the sharp
+  non-binned 2304×1296@100 (idx3) at the same fps. Device-verified 100.00 fps,
+  0 drops over a 30 s soak, warm-switch clean both directions.
+  The obstacle was the **binned vertical-timing wall**, not bandwidth or the ISP
+  MPix ceiling: a binned readout's VMAX must cover the *physical* lines read
+  (2×output_h = 2160) plus vblank, so at the stock binned HMAX=365 a 100fps
+  frame caps VMAX at ~2023 < 2160 and the VIF silently delivers *exactly half*
+  (~50 fps, DropCnt=0). Fix = the same reduced-HMAX trick as the non-binned
+  modes: HMAX 365→**328** lets VMAX be 2250 (=2160+90 vblank, matching the stock
+  90fps mode) at 100fps. Bit depth (10 vs 12bpp) and link (891 vs 1485) were
+  both ruled out as red herrings before the timing wall was identified.
+- **2816×1584@60fps** (idx1, widened from 2560×1440) — the stock 60fps table
+  already reads a 2952×1656 window but venc center-cropped it to 2560×1440,
+  discarding FOV. Widening the output to 2816×1584 (mode-table only, no sensor
+  register change) lifts FOV area from ~44% to ~58% of the sensor. Held at
+  ~2816-wide (267 MPix/s) rather than the full 2952 (293 MPix/s, startup
+  FIFO-FULL) to leave ISP headroom for the OSD overlay. Verified 59.52 fps,
+  0 drops, 0 steady-state FIFO-FULL.
+
+## [0.26.0] - 2026-07-05
+
+Star6E IMX415: a new **non-binned 2304×1296@100fps** window-crop mode, plus
+warm-switch register safety. Follows the 0.25.0 in-tree Star6E drivers.
+
+- **2304×1296@100fps non-binned** (`drivers/sensor_imx415_star6e.c`, inserted
+  fps-ordered at idx3) — the widest 16:9 the I6E ISP sustains non-binned at
+  100fps: 2.99 MPix / ~299 MPix/s, device-verified 99.0 fps + 0 drops over a
+  30 s soak. Challenges the "must bin for FOV at high fps" assumption: native
+  sharp resolution (35% FOV area) where the stock 90/120 modes are 2×2 binned.
+  Enabled by (1) the 1485 Mbps link (`SYS_MODE=0x08`, reused from idx1's base,
+  no venc changes — Star6E's REALTIME bind carries it), (2) a **reduced HMAX**
+  (548) to beat the vertical-timing wall a fixed HMAX=652 would cap at ~89fps,
+  and (3) the I6E ISP sustaining ~300 MPix/s. The wall was device-mapped:
+  2304×1296 clean, 2432×1368 (333 MPix/s) drops, 2560×1440 halves.
+- **Warm-switch register safety** — the SDK keeps sensor registers across a
+  mode switch, and the stock non-binned tables (idx0/idx1) never wrote the
+  binning registers, so a warm switch binned→non-binned (e.g. 90→30) left 2×2
+  binning latched and corrupted the readout. The non-binned idx0/idx1 tables
+  and the new crop now write `0x3020/21/22=0x00` + all-pixel DIG_CLP
+  (`0x30D9=0x06`/`0x30DA=0x02`) explicitly in standby. Verified both
+  directions, 0 drops (120→30, 90→100, 120→60, 90→30).
+
+## [0.25.0] - 2026-07-05
+
+In-tree Star6E (Infinity6E) sensor drivers for IMX335 and IMX415 — the Star6E
+counterpart to the Maruko custom drivers. Previously Star6E had only prebuilt
+stock `.ko`; now the mode lineups are owned in-repo and buildable via
+`make drivers-star6e KSRC_STAR6E=<i6e-4.9.84-kernel>`. Both seeded from the
+OpenIPC infinity6e blueprints, HDR/DOL removed (the two HDR handles are `NULL`
+and the SEF handle made `static`, so the compiler dead-code-eliminates the
+whole HDR subtree). Device-verified on SSC338Q @192.168.1.13, 0 sustained
+drops on every mode.
+
+- **IMX335 — fps-ordered lineup with two new higher-FOV window-crop tiers**
+  (`drivers/sensor_imx335_star6e.c`, `documentation/STAR6E_IMX335_MODES.md`):
+  2560×1920@30 / @60, 2400×1350@90, **2176×1224@100** (new crop, VIF 99.8),
+  1920×1080@120, **1600×900@144** (new crop, VIF 143.3). The two crops push to
+  the highest FOV the I6E ISP sustains — measured ceiling ≈2.66 MPix@100 /
+  ≈1.44 MPix@144; over budget the ISP silently halves (0 fifo/skip logged), so
+  the VIF `/proc` FPS column is the truth signal. The Maruko I6C ceiling model
+  does not apply to I6E. No 50fps mode. `imx335_init_window_crop()` reuses the
+  proven 120fps analog/PLL base and overrides only the readout window + HMAX,
+  latching the geometry in standby (PR#156 discipline).
+- **IMX415 — stock fps-ordered lineup** (`drivers/sensor_imx415_star6e.c`,
+  `documentation/STAR6E_IMX415_MODES.md`): 3840×2160@30, 2560×1440@60,
+  1920×1080@90, 1472×816@120. Stock tables verbatim; no crop tiers.
+- **Build wiring** (`drivers/Makefile`, `Makefile`): `SOC=star6e` obj-m builds
+  both sensor objects; `make drivers-star6e` stages
+  `sensors/star6e/sensor_imx*_star6e.ko`.
+
+Note: venc persists `sensor.mode` in `/etc/waybeam.json`. These drivers expose
+fewer modes than the stock 11-mode IMX415 driver, so a persisted mode index
+beyond the new range makes venc fail mode-select and exit on boot — patch the
+config to a valid index when deploying over a box that ran the stock driver.
+
 ## [0.24.1] - 2026-07-04
 
 Pre-upstream-squash cleanup: adversarial review of the 0.22.0–0.24.0 range

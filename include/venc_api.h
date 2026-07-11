@@ -81,6 +81,15 @@ typedef struct {
 	 * HW rebind.  Returns 0 on success, -1 if framing!=stab-fill.  NULL when
 	 * the backend has no stab path (e.g. Maruko). */
 	int (*apply_pause_stab)(bool paused);
+	/* Live attitude snapshot for GET /api/v1/attitude: malloc'd JSON
+	 * (caller frees), {"valid":false} until the estimator runs. NULL
+	 * when the backend has no attitude path (e.g. Maruko). */
+	char *(*query_attitude)(void);
+	/* Level-pose boresight calibration: blocks ≤3 s averaging accel,
+	 * solves attitude.trimRollDeg/trimPitchDeg. 0 on success, -1 on
+	 * timeout (attitude/IMU not running) or implausible gravity.
+	 * NULL when unsupported. */
+	int (*attitude_calibrate_level)(float *roll_deg, float *pitch_deg);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.
