@@ -2,6 +2,7 @@
 #define MARUKO_OUTPUT_H
 
 #include "venc_config.h"
+#include "venc_frame_ring.h"
 #include "venc_ring.h"
 
 #include <stdint.h>
@@ -55,6 +56,7 @@ typedef struct {
 	socklen_t dst_len;
 	VencOutputUriType transport;
 	venc_ring_t *ring;
+	venc_frame_ring_t *frame_ring;
 	int requested_connected_udp; /* user preference, persisted for apply_server */
 	int connected_udp;           /* actual kernel state — set by configure() */
 	uint32_t send_errors;
@@ -79,6 +81,9 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 
 /** Initialize SHM output: create shared memory ring buffer. */
 int maruko_output_init_shm(MarukoOutput *output, const char *shm_name);
+
+/** Initialize frame-level SHM output: create frame ring buffer. */
+int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name);
 
 /** Observe transport pressure for telemetry.  Mirrors
  *  star6e_output_observe_pressure: hysteresis flag + in-pressure counter,

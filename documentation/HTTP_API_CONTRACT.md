@@ -496,15 +496,19 @@ curl "http://<device-ip>/api/v1/set?outgoing.server=udp://<receiver-ip>:5600"
 - Accepted URI schemes:
   - `udp://HOST:PORT` — standard UDP datagram output
   - `unix://NAME` — Linux abstract Unix datagram socket `@NAME`
-  - `shm://NAME` — shared-memory RTP ring buffer
+  - `shm://NAME` — shared-memory RTP-packet ring buffer
+  - `frame-shm://NAME` — shared-memory **whole-frame** ring buffer (Annex-B
+    frames, no RTP); for a same-host FEC consumer. Wire format:
+    `include/venc_frame_ring.h`.
 - No pipeline restart required.
 - An IDR keyframe is issued after the change for stream continuity.
 - If `connectedUdp` is enabled, the UDP socket is re-connected to the new destination.
-- Live redirects support `udp://` and `unix://`. Live switch to `shm://` is not supported.
+- Live redirects support `udp://` and `unix://`. Live switch to/from `shm://` or `frame-shm://` is not supported (restart required).
 - `connectedUdp` applies only to `udp://`.
-- `shm://` remains RTP-only. It cannot share audio; use a nonzero `audioPort` for separate UDP audio.
+- `shm://` and `frame-shm://` are video-only. They cannot share audio; use a nonzero `audioPort` for separate UDP audio.
 - On Star6E, `audioPort=0` piggybacks on the active video destination for both `udp://` and `unix://`.
-- On Star6E, a nonzero `audioPort` keeps audio on a dedicated UDP port. With `unix://` or `shm://` video output, that dedicated audio port is sent to `127.0.0.1:<audioPort>`.
+- On Star6E, a nonzero `audioPort` keeps audio on a dedicated UDP port. With `unix://`, `shm://`, or `frame-shm://` video output, that dedicated audio port is sent to `127.0.0.1:<audioPort>`.
+- `frame-shm://` publishes whole Annex-B frames into a 16-slot × 512 KB SPSC ring; each slot is prefixed with an 8-byte `VencFrameMeta` (`pts`, `codec`, `flags`; `flags` bit 0 = IDR). On a full ring the encoder drops the frame and keeps running (never blocks). `outgoing.maxPayloadSize` does not apply (no packetization). `GET /api/v1/transport/status` reports `"transport":"frame-shm"` with `framesSent`/`fillPct`/`transportDrops`/`oversizeDrops`.
 
 ### Stream Mode and Send Feedback
 

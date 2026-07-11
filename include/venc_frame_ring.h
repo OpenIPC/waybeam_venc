@@ -1,0 +1,365 @@
+#ifndef VENC_FRAME_RING_H
+#define VENC_FRAME_RING_H
+
+/*
+ * SPSC lock-free ring buffer for whole encoded video frames over POSIX
+ * shared memory.  Designed for frame-aligned transfer between venc
+ * (producer) and waybeam-link (consumer) so the link layer can apply
+ * per-frame FEC without re-fragmenting pre-built RTP packets.
+ *
+ * Each slot carries an 8-byte metadata header (VencFrameMeta) followed
+ * by the Annex B frame data (NALs with start codes preserved).
+ *
+ * Differs from venc_ring (RTP-packet ring):
+ *   - uint32_t slot lengths (frames can exceed 64 KB)
+ *   - larger default slot_data_size (512 KB vs ~4 KB)
+ *   - staged write API (begin/append/commit) to gather scattered NAL
+ *     data from the encoder without a separate staging buffer
+ *   - separate magic/version to prevent cross-type attach
+ *
+ * Memory ordering and futex wake follow the same pattern as venc_ring.
+ */
+
+#include <stdint.h>
+#include <string.h>
+
+#ifdef __linux__
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
+#endif
+
+#define VENC_FRAME_RING_MAGIC   0x5646524D  /* "VFRM" */
+#define VENC_FRAME_RING_VERSION 1
+
+/* Metadata prepended to each frame in the slot's data[] */
+#define VENC_FRAME_META_SIZE    8
+#define VENC_FRAME_CODEC_H265   0x01
+#define VENC_FRAME_FLAG_IDR     0x01
+
+typedef struct {
+	uint32_t pts;        /* capture timestamp (µs, truncated to 32 bits) */
+	uint8_t  codec;      /* VENC_FRAME_CODEC_H265 */
+	uint8_t  flags;      /* VENC_FRAME_FLAG_IDR */
+	uint16_t reserved;   /* must be 0 */
+} VencFrameMeta;
+
+/* ── Ring header (3 cache lines, 192 bytes) ──────────────────────────── */
+
+typedef struct __attribute__((aligned(64))) {
+	/* Line 0: Immutable config */
+	uint32_t magic;
+	uint32_t version;
+	uint32_t slot_count;      /* must be power of 2 */
+	uint32_t slot_data_size;  /* max payload per slot (meta + frame data) */
+	uint32_t total_size;      /* total mmap size */
+	uint32_t epoch;
+	uint32_t init_complete;
+	uint8_t  _pad0[36];
+
+	/* Line 1: Producer-owned */
+	uint64_t write_idx        __attribute__((aligned(64)));
+	uint32_t futex_seq;
+	uint8_t  _pad1[52];
+
+	/* Line 2: Consumer-owned */
+	uint64_t read_idx          __attribute__((aligned(64)));
+	uint32_t consumer_waiting;
+	uint8_t  _pad2[52];
+} venc_frame_ring_hdr_t;
+
+#ifdef __cplusplus
+static_assert(sizeof(venc_frame_ring_hdr_t) == 192,
+              "venc_frame_ring_hdr_t must be exactly 192 bytes");
+static_assert(sizeof(VencFrameMeta) == VENC_FRAME_META_SIZE,
+              "VencFrameMeta must be exactly 8 bytes");
+#else
+_Static_assert(sizeof(venc_frame_ring_hdr_t) == 192,
+               "venc_frame_ring_hdr_t must be exactly 192 bytes");
+_Static_assert(sizeof(VencFrameMeta) == VENC_FRAME_META_SIZE,
+               "VencFrameMeta must be exactly 8 bytes");
+#endif
+
+/* Per-slot layout: 4-byte length prefix + data */
+typedef struct {
+	uint32_t length;
+	uint8_t  data[];  /* [slot_data_size] */
+} venc_frame_ring_slot_t;
+
+typedef struct {
+	uint64_t writes;
+	uint64_t reads;
+	uint64_t full_drops;
+	uint64_t oversize_drops;
+	uint64_t bad_slot_drops;
+} venc_frame_ring_stats_t;
+
+typedef struct {
+	venc_frame_ring_hdr_t *hdr;
+	uint8_t               *slots_base;
+	uint32_t               slot_stride;
+	uint32_t               slot_data_size;
+	uint32_t               map_size;
+	int                    is_owner;
+	char                   name[256];
+	venc_frame_ring_stats_t stats;
+	/* Staged write state (producer only) */
+	uint32_t               write_offset;
+	int                    write_active;
+} venc_frame_ring_t;
+
+/* ── Create / attach / destroy ───────────────────────────────────────── */
+
+venc_frame_ring_t *venc_frame_ring_create(const char *shm_name,
+	uint32_t slot_count, uint32_t slot_data_size);
+
+venc_frame_ring_t *venc_frame_ring_attach(const char *shm_name);
+
+void venc_frame_ring_destroy(venc_frame_ring_t *r);
+
+/* ── Producer-side observability ─────────────────────────────────────── */
+
+typedef struct {
+	uint32_t slot_count;
+	uint32_t used_slots;
+	uint8_t  fill_pct;
+	uint64_t writes;
+	uint64_t reads;
+	uint64_t full_drops;
+	uint64_t oversize_drops;
+	uint64_t bad_slot_drops;
+} venc_frame_ring_fill_t;
+
+static inline int venc_frame_ring_get_fill(const venc_frame_ring_t *r,
+	venc_frame_ring_fill_t *out)
+{
+	if (!r || !r->hdr || !out)
+		return -1;
+	uint64_t w = __atomic_load_n(&r->hdr->write_idx, __ATOMIC_ACQUIRE);
+	uint64_t rd = __atomic_load_n(&r->hdr->read_idx, __ATOMIC_RELAXED);
+	uint32_t used = (w >= rd) ? (uint32_t)(w - rd) : 0;
+	uint32_t slot_count = r->hdr->slot_count;
+	if (used > slot_count)
+		used = slot_count;
+	out->slot_count = slot_count;
+	out->used_slots = used;
+	out->fill_pct = slot_count
+		? (uint8_t)((uint64_t)used * 100u / slot_count)
+		: 0u;
+	out->writes = r->stats.writes;
+	out->reads = r->stats.reads;
+	out->full_drops = r->stats.full_drops;
+	out->oversize_drops = r->stats.oversize_drops;
+	out->bad_slot_drops = r->stats.bad_slot_drops;
+	return 0;
+}
+
+/* ── Inline helpers ──────────────────────────────────────────────────── */
+
+static inline venc_frame_ring_slot_t *venc_frame_ring_slot_at(
+	const venc_frame_ring_t *r, uint32_t idx)
+{
+	return (venc_frame_ring_slot_t *)(r->slots_base +
+		(uint64_t)idx * r->slot_stride);
+}
+
+/* ── Staged write API (producer) ─────────────────────────────────────
+ *
+ * Usage:
+ *   venc_frame_ring_begin_write(r, &meta)   // reserves a slot
+ *   venc_frame_ring_append(r, nal1, len1)   // append NAL data
+ *   venc_frame_ring_append(r, nal2, len2)   // append more
+ *   venc_frame_ring_commit_write(r)         // publish to consumer
+ *
+ * If any append fails (oversize), call abort_write() instead of commit.
+ */
+
+static inline int venc_frame_ring_begin_write(venc_frame_ring_t *r,
+	const VencFrameMeta *meta)
+{
+	uint64_t w, rd;
+	uint32_t idx;
+	venc_frame_ring_slot_t *slot;
+
+	if (!r || !r->hdr || !meta || r->write_active)
+		return -1;
+
+	w = __atomic_load_n(&r->hdr->write_idx, __ATOMIC_RELAXED);
+	rd = __atomic_load_n(&r->hdr->read_idx, __ATOMIC_ACQUIRE);
+
+	if (w - rd >= r->hdr->slot_count) {
+		r->stats.full_drops++;
+		return -1;
+	}
+
+	if (VENC_FRAME_META_SIZE > r->slot_data_size) {
+		r->stats.oversize_drops++;
+		return -1;
+	}
+
+	idx = (uint32_t)(w & (r->hdr->slot_count - 1));
+	slot = venc_frame_ring_slot_at(r, idx);
+	memcpy(slot->data, meta, VENC_FRAME_META_SIZE);
+
+	r->write_offset = VENC_FRAME_META_SIZE;
+	r->write_active = 1;
+	return 0;
+}
+
+static inline int venc_frame_ring_append(venc_frame_ring_t *r,
+	const void *data, uint32_t len)
+{
+	uint64_t w;
+	uint32_t idx;
+	venc_frame_ring_slot_t *slot;
+
+	if (!r || !r->write_active || !data || len == 0)
+		return -1;
+
+	if ((uint64_t)r->write_offset + len > r->slot_data_size) {
+		r->stats.oversize_drops++;
+		return -1;
+	}
+
+	w = __atomic_load_n(&r->hdr->write_idx, __ATOMIC_RELAXED);
+	idx = (uint32_t)(w & (r->hdr->slot_count - 1));
+	slot = venc_frame_ring_slot_at(r, idx);
+	memcpy(slot->data + r->write_offset, data, len);
+	r->write_offset += len;
+	return 0;
+}
+
+static inline void venc_frame_ring_commit_write(venc_frame_ring_t *r)
+{
+	uint64_t w;
+	uint32_t idx;
+	venc_frame_ring_slot_t *slot;
+
+	if (!r || !r->write_active)
+		return;
+
+	w = __atomic_load_n(&r->hdr->write_idx, __ATOMIC_RELAXED);
+	idx = (uint32_t)(w & (r->hdr->slot_count - 1));
+	slot = venc_frame_ring_slot_at(r, idx);
+	slot->length = r->write_offset;
+
+	__atomic_store_n(&r->hdr->write_idx, w + 1, __ATOMIC_RELEASE);
+	r->stats.writes++;
+	r->write_active = 0;
+	r->write_offset = 0;
+
+#ifdef __linux__
+	__atomic_fetch_add(&r->hdr->futex_seq, 1, __ATOMIC_RELEASE);
+	if (__atomic_load_n(&r->hdr->consumer_waiting, __ATOMIC_RELAXED))
+		syscall(SYS_futex, &r->hdr->futex_seq,
+		        FUTEX_WAKE, 1, NULL, NULL, 0);
+#endif
+}
+
+static inline void venc_frame_ring_abort_write(venc_frame_ring_t *r)
+{
+	if (!r)
+		return;
+	r->write_active = 0;
+	r->write_offset = 0;
+}
+
+/* ── Bulk write (producer convenience) ───────────────────────────────── */
+
+static inline int venc_frame_ring_write(venc_frame_ring_t *r,
+	const VencFrameMeta *meta, const void *data, uint32_t len)
+{
+	if (venc_frame_ring_begin_write(r, meta) != 0)
+		return -1;
+	if (len > 0 && venc_frame_ring_append(r, data, len) != 0) {
+		venc_frame_ring_abort_write(r);
+		return -1;
+	}
+	venc_frame_ring_commit_write(r);
+	return 0;
+}
+
+/* ── Read (consumer) ─────────────────────────────────────────────────── */
+
+static inline int venc_frame_ring_read(venc_frame_ring_t *r,
+	void *buf, uint32_t buf_size, uint32_t *out_len)
+{
+	uint64_t rd, w;
+	uint32_t idx, len;
+	venc_frame_ring_slot_t *slot;
+
+	if (!r || !r->hdr)
+		return -1;
+
+	rd = __atomic_load_n(&r->hdr->read_idx, __ATOMIC_RELAXED);
+	w = __atomic_load_n(&r->hdr->write_idx, __ATOMIC_ACQUIRE);
+
+	if (rd >= w)
+		return -1;
+
+	idx = (uint32_t)(rd & (r->hdr->slot_count - 1));
+	slot = venc_frame_ring_slot_at(r, idx);
+	len = slot->length;
+
+	if (len > r->slot_data_size) {
+		r->stats.bad_slot_drops++;
+		__atomic_store_n(&r->hdr->read_idx, rd + 1, __ATOMIC_RELEASE);
+		return -1;
+	}
+
+	if (len > buf_size) {
+		r->stats.oversize_drops++;
+		__atomic_store_n(&r->hdr->read_idx, rd + 1, __ATOMIC_RELEASE);
+		return -1;
+	}
+
+	memcpy(buf, slot->data, len);
+	if (out_len) *out_len = len;
+
+	__atomic_store_n(&r->hdr->read_idx, rd + 1, __ATOMIC_RELEASE);
+	r->stats.reads++;
+	return 0;
+}
+
+static inline int venc_frame_ring_read_wait(venc_frame_ring_t *r,
+	void *buf, uint32_t buf_size, uint32_t *out_len, int timeout_ms)
+{
+	if (!r || !r->hdr)
+		return -1;
+
+	for (;;) {
+		if (venc_frame_ring_read(r, buf, buf_size, out_len) == 0)
+			return 0;
+
+#ifdef __linux__
+		uint32_t seq = __atomic_load_n(&r->hdr->futex_seq,
+			__ATOMIC_ACQUIRE);
+		__atomic_store_n(&r->hdr->consumer_waiting, 1,
+			__ATOMIC_RELEASE);
+
+		struct timespec ts;
+		struct timespec *tsp = NULL;
+		if (timeout_ms > 0) {
+			ts.tv_sec = timeout_ms / 1000;
+			ts.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
+			tsp = &ts;
+		}
+
+		syscall(SYS_futex, &r->hdr->futex_seq,
+		        FUTEX_WAIT, seq, tsp, NULL, 0);
+
+		__atomic_store_n(&r->hdr->consumer_waiting, 0,
+			__ATOMIC_RELEASE);
+#else
+		usleep(1000);
+#endif
+		if (venc_frame_ring_read(r, buf, buf_size, out_len) == 0)
+			return 0;
+
+		if (timeout_ms > 0)
+			return -1;
+	}
+}
+
+#endif /* VENC_FRAME_RING_H */
