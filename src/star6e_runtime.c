@@ -544,6 +544,10 @@ static void start_custom_ae(const Star6ePipelineState *ps,
 		ae_cfg.ae_fps = vcfg->isp.ae_fps;
 	if (vcfg->isp.gain_max > 0)
 		ae_cfg.gain_max = vcfg->isp.gain_max;
+	if (vcfg->isp.shutter_rule_180 && ps->sensor.fps > 0) {
+		ae_cfg.shutter_max_us = 1000000 / (ps->sensor.fps * 2);
+		ae_cfg.shutter_pin = 1;
+	}
 	ae_cfg.verbose = vcfg->system.verbose;
 	star6e_cus3a_start(&ae_cfg);
 }

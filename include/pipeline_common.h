@@ -26,9 +26,12 @@ typedef struct {
 	uint16_t x, y, w, h;
 } PipelinePrecropRect;
 
-/** Cap AE max shutter time to frame period for target FPS.
+/** Cap AE max shutter time for target FPS.
+ * shutter_rule_180 = true → cap to 1/(2*fps) (180° shutter rule).
+ * shutter_rule_180 = false → cap to 1/fps (frame-period cap).
  * fps = 0 is a no-op. */
-int pipeline_common_cap_exposure_for_fps(uint32_t fps);
+int pipeline_common_cap_exposure_for_fps(uint32_t fps,
+	bool shutter_rule_180);
 
 /** Compute crop rectangle for the VIF/SCL stage.
  * keep_aspect = true  → center-crop the sensor to the aspect ratio of

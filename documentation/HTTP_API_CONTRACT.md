@@ -16,7 +16,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.12.0`
+- `contract_version`: `0.12.1`
 - `status`: `active`
 
 ## Governance Rules
@@ -246,7 +246,8 @@ Error `404` — unknown field:
 Majestic-style camelCase aliases are also accepted for selected fields,
 including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `fpv.noiseLevel`, `isp.sensorBin`, `isp.awbMode`, `isp.awbCt`,
-`isp.keepAspect`, `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
+`isp.keepAspect`, `isp.shutterRule180`,
+`video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
 `video0.sceneThreshold`, `video0.sceneHoldoff`,
 `video0.intraRefreshMode`, `video0.intraRefreshLines`,
 `video0.intraRefreshQp`, `video0.zoomX`, `video0.zoomY`, `video0.framing`,
@@ -1357,7 +1358,7 @@ Behavior:
 ### Backend Support Matrix
 
 Endpoints that behave the same on both backends are omitted.  Only feature
-divergence is listed.  As of `contract_version: 0.12.0`:
+divergence is listed.  As of `contract_version: 0.12.1`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1378,6 +1379,14 @@ divergence is listed.  As of `contract_version: 0.12.0`:
 | `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
 
 ## Change Log (Contract)
+- `0.12.1` (additive — new config field):
+  - Added `isp.shutter_rule_180` (boolean, default `false`) to config
+    schema.  When `true`, pins exposure to exactly 1/(2×fps) — sets
+    `minShutterUs == maxShutterUs` in the ISP exposure limit so the AE
+    shutter is locked while gain still auto-adjusts.  The supervisory
+    cus3a thread continuously enforces the pin.  `MUT_RESTART`.  Both
+    backends.
+  - Added `isp.shutterRule180` camelCase alias (`isp.shutter_rule_180`).
 - `0.12.0` (additive — new endpoints):
   - `GET /api/v1/attitude` — live fused attitude snapshot (Star6E only;
     `{"valid":false}` until `attitude.enabled` + `imu.enabled` are on).
