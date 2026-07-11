@@ -955,8 +955,19 @@ int venc_config_parse_output_uri(const char *uri, VencOutputUri *out)
 		return 0;
 	}
 
+	if (strncmp(p, "frame-shm://", 12) == 0) {
+		out->type = VENC_OUTPUT_URI_FRAME_SHM;
+		p += 12;
+		if (!p[0]) {
+			fprintf(stderr, "[venc_config] ERROR: frame-shm:// URI missing name\n");
+			return -1;
+		}
+		safe_strcpy(out->endpoint, sizeof(out->endpoint), p);
+		return 0;
+	}
+
 	fprintf(stderr, "[venc_config] ERROR: unsupported URI scheme in '%s' "
-		"(expected udp://, unix://, or shm://)\n", uri);
+		"(expected udp://, unix://, shm://, or frame-shm://)\n", uri);
 	return -1;
 }
 

@@ -303,6 +303,98 @@ void maruko_video_init_rtp_state(MarukoRtpState *rtp,
 	rtp_session_init(rtp, rtp_session_payload_type(codec), sensor_fps);
 }
 
+static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
+	venc_frame_ring_t *frame_ring)
+{
+	VencFrameMeta meta;
+	size_t total_bytes = 0;
+	unsigned int i;
+	int is_idr = 0;
+
+	if (!stream || !frame_ring)
+		return 0;
+
+	/* IDR detection from packType.h265Nalu (types 19, 20) */
+	for (i = 0; i < stream->count && !is_idr; ++i) {
+		const i6c_venc_pack *pack = &stream->packet[i];
+		if (pack->packNum > 0) {
+			const unsigned int info_cap = (unsigned int)(
+				sizeof(pack->packetInfo) /
+				sizeof(pack->packetInfo[0]));
+			unsigned int nal_count = (unsigned int)pack->packNum;
+			unsigned int k;
+			if (nal_count > info_cap)
+				nal_count = info_cap;
+			for (k = 0; k < nal_count; ++k) {
+				uint8_t nt = (uint8_t)pack->packetInfo[k]
+					.packType.h265Nalu;
+				if (nt == 19 || nt == 20) {
+					is_idr = 1;
+					break;
+				}
+			}
+		}
+	}
+
+	memset(&meta, 0, sizeof(meta));
+	meta.pts = (stream->count > 0 && stream->packet)
+		? (uint32_t)stream->packet[0].timestamp : 0;
+	meta.codec = VENC_FRAME_CODEC_H265;
+	meta.flags = is_idr ? VENC_FRAME_FLAG_IDR : 0;
+
+	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0)
+		return 0;
+
+	for (i = 0; i < stream->count; ++i) {
+		const i6c_venc_pack *pack = &stream->packet[i];
+
+		if (!pack->data)
+			continue;
+
+		if (pack->packNum > 0) {
+			const unsigned int info_cap = (unsigned int)(
+				sizeof(pack->packetInfo) /
+				sizeof(pack->packetInfo[0]));
+			unsigned int nal_count = (unsigned int)pack->packNum;
+			unsigned int k;
+
+			if (nal_count > info_cap)
+				nal_count = info_cap;
+
+			for (k = 0; k < nal_count; ++k) {
+				unsigned int length = pack->packetInfo[k].length;
+				unsigned int offset = pack->packetInfo[k].offset;
+
+				if (length == 0 || offset >= pack->length ||
+				    length > (pack->length - offset))
+					continue;
+
+				if (venc_frame_ring_append(frame_ring,
+				    pack->data + offset, length) != 0) {
+					venc_frame_ring_abort_write(frame_ring);
+					return 0;
+				}
+				total_bytes += length;
+			}
+			continue;
+		}
+
+		if (pack->length > pack->offset) {
+			unsigned int length = pack->length - pack->offset;
+
+			if (venc_frame_ring_append(frame_ring,
+			    pack->data + pack->offset, length) != 0) {
+				venc_frame_ring_abort_write(frame_ring);
+				return 0;
+			}
+			total_bytes += length;
+		}
+	}
+
+	venc_frame_ring_commit_write(frame_ring);
+	return total_bytes;
+}
+
 size_t maruko_video_send_frame(const i6c_venc_strm *stream,
 	MarukoOutput *output, MarukoRtpState *rtp,
 	H26xParamSets *params, MarukoBackendConfig *cfg, HevcRtpStats *stats)
@@ -311,6 +403,10 @@ size_t maruko_video_send_frame(const i6c_venc_strm *stream,
 
 	if (!stream || !output || !cfg)
 		return 0;
+
+	if (output->frame_ring)
+		return maruko_send_frame_ring(stream, output->frame_ring);
+
 	if (output->socket_handle < 0 && !output->ring)
 		return 0;
 

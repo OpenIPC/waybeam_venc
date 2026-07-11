@@ -75,6 +75,36 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 	return 0;
 }
 
+int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name)
+{
+	if (!output || !shm_name || !shm_name[0])
+		return -1;
+
+	output->socket_handle = -1;
+	output->ring = NULL;
+	output->frame_ring = NULL;
+	output->dst_len = 0;
+	output->transport = VENC_OUTPUT_URI_FRAME_SHM;
+	memset(&output->dst, 0, sizeof(output->dst));
+	output->requested_connected_udp = 0;
+	output->connected_udp = 0;
+	output->send_errors = 0;
+	output->send_buf_capacity = 0;
+	memset(&output->batch, 0, sizeof(output->batch));
+	output->batch.socket_handle = -1;
+
+	output->frame_ring = venc_frame_ring_create(shm_name, 16, 512 * 1024);
+	if (!output->frame_ring) {
+		fprintf(stderr, "ERROR: [maruko] venc_frame_ring_create(%s) failed\n",
+			shm_name);
+		return -1;
+	}
+
+	printf("> [maruko] Frame-SHM output: %s (512 KB slots)\n", shm_name);
+	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
+	return 0;
+}
+
 void maruko_output_observe_pressure(MarukoOutput *output)
 {
 	uint8_t fill_pct = 0;
@@ -89,6 +119,15 @@ void maruko_output_observe_pressure(MarukoOutput *output)
 	if (output->ring) {
 		venc_ring_fill_t fill;
 		if (venc_ring_get_fill(output->ring, &fill) == 0) {
+			fill_pct = fill.fill_pct;
+			full_drops = (uint32_t)fill.full_drops;
+			writes = (uint32_t)fill.writes;
+			oversize_drops = (uint32_t)fill.oversize_drops;
+			have_fill = 1;
+		}
+	} else if (output->frame_ring) {
+		venc_frame_ring_fill_t fill;
+		if (venc_frame_ring_get_fill(output->frame_ring, &fill) == 0) {
 			fill_pct = fill.fill_pct;
 			full_drops = (uint32_t)fill.full_drops;
 			writes = (uint32_t)fill.writes;
@@ -130,11 +169,18 @@ int maruko_output_apply_server(MarukoOutput *output, const char *uri)
 		fprintf(stderr, "ERROR: [maruko] cannot change server in SHM mode\n");
 		return -1;
 	}
+	if (output->frame_ring) {
+		fprintf(stderr, "ERROR: [maruko] cannot change server in "
+			"frame-SHM mode\n");
+		return -1;
+	}
 
 	if (venc_config_parse_output_uri(uri, &parsed) != 0)
 		return -1;
-	if (parsed.type == VENC_OUTPUT_URI_SHM) {
-		fprintf(stderr, "ERROR: [maruko] cannot change server to shm:// live\n");
+	if (parsed.type == VENC_OUTPUT_URI_SHM ||
+	    parsed.type == VENC_OUTPUT_URI_FRAME_SHM) {
+		fprintf(stderr, "ERROR: [maruko] cannot change server to "
+			"shm:// or frame-shm:// live\n");
 		return -1;
 	}
 
@@ -325,6 +371,10 @@ void maruko_output_teardown(MarukoOutput *output)
 	if (output->ring) {
 		venc_ring_destroy(output->ring);
 		output->ring = NULL;
+	}
+	if (output->frame_ring) {
+		venc_frame_ring_destroy(output->frame_ring);
+		output->frame_ring = NULL;
 	}
 	if (output->socket_handle >= 0) {
 		close(output->socket_handle);

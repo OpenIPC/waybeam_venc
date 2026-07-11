@@ -1087,11 +1087,14 @@ static const char *output_transport_name(const Star6eOutput *o)
 		return "none";
 	if (o->ring)
 		return "shm";
+	if (o->frame_ring)
+		return "frame-shm";
 	switch (o->transport) {
-	case VENC_OUTPUT_URI_UDP:  return "udp";
-	case VENC_OUTPUT_URI_UNIX: return "unix";
-	case VENC_OUTPUT_URI_SHM:  return "shm";
-	default:                   return "none";
+	case VENC_OUTPUT_URI_UDP:       return "udp";
+	case VENC_OUTPUT_URI_UNIX:      return "unix";
+	case VENC_OUTPUT_URI_SHM:       return "shm";
+	case VENC_OUTPUT_URI_FRAME_SHM: return "frame-shm";
+	default:                        return "none";
 	}
 }
 
@@ -1136,6 +1139,33 @@ static char *query_transport_status(void)
 			"\"transportDrops\":%u,"
 			"\"pressureDrops\":%u,"
 			"\"packetsSent\":%llu,"
+			"\"oversizeDrops\":%llu,"
+			"\"slotCount\":%u,"
+			"\"usedSlots\":%u}}",
+			transport,
+			(unsigned)fill.fill_pct,
+			in_pressure ? "true" : "false",
+			(unsigned)fill.full_drops,
+			(unsigned)pressure_drops,
+			(unsigned long long)fill.writes,
+			(unsigned long long)fill.oversize_drops,
+			(unsigned)fill.slot_count,
+			(unsigned)fill.used_slots);
+	} else if (ps->output.frame_ring) {
+		venc_frame_ring_fill_t fill;
+		int in_pressure;
+		if (venc_frame_ring_get_fill(ps->output.frame_ring, &fill) != 0)
+			return NULL;
+		in_pressure = fill.fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":true,"
+			"\"transport\":\"%s\","
+			"\"fillPct\":%u,"
+			"\"inPressure\":%s,"
+			"\"transportDrops\":%u,"
+			"\"pressureDrops\":%u,"
+			"\"framesSent\":%llu,"
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
 			"\"usedSlots\":%u}}",

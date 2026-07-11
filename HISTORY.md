@@ -1,5 +1,35 @@
 # History
 
+## [0.42.0] - 2026-07-11
+
+Full-frame SHM emissions — a new `frame-shm://` URI scheme that transfers
+whole encoded video frames over POSIX shared memory, bypassing RTP
+packetization entirely.
+
+- **`venc_frame_ring` — SPSC lock-free ring buffer for whole frames.**
+  New `include/venc_frame_ring.h` + `src/venc_frame_ring.c`. Same POSIX SHM /
+  futex architecture as `venc_ring` but tuned for video frames: `uint32_t`
+  slot lengths (frames can exceed 64 KB), 8-byte `VencFrameMeta` header
+  (pts, codec, flags), and a staged write API (`begin_write`/`append`/
+  `commit_write`/`abort_write`) that gathers scattered NAL data from the
+  encoder stream directly into the ring slot — no staging buffer needed.
+  Magic `0x5646524D` ("VFRM"), version 1.
+- **`frame-shm://` output URI** — new `VENC_OUTPUT_URI_FRAME_SHM` transport
+  on both Star6E and Maruko backends. Creates a 16-slot × 512 KB frame ring
+  (~8 MB SHM region). The frame sender iterates the encoder stream packs,
+  detects IDR frames from `h265Nalu` types 19/20, populates `VencFrameMeta`,
+  and writes raw Annex B data (start codes preserved) so the consumer
+  (waybeam-link) can apply its own framing/FEC at frame boundaries.
+- Frame-SHM bypasses RTP entirely — no `MarukoRtpState`, no
+  `star6e_hevc_rtp`, no sendmmsg batching. The output pressure observer
+  reports frame-ring fill alongside the existing RTP-packet ring.
+- `apply_server` rejects frame-SHM outputs (no live retarget for SHM).
+- Transport type string reports `"frame-shm"` in both backends' controls.
+- Unit tests: `tests/test_venc_frame_ring.c` — lifecycle, staged write,
+  abort, bulk write, fill/drain, wraparound, concurrent producer/consumer,
+  stride alignment, corrupt header/slot, overflow, init_complete, stats,
+  fill observation.
+
 ## [0.41.0] - 2026-07-11
 
 - **180° shutter rule toggle (`isp.shutterRule180`).** New boolean config
