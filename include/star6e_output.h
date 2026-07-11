@@ -9,6 +9,7 @@
 #include "rtp_packetizer.h"
 #include "star6e.h"
 #include "venc_config.h"
+#include "venc_frame_ring.h"
 #include "venc_ring.h"
 
 /* Per-frame sendmmsg() batch capacity. Typical frame at 25 Mbps/120 fps is
@@ -76,6 +77,7 @@ typedef struct {
 	int connected_udp;
 	int requested_connected_udp;
 	venc_ring_t *ring;
+	venc_frame_ring_t *frame_ring;
 	uint32_t send_errors;
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
 	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
@@ -146,6 +148,9 @@ int star6e_output_is_rtp(const Star6eOutput *output);
 
 /** Check if active output uses shared memory mode. */
 int star6e_output_is_shm(const Star6eOutput *output);
+
+/** Check if active output uses frame-level shared memory mode. */
+int star6e_output_is_frame_shm(const Star6eOutput *output);
 
 /** Observe transport pressure for telemetry. Updates the hysteresis
  *  flag (`output->in_pressure`), the in-pressure counter

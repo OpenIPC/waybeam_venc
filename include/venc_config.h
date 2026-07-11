@@ -313,6 +313,7 @@ typedef enum {
 	VENC_OUTPUT_URI_UDP = 0,
 	VENC_OUTPUT_URI_UNIX = 1,
 	VENC_OUTPUT_URI_SHM = 2,
+	VENC_OUTPUT_URI_FRAME_SHM = 3,
 } VencOutputUriType;
 
 typedef struct {

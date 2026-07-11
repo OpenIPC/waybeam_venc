@@ -2728,6 +2728,10 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		if (maruko_output_init_shm(&ctx->output,
 		    ctx->cfg.output_uri.endpoint) != 0)
 			return -1;
+	} else if (ctx->cfg.output_uri.type == VENC_OUTPUT_URI_FRAME_SHM) {
+		if (maruko_output_init_frame_shm(&ctx->output,
+		    ctx->cfg.output_uri.endpoint) != 0)
+			return -1;
 	} else {
 		if (maruko_output_init(&ctx->output, &ctx->cfg.output_uri,
 		    ctx->cfg.connected_udp) != 0)

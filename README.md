@@ -296,9 +296,9 @@ omitted fields keep their compiled-in defaults.
   `framing` knob expands to either digital zoom (both backends) or image
   stabilization (`stab` HW-crop / `stab-fill` floating-image, Star6E only;
   live `pauseStab`).
-- **`outgoing`** — destination URI (`udp://`, `unix://`, `shm://`),
-  stream mode (`rtp` / `compact`), payload sizing, optional dedicated
-  audio + sidecar UDP ports.
+- **`outgoing`** — destination URI (`udp://`, `unix://`, `shm://`,
+  `frame-shm://`), stream mode (`rtp` / `compact`), payload sizing,
+  optional dedicated audio + sidecar UDP ports.
 - **`fpv`** — center-priority ROI bands + 3DNR level.
 - **`audio`** — `enabled`, sample rate, channels, codec, software
   volume, live-mutable mute. Supports `pcm`, `g711a`, `g711u`, `opus`.
@@ -316,8 +316,9 @@ omitted fields keep their compiled-in defaults.
 ### Starting a stream
 
 Set `outgoing.enabled` to `true` and `outgoing.server` to
-`udp://<receiver_ip>:5600`, `unix://<abstract_name>`, or
-`shm://<ring_name>`.
+`udp://<receiver_ip>:5600`, `unix://<abstract_name>`,
+`shm://<ring_name>` (RTP-packet ring), or `frame-shm://<ring_name>`
+(whole-frame ring; see [Frame-SHM output](#frame-shm-output)).
 
 ## HTTP API
 
@@ -981,7 +982,7 @@ Notes:
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `outgoing.enabled` | bool | live | Enable/disable streaming output |
-| `outgoing.server` | string | live | Destination URI (`udp://ip:port`, `unix://name`, or `shm://name`) |
+| `outgoing.server` | string | live | Destination URI (`udp://ip:port`, `unix://name`, `shm://name`, or `frame-shm://name`) |
 | `outgoing.stream_mode` | string | restart | `"rtp"` or `"compact"` |
 | `outgoing.max_payload_size` | uint16 | restart | Max UDP payload bytes |
 | `outgoing.connected_udp` | bool | restart | Connect UDP socket (applies only to `udp://`) |
@@ -993,6 +994,22 @@ both `rtp` and `compact` mode. On Star6E, `audioPort=0` piggybacks on the
 same active video destination for both `udp://` and `unix://`. `shm://`
 remains RTP-only; it cannot share audio, but a nonzero `audioPort` still
 uses a dedicated local UDP audio destination.
+
+<a id="frame-shm-output"></a>
+`frame-shm://` publishes **whole encoded frames** (Annex-B, start codes
+preserved) into a POSIX shared-memory ring, bypassing RTP packetization
+entirely — no RTP state, no `sendmmsg`, no sidecar. It exists so a
+same-host consumer (waybeam-link) can apply per-frame FEC at frame
+boundaries instead of re-fragmenting pre-built RTP packets. The ring is a
+16-slot × 512 KB SPSC region (~8 MB); each slot carries an 8-byte
+`VencFrameMeta` header (`pts`, `codec`, `flags` — `flags` bit 0 marks an
+IDR) followed by the raw frame. On a full ring (consumer stalled or gone)
+the encoder drops the frame and keeps running — it never blocks. Like
+`shm://` it is video-only (a nonzero `audioPort` uses a dedicated local
+UDP audio destination) and cannot be switched to/from live (restart
+required). Wire format is specified in the coordination repo at
+`protocols/frame-shm.md`; validate a live ring with
+`tools/frame_shm_consumer_test.c`.
 
 A negative `audioPort` (e.g. `-1`) selects **record-only** mode: the audio
 capture/encode thread still runs and feeds the recording, but no output

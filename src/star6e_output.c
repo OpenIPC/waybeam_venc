@@ -187,6 +187,9 @@ int star6e_output_prepare(Star6eOutputSetup *setup, const char *server_uri,
 		return 0;
 	}
 
+	if (setup->uri.type == VENC_OUTPUT_URI_FRAME_SHM)
+		return 0;
+
 	return 0;
 }
 
@@ -232,6 +235,23 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 		return 0;
 	}
 
+	if (setup->uri.type == VENC_OUTPUT_URI_FRAME_SHM) {
+		output->frame_ring = venc_frame_ring_create(
+			setup->uri.endpoint, 16, 512 * 1024);
+		if (!output->frame_ring) {
+			fprintf(stderr, "ERROR: venc_frame_ring_create(%s) failed\n",
+				setup->uri.endpoint);
+			return -1;
+		}
+
+		output->transport = VENC_OUTPUT_URI_FRAME_SHM;
+		memset(&output->dst, 0, sizeof(output->dst));
+		output->dst_len = 0;
+		output->connected_udp = 0;
+		__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
+		return 0;
+	}
+
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, &setup->uri,
 	    output->requested_connected_udp, &output->connected_udp) != 0)
@@ -251,6 +271,11 @@ int star6e_output_is_rtp(const Star6eOutput *output)
 int star6e_output_is_shm(const Star6eOutput *output)
 {
 	return output && output->transport == VENC_OUTPUT_URI_SHM;
+}
+
+int star6e_output_is_frame_shm(const Star6eOutput *output)
+{
+	return output && output->transport == VENC_OUTPUT_URI_FRAME_SHM;
 }
 
 void star6e_output_observe_pressure(Star6eOutput *output)
@@ -273,6 +298,15 @@ void star6e_output_observe_pressure(Star6eOutput *output)
 	if (output->ring) {
 		venc_ring_fill_t fill;
 		if (venc_ring_get_fill(output->ring, &fill) == 0) {
+			fill_pct = fill.fill_pct;
+			full_drops = (uint32_t)fill.full_drops;
+			writes = (uint32_t)fill.writes;
+			oversize_drops = (uint32_t)fill.oversize_drops;
+			have_fill = 1;
+		}
+	} else if (output->frame_ring) {
+		venc_frame_ring_fill_t fill;
+		if (venc_frame_ring_get_fill(output->frame_ring, &fill) == 0) {
 			fill_pct = fill.fill_pct;
 			full_drops = (uint32_t)fill.full_drops;
 			writes = (uint32_t)fill.writes;
@@ -652,6 +686,99 @@ size_t star6e_output_send_compact_frame(Star6eOutput *output,
 	return total_bytes;
 }
 
+static size_t star6e_output_send_frame_ring(Star6eOutput *output,
+	const MI_VENC_Stream_t *stream)
+{
+	VencFrameMeta meta;
+	size_t total_bytes = 0;
+	unsigned int i;
+	int is_idr = 0;
+
+	if (!output || !output->frame_ring || !stream)
+		return 0;
+
+	/* IDR detection from packType.h265Nalu (types 19, 20) */
+	for (i = 0; i < stream->count && !is_idr; ++i) {
+		const MI_VENC_Pack_t *pack = &stream->packet[i];
+		if (pack->packNum > 0) {
+			const unsigned int info_cap = (unsigned int)(
+				sizeof(pack->packetInfo) /
+				sizeof(pack->packetInfo[0]));
+			unsigned int nal_count = (unsigned int)pack->packNum;
+			unsigned int k;
+			if (nal_count > info_cap)
+				nal_count = info_cap;
+			for (k = 0; k < nal_count; ++k) {
+				uint8_t nt = (uint8_t)pack->packetInfo[k]
+					.packType.h265Nalu;
+				if (nt == 19 || nt == 20) {
+					is_idr = 1;
+					break;
+				}
+			}
+		}
+	}
+
+	memset(&meta, 0, sizeof(meta));
+	meta.pts = (stream->count > 0 && stream->packet)
+		? (uint32_t)stream->packet[0].timestamp : 0;
+	meta.codec = VENC_FRAME_CODEC_H265;
+	meta.flags = is_idr ? VENC_FRAME_FLAG_IDR : 0;
+
+	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0)
+		return 0;
+
+	for (i = 0; i < stream->count; ++i) {
+		const MI_VENC_Pack_t *pack = &stream->packet[i];
+
+		if (!pack->data)
+			continue;
+
+		if (pack->packNum > 0) {
+			const unsigned int info_cap = (unsigned int)(
+				sizeof(pack->packetInfo) /
+				sizeof(pack->packetInfo[0]));
+			unsigned int nal_count = (unsigned int)pack->packNum;
+			unsigned int k;
+
+			if (nal_count > info_cap)
+				nal_count = info_cap;
+
+			for (k = 0; k < nal_count; ++k) {
+				MI_U32 length = pack->packetInfo[k].length;
+				MI_U32 offset = pack->packetInfo[k].offset;
+
+				if (length == 0 || offset >= pack->length ||
+				    length > (pack->length - offset))
+					continue;
+
+				if (venc_frame_ring_append(output->frame_ring,
+				    pack->data + offset, length) != 0) {
+					venc_frame_ring_abort_write(
+						output->frame_ring);
+					return 0;
+				}
+				total_bytes += length;
+			}
+			continue;
+		}
+
+		if (pack->length > pack->offset) {
+			MI_U32 length = pack->length - pack->offset;
+
+			if (venc_frame_ring_append(output->frame_ring,
+			    pack->data + pack->offset, length) != 0) {
+				venc_frame_ring_abort_write(output->frame_ring);
+				return 0;
+			}
+			total_bytes += length;
+		}
+	}
+
+	venc_frame_ring_commit_write(output->frame_ring);
+	return total_bytes;
+}
+
 size_t star6e_output_send_frame(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream, uint32_t max_size,
 	Star6eOutputRtpSendFn rtp_send, void *opaque)
@@ -660,6 +787,9 @@ size_t star6e_output_send_frame(Star6eOutput *output,
 
 	if (!output || !stream)
 		return 0;
+
+	if (output->frame_ring)
+		return star6e_output_send_frame_ring(output, stream);
 
 	if (star6e_output_is_rtp(output)) {
 		if (!rtp_send)
@@ -684,10 +814,17 @@ int star6e_output_apply_server(Star6eOutput *output, const char *uri)
 			"(requires restart)\n");
 		return -1;
 	}
+	if (output->frame_ring) {
+		fprintf(stderr, "ERROR: live switch away from frame-shm:// is not "
+			"supported (requires restart)\n");
+		return -1;
+	}
 	if (venc_config_parse_output_uri(uri, &parsed) != 0)
 		return -1;
-	if (parsed.type == VENC_OUTPUT_URI_SHM) {
-		fprintf(stderr, "ERROR: live switch to shm:// is not supported\n");
+	if (parsed.type == VENC_OUTPUT_URI_SHM ||
+	    parsed.type == VENC_OUTPUT_URI_FRAME_SHM) {
+		fprintf(stderr, "ERROR: live switch to shm:// or frame-shm:// "
+			"is not supported\n");
 		return -1;
 	}
 
@@ -713,6 +850,10 @@ void star6e_output_teardown(Star6eOutput *output)
 	if (output->ring) {
 		venc_ring_destroy(output->ring);
 		output->ring = NULL;
+	}
+	if (output->frame_ring) {
+		venc_frame_ring_destroy(output->frame_ring);
+		output->frame_ring = NULL;
 	}
 	if (output->socket_handle >= 0) {
 		close(output->socket_handle);
