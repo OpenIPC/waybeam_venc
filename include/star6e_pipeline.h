@@ -159,8 +159,10 @@ void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 /** Reset CUS3A handoff state (call on pipeline reinit). */
 void star6e_pipeline_cus3a_reset(void);
 
-/** Calculate max exposure time to avoid frame drops at target FPS. */
-int star6e_pipeline_cap_exposure_for_fps(uint32_t fps);
+/** Calculate max exposure time to avoid frame drops at target FPS.
+ *  shutter_rule_180 = true halves the cap (180° shutter rule). */
+int star6e_pipeline_cap_exposure_for_fps(uint32_t fps,
+	bool shutter_rule_180);
 
 /** Reload the ISP tuning bin against the running pipeline.
  *  configured_path is the new bin location (NULL/empty falls back to

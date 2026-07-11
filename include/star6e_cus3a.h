@@ -10,6 +10,7 @@ typedef struct {
 	uint32_t sensor_fps;       /* sensor output fps (for max shutter calc) */
 	uint32_t ae_fps;           /* monitoring rate in Hz (default 15) */
 	uint32_t shutter_max_us;   /* 0 = auto from sensor_fps */
+	int      shutter_pin;      /* pin minShutter==maxShutter (180° rule) */
 	uint32_t gain_max;         /* 0 = use ISP bin default */
 	int      verbose;          /* enable periodic status logging */
 } Star6eCus3aConfig;

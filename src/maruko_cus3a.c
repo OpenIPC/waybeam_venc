@@ -80,6 +80,7 @@ typedef struct {
 
 	/* runtime caps (writable from main thread) */
 	volatile uint32_t shutter_max_us;
+	int shutter_pin;                    /* pin minShutter==maxShutter */
 	volatile uint32_t gain_max;
 
 	/* baseline limits read from ISP bin */
@@ -222,6 +223,8 @@ static void *cus3a_thread(void *arg)
 		if (want_shutter > 0 &&
 		    want_shutter <= cur_limit.maxShutterUs)
 			cur_limit.maxShutterUs = want_shutter;
+		if (s->shutter_pin && want_shutter > 0)
+			cur_limit.minShutterUs = want_shutter;
 		if (want_gain > 0 && want_gain <= cur_limit.maxSensorGain)
 			cur_limit.maxSensorGain = want_gain;
 
@@ -303,6 +306,11 @@ static void *cus3a_thread(void *arg)
 				shutter_max_us = want_shutter;
 				changed = 1;
 			}
+			if (s->shutter_pin && want_shutter > 0 &&
+			    cur_limit.minShutterUs != want_shutter) {
+				cur_limit.minShutterUs = want_shutter;
+				changed = 1;
+			}
 			if (effective_gain > 0 &&
 			    cur_limit.maxSensorGain != effective_gain) {
 				cur_limit.maxSensorGain = effective_gain;
@@ -377,6 +385,7 @@ int maruko_cus3a_start(const MarukoCus3aConfig *cfg)
 	memset(&g_cus3a, 0, sizeof(g_cus3a));
 	g_cus3a.cfg = *cfg;
 	g_cus3a.shutter_max_us = cfg->shutter_max_us;
+	g_cus3a.shutter_pin = cfg->shutter_pin;
 	g_cus3a.gain_max = cfg->gain_max;
 
 	if (resolve_symbols(&g_cus3a) != 0) {

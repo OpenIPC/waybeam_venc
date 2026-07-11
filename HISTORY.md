@@ -1,5 +1,16 @@
 # History
 
+## [0.41.0] - 2026-07-11
+
+- **180° shutter rule toggle (`isp.shutterRule180`).** New boolean config
+  field (default `false`, restart-required) that pins AE exposure to
+  exactly 1/(2×fps) — `minShutterUs == maxShutterUs` in the ISP exposure
+  limit, so the AE shutter dimension is locked while gain still
+  auto-adjusts for brightness.  At 60 fps the shutter is fixed at
+  8 333 µs (1/120 s).  Both Star6E and Maruko backends; the supervisory
+  cus3a threads continuously enforce the pin so ISP bin reloads or
+  cold-boot AE init cannot override it.  Contract `0.12.1`.
+
 ## [0.40.1] - 2026-07-11
 
 Pre-upstream hardening (adversarial review of the #167–175 workstreams).

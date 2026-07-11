@@ -83,6 +83,7 @@ typedef struct {
 
 	/* constraint limits — written by main thread, read by monitor */
 	volatile uint32_t shutter_max_us;   /* 0 = auto from sensor_fps */
+	int shutter_pin;                    /* pin minShutter==maxShutter */
 	volatile uint32_t gain_max;         /* 0 = use ISP bin default */
 
 	/* ISP bin baseline limits (read at startup) */
@@ -258,6 +259,8 @@ static void *cus3a_thread(void *arg)
 		if (want_shutter > 0 &&
 		    want_shutter <= cur_limit.maxShutterUs)
 			cur_limit.maxShutterUs = want_shutter;
+		if (s->shutter_pin && want_shutter > 0)
+			cur_limit.minShutterUs = want_shutter;
 		if (want_gain > 0 &&
 		    want_gain <= cur_limit.maxSensorGain)
 			cur_limit.maxSensorGain = want_gain;
@@ -325,6 +328,11 @@ static void *cus3a_thread(void *arg)
 			    want_shutter != applied_shutter_max) {
 				cur_limit.maxShutterUs = want_shutter;
 				applied_shutter_max = want_shutter;
+				changed = 1;
+			}
+			if (s->shutter_pin && want_shutter > 0 &&
+			    cur_limit.minShutterUs != want_shutter) {
+				cur_limit.minShutterUs = want_shutter;
 				changed = 1;
 			}
 			if (effective_gain > 0 &&
@@ -481,6 +489,7 @@ int star6e_cus3a_start(const Star6eCus3aConfig *cfg)
 	memset(&g_cus3a, 0, sizeof(g_cus3a));
 	g_cus3a.cfg = *cfg;
 	g_cus3a.shutter_max_us = cfg->shutter_max_us;
+	g_cus3a.shutter_pin = cfg->shutter_pin;
 	g_cus3a.gain_max = cfg->gain_max;
 
 	if (resolve_symbols(&g_cus3a) != 0) {

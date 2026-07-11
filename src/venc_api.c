@@ -423,9 +423,10 @@ static const FieldDesc g_fields[] = {
 	FIELD(discovery, name,         FT_STRING, MUT_RESTART),
 	FIELD(discovery, bare_alias,   FT_BOOL,   MUT_RESTART),
 
-	FIELD(isp, ae_engine,      FT_STRING, MUT_RESTART),
-	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
-	FIELD(isp, keep_aspect,    FT_BOOL,   MUT_RESTART),
+	FIELD(isp, ae_engine,         FT_STRING, MUT_RESTART),
+	FIELD(isp, ae_fps,            FT_UINT,   MUT_RESTART),
+	FIELD(isp, keep_aspect,       FT_BOOL,   MUT_RESTART),
+	FIELD(isp, shutter_rule_180,  FT_BOOL,   MUT_RESTART),
 
 	FIELD(audio, enabled,      FT_BOOL,   MUT_RESTART),
 	FIELD(audio, sample_rate,  FT_UINT,   MUT_RESTART),
@@ -542,6 +543,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "isp.aeEngine", "isp.ae_engine" },
 	{ "isp.aeFps", "isp.ae_fps" },
 	{ "isp.keepAspect", "isp.keep_aspect" },
+	{ "isp.shutterRule180", "isp.shutter_rule_180" },
 	{ "audio.sampleRate", "audio.sample_rate" },
 	{ "imu.i2cDevice", "imu.i2c_device" },
 	{ "imu.i2cAddr", "imu.i2c_addr" },
@@ -2209,7 +2211,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.12.0\","
+		"\"contract_version\":\"0.12.1\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);

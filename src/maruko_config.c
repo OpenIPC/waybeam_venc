@@ -166,5 +166,7 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	snprintf(cfg->framing, sizeof(cfg->framing), "%s",
 		vcfg->video0.framing);
 
+	cfg->shutter_rule_180 = vcfg->isp.shutter_rule_180 ? 1 : 0;
+
 	return 0;
 }

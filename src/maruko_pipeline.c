@@ -2579,7 +2579,9 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		/* Auto-cap exposure to frame period for max FPS.
 		 * 120fps sensor → 8333us cap → 118fps. */
 		if (ctx->sensor.fps > 0) {
-			uint32_t frame_period_us = 1000000 / ctx->sensor.fps;
+			uint32_t divisor = ctx->cfg.shutter_rule_180
+				? ctx->sensor.fps * 2 : ctx->sensor.fps;
+			uint32_t frame_period_us = 1000000 / divisor;
 			typedef int (*ae_get_fn)(uint32_t, uint32_t,
 				MarukoIspExposureLimit *);
 			typedef int (*ae_set_fn)(uint32_t, uint32_t,
@@ -2591,14 +2593,19 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			if (fn_get && fn_set) {
 				MarukoIspExposureLimit lim = {0};
 				if (fn_get(0, 0, &lim) == 0) {
-					printf("> [maruko] Exposure cap: "
-						"%uus -> %uus (for %u fps, "
-						"frame period %uus)\n",
+					printf("> [maruko] Exposure %s: "
+						"%uus -> %uus (for %u fps%s)\n",
+						ctx->cfg.shutter_rule_180
+							? "pin" : "cap",
 						lim.maxShutterUs,
 						frame_period_us,
 						ctx->sensor.fps,
-						frame_period_us);
+						ctx->cfg.shutter_rule_180
+							? ", 180\xc2\xb0 rule"
+							: "");
 					lim.maxShutterUs = frame_period_us;
+					if (ctx->cfg.shutter_rule_180)
+						lim.minShutterUs = frame_period_us;
 					fn_set(0, 0, &lim);
 				}
 			}
@@ -2662,6 +2669,12 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			ae_cfg.sensor_fps    = ctx->sensor.fps;
 			ae_cfg.ae_fps        = ctx->cfg.ae_fps;
 			ae_cfg.gain_max      = ctx->cfg.isp_gain_max;
+			if (ctx->cfg.shutter_rule_180 &&
+			    ctx->sensor.fps > 0) {
+				ae_cfg.shutter_max_us =
+					1000000 / (ctx->sensor.fps * 2);
+				ae_cfg.shutter_pin = 1;
+			}
 			ae_cfg.verbose       = ctx->cfg.verbose;
 			(void)maruko_cus3a_start(&ae_cfg);
 		} else if (ctx->cfg.verbose) {

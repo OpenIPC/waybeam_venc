@@ -107,6 +107,7 @@ typedef struct {
 	 * FRAME_BASE) — see bind_maruko_pipeline().  The framing MODULE still
 	 * selects off VencConfig; this mirror only steers graph topology. */
 	char framing[16];
+	int shutter_rule_180;
 } MarukoBackendConfig;
 
 /** Fill config with compiled-in defaults for Maruko backend. */

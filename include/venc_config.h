@@ -83,6 +83,11 @@ typedef struct {
 	                        * downstream and stretch.  Star6E applies the
 	                        * crop at VIF; Maruko applies it at the SCL
 	                        * port.crop. */
+	bool shutter_rule_180; /* 180° shutter rule: cap max shutter to
+	                        * 1/(2*fps) instead of 1/fps, and disable
+	                        * auto-exposure.  At 60 fps the cap becomes
+	                        * 1/120 s (8333 µs).  false = default
+	                        * frame-period cap (1/fps). */
 } VencConfigIsp;
 
 typedef struct {
