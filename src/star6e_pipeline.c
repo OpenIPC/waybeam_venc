@@ -2495,6 +2495,26 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	if (ret != 0)
 		goto fail_venc;
 
+	/* Must run AFTER bind_and_finalize_pipeline(): it calls
+	 * star6e_output_init() -> star6e_output_reset(), which memsets the
+	 * whole output struct and would otherwise zero these GDR/SVC-T
+	 * tagging fields. */
+	state->output.gdr_active =
+		(vcfg->video0.intra_refresh_mode[0] != '\0' &&
+		 strcmp(vcfg->video0.intra_refresh_mode, "off") != 0) ? 1 : 0;
+	state->output.svct_active = vcfg->video0.ref_base > 0 ? 1 : 0;
+	{
+		IntraRefreshDerived gdr_ir;
+		(void)star6e_pipeline_intra_refresh_derive(
+			vcfg, pconf.image_height, venc_fps, pconf.rc_codec,
+			&gdr_ir);
+		uint32_t clen = (gdr_ir.total_rows && gdr_ir.lines)
+			? (gdr_ir.total_rows + gdr_ir.lines - 1) / gdr_ir.lines
+			: 0;
+		state->output.gdr_cycle_len = clen > 255 ? 255 : (uint8_t)clen;
+		state->output.gdr_counter = 0;
+	}
+
 	return 0;
 
 fail_venc:

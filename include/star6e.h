@@ -134,6 +134,14 @@ typedef i6_venc_pack  MI_VENC_Pack_t;
 typedef i6_venc_stat  MI_VENC_Stat_t;
 typedef i6_venc_strm  MI_VENC_Stream_t;
 
+/* SVC-T per-frame reference type (MI_VENC_H264eRefType_e, H265 aliases it):
+ * E_MI_VENC_ENHANCE_P_NOTFORREF = 5 — the droppable top enhance-layer frame.
+ * NOTE: the SigmaStar enum inserts E_MI_VENC_BASE_P_REFTOIDR at index 1, so
+ * this is 5, NOT 4 (the HiSilicon value); value 4 is ENHANCE_P_REFBYENHANCE,
+ * a referenced enhance frame that must NOT be dropped. Device-verified on i6e
+ * IMX335: 1:1 SVC-T droppable frames report refType=5. */
+#define STAR6E_REFTYPE_ENHANCE_P_NOTFORREF 5
+
 #if defined(PLATFORM_MARUKO)
 typedef MI_U32 MI_VIF_DEV;
 typedef MI_U32 MI_VIF_CHN;

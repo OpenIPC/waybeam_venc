@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #define STAR6E_RTP_HEADER_SIZE 12
+/* STAR6E_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in star6e.h. */
 
 static uint16_t star6e_read_be16(const uint8_t *data)
 {
@@ -724,6 +725,19 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 		? (uint32_t)stream->packet[0].timestamp : 0;
 	meta.codec = VENC_FRAME_CODEC_H265;
 	meta.flags = is_idr ? VENC_FRAME_FLAG_IDR : 0;
+	if (!is_idr && output->gdr_active) {
+		meta.flags |= VENC_FRAME_FLAG_GDR;
+		meta.gdr_pos = output->gdr_counter;
+		meta.gdr_len = output->gdr_cycle_len;
+		output->gdr_counter++;
+		if (output->gdr_counter >= output->gdr_cycle_len)
+			output->gdr_counter = 0;
+	} else if (is_idr) {
+		output->gdr_counter = 0;
+	}
+	if (output->svct_active &&
+	    stream->h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF)
+		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
 	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0)
 		return 0;
