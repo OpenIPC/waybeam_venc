@@ -1,5 +1,25 @@
 # History
 
+## [0.44.0] - 2026-07-18
+
+Live FPS change improvements and exposure-based FPS override.
+
+- **Reduced live FPS change stream stall** — `apply_fps()` (Star6E) and
+  `maruko_apply_fps()` now skip the VPE→VENC unbind/rebind when the
+  requested FPS matches the currently delivered FPS (no-op early-out),
+  and request an IDR frame immediately after a successful rebind so the
+  decoder recovers without waiting for the next GOP boundary.
+- **New `isp.shutterMaxUs` live control** — exposes the CUS3A supervisory
+  thread's `shutter_max_us` as a `MUT_LIVE` API field.  Setting this
+  above the frame period (e.g. 33333 µs at 60 fps bound) forces the
+  sensor to skip frames, reducing effective output FPS proportionally
+  without the ~0.5 s bind-rebind stall.  Bitrate scales with effective
+  FPS.  0 = automatic (1/sensor_fps).  Both Star6E and Maruko backends
+  supported.  Dashboard ISP section updated with the new control.
+- Config JSON: `isp.shutterMaxUs` parsed and serialized (persists across
+  restarts).  Pipeline startup applies a non-zero persisted value to the
+  CUS3A config (subordinate to `shutterRule180` when both are set).
+
 ## [0.43.0] - 2026-07-15
 
 Frame-SHM tagging for GDR and SVC-T enhance-layer frames.
@@ -56,7 +76,6 @@ Device-verification fixes (Star6E IMX335 .201):
   retains large headroom while a drop-not-block realtime ring needs far fewer
   than 16 in-flight slots. Consumers read the geometry from the ring header, so
   no consumer change is required.
-
 ## [0.42.0] - 2026-07-11
 
 Full-frame SHM emissions — a new `frame-shm://` URI scheme that transfers

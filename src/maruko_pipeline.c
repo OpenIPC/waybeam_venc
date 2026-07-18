@@ -2690,6 +2690,9 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 				ae_cfg.shutter_max_us =
 					1000000 / (ctx->sensor.fps * 2);
 				ae_cfg.shutter_pin = 1;
+			} else if (ctx->cfg.isp_shutter_max_us > 0) {
+				ae_cfg.shutter_max_us =
+					ctx->cfg.isp_shutter_max_us;
 			}
 			ae_cfg.verbose       = ctx->cfg.verbose;
 			(void)maruko_cus3a_start(&ae_cfg);

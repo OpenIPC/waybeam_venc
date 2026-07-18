@@ -565,3 +565,8 @@ void star6e_cus3a_set_gain_max(uint32_t gain)
 {
 	g_cus3a.gain_max = gain;
 }
+
+void star6e_cus3a_set_shutter_max(uint32_t us)
+{
+	g_cus3a.shutter_max_us = us;
+}

@@ -334,6 +334,8 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 	}
 	s->ae_fps = (uint32_t)json_get_int(obj, "aeFps", (int)s->ae_fps);
 	s->gain_max = (uint32_t)json_get_int(obj, "gainMax", (int)s->gain_max);
+	s->shutter_max_us = (uint32_t)json_get_int(obj, "shutterMaxUs",
+		(int)s->shutter_max_us);
 	safe_strcpy(s->awb_mode, sizeof(s->awb_mode),
 		json_get_string(obj, "awbMode", s->awb_mode));
 	s->awb_ct = (uint32_t)json_get_int(obj, "awbCt", (int)s->awb_ct);
@@ -1222,6 +1224,7 @@ static void render_isp(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "aeEngine",   cfg->isp.ae_engine,   0);
 	pp_field_uint(p,   2, "aeFps",      cfg->isp.ae_fps,      0);
 	pp_field_uint(p,   2, "gainMax",    cfg->isp.gain_max,    0);
+	pp_field_uint(p,   2, "shutterMaxUs", cfg->isp.shutter_max_us, 0);
 	pp_field_string(p, 2, "awbMode",    cfg->isp.awb_mode,    0);
 	pp_field_uint(p,   2, "awbCt",      cfg->isp.awb_ct,      0);
 	pp_field_bool(p,   2, "keepAspect",      cfg->isp.keep_aspect,      0);
@@ -1440,6 +1443,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(isp, "aeEngine", cfg->isp.ae_engine);
 		cJSON_AddNumberToObject(isp, "aeFps", cfg->isp.ae_fps);
 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);
+		cJSON_AddNumberToObject(isp, "shutterMaxUs", cfg->isp.shutter_max_us);
 		cJSON_AddStringToObject(isp, "awbMode", cfg->isp.awb_mode);
 		cJSON_AddNumberToObject(isp, "awbCt", cfg->isp.awb_ct);
 		cJSON_AddBoolToObject(isp, "keepAspect", cfg->isp.keep_aspect);

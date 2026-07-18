@@ -279,6 +279,9 @@ static int maruko_apply_qp_delta(int delta)
 	return 0;
 }
 
+static int maruko_request_idr(void);
+static uint32_t maruko_query_live_fps(void);
+
 static int maruko_apply_fps(uint32_t fps)
 {
 	i6c_venc_chn attr = {0};
@@ -297,6 +300,8 @@ static int maruko_apply_fps(uint32_t fps)
 			sensor_fps);
 		fps = sensor_fps;
 	}
+	if (fps == maruko_query_live_fps())
+		return 0;
 
 	/* stab-fill: there is NO SCL→VENC bind — the VENC is NORMAL_FRMBASE and
 	 * manually fed.  The unbind/RING-rebind fps-divider below would force a
@@ -348,6 +353,7 @@ static int maruko_apply_fps(uint32_t fps)
 			g_ctx.venc_chn, &attr);
 	}
 
+	maruko_request_idr();
 	printf("> FPS changed to %u (bind %u:%u)\n", fps, sensor_fps, fps);
 	return 0;
 }
@@ -837,6 +843,41 @@ static int maruko_apply_gain_max(uint32_t gain)
 	return ret;
 }
 
+static int maruko_apply_shutter_max(uint32_t us)
+{
+	maruko_cus3a_set_shutter_max(us);
+	if (maruko_cus3a_running()) {
+		printf("> [maruko] Shutter max -> %u us (0 = auto; applied "
+			"by supervisory within one tick)\n", us);
+		return 0;
+	}
+
+	if (us == 0) {
+		printf("> [maruko] Shutter max -> 0 ignored (supervisory off; "
+			"keeping current limit)\n");
+		return 0;
+	}
+	typedef int (*ae_get_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
+	typedef int (*ae_set_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
+	void *h = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!h) return -1;
+
+	ae_get_fn fn_get = (ae_get_fn)dlsym(h, "MI_ISP_AE_GetExposureLimit");
+	ae_set_fn fn_set = (ae_set_fn)dlsym(h, "MI_ISP_AE_SetExposureLimit");
+	if (!fn_get || !fn_set) { dlclose(h); return -1; }
+
+	MarukoIspExposureLimit limit = {0};
+	int ret = fn_get(0, 0, &limit);
+	if (ret != 0) { dlclose(h); return ret; }
+
+	printf("> [maruko] Shutter max: %u -> %u us\n",
+		limit.maxShutterUs, us);
+	limit.maxShutterUs = us;
+	ret = fn_set(0, 0, &limit);
+	dlclose(h);
+	return ret;
+}
+
 /* ── Audio mute callback (Phase 5) ───────────────────────────────────── */
 
 static int maruko_apply_mute(bool muted)
@@ -1179,6 +1220,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_output_enabled = maruko_apply_output_enabled,
 	.apply_server = maruko_apply_server,
 	.apply_gain_max = maruko_apply_gain_max,
+	.apply_shutter_max = maruko_apply_shutter_max,
 	.apply_mute = maruko_apply_mute,
 	.request_idr = maruko_request_idr,
 	.query_live_fps = maruko_query_live_fps,

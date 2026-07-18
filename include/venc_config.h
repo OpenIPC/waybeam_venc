@@ -88,6 +88,10 @@ typedef struct {
 	                        * auto-exposure.  At 60 fps the cap becomes
 	                        * 1/120 s (8333 µs).  false = default
 	                        * frame-period cap (1/fps). */
+	uint32_t shutter_max_us; /* live exposure cap in µs (0 = auto from
+	                          * sensor_fps).  Setting this above the frame
+	                          * period forces the sensor to skip frames,
+	                          * reducing effective output FPS. */
 } VencConfigIsp;
 
 typedef struct {

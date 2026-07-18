@@ -52,4 +52,7 @@ int maruko_cus3a_running(void);
 /** Update the max sensor gain at runtime. */
 void maruko_cus3a_set_gain_max(uint32_t gain);
 
+/** Update the max shutter (exposure) at runtime. */
+void maruko_cus3a_set_shutter_max(uint32_t us);
+
 #endif /* MARUKO_CUS3A_H */
