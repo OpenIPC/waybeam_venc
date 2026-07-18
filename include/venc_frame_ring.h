@@ -338,6 +338,12 @@ static inline int venc_frame_ring_read_wait(venc_frame_ring_t *r,
 		__atomic_store_n(&r->hdr->consumer_waiting, 1,
 			__ATOMIC_RELEASE);
 
+		if (venc_frame_ring_read(r, buf, buf_size, out_len) == 0) {
+			__atomic_store_n(&r->hdr->consumer_waiting, 0,
+				__ATOMIC_RELEASE);
+			return 0;
+		}
+
 		struct timespec ts;
 		struct timespec *tsp = NULL;
 		if (timeout_ms > 0) {

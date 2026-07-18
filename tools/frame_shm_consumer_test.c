@@ -30,9 +30,6 @@
 static volatile int running = 1;
 static void sighandler(int sig) { (void)sig; running = 0; }
 
-/* 512 KB slot -> a frame can be up to slot_data_size; size buf generously. */
-#define BUF_SIZE (512 * 1024)
-
 int main(int argc, char **argv)
 {
 	const char *name = (argc > 1) ? argv[1] : "venc_frames";
@@ -51,7 +48,8 @@ int main(int argc, char **argv)
 	       name, r->hdr->slot_count, r->hdr->slot_data_size / 1024,
 	       r->hdr->epoch, r->hdr->version, r->hdr->magic);
 
-	uint8_t *buf = malloc(BUF_SIZE);
+	uint32_t buf_size = r->slot_data_size;
+	uint8_t *buf = malloc(buf_size);
 	if (!buf) { fprintf(stderr, "OOM\n"); venc_frame_ring_destroy(r); return 1; }
 	uint32_t out_len = 0;
 
@@ -67,9 +65,9 @@ int main(int argc, char **argv)
 	unsigned long interval_frames = 0, interval_idr = 0;
 
 	while (running) {
-		int ret = venc_frame_ring_read(r, buf, BUF_SIZE, &out_len);
+		int ret = venc_frame_ring_read(r, buf, buf_size, &out_len);
 		if (ret != 0)
-			ret = venc_frame_ring_read_wait(r, buf, BUF_SIZE, &out_len, 100);
+			ret = venc_frame_ring_read_wait(r, buf, buf_size, &out_len, 100);
 
 		if (ret == 0 && out_len >= VENC_FRAME_META_SIZE) {
 			VencFrameMeta m;
@@ -113,7 +111,11 @@ int main(int argc, char **argv)
 			double s = el_ms / 1000.0;
 			printf("  %.1f fps  (%lu IDR)  ring lag=%lu\n",
 			       interval_frames / s, interval_idr,
-			       (unsigned long)(r->hdr->write_idx - r->hdr->read_idx));
+			       (unsigned long)(
+				       __atomic_load_n(&r->hdr->write_idx,
+					       __ATOMIC_ACQUIRE) -
+				       __atomic_load_n(&r->hdr->read_idx,
+					       __ATOMIC_ACQUIRE)));
 			ts_report = ts_now;
 			interval_frames = 0; interval_idr = 0;
 		}
@@ -141,7 +143,10 @@ int main(int argc, char **argv)
 	printf("Integrity:    bad_meta=%lu bad_startcode=%lu pts_regress=%lu\n",
 	       bad_meta, bad_startcode, pts_regress);
 	printf("Ring:         w_idx=%lu r_idx=%lu\n",
-	       (unsigned long)r->hdr->write_idx, (unsigned long)r->hdr->read_idx);
+	       (unsigned long)__atomic_load_n(&r->hdr->write_idx,
+		       __ATOMIC_ACQUIRE),
+	       (unsigned long)__atomic_load_n(&r->hdr->read_idx,
+		       __ATOMIC_ACQUIRE));
 
 	int ok = (total_frames > 0 && total_idr > 0 &&
 	          bad_meta == 0 && bad_startcode == 0 && pts_regress == 0);
