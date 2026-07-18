@@ -44,6 +44,10 @@ typedef struct {
 	 * not need to reject size-based requests. Returns 0 on success,
 	 * -1 if the backend has no live state to mutate. */
 	int (*apply_max_payload_size)(uint16_t size);
+	/* Live-update per-frame size caps (MaxISize/MaxPSize) in the RC param
+	 * struct and set RC priority to FRAMEBITS_FIRST when either is >0.
+	 * Both values in bytes; 0 = unlimited (restores BITRATE_FIRST). */
+	int (*apply_max_frame_size)(uint32_t max_i_bytes, uint32_t max_p_bytes);
 	/* Output transport observability snapshot.  Returns malloc'd JSON
 	 * string (caller frees) describing output queue fill, lifetime
 	 * delivery counters, and backpressure state.  The JSON includes a

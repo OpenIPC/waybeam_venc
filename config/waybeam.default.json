@@ -31,6 +31,8 @@
     "bitrate": 8192,
     "gopSize": 1.0,
     "qpDelta": -4,
+    "maxIBytes": 0,
+    "maxPBytes": 0,
     "sceneThreshold": 0,
     "sceneHoldoff": 2,
     "resilience": "off",
