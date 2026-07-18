@@ -1,6 +1,9 @@
 # Low-Delay VENC Pipeline (Ring Buffer Mode)
 
-**Priority: HIGH** | **Effort: HIGH** | **Status: Not started**
+**Priority: HIGH** | **Effort: HIGH** | **Status: Superseded** — see
+`REALTIME_PIPELINE_INVESTIGATION.md` (2026-07-17) for the current
+cross-backend analysis and the Star6E/IMX335 MVP plan. The measurements
+and the RING+FRAMEBASE-combo finding below remain valid reference.
 
 ## Goal
 
