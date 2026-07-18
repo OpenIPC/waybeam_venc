@@ -510,6 +510,20 @@ static int apply_shutter_max(uint32_t us)
 	return 0;
 }
 
+static int apply_gain_min(uint32_t gain)
+{
+	if (star6e_cus3a_running())
+		star6e_cus3a_set_gain_min(gain);
+	return 0;
+}
+
+static int apply_shutter_min(uint32_t us)
+{
+	if (star6e_cus3a_running())
+		star6e_cus3a_set_shutter_min(us);
+	return 0;
+}
+
 static int apply_verbose(bool on)
 {
 	printf("> Verbose %s via API\n", on ? "enabled" : "disabled");
@@ -1323,6 +1337,8 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_roi_qp = apply_roi_qp,
 	.apply_gain_max = apply_gain_max,
 	.apply_shutter_max = apply_shutter_max,
+	.apply_gain_min = apply_gain_min,
+	.apply_shutter_min = apply_shutter_min,
 	.apply_verbose = apply_verbose,
 	.apply_output_enabled = apply_output_enabled,
 	.apply_server = apply_server,

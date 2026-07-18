@@ -552,6 +552,14 @@ static void start_custom_ae(const Star6ePipelineState *ps,
 	} else if (vcfg->isp.shutter_max_us > 0) {
 		ae_cfg.shutter_max_us = vcfg->isp.shutter_max_us;
 	}
+	if (vcfg->isp.gain_min > 0)
+		ae_cfg.gain_min = vcfg->isp.gain_min;
+	if (vcfg->isp.shutter_min_us > 0)
+		ae_cfg.shutter_min_us = vcfg->isp.shutter_min_us;
+	/* legacy_ae (aeEngine=sdk): the SDK firmware AE does convergence and
+	 * this thread runs as a pure limit enforcer beside it (limits_only) so
+	 * the gain/shutter min/max knobs work without switching to custom AE. */
+	ae_cfg.limits_only = vcfg->isp.legacy_ae ? 1 : 0;
 	ae_cfg.verbose = vcfg->system.verbose;
 	star6e_cus3a_start(&ae_cfg);
 }
@@ -809,7 +817,9 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	scene_init(&ctx->scene, ctx->vcfg.video0.scene_threshold,
 		ctx->vcfg.video0.scene_holdoff);
 
-	if (!vcfg->isp.legacy_ae)
+	/* Custom AE always spins the thread; legacy (sdk) AE spins it only as a
+	 * limits-only enforcer, and only when aeFps>0 gives it a tick rate. */
+	if (!vcfg->isp.legacy_ae || vcfg->isp.ae_fps > 0)
 		start_custom_ae(ps, vcfg);
 
 	if (vcfg->fpv.roi_enabled) {

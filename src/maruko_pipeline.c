@@ -2694,6 +2694,8 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 				ae_cfg.shutter_max_us =
 					ctx->cfg.isp_shutter_max_us;
 			}
+			ae_cfg.gain_min      = ctx->cfg.isp_gain_min;
+			ae_cfg.shutter_min_us = ctx->cfg.isp_shutter_min_us;
 			ae_cfg.verbose       = ctx->cfg.verbose;
 			(void)maruko_cus3a_start(&ae_cfg);
 		} else if (ctx->cfg.verbose) {

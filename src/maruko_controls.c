@@ -938,6 +938,78 @@ static int maruko_apply_shutter_max(uint32_t us)
 	return ret;
 }
 
+static int maruko_apply_gain_min(uint32_t gain)
+{
+	/* Route through the supervisory thread when it runs (same rationale
+	 * as maruko_apply_gain_max): 0 = keep the ISP-bin default floor. */
+	maruko_cus3a_set_gain_min(gain);
+	if (maruko_cus3a_running()) {
+		printf("> [maruko] Gain min -> %u (0 = bin default; applied "
+			"by supervisory within one tick)\n", gain);
+		return 0;
+	}
+
+	if (gain == 0) {
+		printf("> [maruko] Gain min -> 0 ignored (supervisory off; "
+			"keeping current limit)\n");
+		return 0;
+	}
+	typedef int (*ae_get_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
+	typedef int (*ae_set_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
+	void *h = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!h) return -1;
+
+	ae_get_fn fn_get = (ae_get_fn)dlsym(h, "MI_ISP_AE_GetExposureLimit");
+	ae_set_fn fn_set = (ae_set_fn)dlsym(h, "MI_ISP_AE_SetExposureLimit");
+	if (!fn_get || !fn_set) { dlclose(h); return -1; }
+
+	MarukoIspExposureLimit limit = {0};
+	int ret = fn_get(0, 0, &limit);
+	if (ret != 0) { dlclose(h); return ret; }
+
+	printf("> [maruko] Gain min: %u -> %u\n",
+		limit.minSensorGain, gain);
+	limit.minSensorGain = gain;
+	ret = fn_set(0, 0, &limit);
+	dlclose(h);
+	return ret;
+}
+
+static int maruko_apply_shutter_min(uint32_t us)
+{
+	maruko_cus3a_set_shutter_min(us);
+	if (maruko_cus3a_running()) {
+		printf("> [maruko] Shutter min -> %u us (0 = bin default; applied "
+			"by supervisory within one tick)\n", us);
+		return 0;
+	}
+
+	if (us == 0) {
+		printf("> [maruko] Shutter min -> 0 ignored (supervisory off; "
+			"keeping current limit)\n");
+		return 0;
+	}
+	typedef int (*ae_get_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
+	typedef int (*ae_set_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
+	void *h = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!h) return -1;
+
+	ae_get_fn fn_get = (ae_get_fn)dlsym(h, "MI_ISP_AE_GetExposureLimit");
+	ae_set_fn fn_set = (ae_set_fn)dlsym(h, "MI_ISP_AE_SetExposureLimit");
+	if (!fn_get || !fn_set) { dlclose(h); return -1; }
+
+	MarukoIspExposureLimit limit = {0};
+	int ret = fn_get(0, 0, &limit);
+	if (ret != 0) { dlclose(h); return ret; }
+
+	printf("> [maruko] Shutter min: %u -> %u us\n",
+		limit.minShutterUs, us);
+	limit.minShutterUs = us;
+	ret = fn_set(0, 0, &limit);
+	dlclose(h);
+	return ret;
+}
+
 /* ── Audio mute callback (Phase 5) ───────────────────────────────────── */
 
 static int maruko_apply_mute(bool muted)
@@ -1281,6 +1353,8 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_server = maruko_apply_server,
 	.apply_gain_max = maruko_apply_gain_max,
 	.apply_shutter_max = maruko_apply_shutter_max,
+	.apply_gain_min = maruko_apply_gain_min,
+	.apply_shutter_min = maruko_apply_shutter_min,
 	.apply_mute = maruko_apply_mute,
 	.request_idr = maruko_request_idr,
 	.query_live_fps = maruko_query_live_fps,

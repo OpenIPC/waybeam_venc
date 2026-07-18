@@ -1,5 +1,37 @@
 # History
 
+## [0.46.0] - 2026-07-18
+
+Manual minimum exposure / gain floors for the supervisory AE.
+
+- **New `isp.gainMin` / `isp.shutterMinUs` live controls** — set an explicit
+  minimum sensor gain and minimum exposure (µs) floor for the 3A, completing
+  the manual min/max envelope alongside the existing `isp.gainMax` /
+  `isp.shutterMaxUs` ceilings.  Both default `0` = "use the ISP bin's
+  calibrated floor" (no override).
+- The supervisory cus3a thread writes the floors into `minSensorGain` /
+  `minShutterUs` of the ISP exposure limit on startup and re-enforces them
+  each tick.  Each floor is clamped so it can never exceed its ceiling, and
+  `isp.shutterRule180` (which pins `min==max`) takes precedence over a manual
+  `shutterMin`.  Setting a floor back to `0` restores the ISP bin's calibrated
+  floor (the thread captures `minSensorGain`/`minShutterUs` from the bin at
+  startup and falls back to it, mirroring the ceiling's `bin_max_*` fallback).
+  `MUT_LIVE`, both Star6E and Maruko backends.  Device-verified on `.201`
+  (IMX335) and `.233` (IMX415): floors apply, clamp to ceiling, pin overrides
+  shutter floor, and `0` restores the bin default.
+- **Star6E: the supervisory thread now runs as a limits-only enforcer under the
+  SDK firmware AE too** (`aeEngine=sdk`), so `gainMin/Max` + `shutterMin/Max`
+  work without switching to the custom AE (Maruko already enforced in both
+  modes).  The thread starts whenever `aeFps>0`; in `sdk`/`legacy_ae` it sets
+  `limits_only` — it enforces only explicit user gain/shutter min/max (with the
+  bin baseline restored on `0`) and skips the fps-derived shutter cap and the
+  cold-boot fps kick, which the pipeline already owns in legacy mode.
+  Device-verified on `.201` in `sdk`: all four knobs apply and fully revert, and
+  a binding `gainMax` genuinely clamps the live firmware AE (long gain 20129 →
+  5000 → 3000, luma tracks; recovers on revert) — the AE stays converged.
+- camelCase aliases `isp.gainMin` / `isp.shutterMinUs`; added to the config
+  schema, pretty-printer, JSON export, default configs, and HTTP API contract.
+
 ## [0.45.0] - 2026-07-18
 
 Live per-frame I/P frame-size caps (MaxISize/MaxPSize) with RC priority.

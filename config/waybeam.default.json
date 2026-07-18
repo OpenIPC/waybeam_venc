@@ -14,6 +14,8 @@
     "aeFps": 15,
     "gainMax": 0,
     "shutterMaxUs": 0,
+    "gainMin": 0,
+    "shutterMinUs": 0,
     "awbMode": "auto",
     "awbCt": 5500,
     "keepAspect": true,

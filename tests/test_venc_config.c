@@ -199,7 +199,9 @@ static int test_load_full_json(void)
 		 * here proves migration: the JSON value is ignored and the
 		 * always-on default (true) drives the cold-boot register hook. */
 		"  \"sensor\": { \"index\": 2, \"mode\": 3, \"unlockEnabled\": false },"
-		"  \"isp\": { \"sensorBin\": \"/etc/sensors/imx415.bin\" },"
+		"  \"isp\": { \"sensorBin\": \"/etc/sensors/imx415.bin\","
+		"    \"gainMax\": 8192, \"shutterMaxUs\": 8000,"
+		"    \"gainMin\": 1500, \"shutterMinUs\": 200 },"
 		"  \"image\": { \"mirror\": true, \"flip\": true },"
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
 		/* "codec" above is intentionally legacy — parser must silently drop it. */
@@ -228,6 +230,10 @@ static int test_load_full_json(void)
 	CHECK("load_unlock_legacy_ignored",
 		cfg.sensor.unlock_enabled == true);   /* JSON had false; default wins */
 	CHECK("load_isp_bin", strcmp(cfg.isp.sensor_bin, "/etc/sensors/imx415.bin") == 0);
+	CHECK("load_isp_gain_max", cfg.isp.gain_max == 8192);
+	CHECK("load_isp_shutter_max", cfg.isp.shutter_max_us == 8000);
+	CHECK("load_isp_gain_min", cfg.isp.gain_min == 1500);
+	CHECK("load_isp_shutter_min", cfg.isp.shutter_min_us == 200);
 	CHECK("load_mirror", cfg.image.mirror == true);
 	CHECK("load_flip", cfg.image.flip == true);
 	CHECK("load_rc", strcmp(cfg.video0.rc_mode, "vbr") == 0);

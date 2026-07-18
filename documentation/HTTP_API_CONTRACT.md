@@ -1383,6 +1383,16 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
 
 ## Change Log (Contract)
+- `0.46.0` (additive — new config fields):
+  - Added `isp.gain_min` (min sensor gain floor) and `isp.shutter_min_us`
+    (min exposure floor, µs) to the config schema.  Both default `0` =
+    "use the ISP bin's calibrated floor" (no override), symmetric with the
+    existing `isp.gain_max` / `isp.shutter_max_us` ceilings.  The
+    supervisory cus3a thread writes them into `minSensorGain` /
+    `minShutterUs` of the ISP exposure limit; each floor is clamped to not
+    exceed its ceiling, and `isp.shutter_rule_180` (min==max pin) overrides
+    a manual `shutter_min`.  `MUT_LIVE`, both backends.
+  - Added `isp.gainMin` / `isp.shutterMinUs` camelCase aliases.
 - `0.12.1` (additive — new config field):
   - Added `isp.shutter_rule_180` (boolean, default `false`) to config
     schema.  When `true`, pins exposure to exactly 1/(2×fps) — sets
