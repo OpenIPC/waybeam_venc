@@ -290,6 +290,10 @@ static int i6e_venc_load(star6e_venc_impl *venc)
 	LOAD_SYM(venc, "libmi_venc.so", fnGetChnDevid,
 		int (*)(int, uint32_t *), "MI_VENC_GetChnDevid");
 	/* Optional — older libmi_venc.so may not export these. */
+	/* MI_VENC_SetRcPriority(VeChn, MI_VENC_RcPriority_e *) — takes a POINTER
+	 * to the priority enum, not the value (mi_venc.h). */
+	LOAD_SYM(venc, "libmi_venc.so", fnSetRcPriority,
+		int (*)(int, void *), "MI_VENC_SetRcPriority");
 	LOAD_SYM(venc, "libmi_venc.so", fnSetIntraRefresh,
 		int (*)(int, void *), "MI_VENC_SetIntraRefresh");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetIntraRefresh,

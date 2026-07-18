@@ -320,6 +320,63 @@ static int apply_qp_delta(int delta)
 	return 0;
 }
 
+static int apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
+{
+	MI_VENC_ChnAttr_t attr = {0};
+	MI_VENC_RcParam_t param = {0};
+	MI_VENC_RcPriority_e pri;
+
+	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
+		return -1;
+	if (MI_VENC_GetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
+		return -1;
+
+	switch (attr.rate.mode) {
+	case I6_VENC_RATEMODE_H265CBR:
+		param.stParamH265Cbr.u32MaxISize = max_i_bytes;
+		param.stParamH265Cbr.u32MaxPSize = max_p_bytes;
+		break;
+	case I6_VENC_RATEMODE_H264CBR:
+		param.stParamH264Cbr.u32MaxISize = max_i_bytes;
+		param.stParamH264Cbr.u32MaxPSize = max_p_bytes;
+		break;
+	case I6_VENC_RATEMODE_H265VBR:
+		param.stParamH265Vbr.u32MaxISize = max_i_bytes;
+		param.stParamH265Vbr.u32MaxPSize = max_p_bytes;
+		break;
+	case I6_VENC_RATEMODE_H264VBR:
+		param.stParamH264VBR.u32MaxISize = max_i_bytes;
+		param.stParamH264VBR.u32MaxPSize = max_p_bytes;
+		break;
+	case I6_VENC_RATEMODE_H265AVBR:
+		param.stParamH265Avbr.u32MaxISize = max_i_bytes;
+		param.stParamH265Avbr.u32MaxPSize = max_p_bytes;
+		break;
+	case I6_VENC_RATEMODE_H264AVBR:
+		param.stParamH264Avbr.u32MaxISize = max_i_bytes;
+		param.stParamH264Avbr.u32MaxPSize = max_p_bytes;
+		break;
+	default:
+		return -1;
+	}
+
+	if (MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
+		return -1;
+
+	pri = (max_i_bytes > 0 || max_p_bytes > 0)
+		? E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
+		: E_MI_VENC_RC_PRIORITY_BITRATE_FIRST;
+	MI_VENC_SetRcPriority(g_star6e_control_ctx.venc_chn, pri);
+
+	if (request_idr() != 0)
+		return -1;
+	printf("> maxFrameSize changed: I=%u P=%u bytes, priority=%s\n",
+		max_i_bytes, max_p_bytes,
+		pri == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
+			? "framebits" : "bitrate");
+	return 0;
+}
+
 static int apply_encoder_fps(uint32_t fps)
 {
 	MI_VENC_ChnAttr_t attr = {0};
@@ -1283,6 +1340,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.query_audio_status = query_audio_status,
 	.apply_zoom = apply_zoom,
 	.apply_isp_bin = apply_isp_bin,
+	.apply_max_frame_size = apply_max_frame_size,
 	.apply_snapshot_quality = venc_jpeg_set_quality,
 	.apply_pause_stab = apply_pause_stab,
 	.query_attitude = query_attitude,

@@ -409,6 +409,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, bitrate,         FT_UINT,   MUT_LIVE),
 	FIELD(video0, gop_size,        FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
+	FIELD(video0, max_i_bytes,     FT_UINT,   MUT_LIVE),
+	FIELD(video0, max_p_bytes,     FT_UINT,   MUT_LIVE),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
 	FIELD(outgoing, server,            FT_STRING, MUT_LIVE),
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
@@ -535,6 +537,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.rcMode", "video0.rc_mode" },
 	{ "video0.gopSize", "video0.gop_size" },
 	{ "video0.qpDelta", "video0.qp_delta" },
+	{ "video0.maxIBytes", "video0.max_i_bytes" },
+	{ "video0.maxPBytes", "video0.max_p_bytes" },
 	{ "outgoing.maxPayloadSize", "outgoing.max_payload_size" },
 	{ "outgoing.audioPort", "outgoing.audio_port" },
 	{ "fpv.roiEnabled", "fpv.roi_enabled" },
@@ -1083,6 +1087,7 @@ typedef enum {
 	LIVE_GROUP_ISP_BIN,
 	LIVE_GROUP_SNAPSHOT_QUALITY,
 	LIVE_GROUP_PAUSE_STAB,
+	LIVE_GROUP_MAX_FRAME_SIZE,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1254,6 +1259,9 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_SNAPSHOT_QUALITY;
 	if (strcmp(canonical_key, "video0.pause_stab") == 0)
 		return LIVE_GROUP_PAUSE_STAB;
+	if (strcmp(canonical_key, "video0.max_i_bytes") == 0 ||
+	    strcmp(canonical_key, "video0.max_p_bytes") == 0)
+		return LIVE_GROUP_MAX_FRAME_SIZE;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1291,6 +1299,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "snapshot.quality";
 	case LIVE_GROUP_PAUSE_STAB:
 		return "video0.pauseStab";
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		return "video0.maxIBytes/maxPBytes";
 	default:
 		return "unknown";
 	}
@@ -1449,6 +1459,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality != NULL;
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab != NULL;
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		return g_cb->apply_max_frame_size != NULL;
 	default:
 		return 0;
 	}
@@ -1526,6 +1538,10 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_PAUSE_STAB:
 		dst->video0.pause_stab = src->video0.pause_stab;
+		break;
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		dst->video0.max_i_bytes = src->video0.max_i_bytes;
+		dst->video0.max_p_bytes = src->video0.max_p_bytes;
 		break;
 	default:
 		break;
@@ -1646,6 +1662,9 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality(cfg->snapshot.quality);
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab(cfg->video0.pause_stab);
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		return g_cb->apply_max_frame_size(cfg->video0.max_i_bytes,
+			cfg->video0.max_p_bytes);
 	default:
 		return -2;
 	}
