@@ -48,4 +48,8 @@ int star6e_cus3a_running(void);
  *  Called when the user changes isp.gainMax via API. */
 void star6e_cus3a_set_gain_max(uint32_t gain);
 
+/** Update the max shutter (exposure) at runtime.
+ *  Called when the user changes isp.shutterMaxUs via API. */
+void star6e_cus3a_set_shutter_max(uint32_t us);
+
 #endif /* STAR6E_CUS3A_H */

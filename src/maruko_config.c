@@ -139,6 +139,7 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->show_osd = vcfg->debug.show_osd ? 1 : 0;
 	cfg->ae_fps = vcfg->isp.ae_fps;
 	cfg->isp_gain_max = vcfg->isp.gain_max;
+	cfg->isp_shutter_max_us = vcfg->isp.shutter_max_us;
 	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s",
 		vcfg->isp.ae_mode[0] ? vcfg->isp.ae_mode : "native");
 	cfg->imu = vcfg->imu;

@@ -17,6 +17,7 @@ typedef struct {
 	int (*apply_qp_delta)(int delta);
 	int (*apply_roi_qp)(int qp);
 	int (*apply_gain_max)(uint32_t gain);
+	int (*apply_shutter_max)(uint32_t us);
 	int (*apply_verbose)(bool on);
 	int (*apply_output_enabled)(bool on);
 	int (*apply_server)(const char *uri);

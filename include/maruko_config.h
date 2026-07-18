@@ -79,6 +79,7 @@ typedef struct {
 	int show_osd;
 	uint32_t ae_fps;        /* supervisory 3A rate (Hz); 0 disables */
 	uint32_t isp_gain_max;  /* sensor gain cap; 0 = use ISP bin default */
+	uint32_t isp_shutter_max_us; /* exposure cap in µs; 0 = auto */
 	char ae_mode[16];       /* "native" (default) or "throttle" — see
 	                         * VencConfigIsp::ae_mode for semantics. */
 	VencConfigImu imu;
