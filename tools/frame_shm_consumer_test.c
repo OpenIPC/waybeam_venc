@@ -53,16 +53,19 @@ int main(int argc, char **argv)
 	if (!buf) { fprintf(stderr, "OOM\n"); venc_frame_ring_destroy(r); return 1; }
 	uint32_t out_len = 0;
 
-	unsigned long total_frames = 0, total_idr = 0, total_bytes = 0;
+	unsigned long total_frames = 0, total_idr = 0, total_gdr = 0,
+		total_enhance = 0, total_bytes = 0;
 	uint32_t max_frame = 0, min_frame = 0xFFFFFFFF;
 	unsigned long bad_meta = 0, bad_startcode = 0, pts_regress = 0;
 	uint32_t first_pts = 0, last_pts = 0;
+	uint8_t last_gdr_len = 0;
 	int have_first = 0;
 
 	struct timespec ts_start, ts_now, ts_report;
 	clock_gettime(CLOCK_MONOTONIC, &ts_start);
 	ts_report = ts_start;
-	unsigned long interval_frames = 0, interval_idr = 0;
+	unsigned long interval_frames = 0, interval_idr = 0,
+		interval_gdr = 0, interval_enhance = 0;
 
 	while (running) {
 		int ret = venc_frame_ring_read(r, buf, buf_size, &out_len);
@@ -75,6 +78,8 @@ int main(int argc, char **argv)
 			uint32_t frame_len = out_len - VENC_FRAME_META_SIZE;
 			const uint8_t *fd = buf + VENC_FRAME_META_SIZE;
 			int is_idr = (m.flags & VENC_FRAME_FLAG_IDR) != 0;
+			int is_gdr = (m.flags & VENC_FRAME_FLAG_GDR) != 0;
+			int is_enhance = (m.flags & VENC_FRAME_FLAG_ENHANCE) != 0;
 
 			total_frames++;
 			interval_frames++;
@@ -82,9 +87,14 @@ int main(int argc, char **argv)
 			if (frame_len > max_frame) max_frame = frame_len;
 			if (frame_len < min_frame) min_frame = frame_len;
 			if (is_idr) { total_idr++; interval_idr++; }
+			if (is_gdr) { total_gdr++; interval_gdr++; last_gdr_len = m.gdr_len; }
+			if (is_enhance) { total_enhance++; interval_enhance++; }
 
-			/* Validate meta: codec H265, reserved 0 */
-			if (m.codec != VENC_FRAME_CODEC_H265 || m.reserved != 0)
+			/* Validate meta: codec H265 */
+			if (m.codec != VENC_FRAME_CODEC_H265)
+				bad_meta++;
+			/* gdr_pos/gdr_len consistency */
+			if (is_gdr && m.gdr_len > 0 && m.gdr_pos >= m.gdr_len)
 				bad_meta++;
 
 			/* Validate Annex-B start code (00 00 01 or 00 00 00 01) */
@@ -109,8 +119,9 @@ int main(int argc, char **argv)
 			+ (ts_now.tv_nsec - ts_report.tv_nsec) / 1000000;
 		if (el_ms >= 1000) {
 			double s = el_ms / 1000.0;
-			printf("  %.1f fps  (%lu IDR)  ring lag=%lu\n",
+			printf("  %.1f fps  (%lu IDR, %lu GDR, %lu ENH)  ring lag=%lu\n",
 			       interval_frames / s, interval_idr,
+			       interval_gdr, interval_enhance,
 			       (unsigned long)(
 				       __atomic_load_n(&r->hdr->write_idx,
 					       __ATOMIC_ACQUIRE) -
@@ -118,6 +129,7 @@ int main(int argc, char **argv)
 					       __ATOMIC_ACQUIRE)));
 			ts_report = ts_now;
 			interval_frames = 0; interval_idr = 0;
+			interval_gdr = 0; interval_enhance = 0;
 		}
 		if (duration > 0 && (ts_now.tv_sec - ts_start.tv_sec) >= duration)
 			break;
@@ -132,6 +144,9 @@ int main(int argc, char **argv)
 	printf("Frames:       %lu (%.1f fps)\n", total_frames, total_frames / total_s);
 	printf("IDR frames:   %lu (every ~%.1f frames)\n", total_idr,
 	       total_idr ? (double)total_frames / total_idr : 0.0);
+	printf("GDR frames:   %lu (cycle_len from last frame: %u)\n",
+	       total_gdr, (unsigned)last_gdr_len);
+	printf("ENH frames:   %lu\n", total_enhance);
 	printf("Data:         %.2f MB (%.2f Mbit/s)\n",
 	       total_bytes / (1024.0 * 1024.0),
 	       (total_bytes * 8.0) / (total_s * 1000000.0));

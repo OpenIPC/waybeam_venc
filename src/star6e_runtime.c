@@ -291,7 +291,9 @@ static uint32_t star6e_scene_frame_size(const MI_VENC_Stream_t *s)
 /* HEVC NAL types relevant for non-reference rewriting */
 #define HEVC_NAL_TRAIL_N 0
 #define HEVC_NAL_TRAIL_R 1
-#define SS_REFTYPE_ENHANCE_P_NOTFORREF 4
+/* STAR6E_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in star6e.h. Was locally
+ * 4 (HiSilicon value) — wrong for the SigmaStar enum, so the TRAIL_N rewrite
+ * marked referenced-enhance frames (or nothing under shallow SVC-T). */
 
 /* Locate the NAL header byte 0 inside a payload buffer that may or may not
  * begin with a start-code prefix (00 00 01 / 00 00 00 01).  Returns the
@@ -1047,7 +1049,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * Only active when refPred is enabled (ref_base > 0) — otherwise the
 	 * encoder produces a flat single-ref stream and every frame matters. */
 	if (vcfg->video0.ref_base > 0 &&
-	    stream.h265Info.refType == SS_REFTYPE_ENHANCE_P_NOTFORREF) {
+	    stream.h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF) {
 		star6e_patch_stream_to_trail_n(&stream);
 	}
 

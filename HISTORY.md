@@ -1,5 +1,48 @@
 # History
 
+## [0.43.0] - 2026-07-15
+
+Frame-SHM tagging for GDR and SVC-T enhance-layer frames.
+
+- **New `VencFrameMeta` flag bits** — `VENC_FRAME_FLAG_GDR` (0x02) and
+  `VENC_FRAME_FLAG_ENHANCE` (0x04) in `include/venc_frame_ring.h`. No
+  struct size change; uses bits 1–2 of the existing `flags` byte. Old
+  consumers ignore unknown bits — no ring version bump needed.
+- **GDR cycle position** — the former `reserved` field is replaced by
+  `gdr_pos` (0-based position in the refresh cycle) and `gdr_len` (cycle
+  length in frames). The transport layer can use these to apply stronger
+  FEC or ARQ near the end of the cycle where the refresh completes.
+  Cycle length is derived at pipeline init from `ceil(total_ctu_rows /
+  lines_per_frame)`. Counter resets on each IDR.
+- **GDR tagging** — when intra refresh is active (resilience preset is not
+  "off"), every non-IDR frame is tagged with `VENC_FRAME_FLAG_GDR` to
+  indicate a rolling intra stripe is present. Both Star6E and Maruko
+  backends track `gdr_active` on the output struct.
+- **SVC-T enhance tagging** — when temporal scalability is configured
+  (`ref_base > 0`), frames with `refType == ENHANCE_P_NOTFORREF` (the
+  droppable top enhance layer) are tagged with `VENC_FRAME_FLAG_ENHANCE`.
+  Both backends track `svct_active` on the output struct.
+- `frame_shm_consumer_test` reports GDR and ENHANCE frame counts plus
+  cycle length in both per-second interval output and the final summary.
+
+Device-verification fixes (Star6E IMX335 .201):
+- **Fixed: Star6E GDR/SVC-T fields zeroed by output reset.** The pipeline
+  set `gdr_active`/`svct_active`/`gdr_cycle_len` before
+  `bind_and_finalize_pipeline()`, which calls `star6e_output_init()` →
+  `star6e_output_reset()` (a full `memset`), wiping them — so Star6E emitted
+  zero GDR/ENHANCE tags. The assignment now runs after finalize.
+- **Fixed: wrong `ENHANCE_P_NOTFORREF` refType constant (both backends).**
+  It was `4` (the HiSilicon enum value); the SigmaStar i6e/i6c enum inserts
+  `BASE_P_REFTOIDR` at index 1, making `ENHANCE_P_NOTFORREF` = `5` (value 4
+  is `ENHANCE_P_REFBYENHANCE`, a referenced, non-droppable frame).
+  Consolidated into one shared define per backend
+  (`STAR6E_REFTYPE_ENHANCE_P_NOTFORREF` in `star6e.h`,
+  `MARUKO_REFTYPE_ENHANCE_P_NOTFORREF` in `maruko_video.h`), which also
+  corrects the pre-existing TRAIL_R→TRAIL_N error-resilience rewrite in
+  `star6e_runtime.c` / `maruko_pipeline.c` that shared the same wrong value.
+  Verified on i6e: 1:1 SVC-T → 50% frames tagged ENHANCE and rewritten to
+  TRAIL_N; reference frames stay TRAIL_R.
+
 ## [0.42.1] - 2026-07-11
 
 - **Frame-SHM wait wakeup hardening.** `venc_frame_ring_read_wait()` now re-checks
