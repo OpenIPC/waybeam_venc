@@ -92,6 +92,12 @@ typedef struct {
 	                          * sensor_fps).  Setting this above the frame
 	                          * period forces the sensor to skip frames,
 	                          * reducing effective output FPS. */
+	uint32_t gain_min;       /* min sensor gain floor (0 = use ISP bin
+	                          * default).  Raises the darkest-scene gain the
+	                          * supervisory AE may pick. */
+	uint32_t shutter_min_us; /* min exposure floor in µs (0 = use ISP bin
+	                          * default).  Overridden by shutter_rule_180,
+	                          * which pins min==max. */
 } VencConfigIsp;
 
 typedef struct {

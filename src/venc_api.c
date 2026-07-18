@@ -394,6 +394,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(isp, sensor_bin,         FT_STRING, MUT_LIVE),
 	FIELD(isp, gain_max,           FT_UINT,   MUT_LIVE),
 	FIELD(isp, shutter_max_us,     FT_UINT,   MUT_LIVE),
+	FIELD(isp, gain_min,           FT_UINT,   MUT_LIVE),
+	FIELD(isp, shutter_min_us,     FT_UINT,   MUT_LIVE),
 	FIELD(isp, awb_mode,           FT_STRING, MUT_LIVE),
 	FIELD(isp, awb_ct,             FT_UINT,   MUT_LIVE),
 
@@ -532,6 +534,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "isp.sensorBin", "isp.sensor_bin" },
 	{ "isp.gainMax", "isp.gain_max" },
 	{ "isp.shutterMaxUs", "isp.shutter_max_us" },
+	{ "isp.gainMin", "isp.gain_min" },
+	{ "isp.shutterMinUs", "isp.shutter_min_us" },
 	{ "isp.awbMode", "isp.awb_mode" },
 	{ "isp.awbCt", "isp.awb_ct" },
 	{ "video0.rcMode", "video0.rc_mode" },
@@ -1078,6 +1082,8 @@ typedef enum {
 	LIVE_GROUP_ROI,
 	LIVE_GROUP_GAIN_MAX,
 	LIVE_GROUP_SHUTTER_MAX,
+	LIVE_GROUP_GAIN_MIN,
+	LIVE_GROUP_SHUTTER_MIN,
 	LIVE_GROUP_AWB,
 	LIVE_GROUP_VERBOSE,
 	LIVE_GROUP_OUTGOING,
@@ -1238,6 +1244,10 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_GAIN_MAX;
 	if (strcmp(canonical_key, "isp.shutter_max_us") == 0)
 		return LIVE_GROUP_SHUTTER_MAX;
+	if (strcmp(canonical_key, "isp.gain_min") == 0)
+		return LIVE_GROUP_GAIN_MIN;
+	if (strcmp(canonical_key, "isp.shutter_min_us") == 0)
+		return LIVE_GROUP_SHUTTER_MIN;
 	if (strcmp(canonical_key, "isp.awb_mode") == 0 ||
 	    strcmp(canonical_key, "isp.awb_ct") == 0)
 		return LIVE_GROUP_AWB;
@@ -1281,6 +1291,10 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "isp.gain_max";
 	case LIVE_GROUP_SHUTTER_MAX:
 		return "isp.shutter_max_us";
+	case LIVE_GROUP_GAIN_MIN:
+		return "isp.gain_min";
+	case LIVE_GROUP_SHUTTER_MIN:
+		return "isp.shutter_min_us";
 	case LIVE_GROUP_AWB:
 		return "isp.awb_*";
 	case LIVE_GROUP_VERBOSE:
@@ -1436,6 +1450,10 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_gain_max != NULL;
 	case LIVE_GROUP_SHUTTER_MAX:
 		return g_cb->apply_shutter_max != NULL;
+	case LIVE_GROUP_GAIN_MIN:
+		return g_cb->apply_gain_min != NULL;
+	case LIVE_GROUP_SHUTTER_MIN:
+		return g_cb->apply_shutter_min != NULL;
 	case LIVE_GROUP_AWB:
 		return g_cb->apply_awb_mode != NULL;
 	case LIVE_GROUP_VERBOSE:
@@ -1496,6 +1514,12 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_SHUTTER_MAX:
 		dst->isp.shutter_max_us = src->isp.shutter_max_us;
+		break;
+	case LIVE_GROUP_GAIN_MIN:
+		dst->isp.gain_min = src->isp.gain_min;
+		break;
+	case LIVE_GROUP_SHUTTER_MIN:
+		dst->isp.shutter_min_us = src->isp.shutter_min_us;
 		break;
 	case LIVE_GROUP_AWB:
 		if (touched && touched->awb_mode) {
@@ -1619,6 +1643,10 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_gain_max(cfg->isp.gain_max);
 	case LIVE_GROUP_SHUTTER_MAX:
 		return g_cb->apply_shutter_max(cfg->isp.shutter_max_us);
+	case LIVE_GROUP_GAIN_MIN:
+		return g_cb->apply_gain_min(cfg->isp.gain_min);
+	case LIVE_GROUP_SHUTTER_MIN:
+		return g_cb->apply_shutter_min(cfg->isp.shutter_min_us);
 	case LIVE_GROUP_AWB:
 		mode = strcmp(cfg->isp.awb_mode, "ct_manual") == 0 ? 1 : 0;
 		return g_cb->apply_awb_mode(mode, cfg->isp.awb_ct);
