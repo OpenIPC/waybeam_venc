@@ -4,23 +4,20 @@
 #include <stdint.h>
 
 /** Supervisory AE configuration.
- *  The thread enforces FPV constraints (gain cap, shutter cap) via
- *  SetExposureLimit while the ISP's internal AE handles convergence. */
+ *  This thread is a pure exposure-limit enforcer: it re-asserts the user's
+ *  gain/shutter min/max on the ISP exposure limit each tick while the ISP's
+ *  internal (SDK firmware / bin) AE handles convergence.  It is the ONLY AE
+ *  path on Star6E — the historical aeEngine=custom userspace governor (with
+ *  its own fps-derived shutter cap and cold-boot fps kick) was retired; the
+ *  pipeline owns cold-boot fps recovery.  See star6e_runtime.c. */
 typedef struct {
-	uint32_t sensor_fps;       /* sensor output fps (for max shutter calc) */
 	uint32_t ae_fps;           /* monitoring rate in Hz (default 15) */
-	uint32_t shutter_max_us;   /* 0 = auto from sensor_fps */
+	uint32_t shutter_max_us;   /* max exposure ceiling µs (0 = bin default) */
 	int      shutter_pin;      /* pin minShutter==maxShutter (180° rule) */
 	uint32_t gain_max;         /* 0 = use ISP bin default */
 	uint32_t shutter_min_us;   /* min exposure floor µs (0 = bin default;
 	                            * ignored while shutter_pin is set) */
 	uint32_t gain_min;         /* min sensor gain floor (0 = bin default) */
-	int      limits_only;      /* 1 = run alongside the SDK firmware AE as a
-	                            * pure exposure-limit enforcer (sdk/legacy AE
-	                            * mode): enforce only explicit user gain/shutter
-	                            * min/max, skip the fps-derived shutter cap and
-	                            * the cold-boot fps kick (the pipeline owns those
-	                            * when legacy_ae is set). */
 	int      verbose;          /* enable periodic status logging */
 } Star6eCus3aConfig;
 

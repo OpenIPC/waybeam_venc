@@ -535,13 +535,17 @@ static int runtime_request_idr(void)
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
-static void start_custom_ae(const Star6ePipelineState *ps,
+/* Start the supervisory AE limit enforcer.  This is the sole AE path on
+ * Star6E: the ISP firmware/bin AE does convergence and this thread re-asserts
+ * the user's gain/shutter min/max on the exposure limit each tick.  The
+ * historical aeEngine=custom userspace governor was retired — both engine
+ * values now run this same enforcer (see start_ae_enforcer's caller). */
+static void start_ae_enforcer(const Star6ePipelineState *ps,
 	const VencConfig *vcfg)
 {
 	Star6eCus3aConfig ae_cfg;
 
 	star6e_cus3a_config_defaults(&ae_cfg);
-	ae_cfg.sensor_fps = ps->sensor.fps;
 	if (vcfg->isp.ae_fps > 0)
 		ae_cfg.ae_fps = vcfg->isp.ae_fps;
 	if (vcfg->isp.gain_max > 0)
@@ -556,10 +560,6 @@ static void start_custom_ae(const Star6ePipelineState *ps,
 		ae_cfg.gain_min = vcfg->isp.gain_min;
 	if (vcfg->isp.shutter_min_us > 0)
 		ae_cfg.shutter_min_us = vcfg->isp.shutter_min_us;
-	/* legacy_ae (aeEngine=sdk): the SDK firmware AE does convergence and
-	 * this thread runs as a pure limit enforcer beside it (limits_only) so
-	 * the gain/shutter min/max knobs work without switching to custom AE. */
-	ae_cfg.limits_only = vcfg->isp.legacy_ae ? 1 : 0;
 	ae_cfg.verbose = vcfg->system.verbose;
 	star6e_cus3a_start(&ae_cfg);
 }
@@ -817,10 +817,11 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	scene_init(&ctx->scene, ctx->vcfg.video0.scene_threshold,
 		ctx->vcfg.video0.scene_holdoff);
 
-	/* Custom AE always spins the thread; legacy (sdk) AE spins it only as a
-	 * limits-only enforcer, and only when aeFps>0 gives it a tick rate. */
-	if (!vcfg->isp.legacy_ae || vcfg->isp.ae_fps > 0)
-		start_custom_ae(ps, vcfg);
+	/* AE runs in ONE mode on Star6E: the SDK firmware/bin AE converges and
+	 * the supervisory thread enforces the gain/shutter limits beside it.  The
+	 * thread needs aeFps>0 for a tick rate. */
+	if (vcfg->isp.ae_fps > 0)
+		start_ae_enforcer(ps, vcfg);
 
 	if (vcfg->fpv.roi_enabled) {
 		star6e_controls_apply_roi_qp(vcfg->fpv.roi_qp);
@@ -1361,7 +1362,7 @@ static int star6e_runner_run(void *opaque)
 	Star6eRunnerContext *ctx = opaque;
 	struct timespec cus3a_ts_last = {0};
 	struct timespec run_start;
-	int legacy_fps_kick_done = 0;
+	int cold_boot_fps_kick_done = 0;
 	unsigned int idle_counter = 0;
 	int handled;
 	int ret;
@@ -1423,18 +1424,17 @@ static int star6e_runner_run(void *opaque)
 			return ret;
 		}
 
-		/* One-shot legacy-AE cold-boot fps re-kick ~1.5s after start,
-		 * once the ISP bin load + AE have settled (the init-time kick
-		 * fires too early and doesn't stick on a cold boot).  No-op in
-		 * CUS3A mode (its thread does the frame-15 kick). */
-		if (!legacy_fps_kick_done) {
+		/* One-shot cold-boot fps re-kick ~1.5s after start, once the ISP
+		 * bin load + AE have settled (the init-time kick fires too early
+		 * and doesn't stick on a cold boot). */
+		if (!cold_boot_fps_kick_done) {
 			struct timespec now;
 			clock_gettime(CLOCK_MONOTONIC, &now);
 			if ((now.tv_sec - run_start.tv_sec) +
 			    (now.tv_nsec - run_start.tv_nsec) / 1e9 >= 1.5) {
-				star6e_pipeline_legacy_fps_rekick(&ctx->ps,
+				star6e_pipeline_cold_boot_fps_rekick(&ctx->ps,
 					&ctx->vcfg);
-				legacy_fps_kick_done = 1;
+				cold_boot_fps_kick_done = 1;
 			}
 		}
 	}

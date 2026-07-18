@@ -89,12 +89,10 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->sensor.unlock_value = 0x80;
 	cfg->sensor.unlock_dir = 0;
 
-	/* isp.  ae_engine drives both per-backend struct fields; defaults
-	 * to "sdk" (Star6E legacy_ae=true / Maruko ae_mode="native"). */
+	/* isp.  ae_engine is "sdk"-only (the SDK firmware/bin AE drives
+	 * convergence; a supervisory thread enforces limits beside it). */
 	cfg->isp.sensor_bin[0] = '\0';
 	safe_strcpy(cfg->isp.ae_engine, sizeof(cfg->isp.ae_engine), "sdk");
-	cfg->isp.legacy_ae = true;
-	safe_strcpy(cfg->isp.ae_mode, sizeof(cfg->isp.ae_mode), "native");
 	cfg->isp.ae_fps = 15;
 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
 	cfg->isp.awb_ct = 5500;
@@ -280,33 +278,19 @@ static void load_sensor(const cJSON *root, VencConfigSensor *s)
 	 * silently ignored on read so existing configs migrate cleanly. */
 }
 
-/* ae_engine → per-backend struct field expansion.
+/* ae_engine validation.  "sdk" is the only supported value: the SDK
+ * firmware/bin AE drives convergence, with a supervisory limit enforcer beside
+ * it (Star6E) or the paced-native 3A (Maruko).  The historical "custom"
+ * userspace governor was retired (Maruko 0.22.0, Star6E 0.47.0) and the
+ * "custom" value removed entirely.
  *
- * Star6E:
- *   "sdk"    → legacy_ae=true   (ISP firmware AE; skip start_custom_ae)
- *   "custom" → legacy_ae=false  (start_custom_ae spins cus3a)
- *
- * Maruko: IGNORED since 0.22.0 — paced native 3A is the only AE mode
- *   (vendor AE+AWB, RunOnce pacer at sensor_fps/3, floor 30 Hz; beats
- *   both historical modes on CPU and image quality).  The field is still
- *   parsed so existing configs load cleanly; "custom" logs a retirement
- *   notice at pipeline init.
- *
- * Unknown values fall back to "sdk".  Returns 0 on recognised value,
- * -1 if `name` is unrecognised (caller warns and falls back). */
+ * Returns 0 for "sdk" (or empty → "sdk"), -1 otherwise (caller warns and
+ * falls back to "sdk", so old configs carrying "custom" still load). */
 static int apply_ae_engine(const char *name, VencConfigIsp *s)
 {
 	const char *want = (!name || !*name) ? "sdk" : name;
 	if (strcmp(want, "sdk") == 0) {
 		safe_strcpy(s->ae_engine, sizeof(s->ae_engine), "sdk");
-		s->legacy_ae = true;
-		safe_strcpy(s->ae_mode, sizeof(s->ae_mode), "native");
-		return 0;
-	}
-	if (strcmp(want, "custom") == 0) {
-		safe_strcpy(s->ae_engine, sizeof(s->ae_engine), "custom");
-		s->legacy_ae = false;
-		safe_strcpy(s->ae_mode, sizeof(s->ae_mode), "throttle");
 		return 0;
 	}
 	return -1;
@@ -318,16 +302,14 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 	if (!obj) return;
 	safe_strcpy(s->sensor_bin, sizeof(s->sensor_bin),
 		json_get_string(obj, "sensorBin", s->sensor_bin));
-	/* ae_engine is the sole AE selector.  Legacy `legacyAe` /
-	 * `aeMode` keys are silently dropped on load — existing configs
-	 * migrate to the ae_engine default ("sdk") which matches the
-	 * historical legacyAe=true / aeMode="native" defaults. */
+	/* ae_engine is "sdk"-only.  Retired `legacyAe` / `aeMode` / the "custom"
+	 * value are dropped on load — existing configs migrate to "sdk". */
 	{
 		const char *engine = json_get_string(obj, "aeEngine",
 			s->ae_engine);
 		if (apply_ae_engine(engine, s) != 0) {
-			fprintf(stderr, "[config] WARNING: unknown isp.aeEngine "
-				"'%s' (use sdk|custom) — falling back to sdk\n",
+			fprintf(stderr, "[config] WARNING: unsupported isp.aeEngine "
+				"'%s' (only 'sdk' is supported) — using sdk\n",
 				engine);
 			(void)apply_ae_engine("sdk", s);
 		}

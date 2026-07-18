@@ -784,9 +784,8 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 			return "awb_mode must be 'auto' or 'ct_manual'";
 	}
 	if (strcmp(key, "isp.ae_engine") == 0) {
-		if (strcmp(cfg->isp.ae_engine, "sdk") != 0 &&
-		    strcmp(cfg->isp.ae_engine, "custom") != 0)
-			return "ae_engine must be 'sdk' or 'custom'";
+		if (strcmp(cfg->isp.ae_engine, "sdk") != 0)
+			return "ae_engine must be 'sdk'";
 	}
 	if (strcmp(key, "isp.sensor_bin") == 0) {
 		/* Empty string opts into the /etc/sensors/<sensor>.bin fallback;

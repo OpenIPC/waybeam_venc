@@ -1,5 +1,37 @@
 # History
 
+## [0.47.0] - 2026-07-18
+
+Retire the Star6E `aeEngine=custom` userspace AE and remove the `custom` value
+entirely (mirrors Maruko's 0.22.0 move).
+
+- **`aeEngine=custom` is removed.**  The `cus3a` thread never did AE convergence —
+  the ISP firmware/bin AE always drives it, in both engine modes.  Since 0.46.0
+  made the thread enforce gain/shutter limits under `sdk` too, the only thing
+  `custom` still did was run the fps-derived shutter cap and the cold-boot fps
+  kick from the thread instead of the pipeline.  Star6E now always runs the single
+  limits-only enforcer beside the firmware AE.  `isp.aeEngine` accepts only `sdk`;
+  any other value (including a stale `custom` in an old config) warns and falls
+  back to `sdk`, so existing configs still load.
+- Behaviour for the default (`sdk`) path is unchanged: convergence, cold-boot fps
+  recovery (pipeline `cap_exposure_for_fps` + `MI_SNR_SetFps` kicks, now
+  unconditional), and gain/shutter min/max enforcement all behave exactly as in
+  0.46.0.  The retirement does **not** adopt custom's continuous fps-derived
+  shutter cap — the pipeline already caps at init and on bin reload.
+- Removed the now-dead custom-only internals from `star6e_cus3a` (the
+  `limits_only`/`sensor_fps` config fields, the `MI_SNR_SetFps` symbol + the
+  frame-15 cold-boot kick, and `compute_max_shutter`'s fps fallback) and made the
+  pipeline's three cold-boot `SetFps` kicks unconditional.  `start_custom_ae` →
+  `start_ae_enforcer`, `star6e_pipeline_legacy_fps_rekick` →
+  `star6e_pipeline_cold_boot_fps_rekick`.
+- Dropped the vestigial `VencConfigIsp::legacy_ae` / `ae_mode` derived fields, the
+  `MarukoConfig::ae_mode` mirror, and both backends' retirement-NOTE branches —
+  `custom` no longer exists to record.
+- `make verify` clean both backends; `test-werror` + `test-asan` **1979/0**.
+  Device-verified on `.201` (IMX335): `sdk` enforcer clamps the live firmware AE
+  (gainMax 5000→gain 5000, revert→30000); cold-boot fps holds 60.  `.201`
+  restored to its 0.45.0 baseline.
+
 ## [0.46.0] - 2026-07-18
 
 Manual minimum exposure / gain floors for the supervisory AE.
