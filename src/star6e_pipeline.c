@@ -361,22 +361,22 @@ void star6e_pipeline_cus3a_reset(void)
 	g_cus3a_handoff_done = 0;
 }
 
-/* Delayed legacy-AE cold-boot fps re-kick.  The pipeline-init MI_SNR_SetFps
+/* Delayed cold-boot fps re-kick.  The pipeline-init MI_SNR_SetFps
  * (bind_and_finalize_pipeline) fires before the ISP bin's AE has settled, so on
  * a cold boot the sensor's physical timing register can be left below the
  * configured fps (observed ~70fps @ target 90; a warm restart keeps the kernel
- * sensor state so it shows ~90).  CUS3A handles this via its frame-15 thread
- * kick; legacy AE has no periodic thread, so re-issue SetFps once from the run
- * loop ~1.5s after start, after the bin load + AE converge, to force the sensor
- * register to the target.  No-op when legacy_ae is off (CUS3A path) or fps is 0. */
-void star6e_pipeline_legacy_fps_rekick(const Star6ePipelineState *state,
+ * sensor state so it shows ~90).  The supervisory AE enforcer only touches the
+ * ISP exposure limit, not the sensor timing register, so re-issue SetFps once
+ * from the run loop ~1.5s after start, after the bin load + AE converge, to
+ * force the sensor register to the target.  No-op when fps is 0. */
+void star6e_pipeline_cold_boot_fps_rekick(const Star6ePipelineState *state,
 	const VencConfig *vcfg)
 {
-	if (!state || !vcfg || !vcfg->isp.legacy_ae)
+	if (!state || !vcfg)
 		return;
 	if (state->sensor.fps == 0)
 		return;
-	printf("[waybeam] legacy cold-boot fps re-kick: SetFps(%u)\n",
+	printf("[waybeam] cold-boot fps re-kick: SetFps(%u)\n",
 		state->sensor.fps);
 	fflush(stdout);
 	MI_SNR_SetFps(state->sensor.pad_id, state->sensor.fps);
@@ -1879,14 +1879,14 @@ int star6e_pipeline_load_isp_bin_live(const char *configured_path,
 		star6e_pipeline_cap_exposure_for_fps(vcfg->video0.fps,
 			vcfg->isp.shutter_rule_180);
 
-	/* Legacy-AE writes the bin's cold-boot shutter (often ~100 ms) directly
-	 * to the sensor register, which the SetExposureLimit cap above doesn't
-	 * touch.  Kick MI_SNR_SetFps to force the sensor driver to reconfigure
-	 * timing — without this, swapping to a darker bin can lock the sensor
-	 * at ~12 fps until reinit (cold_boot_fps_lock memory).  CUS3A mode
-	 * handles this via its periodic fps_kick logic, so skip the kick when
-	 * legacy_ae is off. */
-	if (vcfg->isp.legacy_ae && sensor_framerate > 0) {
+	/* The ISP bin's AE writes the bin's cold-boot shutter (often ~100 ms)
+	 * directly to the sensor register, which the SetExposureLimit cap above
+	 * doesn't touch.  Kick MI_SNR_SetFps to force the sensor driver to
+	 * reconfigure timing — without this, swapping to a darker bin can lock
+	 * the sensor at ~12 fps until reinit (cold_boot_fps_lock memory).  The
+	 * supervisory AE enforcer only touches the exposure limit, so the
+	 * pipeline owns this kick. */
+	if (sensor_framerate > 0) {
 		MI_SNR_SetFps(pad_id, sensor_framerate);
 		/* SetFps can reprogram sensor timing, which on some sensors also
 		 * resets the orientation registers.  This is a discrete runtime
@@ -2078,14 +2078,13 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate,
 		vcfg->isp.shutter_rule_180);
 
-	/* Cold-boot fix: with legacyAe the ISP bin's AE may initialize the
-	 * sensor at a shutter exceeding the frame period.  SetExposureLimit
-	 * only constrains the AE algorithm, not the physical sensor register.
-	 * MI_SNR_SetFps forces the sensor driver to reconfigure timing,
-	 * resetting the shutter to fit the frame period.  When CUS3A is
-	 * active it handles this via the fps_kick logic; when legacyAe is
-	 * active we must do it here. */
-	if (vcfg->isp.legacy_ae && pconf->exposure_cap_us > 0 &&
+	/* Cold-boot fix: the ISP bin's AE may initialize the sensor at a shutter
+	 * exceeding the frame period.  SetExposureLimit only constrains the AE
+	 * algorithm, not the physical sensor register.  MI_SNR_SetFps forces the
+	 * sensor driver to reconfigure timing, resetting the shutter to fit the
+	 * frame period.  The supervisory AE enforcer only touches the exposure
+	 * limit, so the pipeline owns this kick. */
+	if (pconf->exposure_cap_us > 0 &&
 	    pconf->sensor_framerate > 0) {
 		MI_SNR_SetFps(state->sensor.pad_id, pconf->sensor_framerate);
 	}

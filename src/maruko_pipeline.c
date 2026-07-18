@@ -2650,12 +2650,9 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		 * thread ticks the same algo at sensor_fps/3 (floor 30 Hz).
 		 * Device-measured @1080p100: 70.0% (old native) / 52.8% (old
 		 * throttle) → 39.4%, with full vendor image quality.  The
-		 * historical isp.aeEngine modes are accepted but ignored —
-		 * paced beats both on every axis (HISTORY 0.22.0). */
-		if (ctx->cfg.ae_mode[0] &&
-		    strcmp(ctx->cfg.ae_mode, "throttle") == 0)
-			printf("> [maruko] NOTE: isp.aeEngine=custom is "
-				"retired; paced native 3A is always used\n");
+		 * historical isp.aeEngine=custom mode was retired in 0.22.0 and
+		 * the value removed entirely in 0.47.0 — paced native is the only
+		 * AE (HISTORY 0.22.0). */
 
 		/* Experimental bench toggle: WAYBEAM_NO_3A=1 freezes 3A entirely —
 		 * pause the vendor auto-run (SetRunMode OFF) and start NO pacer /

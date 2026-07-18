@@ -1380,7 +1380,7 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
-| `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
+| `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
 - `0.46.0` (additive — new config fields):

@@ -199,7 +199,10 @@ static int test_load_full_json(void)
 		 * here proves migration: the JSON value is ignored and the
 		 * always-on default (true) drives the cold-boot register hook. */
 		"  \"sensor\": { \"index\": 2, \"mode\": 3, \"unlockEnabled\": false },"
+		/* aeEngine "custom" is retired/removed — parser must migrate a
+		 * stale value to "sdk" (with a warning) rather than reject it. */
 		"  \"isp\": { \"sensorBin\": \"/etc/sensors/imx415.bin\","
+		"    \"aeEngine\": \"custom\","
 		"    \"gainMax\": 8192, \"shutterMaxUs\": 8000,"
 		"    \"gainMin\": 1500, \"shutterMinUs\": 200 },"
 		"  \"image\": { \"mirror\": true, \"flip\": true },"
@@ -230,6 +233,8 @@ static int test_load_full_json(void)
 	CHECK("load_unlock_legacy_ignored",
 		cfg.sensor.unlock_enabled == true);   /* JSON had false; default wins */
 	CHECK("load_isp_bin", strcmp(cfg.isp.sensor_bin, "/etc/sensors/imx415.bin") == 0);
+	CHECK("load_ae_engine_custom_migrates_sdk",
+		strcmp(cfg.isp.ae_engine, "sdk") == 0);   /* JSON had "custom"; falls back */
 	CHECK("load_isp_gain_max", cfg.isp.gain_max == 8192);
 	CHECK("load_isp_shutter_max", cfg.isp.shutter_max_us == 8000);
 	CHECK("load_isp_gain_min", cfg.isp.gain_min == 1500);

@@ -73,7 +73,6 @@ typedef int (*fn_ae_set_exposure_limit_t)(int channel,
 /* MI_SNR_GetPlaneInfo reads the actual sensor register values (shutter,
  * gain) which may differ from the ISP AE limit/target on cold boot. */
 typedef int (*fn_snr_get_plane_info_t)(int pad, int plane_id, void *info);
-typedef int (*fn_snr_set_fps_t)(int pad, unsigned int fps);
 
 /* ── Module state ────────────────────────────────────────────────────── */
 
@@ -82,7 +81,7 @@ typedef struct {
 	Star6eCus3aConfig cfg;
 
 	/* constraint limits — written by main thread, read by monitor */
-	volatile uint32_t shutter_max_us;   /* 0 = auto from sensor_fps */
+	volatile uint32_t shutter_max_us;   /* 0 = use ISP bin default */
 	int shutter_pin;                    /* pin minShutter==maxShutter */
 	volatile uint32_t gain_max;         /* 0 = use ISP bin default */
 	volatile uint32_t shutter_min_us;   /* 0 = bin default; ignored if pinned */
@@ -110,7 +109,6 @@ typedef struct {
 	fn_ae_get_exposure_limit_t  fn_get_exposure_limit;
 	fn_ae_set_exposure_limit_t  fn_set_exposure_limit;
 	fn_snr_get_plane_info_t     fn_get_plane_info;
-	fn_snr_set_fps_t            fn_set_fps;
 	void                       *h_sensor;
 } Cus3aState;
 
@@ -121,23 +119,17 @@ static Cus3aState g_cus3a;
 void star6e_cus3a_config_defaults(Star6eCus3aConfig *cfg)
 {
 	memset(cfg, 0, sizeof(*cfg));
-	cfg->sensor_fps = 120;
 	cfg->ae_fps = 15;
 }
 
+/* The user's explicit shutter ceiling (0 = none).  This enforcer never
+ * imposes an fps-derived cap of its own — the pipeline's exposure cap
+ * (cap_exposure_for_fps + the cold-boot SetFps kick) owns frame-period
+ * protection.  When 0, the enforcement loop restores the bin's calibrated
+ * ceiling via bin_max_shutter_us. */
 static uint32_t compute_max_shutter(const Cus3aState *s)
 {
-	if (s->shutter_max_us > 0)
-		return s->shutter_max_us;
-	/* In limits-only mode (running beside the SDK firmware AE) do NOT
-	 * impose the fps-derived shutter cap — the pipeline's legacy exposure
-	 * cap owns that.  0 = "no user shutter ceiling" so the enforcement
-	 * loop leaves maxShutterUs untouched. */
-	if (s->cfg.limits_only)
-		return 0;
-	if (s->cfg.sensor_fps > 0)
-		return 1000000 / s->cfg.sensor_fps;
-	return 8333;  /* fallback ~120fps */
+	return s->shutter_max_us;
 }
 
 static int resolve_symbols(Cus3aState *s)
@@ -179,8 +171,6 @@ static int resolve_symbols(Cus3aState *s)
 	if (s->h_sensor) {
 		s->fn_get_plane_info = (fn_snr_get_plane_info_t)dlsym(
 			s->h_sensor, "MI_SNR_GetPlaneInfo");
-		s->fn_set_fps = (fn_snr_set_fps_t)dlsym(
-			s->h_sensor, "MI_SNR_SetFps");
 	}
 
 	if (!s->fn_get_hw_stats || !s->fn_get_ae_status) {
@@ -227,7 +217,6 @@ static void *cus3a_thread(void *arg)
 	uint32_t applied_gain_max = 0;
 	uint32_t applied_shutter_min = 0;
 	uint32_t applied_gain_min = 0;
-	int fps_kick_done = 0;
 
 	ae_hw = malloc(sizeof(Cus3aAeHwStats));
 	if (!ae_hw) {
@@ -406,34 +395,10 @@ static void *cus3a_thread(void *arg)
 				}
 			}
 
-			/* Cold-boot fps kick (CUS3A path).  On cold boot the ISP
-			 * bin AE can leave the sensor timing register below the
-			 * target fps (observed ~70fps @ target 90).
-			 * SetExposureLimit only constrains the AE algorithm, not
-			 * the physical register; MI_SNR_SetFps forces the sensor
-			 * driver to reconfigure timing.
-			 *
-			 * Fire it UNCONDITIONALLY once at frame 15 (~1s, after
-			 * the ISP bin load + 3A handoff settle).  The prior gate
-			 * only kicked when pi.shutter > applied_shutter_max, but
-			 * the cold-boot lock does not always manifest as
-			 * shutter-above-cap (and applied_shutter_max may not be
-			 * read yet), so that gate silently missed the 70fps case.
-			 * The pipeline-level kick is skipped in CUS3A mode, so
-			 * this is the sole deterministic kick.  Cus3a_thread
-			 * restarts on reinit, so fps_kick_done re-arms each
-			 * pipeline cycle. */
-			if (frames == 15 && !fps_kick_done && !s->cfg.limits_only &&
-			    s->fn_set_fps && s->cfg.sensor_fps > 0) {
-				printf("[cus3a] cold-boot fps kick: "
-				    "SetFps(%u)\n", s->cfg.sensor_fps);
-				s->fn_set_fps(0, s->cfg.sensor_fps);
-				/* Orientation (image.flip/mirror) is applied once
-				 * at bring-up and holds across this cold-boot fps
-				 * kick — device-verified on IMX335, no re-apply
-				 * needed here.  See star6e_runtime.c. */
-				fps_kick_done = 1;
-			}
+			/* Cold-boot fps recovery is owned by the pipeline
+			 * (cap_exposure_for_fps + MI_SNR_SetFps kicks in
+			 * star6e_pipeline.c) — this enforcer no longer touches
+			 * the sensor timing register. */
 
 			/* Independent shutter clamp: if the sensor shutter crept
 			 * above our cap during the first second, re-apply the
