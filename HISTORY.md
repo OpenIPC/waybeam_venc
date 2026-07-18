@@ -1,5 +1,19 @@
 # History
 
+## [0.42.1] - 2026-07-11
+
+- **Frame-SHM wait wakeup hardening.** `venc_frame_ring_read_wait()` now re-checks
+  the ring after publishing `consumer_waiting` and before entering the futex wait,
+  closing a lost-wake race where a consumer could sleep even though a frame had
+  already been committed. The standalone frame-SHM consumer now sizes its read
+  buffer from the attached ring header instead of assuming 512 KiB slots.
+- **Frame-SHM ring geometry tuned for realtime.** The `frame-shm://` ring now
+  allocates 8 slots × 384 KiB (~3 MiB) instead of 16 × 512 KiB (~8 MiB) on both
+  Star6E and Maruko backends. Observed ≤1080p IDRs are ≤28 KiB, so 384 KiB
+  retains large headroom while a drop-not-block realtime ring needs far fewer
+  than 16 in-flight slots. Consumers read the geometry from the ring header, so
+  no consumer change is required.
+
 ## [0.42.0] - 2026-07-11
 
 Full-frame SHM emissions — a new `frame-shm://` URI scheme that transfers

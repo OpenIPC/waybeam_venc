@@ -237,7 +237,7 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 
 	if (setup->uri.type == VENC_OUTPUT_URI_FRAME_SHM) {
 		output->frame_ring = venc_frame_ring_create(
-			setup->uri.endpoint, 16, 512 * 1024);
+			setup->uri.endpoint, 8, 384 * 1024);
 		if (!output->frame_ring) {
 			fprintf(stderr, "ERROR: venc_frame_ring_create(%s) failed\n",
 				setup->uri.endpoint);
