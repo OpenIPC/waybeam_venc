@@ -3,6 +3,7 @@
 #include "attitude_est.h"
 #include "audio_codec.h"
 #include "debug_osd.h"
+#include "detect_wire.h"
 #include "idr_rate_limit.h"
 #include "imu_bmi270.h"
 #include "imu_ring.h"
@@ -12,9 +13,11 @@
 #include "sdk_quiet.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
+#include "star6e_ipu_yolo.h"
 #include "star6e_iq.h"
 #include "star6e_pipeline.h"
 #include "star6e.h"
+#include "timing.h"
 #include "venc_api.h"
 #include "venc_config.h"
 #include "venc_httpd.h"
@@ -730,7 +733,7 @@ static void *dual_rec_thread_fn(void *arg)
 					 * knob for inter-frame-coded video. */
 					(void)star6e_video_send_frame(&d->video,
 						&d->output, &stream, 1, 0, NULL,
-						NULL);
+						NULL, NULL, 0);
 				} else if (d->ts_recorder) {
 					star6e_ts_recorder_write_stream(
 						d->ts_recorder, &stream);
@@ -1100,9 +1103,36 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		if (vcfg->attitude.enabled && ps->imu)
 			att_ptr = attitude_frame_update(vcfg, &att_info);
 
+		/* Detection: serialise the latest IPU snapshot into a DETECT
+		 * trailer, but only when detection is active AND a sidecar
+		 * subscriber is live — the blob is dead weight otherwise.  The
+		 * object cap keeps the trailer well under the datagram buffer,
+		 * so the full buffer is a safe budget. */
+		uint8_t detect_buf[RTP_SIDECAR_DGRAM_MAX];
+		const void *detect_ptr = NULL;
+		uint16_t detect_len = 0;
+		if (vcfg->detect.enabled &&
+		    rtp_sidecar_is_subscribed(&ps->video.sidecar)) {
+			Star6eDetectSnapshot snap;
+			if (star6e_ipu_yolo_snapshot(ps, &snap)) {
+				uint64_t now_us = wb_monotonic_us();
+				uint64_t age = now_us > snap.produced_us
+					? (now_us - snap.produced_us) / 1000 : 0;
+				size_t len = detect_wire_build(detect_buf,
+					sizeof(detect_buf), snap.boxes, snap.count,
+					RTP_SIDECAR_DETECT_MODEL_VISDRONE, snap.seq,
+					age > 0xFFFF ? 0xFFFF : (uint16_t)age,
+					snap.net_w, snap.net_h, sizeof(detect_buf));
+				if (len > 0) {
+					detect_ptr = detect_buf;
+					detect_len = (uint16_t)len;
+				}
+			}
+		}
+
 		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
 			ps->output_enabled, vcfg->system.verbose, &enc_info,
-			att_ptr);
+			att_ptr, detect_ptr, detect_len);
 	}
 
 	/* Orientation (image.flip / image.mirror) is applied once at bring-up
@@ -1292,6 +1322,74 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 					"%ux%u+%u+%u",
 					zoom.crop_w, zoom.crop_h,
 					zoom.crop_x, zoom.crop_y);
+			}
+
+			/* Detection boxes (detect.osd): scale net-space boxes
+			 * onto the canvas — the port1 tap squashes the full
+			 * FOV linearly per axis, so net->canvas is a straight
+			 * ratio (the same mapping the sidecar normalizes by).
+			 * A stale snapshot (reader stalled) is not drawn. */
+			if (vcfg->detect.enabled && vcfg->detect.osd) {
+				Star6eDetectSnapshot snap;
+				static const uint16_t det_col[] = {
+					DEBUG_OSD_RED, DEBUG_OSD_GREEN,
+					DEBUG_OSD_YELLOW, DEBUG_OSD_CYAN,
+					DEBUG_OSD_BLUE, DEBUG_OSD_WHITE,
+				};
+				const unsigned ncol =
+					sizeof(det_col) / sizeof(det_col[0]);
+
+				if (star6e_ipu_yolo_snapshot(ps, &snap) &&
+				    snap.count > 0 &&
+				    snap.net_w && snap.net_h &&
+				    wb_monotonic_us() - snap.produced_us <
+					700000) {
+					uint32_t cw = ps->image_width;
+					uint32_t chh = ps->image_height;
+					int di;
+
+					for (di = 0; di < snap.count; di++) {
+						const DetectBox *b =
+							&snap.boxes[di];
+						/* Plugin coords cross an ABI
+						 * boundary — clamp the low
+						 * side before the float ->
+						 * unsigned conversion (UB on
+						 * negatives). */
+						float fx1 = b->x1 < 0.0f ?
+							0.0f : b->x1;
+						float fy1 = b->y1 < 0.0f ?
+							0.0f : b->y1;
+						float fx2 = b->x2 < 0.0f ?
+							0.0f : b->x2;
+						float fy2 = b->y2 < 0.0f ?
+							0.0f : b->y2;
+						uint32_t x1 = (uint32_t)(fx1
+							* cw / snap.net_w);
+						uint32_t y1 = (uint32_t)(fy1
+							* chh / snap.net_h);
+						uint32_t x2 = (uint32_t)(fx2
+							* cw / snap.net_w);
+						uint32_t y2 = (uint32_t)(fy2
+							* chh / snap.net_h);
+
+						if (x2 >= cw)  x2 = cw - 1;
+						if (y2 >= chh) y2 = chh - 1;
+						if (x1 >= x2 || y1 >= y2)
+							continue;
+						debug_osd_rect(ps->debug_osd,
+							(uint16_t)x1,
+							(uint16_t)y1,
+							(uint16_t)(x2 - x1),
+							(uint16_t)(y2 - y1),
+							det_col[(unsigned)
+								b->cls % ncol],
+							0);
+					}
+					debug_osd_text(ps->debug_osd,
+						osd_row++, "det", "%d",
+						snap.count);
+				}
 			}
 		}
 

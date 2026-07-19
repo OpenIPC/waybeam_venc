@@ -1,5 +1,6 @@
 #include "star6e_pipeline.h"
 #include "star6e_framing.h"
+#include "star6e_ipu_yolo.h"
 #include "star6e_framing_host.h"
 #if HAVE_FRAMING_STAB
 #include "star6e_framing_stab.h"
@@ -2013,6 +2014,20 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
 	}
 
+	/* IPU object-detection tap (VPE port1).  Mutually exclusive with a
+	 * framing module (stab), which already owns the single VPE port1.  Skip
+	 * with a note when framing is active; otherwise start best-effort (never
+	 * fatal to the stream). */
+	if (vcfg->detect.enabled) {
+		if (g_framing) {
+			fprintf(stderr, "[waybeam] detect: skipped — video0.framing "
+				"owns VPE port1 (detect and stab are mutually "
+				"exclusive)\n");
+		} else {
+			star6e_ipu_yolo_start(state, vcfg);
+		}
+	}
+
 	/* Bring up the JPEG snapshot subsystem on the same VPE source port the
 	 * main channel just bound to.  Failure is non-fatal — /api/v1/snapshot.jpg
 	 * just serves 503 if init fails.  Config from venc.json snapshot.*
@@ -2276,6 +2291,12 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	 * must run while the SDK still holds a consistent view of the VPE
 	 * source.  Idempotent; safe even if init was skipped or failed. */
 	venc_jpeg_shutdown();
+
+	/* Stop the IPU detection reader (joins before DisablePort(0,1), MMU-safe)
+	 * and tear down its backend.  Idempotent; no-op when detection inactive.
+	 * Detect and framing are mutually exclusive, so at most one of these
+	 * two blocks does work. */
+	star6e_ipu_yolo_stop(state);
 
 	/* Stop the stabilization detector thread: park the detector, disable the
 	 * tiny port1 tap, and join the thread; port0 stays a normal VPE→VENC bind

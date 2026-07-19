@@ -677,6 +677,12 @@ const TOOLTIPS = {
 'attitude.mountDeg':'Legacy output-side rotation about the camera axis (0/90/180/270). Prefer axisFwd/axisDown; leave 0 after axis calibration. Requires restart',
 'attitude.invertRoll':'Flip roll sign after mount rotation (use if the AHI tilts the wrong way). Requires restart',
 'attitude.invertPitch':'Flip pitch sign after mount rotation. Requires restart',
+'detect.enabled':'Run the NPU object detector (Star6E only). Needs a detector plugin .so deployed on the device. Mutually exclusive with video0.framing=stab (both claim VPE port1). Requires restart',
+'detect.plugin':'Path to the detector plugin .so. The plugin owns the model runtime and decode; it is deployed separately from waybeam. Requires restart',
+'detect.modelPath':'Compiled model file handed to the plugin. Empty = plugin default. Requires restart',
+'detect.firmwarePath':'NPU firmware handed to the plugin. Empty = plugin/SDK default. Requires restart',
+'detect.inferInterval':'Run inference on 1 of every N captured frames. 1 = every frame. Default: 1. Requires restart',
+'detect.osd':'Draw detection boxes on the debug OSD (needs debug.showOsd). Detections always stream on the RTP sidecar DETECT trailer regardless. Requires restart',
 'record.enabled':'Enable recording on startup. Requires restart',
 'record.dir':'Recording output directory. Default: /tmp. Requires restart',
 'record.format':'Recording container format: ts (MPEG-TS) or hevc (raw). Default: ts. Requires restart',
@@ -734,6 +740,7 @@ const SECTIONS = [
 {id:'fpv',title:'FPV',keys:['fpv.roiEnabled','fpv.roiQp','fpv.roiSteps','fpv.roiCenter','fpv.noiseLevel']},
 {id:'imu',title:'IMU',keys:['imu.enabled','imu.i2cDevice','imu.i2cAddr','imu.sampleRateHz','imu.gyroRangeDps','imu.calFile','imu.calSamples']},
 {id:'attitude',title:'Attitude',keys:['attitude.enabled','attitude.axisFwd','attitude.axisDown','attitude.trimRollDeg','attitude.trimPitchDeg','attitude.mountDeg','attitude.invertRoll','attitude.invertPitch']},
+{id:'detect',title:'Detection',keys:['detect.enabled','detect.plugin','detect.modelPath','detect.firmwarePath','detect.inferInterval','detect.osd']},
 {id:'record',title:'Recording',keys:['record.enabled','record.mode','record.format','record.dir','record.maxSeconds','record.maxMB','record.bitrate','record.fps','record.gopSize','record.server']}
 ];
 
