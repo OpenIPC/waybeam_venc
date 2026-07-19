@@ -241,13 +241,23 @@ void rtp_sidecar_poll(RtpSidecarSender *s)
 
 /* ── Frame metadata sender ───────────────────────────────────────────── */
 
-int rtp_sidecar_send_frame_full(RtpSidecarSender *s,
+/* Assemble one FRAME datagram (base + flag-ordered trailers) into a stack
+ * buffer and fan it out to every live subscriber.  Trailers are appended
+ * sequentially in flag-bit order, so an absent trailer simply leaves the next
+ * one sliding up — no gaps, computable offsets.  DETECT is the only variable-
+ * length trailer and is appended last; the caller passes a fully serialised
+ * blob (header + TLV body, network byte order) which is copied verbatim, so
+ * the sidecar never parses detection tags.  A raw byte buffer (not the fixed
+ * RtpSidecarFrameExtFull struct) is used precisely so the variable DETECT blob
+ * fits. */
+static int send_frame_impl(RtpSidecarSender *s,
 	uint32_t ssrc, uint32_t rtp_ts,
 	uint16_t seq_first, uint16_t seq_count,
 	uint64_t capture_us, uint64_t frame_ready_us,
 	const RtpSidecarEncInfo *enc_info,
 	const RtpSidecarTransportInfo *transport_info,
-	const RtpSidecarAttitudeInfo *attitude_info)
+	const RtpSidecarAttitudeInfo *attitude_info,
+	const void *detect_blob, uint16_t detect_len)
 {
 	if (!s || s->fd < 0)
 		return 0;  /* disabled */
@@ -261,50 +271,48 @@ int rtp_sidecar_send_frame_full(RtpSidecarSender *s,
 	if (!sub_active_at(s, now))
 		return 0;  /* no subscriber — channel stays silent */
 
-	RtpSidecarFrameExtFull msg;
-	size_t msg_len = sizeof(msg.frame);
+	uint8_t buf[RTP_SIDECAR_DGRAM_MAX];
+	RtpSidecarFrame frame;
+	uint8_t flags = 0;
+	size_t off = sizeof(frame);
 
-	memset(&msg, 0, sizeof(msg));
-	msg.frame.magic            = htonl(RTP_SIDECAR_MAGIC);
-	msg.frame.version          = RTP_SIDECAR_VERSION;
-	msg.frame.msg_type         = RTP_SIDECAR_MSG_FRAME;
-	msg.frame.stream_id        = 0;
-	msg.frame.flags            = 0;
-	msg.frame.ssrc             = htonl(ssrc);
-	msg.frame.rtp_timestamp    = htonl(rtp_ts);
-	msg.frame.frame_id         = sidecar_htobe64(s->frame_id++);
-	msg.frame.frame_ready_us   = sidecar_htobe64(frame_ready_us);
-	msg.frame.seq_first        = htons(seq_first);
-	msg.frame.seq_count        = htons(seq_count);
-	msg.frame.capture_us       = sidecar_htobe64(capture_us);
-	msg.frame.last_pkt_send_us = sidecar_htobe64(now);
+	memset(&frame, 0, sizeof(frame));
+	frame.magic            = htonl(RTP_SIDECAR_MAGIC);
+	frame.version          = RTP_SIDECAR_VERSION;
+	frame.msg_type         = RTP_SIDECAR_MSG_FRAME;
+	frame.stream_id        = 0;
+	frame.ssrc             = htonl(ssrc);
+	frame.rtp_timestamp    = htonl(rtp_ts);
+	frame.frame_id         = sidecar_htobe64(s->frame_id++);
+	frame.frame_ready_us   = sidecar_htobe64(frame_ready_us);
+	frame.seq_first        = htons(seq_first);
+	frame.seq_count        = htons(seq_count);
+	frame.capture_us       = sidecar_htobe64(capture_us);
+	frame.last_pkt_send_us = sidecar_htobe64(now);
 
 	if (enc_info) {
-		msg.frame.flags |= RTP_SIDECAR_FLAG_ENC_INFO;
+		RtpSidecarEncInfoWire wire;
+
+		flags |= RTP_SIDECAR_FLAG_ENC_INFO;
 		if (enc_info->frame_type == RTP_SIDECAR_FRAME_I ||
 		    enc_info->frame_type == RTP_SIDECAR_FRAME_IDR)
-			msg.frame.flags |= RTP_SIDECAR_FLAG_KEYFRAME;
+			flags |= RTP_SIDECAR_FLAG_KEYFRAME;
 
-		msg.enc.frame_size_bytes = htonl(enc_info->frame_size_bytes);
-		msg.enc.frame_type = enc_info->frame_type;
-		msg.enc.qp = enc_info->qp;
-		msg.enc.complexity = enc_info->complexity;
-		msg.enc.scene_change = enc_info->scene_change;
-		msg.enc.gop_state = enc_info->gop_state;
-		msg.enc.idr_inserted = enc_info->idr_inserted;
-		msg.enc.frames_since_idr = htons(enc_info->frames_since_idr);
-		msg_len = offsetof(RtpSidecarFrameExtFull, transport);
+		memset(&wire, 0, sizeof(wire));
+		wire.frame_size_bytes = htonl(enc_info->frame_size_bytes);
+		wire.frame_type = enc_info->frame_type;
+		wire.qp = enc_info->qp;
+		wire.complexity = enc_info->complexity;
+		wire.scene_change = enc_info->scene_change;
+		wire.gop_state = enc_info->gop_state;
+		wire.idr_inserted = enc_info->idr_inserted;
+		wire.frames_since_idr = htons(enc_info->frames_since_idr);
+		memcpy(buf + off, &wire, sizeof(wire));
+		off += sizeof(wire);
 	}
 
 	if (transport_info) {
-		/* Trailer follows ENC_INFO when present, or sits directly
-		 * after the base frame otherwise.  We always serialise to
-		 * the "after enc" slot in the contiguous struct; when enc is
-		 * absent we slide the trailer up so old probes that read
-		 * just the base frame don't see partial enc bytes between
-		 * frame and transport. */
 		RtpSidecarTransportInfoWire wire;
-		size_t trailer_offset;
 
 		memset(&wire, 0, sizeof(wire));
 		wire.fill_pct        = transport_info->fill_pct;
@@ -313,17 +321,12 @@ int rtp_sidecar_send_frame_full(RtpSidecarSender *s,
 		wire.pressure_drops  = htonl(transport_info->pressure_drops);
 		wire.packets_sent    = htonl(transport_info->packets_sent);
 
-		msg.frame.flags |= RTP_SIDECAR_FLAG_TRANSPORT_INFO;
-		trailer_offset = enc_info
-			? offsetof(RtpSidecarFrameExtFull, transport)
-			: sizeof(RtpSidecarFrame);
-		memcpy((uint8_t *)&msg + trailer_offset, &wire, sizeof(wire));
-		msg_len = trailer_offset + sizeof(wire);
+		flags |= RTP_SIDECAR_FLAG_TRANSPORT_INFO;
+		memcpy(buf + off, &wire, sizeof(wire));
+		off += sizeof(wire);
 	}
 
 	if (attitude_info) {
-		/* Last in flag-bit order: slides up over absent enc/transport
-		 * trailers, same scheme as TRANSPORT_INFO above. */
 		RtpSidecarAttitudeWire wire;
 
 		memset(&wire, 0, sizeof(wire));
@@ -334,16 +337,29 @@ int rtp_sidecar_send_frame_full(RtpSidecarSender *s,
 		wire.imu_age_ms = htons(attitude_info->imu_age_ms);
 		wire.reserved   = 0;
 
-		msg.frame.flags |= RTP_SIDECAR_FLAG_ATTITUDE;
-		memcpy((uint8_t *)&msg + msg_len, &wire, sizeof(wire));
-		msg_len += sizeof(wire);
+		flags |= RTP_SIDECAR_FLAG_ATTITUDE;
+		memcpy(buf + off, &wire, sizeof(wire));
+		off += sizeof(wire);
 	}
+
+	/* DETECT last (highest bit).  Opaque blob built by the host; drop it
+	 * rather than overflow the datagram (a well-formed trailer is bounded
+	 * well under RTP_SIDECAR_DGRAM_MAX, so this guard never fires in
+	 * practice). */
+	if (detect_blob && detect_len && off + detect_len <= sizeof(buf)) {
+		flags |= RTP_SIDECAR_FLAG_DETECT;
+		memcpy(buf + off, detect_blob, detect_len);
+		off += detect_len;
+	}
+
+	frame.flags = flags;
+	memcpy(buf, &frame, sizeof(frame));
 
 	int rc = 0;
 	for (int i = 0; i < RTP_SIDECAR_MAX_SUBS; i++) {
 		if (!slot_live_at(&s->subs[i], now))
 			continue;
-		ssize_t sent = sendto(s->fd, &msg, msg_len, MSG_DONTWAIT,
+		ssize_t sent = sendto(s->fd, buf, off, MSG_DONTWAIT,
 			(struct sockaddr *)&s->subs[i].addr,
 			sizeof(s->subs[i].addr));
 		if (sent < 0 && errno != EAGAIN) {
@@ -352,6 +368,33 @@ int rtp_sidecar_send_frame_full(RtpSidecarSender *s,
 		}
 	}
 	return rc;
+}
+
+int rtp_sidecar_send_frame_full(RtpSidecarSender *s,
+	uint32_t ssrc, uint32_t rtp_ts,
+	uint16_t seq_first, uint16_t seq_count,
+	uint64_t capture_us, uint64_t frame_ready_us,
+	const RtpSidecarEncInfo *enc_info,
+	const RtpSidecarTransportInfo *transport_info,
+	const RtpSidecarAttitudeInfo *attitude_info)
+{
+	return send_frame_impl(s, ssrc, rtp_ts, seq_first, seq_count,
+		capture_us, frame_ready_us, enc_info, transport_info,
+		attitude_info, NULL, 0);
+}
+
+int rtp_sidecar_send_frame_detect(RtpSidecarSender *s,
+	uint32_t ssrc, uint32_t rtp_ts,
+	uint16_t seq_first, uint16_t seq_count,
+	uint64_t capture_us, uint64_t frame_ready_us,
+	const RtpSidecarEncInfo *enc_info,
+	const RtpSidecarTransportInfo *transport_info,
+	const RtpSidecarAttitudeInfo *attitude_info,
+	const void *detect_blob, uint16_t detect_len)
+{
+	return send_frame_impl(s, ssrc, rtp_ts, seq_first, seq_count,
+		capture_us, frame_ready_us, enc_info, transport_info,
+		attitude_info, detect_blob, detect_len);
 }
 
 int rtp_sidecar_send_frame_transport(RtpSidecarSender *s,

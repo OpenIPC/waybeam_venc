@@ -17,6 +17,7 @@
 #include <time.h>
 
 struct DebugOsdState; /* forward declaration — see debug_osd.h */
+struct Star6eIpuDetect; /* forward declaration — see star6e_ipu_yolo.c */
 
 /* Hard VENC encoder-input frame-rate ceiling on Infinity6E.  The SDK's
  * _MI_VENC_VerifyFps rejects any input FPS > 120 and silently resets it to
@@ -70,6 +71,7 @@ typedef struct {
 	/* Dual VENC (gemini mode) — heap-allocated, NULL when inactive */
 	struct Star6eDualVenc *dual;
 	struct DebugOsdState *debug_osd;  /* NULL if debug OSD disabled */
+	struct Star6eIpuDetect *detect;   /* NULL when IPU detection inactive */
 	Star6ePrecropRect active_precrop; /* precrop currently programmed into VIF
 	                                   * (includes overscan offsets) */
 } Star6ePipelineState;

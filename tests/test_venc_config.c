@@ -1064,6 +1064,65 @@ static int test_save_layout_populated_round_trip(void)
 	return failures;
 }
 
+/* Guards the step-5 config export: a field settable via /api/v1/set but
+ * missing from venc_config_to_json_string() is invisible in /api/v1/config
+ * and the WebUI.  Load detect.* from JSON, render via the API serializer, and
+ * confirm the camelCase keys survive a render->reload round-trip. */
+static int test_detect_export_roundtrip(void)
+{
+	int failures = 0;
+	const char *json =
+		"{ \"detect\": { \"enabled\": true, "
+		"\"plugin\": \"/root/libwaybeam_detect.so\", "
+		"\"modelPath\": \"/root/models/m.img\", "
+		"\"inferInterval\": 3, \"osd\": false } }";
+
+	char *path = write_temp_json(json);
+	CHECK("detect_ro_tmpfile", path != NULL);
+	if (!path) return failures;
+
+	VencConfig cfg;
+	venc_config_defaults(&cfg);
+	int ret = venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("detect_load_ok", ret == 0);
+	CHECK("detect_enabled", cfg.detect.enabled == true);
+	CHECK("detect_interval", cfg.detect.infer_interval == 3);
+
+	char *rendered = venc_config_to_json_string(&cfg);
+	CHECK("detect_render_ok", rendered != NULL);
+	if (rendered) {
+		/* step-5 export must include the camelCase keys */
+		CHECK("detect_export_has_plugin",
+			strstr(rendered, "\"plugin\"") != NULL);
+		CHECK("detect_export_has_modelPath",
+			strstr(rendered, "\"modelPath\"") != NULL);
+		CHECK("detect_export_has_inferInterval",
+			strstr(rendered, "\"inferInterval\"") != NULL);
+
+		char *path2 = write_temp_json(rendered);
+		free(rendered);
+		if (path2) {
+			VencConfig cfg2;
+			venc_config_defaults(&cfg2);
+			ret = venc_config_load(path2, &cfg2);
+			unlink(path2);
+			free(path2);
+			CHECK("detect_reload_ok", ret == 0);
+			CHECK("detect_roundtrip_enabled",
+				cfg2.detect.enabled == true);
+			CHECK("detect_roundtrip_interval",
+				cfg2.detect.infer_interval == 3);
+			CHECK("detect_roundtrip_model",
+				strcmp(cfg2.detect.model_path,
+					"/root/models/m.img") == 0);
+		}
+	}
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_config(void)
@@ -1090,5 +1149,7 @@ int test_venc_config(void)
 	failures += test_save_layout_byte_equal();
 	failures += test_save_layout_populated_round_trip();
 	failures += test_resilience_preset_expansion();
+	failures += test_detect_export_roundtrip();
 	return failures;
 }
+

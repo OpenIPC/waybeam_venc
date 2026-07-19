@@ -116,5 +116,13 @@
     "axisDown": "+z",
     "trimRollDeg": 0.0,
     "trimPitchDeg": 0.0
+  },
+  "detect": {
+    "enabled": false,
+    "plugin": "/root/libwaybeam_detect.so",
+    "modelPath": "",
+    "firmwarePath": "",
+    "inferInterval": 1,
+    "osd": true
   }
 }

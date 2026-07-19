@@ -225,6 +225,15 @@ void venc_config_defaults(VencConfig *cfg)
 		sizeof(cfg->attitude.axis_down), "+z");
 	cfg->attitude.trim_roll_deg  = 0.0f;
 	cfg->attitude.trim_pitch_deg = 0.0f;
+
+	/* detect (IPU NPU object detection; Star6E only) */
+	cfg->detect.enabled = false;
+	safe_strcpy(cfg->detect.plugin, sizeof(cfg->detect.plugin),
+		"/root/libwaybeam_detect.so");
+	cfg->detect.model_path[0]    = '\0';
+	cfg->detect.firmware_path[0] = '\0';
+	cfg->detect.infer_interval   = 1;
+	cfg->detect.osd              = true;
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -845,6 +854,30 @@ int venc_config_load(const char *path, VencConfig *cfg)
 				cfg->attitude.trim_pitch_deg);
 		}
 	}
+	{
+		const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root,
+			"detect");
+		if (obj) {
+			cfg->detect.enabled = json_get_bool(obj, "enabled",
+				cfg->detect.enabled);
+			safe_strcpy(cfg->detect.plugin,
+				sizeof(cfg->detect.plugin),
+				json_get_string(obj, "plugin",
+					cfg->detect.plugin));
+			safe_strcpy(cfg->detect.model_path,
+				sizeof(cfg->detect.model_path),
+				json_get_string(obj, "modelPath",
+					cfg->detect.model_path));
+			safe_strcpy(cfg->detect.firmware_path,
+				sizeof(cfg->detect.firmware_path),
+				json_get_string(obj, "firmwarePath",
+					cfg->detect.firmware_path));
+			cfg->detect.infer_interval = json_get_int(obj,
+				"inferInterval", cfg->detect.infer_interval);
+			cfg->detect.osd = json_get_bool(obj, "osd",
+				cfg->detect.osd);
+		}
+	}
 
 	cJSON_Delete(root);
 
@@ -1373,6 +1406,18 @@ static void render_attitude(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_section_close(p, 1, is_last);
 }
 
+static void render_detect(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "detect");
+	pp_field_bool(p,   2, "enabled",      cfg->detect.enabled,       0);
+	pp_field_string(p, 2, "plugin",       cfg->detect.plugin,        0);
+	pp_field_string(p, 2, "modelPath",    cfg->detect.model_path,    0);
+	pp_field_string(p, 2, "firmwarePath", cfg->detect.firmware_path, 0);
+	pp_field_int(p,    2, "inferInterval", cfg->detect.infer_interval, 0);
+	pp_field_bool(p,   2, "osd",          cfg->detect.osd,           1);
+	pp_section_close(p, 1, is_last);
+}
+
 /* Top-level: build the canonical pretty layout into a malloc'd string.
  * Caller must free.  Returns NULL on allocation failure. */
 static char *config_render_pretty(const VencConfig *cfg)
@@ -1394,7 +1439,8 @@ static char *config_render_pretty(const VencConfig *cfg)
 	render_record(&p,   cfg, 0);
 	render_snapshot(&p, cfg, 0);
 	render_debug(&p,    cfg, 0);
-	render_attitude(&p, cfg, 1);
+	render_attitude(&p, cfg, 0);
+	render_detect(&p,   cfg, 1);
 	pp_str(&p, "}");
 
 	if (p.oom) {
@@ -1591,6 +1637,19 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 			cfg->attitude.trim_roll_deg);
 		cJSON_AddNumberToObject(att, "trimPitchDeg",
 			cfg->attitude.trim_pitch_deg);
+	}
+
+	cJSON *det = cJSON_AddObjectToObject(root, "detect");
+	if (det) {
+		cJSON_AddBoolToObject(det, "enabled", cfg->detect.enabled);
+		cJSON_AddStringToObject(det, "plugin", cfg->detect.plugin);
+		cJSON_AddStringToObject(det, "modelPath",
+			cfg->detect.model_path);
+		cJSON_AddStringToObject(det, "firmwarePath",
+			cfg->detect.firmware_path);
+		cJSON_AddNumberToObject(det, "inferInterval",
+			cfg->detect.infer_interval);
+		cJSON_AddBoolToObject(det, "osd", cfg->detect.osd);
 	}
 
 	return root;

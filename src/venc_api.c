@@ -510,6 +510,13 @@ static const FieldDesc g_fields[] = {
 	FIELD(attitude, axis_down,    FT_STRING, MUT_RESTART),
 	FIELD(attitude, trim_roll_deg,  FT_FLOAT, MUT_RESTART),
 	FIELD(attitude, trim_pitch_deg, FT_FLOAT, MUT_RESTART),
+
+	FIELD(detect, enabled,        FT_BOOL,   MUT_RESTART),
+	FIELD(detect, plugin,         FT_STRING, MUT_RESTART),
+	FIELD(detect, model_path,     FT_STRING, MUT_RESTART),
+	FIELD(detect, firmware_path,  FT_STRING, MUT_RESTART),
+	FIELD(detect, infer_interval, FT_INT,    MUT_RESTART),
+	FIELD(detect, osd,            FT_BOOL,   MUT_RESTART),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -587,6 +594,9 @@ static const FieldAlias g_field_aliases[] = {
 	{ "attitude.axisDown", "attitude.axis_down" },
 	{ "attitude.trimRollDeg", "attitude.trim_roll_deg" },
 	{ "attitude.trimPitchDeg", "attitude.trim_pitch_deg" },
+	{ "detect.modelPath", "detect.model_path" },
+	{ "detect.firmwarePath", "detect.firmware_path" },
+	{ "detect.inferInterval", "detect.infer_interval" },
 };
 
 static const char *canonicalize_field_key(const char *key)
