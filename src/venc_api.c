@@ -383,6 +383,24 @@ static const FieldUi ui_pause_stab = {
 	"framing=off or zoom."
 };
 
+/* UI descriptors for the per-frame size caps (0.45.0).  Rendered as a
+ * "Frame size caps" group purely from capabilities — the caps were API-only
+ * until now (no static SECTIONS rows). */
+static const FieldUi ui_max_i_bytes = {
+	"Frame size caps", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
+	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
+	"When either cap is > 0 the RC priority switches to framebits-first so "
+	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
+	"An IDR is requested after each apply. Applied live."
+};
+static const FieldUi ui_max_p_bytes = {
+	"Frame size caps", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
+	"Hard per-frame cap on the encoded P-frame size in bytes. 0 = unlimited. "
+	"When either cap is > 0 the RC priority switches to framebits-first so "
+	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
+	"An IDR is requested after each apply. Applied live."
+};
+
 static const FieldDesc g_fields[] = {
 	FIELD(system, web_port,        FT_UINT16, MUT_RESTART),
 	FIELD(system, overclock_level, FT_INT,    MUT_RESTART),
@@ -411,8 +429,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, bitrate,         FT_UINT,   MUT_LIVE),
 	FIELD(video0, gop_size,        FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
-	FIELD(video0, max_i_bytes,     FT_UINT,   MUT_LIVE),
-	FIELD(video0, max_p_bytes,     FT_UINT,   MUT_LIVE),
+	FIELD_UI(video0, max_i_bytes,  FT_UINT,   MUT_LIVE, &ui_max_i_bytes),
+	FIELD_UI(video0, max_p_bytes,  FT_UINT,   MUT_LIVE, &ui_max_p_bytes),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
 	FIELD(outgoing, server,            FT_STRING, MUT_LIVE),
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
