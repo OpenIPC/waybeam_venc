@@ -1,5 +1,16 @@
 # History
 
+## [0.49.0] - 2026-07-19
+
+WebUI exposure for the per-frame size caps.
+
+- **`video0.maxIBytes` / `video0.maxPBytes` in the dashboard** — the 0.45.0
+  frame-size caps were API-only; they now carry data-driven UI metadata
+  (`FIELD_UI`) and render as a "Frame size caps" group from
+  `/api/v1/capabilities`. No dashboard.html change — the group comes entirely
+  from the capabilities feed, tooltips included (cap semantics, the
+  framebits-first/bitrate-first RC-priority flip, IDR-on-apply).
+
 ## [0.48.0] - 2026-07-19
 
 Star6E NPU object detection (#183): pluggable object detection on the idle
