@@ -123,6 +123,10 @@
     "modelPath": "",
     "firmwarePath": "",
     "inferInterval": 1,
+    "confThresh": 0.0,
+    "nmsIou": 0.0,
+    "netWidth": 640,
+    "netHeight": 352,
     "osd": true
   }
 }

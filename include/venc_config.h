@@ -304,6 +304,19 @@ typedef struct {
 	bool osd;              /* draw boxes on the debug OSD (needs
 	                          debug.showOsd; native backends have no
 	                          vehicle overlay of their own)              */
+	/* Appended 2026-07-23 — new members go at the END; the config ABI is
+	 * append-only (SigmaStar ISP bin loading breaks if VencConfig's
+	 * layout shifts). */
+	float    conf_thresh;  /* detector keep threshold; <=0 -> plugin
+	                          default (0.40).  Worth lowering: INT8
+	                          quantization costs ~30% of the FP32 score on
+	                          small objects, and the ground tracker is
+	                          built to confirm weak detections over time
+	                          rather than trust any single frame.        */
+	float    nms_iou;      /* NMS IoU; <=0 -> plugin default (0.45)      */
+	uint32_t net_width;    /* VPE port1 tap + model input; 0 -> 640.     */
+	uint32_t net_height;   /* 0 -> 352.  MUST match the compiled .img —
+	                          the backend rejects a mismatched frame.    */
 } VencConfigDetect;
 
 /* ── Top-level config ────────────────────────────────────────────────── */

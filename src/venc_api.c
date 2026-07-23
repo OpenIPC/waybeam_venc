@@ -615,6 +615,10 @@ static const FieldAlias g_field_aliases[] = {
 	{ "detect.modelPath", "detect.model_path" },
 	{ "detect.firmwarePath", "detect.firmware_path" },
 	{ "detect.inferInterval", "detect.infer_interval" },
+	{ "detect.confThresh", "detect.conf_thresh" },
+	{ "detect.nmsIou", "detect.nms_iou" },
+	{ "detect.netWidth", "detect.net_width" },
+	{ "detect.netHeight", "detect.net_height" },
 };
 
 static const char *canonicalize_field_key(const char *key)

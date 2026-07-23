@@ -246,11 +246,24 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 	MI_VPE_PortAttr_t port;
 	MI_SYS_ChnPort_t vpe1 = {
 		.module = I6_SYS_MOD_VPE, .device = 0, .channel = 0, .port = 1 };
-	uint32_t net_w = 640, net_h = 352;
+	uint32_t net_w, net_h;
 	MI_S32 ret;
 
 	if (!state || !vcfg || !vcfg->detect.enabled)
 		return 0;
+
+	/* Tap geometry follows the compiled model, so a higher-resolution
+	 * .img needs no code change.  Both dims must be a multiple of 32:
+	 * the YOLO head strides 8/16/32, and a ragged grid would not match
+	 * the anchor count the decode derives. */
+	net_w = vcfg->detect.net_width  ? vcfg->detect.net_width  : 640;
+	net_h = vcfg->detect.net_height ? vcfg->detect.net_height : 352;
+	if (net_w % 32 || net_h % 32 || net_w < 64 || net_h < 64) {
+		fprintf(stderr, "[ipu-yolo] detect.netWidth/netHeight %ux%u "
+			"must be multiples of 32 (>=64); detection disabled\n",
+			net_w, net_h);
+		return 0;
+	}
 	if (state->detect)
 		return 0;   /* already running */
 
@@ -334,6 +347,9 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 		cfg.firmware_path = vcfg->detect.firmware_path;
 		cfg.display_w = (int)state->image_width;
 		cfg.display_h = (int)state->image_height;
+		/* 0 leaves the plugin on its own defaults (0.40 / 0.45). */
+		cfg.conf_thresh = vcfg->detect.conf_thresh;
+		cfg.nms_iou = vcfg->detect.nms_iou;
 		if (d->backend->init(&cfg) != 0) {
 			fprintf(stderr, "[ipu-yolo] backend '%s' init failed; "
 				"detection disabled\n", d->backend->name);
@@ -361,8 +377,10 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 
 	state->detect = d;
 	fprintf(stderr, "[ipu-yolo] detection active: backend=%s tap=VPE0P1 "
-		"%ux%u interval=%d\n", d->backend->name, net_w, net_h,
-		d->infer_interval);
+		"%ux%u interval=%d conf=%.2f iou=%.2f\n", d->backend->name,
+		net_w, net_h, d->infer_interval,
+		(double)vcfg->detect.conf_thresh,
+		(double)vcfg->detect.nms_iou);
 	return 0;
 }
 

@@ -1075,7 +1075,9 @@ static int test_detect_export_roundtrip(void)
 		"{ \"detect\": { \"enabled\": true, "
 		"\"plugin\": \"/root/libwaybeam_detect.so\", "
 		"\"modelPath\": \"/root/models/m.img\", "
-		"\"inferInterval\": 3, \"osd\": false } }";
+		"\"inferInterval\": 3, \"osd\": false, "
+		"\"confThresh\": 0.2, \"nmsIou\": 0.5, "
+		"\"netWidth\": 800, \"netHeight\": 448 } }";
 
 	char *path = write_temp_json(json);
 	CHECK("detect_ro_tmpfile", path != NULL);
@@ -1089,6 +1091,15 @@ static int test_detect_export_roundtrip(void)
 	CHECK("detect_load_ok", ret == 0);
 	CHECK("detect_enabled", cfg.detect.enabled == true);
 	CHECK("detect_interval", cfg.detect.infer_interval == 3);
+	/* A typo'd key here would silently leave the plugin on its 0.40
+	 * default, which is precisely the threshold INT8 quantization makes
+	 * too high -- so assert the parse, not just the round-trip. */
+	CHECK("detect_conf_thresh", cfg.detect.conf_thresh > 0.199f &&
+		cfg.detect.conf_thresh < 0.201f);
+	CHECK("detect_nms_iou", cfg.detect.nms_iou > 0.499f &&
+		cfg.detect.nms_iou < 0.501f);
+	CHECK("detect_net_width", cfg.detect.net_width == 800);
+	CHECK("detect_net_height", cfg.detect.net_height == 448);
 
 	char *rendered = venc_config_to_json_string(&cfg);
 	CHECK("detect_render_ok", rendered != NULL);
@@ -1100,6 +1111,10 @@ static int test_detect_export_roundtrip(void)
 			strstr(rendered, "\"modelPath\"") != NULL);
 		CHECK("detect_export_has_inferInterval",
 			strstr(rendered, "\"inferInterval\"") != NULL);
+		CHECK("detect_export_has_confThresh",
+			strstr(rendered, "\"confThresh\"") != NULL);
+		CHECK("detect_export_has_netWidth",
+			strstr(rendered, "\"netWidth\"") != NULL);
 
 		char *path2 = write_temp_json(rendered);
 		free(rendered);
