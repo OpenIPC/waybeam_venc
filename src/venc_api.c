@@ -619,6 +619,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "detect.nmsIou", "detect.nms_iou" },
 	{ "detect.netWidth", "detect.net_width" },
 	{ "detect.netHeight", "detect.net_height" },
+	{ "detect.modelId", "detect.model_id" },
 };
 
 static const char *canonicalize_field_key(const char *key)

@@ -127,6 +127,7 @@
     "nmsIou": 0.0,
     "netWidth": 640,
     "netHeight": 352,
+    "modelId": 0,
     "osd": true
   }
 }

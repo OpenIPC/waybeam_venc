@@ -1077,7 +1077,8 @@ static int test_detect_export_roundtrip(void)
 		"\"modelPath\": \"/root/models/m.img\", "
 		"\"inferInterval\": 3, \"osd\": false, "
 		"\"confThresh\": 0.2, \"nmsIou\": 0.5, "
-		"\"netWidth\": 800, \"netHeight\": 448 } }";
+		"\"netWidth\": 800, \"netHeight\": 448, "
+		"\"modelId\": 1 } }";
 
 	char *path = write_temp_json(json);
 	CHECK("detect_ro_tmpfile", path != NULL);
@@ -1100,6 +1101,9 @@ static int test_detect_export_roundtrip(void)
 		cfg.detect.nms_iou < 0.501f);
 	CHECK("detect_net_width", cfg.detect.net_width == 800);
 	CHECK("detect_net_height", cfg.detect.net_height == 448);
+	/* Defaulting this to 0 relabels every box as VisDrone "pedestrian",
+	 * so the parse has to actually take effect, not just round-trip. */
+	CHECK("detect_model_id", cfg.detect.model_id == 1);
 
 	char *rendered = venc_config_to_json_string(&cfg);
 	CHECK("detect_render_ok", rendered != NULL);
@@ -1115,6 +1119,8 @@ static int test_detect_export_roundtrip(void)
 			strstr(rendered, "\"confThresh\"") != NULL);
 		CHECK("detect_export_has_netWidth",
 			strstr(rendered, "\"netWidth\"") != NULL);
+		CHECK("detect_export_has_modelId",
+			strstr(rendered, "\"modelId\"") != NULL);
 
 		char *path2 = write_temp_json(rendered);
 		free(rendered);

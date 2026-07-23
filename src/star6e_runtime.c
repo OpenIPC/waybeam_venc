@@ -1120,7 +1120,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 					? (now_us - snap.produced_us) / 1000 : 0;
 				size_t len = detect_wire_build(detect_buf,
 					sizeof(detect_buf), snap.boxes, snap.count,
-					RTP_SIDECAR_DETECT_MODEL_VISDRONE, snap.seq,
+					(uint16_t)vcfg->detect.model_id, snap.seq,
 					age > 0xFFFF ? 0xFFFF : (uint16_t)age,
 					snap.net_w, snap.net_h, sizeof(detect_buf));
 				if (len > 0) {

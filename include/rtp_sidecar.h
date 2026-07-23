@@ -62,7 +62,11 @@
 #define RTP_SIDECAR_DETECT_SCHEMA_V1  1     /* schema_ver: standard BOX tag     */
 #define RTP_SIDECAR_DETECT_TRUNCATED  0x0001 /* header.flags bit0               */
 #define RTP_SIDECAR_DETECT_TAG_BOX    0x01  /* TLV tag: normalized bbox (10 B)  */
-#define RTP_SIDECAR_DETECT_MODEL_VISDRONE 0 /* model_id 0 → VisDrone-10 labels  */
+/* model_id registry — a consumer-side class-table selector, allocated in
+ * protocols/rtp-sidecar.md.  Keep the two in step: the number is the only
+ * thing on the wire that says what `cls` means. */
+#define RTP_SIDECAR_DETECT_MODEL_VISDRONE 0 /* VisDrone-10 labels               */
+#define RTP_SIDECAR_DETECT_MODEL_PERSON   1 /* single class: "person" (SAR)     */
 
 /*
  * Frame type values carried in the optional encoder-feedback trailer.

@@ -317,6 +317,13 @@ typedef struct {
 	uint32_t net_width;    /* VPE port1 tap + model input; 0 -> 640.     */
 	uint32_t net_height;   /* 0 -> 352.  MUST match the compiled .img —
 	                          the backend rejects a mismatched frame.    */
+	uint32_t model_id;     /* class-table selector put on the wire (see
+	                          RTP_SIDECAR_DETECT_MODEL_* and the registry
+	                          in protocols/rtp-sidecar.md).  Cannot be
+	                          derived: the plugin loads whatever .img the
+	                          config names, so only the operator knows
+	                          which label table the boxes belong to.
+	                          0 = VisDrone-10, 1 = SAR person.           */
 } VencConfigDetect;
 
 /* ── Top-level config ────────────────────────────────────────────────── */
