@@ -1,5 +1,25 @@
 # History
 
+## [0.50.0] - 2026-07-23
+
+Volatile config writes: `GET /api/v1/live/set`.
+
+- **New endpoint `/api/v1/live/set`** — `/set`'s field surface applied to the
+  running config only, no write to `/etc/waybeam.json`.  Built for
+  high-cadence automated writers (waybeam-link adaptive bitrate / frame-cap /
+  fps actuation, waybeam-link spec Pass 73): persist-on-set at controller
+  cadence wears flash and reboots into the last adaptive transient.
+- Live (MUT_LIVE) fields only; restart-required fields answer `400`
+  ("restart-class field requires persistence; use /api/v1/set") because a
+  pipeline reinit reloads from disk and would silently discard the value.
+  Response shapes are byte-identical to `/set`; single- and multi-set both
+  supported.
+- A later persisting `/set` / `/defaults` snapshots the whole running config,
+  volatile changes included (one config struct, by design).
+- Builds without the endpoint 404 — clients probe once and fall back to the
+  persisting `/set` (waybeam-link does exactly this).
+- Contract version 0.12.1 -> 0.13.0 (non-breaking endpoint addition).
+
 ## [0.49.0] - 2026-07-19
 
 WebUI exposure for the per-frame size caps.

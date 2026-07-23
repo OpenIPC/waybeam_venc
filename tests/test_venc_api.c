@@ -195,9 +195,9 @@ static int read_http_response(int fd, int *http_status, char *response_buf,
 	return 0;
 }
 
-static int apply_set_query_http(VencConfig *cfg, const char *backend_name,
-	const VencApplyCallbacks *cb, const char *query, int *http_status,
-	char *response_buf, size_t response_buf_size)
+static int apply_query_http_path(VencConfig *cfg, const char *backend_name,
+	const VencApplyCallbacks *cb, const char *path, const char *query,
+	int *http_status, char *response_buf, size_t response_buf_size)
 {
 	char request[1024];
 	int fd;
@@ -214,10 +214,10 @@ static int apply_set_query_http(VencConfig *cfg, const char *backend_name,
 		return -1;
 
 	req_len = (size_t)snprintf(request, sizeof(request),
-		"GET /api/v1/set?%s HTTP/1.0\r\n"
+		"GET %s?%s HTTP/1.0\r\n"
 		"Host: 127.0.0.1\r\n"
 		"\r\n",
-		query ? query : "");
+		path, query ? query : "");
 	if (req_len >= sizeof(request)) {
 		close(fd);
 		return -1;
@@ -243,6 +243,14 @@ static int apply_set_query_http(VencConfig *cfg, const char *backend_name,
 
 	close(fd);
 	return 0;
+}
+
+static int apply_set_query_http(VencConfig *cfg, const char *backend_name,
+	const VencApplyCallbacks *cb, const char *query, int *http_status,
+	char *response_buf, size_t response_buf_size)
+{
+	return apply_query_http_path(cfg, backend_name, cb, "/api/v1/set",
+		query, http_status, response_buf, response_buf_size);
 }
 
 static int test_apply_bitrate(uint32_t kbps)
@@ -710,6 +718,71 @@ static int test_live_set_rejects_out_of_range_roi_values(void)
 /* H.265-only: video0.codec was retired with the resilience-preset
  * consolidation.  Legacy clients setting `video0.codec=h264` must now
  * receive a clean 404 rather than silent acceptance. */
+/* /api/v1/live/set: applies to the running config, never writes disk;
+ * restart-class fields are rejected (a respawn reloads from disk). */
+static int test_live_set_endpoint_volatile_no_disk_write(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+	const char *path = "/tmp/test_venc_api_live_set.json";
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_bitrate = test_apply_bitrate;
+	cb.apply_verbose = test_apply_verbose;
+
+	unlink(path);
+	venc_api_set_config_path(path);
+
+	/* Single live field: applied, callback fired, nothing on disk. */
+	CHECK("live/set apply rc",
+		apply_query_http_path(&cfg, "star6e", &cb, "/api/v1/live/set",
+			"video0.bitrate=9000", &status, response,
+			sizeof(response)) == 0);
+	CHECK("live/set status 200", status == 200);
+	CHECK("live/set cfg updated", cfg.video0.bitrate == 9000);
+	CHECK("live/set callback fired",
+		g_api_cb_state.apply_bitrate_calls == 1);
+	CHECK("live/set no disk write", access(path, F_OK) != 0);
+
+	/* Multi-param stays volatile too. */
+	CHECK("live/set multi rc",
+		apply_query_http_path(&cfg, "star6e", &cb, "/api/v1/live/set",
+			"video0.bitrate=9500&system.verbose=true", &status,
+			response, sizeof(response)) == 0);
+	CHECK("live/set multi status 200", status == 200);
+	CHECK("live/set multi cfg updated", cfg.video0.bitrate == 9500);
+	CHECK("live/set multi no disk write", access(path, F_OK) != 0);
+
+	/* Restart-class field: rejected, not silently discarded. */
+	CHECK("live/set restart-class rc",
+		apply_query_http_path(&cfg, "star6e", &cb, "/api/v1/live/set",
+			"image.mirror=true", &status, response,
+			sizeof(response)) == 0);
+	CHECK("live/set restart-class 400", status == 400);
+	CHECK("live/set restart-class message",
+		strstr(response, "requires persistence") != NULL);
+	CHECK("live/set restart-class no disk write",
+		access(path, F_OK) != 0);
+
+	/* The persisting /set still writes — the whole running config,
+	 * earlier volatile changes included. */
+	CHECK("set apply rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.bitrate=9200", &status, response,
+			sizeof(response)) == 0);
+	CHECK("set status 200", status == 200);
+	CHECK("set disk write", access(path, F_OK) == 0);
+
+	unlink(path);
+	venc_api_set_config_path(NULL);
+	return failures;
+}
+
 static int test_restart_set_rejects_legacy_codec_field(void)
 {
 	int failures = 0;
@@ -1249,6 +1322,7 @@ int test_venc_api(void)
 	failures += test_live_set_isp_bin_dispatches_callback();
 	failures += test_live_set_isp_bin_rejects_unreadable_path();
 	failures += test_live_set_isp_bin_no_callback_returns_501();
+	failures += test_live_set_endpoint_volatile_no_disk_write();
 	failures += test_restart_set_rejects_legacy_codec_field();
 	failures += test_single_set_url_decodes_outgoing_server();
 	failures += test_multi_set_url_decodes_values();

@@ -1976,7 +1976,8 @@ static int make_live_set_response_locked(const VencConfig *cfg,
 }
 
 static int apply_live_set_query(SetQueryParam *params, size_t param_count,
-	int single_response, int *status_code, char **response_json)
+	int single_response, int persist, int *status_code,
+	char **response_json)
 {
 	LiveApplyGroup group_order[LIVE_GROUP_COUNT];
 	LiveBatchTouched touched;
@@ -2046,8 +2047,15 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	 * Done after the mutex is released to avoid holding it across fsync.
 	 * The helper already logs failures to stderr and caches the
 	 * last-saved snapshot, so repeated identical sets skip the flash
-	 * write entirely. */
-	(void)venc_api_save_config_to_disk(&actual_cfg);
+	 * write entirely.
+	 *
+	 * /api/v1/live/set passes persist=0: the change applies to the
+	 * running config only — no flash write.  Built for high-cadence
+	 * automated writers (waybeam-link adaptive actuation); a later
+	 * persisting /set snapshots the whole running config, volatile
+	 * changes included (one config struct, by design). */
+	if (persist)
+		(void)venc_api_save_config_to_disk(&actual_cfg);
 	return 0;
 }
 
@@ -2223,8 +2231,8 @@ static int process_restart_set_query(const SetQueryParam *param,
 	return rc;
 }
 
-static int process_single_set_query(const char *query, int *status_code,
-	char **response_json)
+static int process_single_set_query(const char *query, int persist,
+	int *status_code, char **response_json)
 {
 	char key[128], val[256];
 	const char *canonical_key;
@@ -2248,15 +2256,25 @@ static int process_single_set_query(const char *query, int *status_code,
 
 	init_single_set_param(&param, key, canonical_key, val, f);
 	if (f->mut == MUT_LIVE) {
-		return apply_live_set_query(&param, 1, 1, status_code,
+		return apply_live_set_query(&param, 1, 1, persist,
+			status_code, response_json);
+	}
+
+	/* Restart-class fields respawn the pipeline, which reloads from
+	 * disk — a volatile value would be silently discarded.  Reject on
+	 * the live endpoint rather than pretend. */
+	if (!persist) {
+		*status_code = 400;
+		return make_error_json("invalid_request",
+			"restart-class field requires persistence; use /api/v1/set",
 			response_json);
 	}
 
 	return process_restart_set_query(&param, status_code, response_json);
 }
 
-static int process_multi_live_set_query(const char *query, int *status_code,
-	char **response_json)
+static int process_multi_live_set_query(const char *query, int persist,
+	int *status_code, char **response_json)
 {
 	SetQueryParam params[SET_QUERY_MAX_PARAMS];
 	const char *parse_error = NULL;
@@ -2270,13 +2288,14 @@ static int process_multi_live_set_query(const char *query, int *status_code,
 			response_json);
 	}
 	if (param_count < 2)
-		return process_single_set_query(query, status_code, response_json);
+		return process_single_set_query(query, persist, status_code,
+			response_json);
 
-	return apply_live_set_query(params, param_count, 0, status_code,
-		response_json);
+	return apply_live_set_query(params, param_count, 0, persist,
+		status_code, response_json);
 }
 
-static int process_set_query(const char *query, int *status_code,
+static int process_set_query(const char *query, int persist, int *status_code,
 	char **response_json)
 {
 	if (!status_code || !response_json)
@@ -2286,10 +2305,11 @@ static int process_set_query(const char *query, int *status_code,
 	*response_json = NULL;
 
 	if (query && strchr(query, '&'))
-		return process_multi_live_set_query(query, status_code,
-			response_json);
+		return process_multi_live_set_query(query, persist,
+			status_code, response_json);
 
-	return process_single_set_query(query, status_code, response_json);
+	return process_single_set_query(query, persist, status_code,
+		response_json);
 }
 
 /* ── Route handlers ──────────────────────────────────────────────────── */
@@ -2304,7 +2324,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.12.1\","
+		"\"contract_version\":\"0.13.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2443,7 +2463,29 @@ static int handle_set(int fd, const HttpRequest *req, void *ctx)
 
 	(void)ctx;
 
-	rc = process_set_query(req->query, &status, &json);
+	rc = process_set_query(req->query, 1, &status, &json);
+	if (rc != 0 || !json) {
+		free(json);
+		return httpd_send_error(fd, 500, "internal_error", "out of memory");
+	}
+
+	rc = httpd_send_json(fd, status, json);
+	free(json);
+	return rc;
+}
+
+/* /api/v1/live/set — /set's field surface, applied to the running config
+ * only (no flash write).  Serves MUT_LIVE fields; restart-class fields are
+ * rejected (a respawn reloads from disk and would discard the value). */
+static int handle_live_set(int fd, const HttpRequest *req, void *ctx)
+{
+	char *json = NULL;
+	int status = 500;
+	int rc;
+
+	(void)ctx;
+
+	rc = process_set_query(req->query, 0, &status, &json);
 	if (rc != 0 || !json) {
 		free(json);
 		return httpd_send_error(fd, 500, "internal_error", "out of memory");
@@ -2755,7 +2797,7 @@ static int handle_attitude_calibrate(int fd, const HttpRequest *req,
 
 	snprintf(q, sizeof(q), "attitude.trim_roll_deg=%.2f",
 		(double)roll);
-	if (process_set_query(q, &status, &resp) != 0 || status != 200) {
+	if (process_set_query(q, 1, &status, &resp) != 0 || status != 200) {
 		free(resp);
 		return httpd_send_error(fd, 500, "internal_error",
 			"failed to persist trim_roll_deg");
@@ -2764,7 +2806,7 @@ static int handle_attitude_calibrate(int fd, const HttpRequest *req,
 	resp = NULL;
 	snprintf(q, sizeof(q), "attitude.trim_pitch_deg=%.2f",
 		(double)pitch);
-	if (process_set_query(q, &status, &resp) != 0 || status != 200) {
+	if (process_set_query(q, 1, &status, &resp) != 0 || status != 200) {
 		free(resp);
 		return httpd_send_error(fd, 500, "internal_error",
 			"failed to persist trim_pitch_deg");
@@ -3398,6 +3440,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/config.json",  handle_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/capabilities", handle_capabilities, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/set",          handle_set, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/live/set",     handle_live_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/get",          handle_get, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/fps/config",   handle_fps_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/fps/live",     handle_fps_live, NULL);

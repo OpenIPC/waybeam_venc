@@ -8,7 +8,9 @@
 - Keep endpoints lean and focused on direct operational value.
 - Accepted `/api/v1/set` and `/api/v1/defaults` changes are persisted to the
   registered config path before the response returns. Manual `/api/v1/restart`
-  still reloads exactly what is already on disk.
+  still reloads exactly what is already on disk. `/api/v1/live/set` is the
+  deliberate exception: it applies live fields to the running config without
+  touching disk (for high-cadence automated writers).
 - Keep JSON payloads simple and descriptive.
 - Keep mutability semantics explicit:
   - `live` — applied immediately without pipeline restart.
@@ -16,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.12.1`
+- `contract_version`: `0.13.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -376,6 +378,36 @@ Error `400` — multi-set included a restart-required field:
 
 The same camelCase aliases listed above are accepted here for
 Majestic-oriented clients.
+
+### `GET /api/v1/live/set?<field_name>=<value>`
+
+`/api/v1/set`'s field surface, applied to the **running config only — no
+write to `/etc/waybeam.json`**. Built for high-cadence automated writers
+(waybeam-link adaptive bitrate/caps/fps actuation), where persist-on-set
+would wear flash and boot into the last adaptive transient.
+
+```bash
+# Volatile bitrate change: applied live, gone after restart
+curl "http://<device-ip>/api/v1/live/set?video0.bitrate=4096"
+
+# Multi-set works identically (all fields must be live)
+curl "http://<device-ip>/api/v1/live/set?video0.maxIBytes=60000&video0.maxPBytes=12000"
+```
+
+Semantics:
+- **Live fields only.** Restart-required fields are rejected with `400`
+  (`"restart-class field requires persistence; use /api/v1/set"`) — a
+  pipeline reinit reloads from disk, which would silently discard a volatile
+  value.
+- Responses (success and error) are byte-identical in shape to
+  `/api/v1/set`.
+- A later persisting `/api/v1/set` or `/api/v1/defaults` snapshots the
+  **whole running config, earlier volatile changes included** — one config
+  struct, by design. Deployments that must keep a field volatile should
+  route all writers of that field through `/live/set` (waybeam-link's
+  single-bitrate-authority rule).
+- Detection: builds without this endpoint answer `404 no matching route`,
+  so clients can probe once and fall back to `/api/v1/set`.
 
 ### `video0.qp_delta`
 
