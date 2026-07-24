@@ -767,6 +767,53 @@ static int test_fr_read_null_guard(void)
 	return failures;
 }
 
+/* ── read_wait wakeup path ─────────────────────────────────────────── */
+
+static void *fr_delayed_producer_thread(void *arg)
+{
+	venc_frame_ring_t *r = (venc_frame_ring_t *)arg;
+	VencFrameMeta meta;
+	uint8_t data[4] = {0, 0, 0, 1};
+
+	usleep(5000);
+	memset(&meta, 0, sizeof(meta));
+	meta.pts = 1234;
+	meta.codec = VENC_FRAME_CODEC_H265;
+	meta.flags = VENC_FRAME_FLAG_IDR;
+	(void)venc_frame_ring_write(r, &meta, data, sizeof(data));
+	return NULL;
+}
+
+static int test_fr_read_wait_wakeup(void)
+{
+	int failures = 0;
+	uint8_t buf[256];
+	uint32_t out_len = 0;
+	pthread_t prod;
+
+	venc_frame_ring_t *r = venc_frame_ring_create("test_fr_wait", 4,
+		256);
+	CHECK("fr_wait_create", r != NULL);
+	if (!r)
+		return failures;
+
+	pthread_create(&prod, NULL, fr_delayed_producer_thread, r);
+	int ret = venc_frame_ring_read_wait(r, buf, sizeof(buf), &out_len,
+		1000);
+	pthread_join(prod, NULL);
+
+	CHECK("fr_wait_read", ret == 0);
+	CHECK("fr_wait_len", out_len == VENC_FRAME_META_SIZE + 4);
+	VencFrameMeta *rm = (VencFrameMeta *)buf;
+	CHECK("fr_wait_pts", rm->pts == 1234);
+	CHECK("fr_wait_consumer_clear",
+	      __atomic_load_n(&r->hdr->consumer_waiting,
+		      __ATOMIC_RELAXED) == 0);
+
+	venc_frame_ring_destroy(r);
+	return failures;
+}
+
 /* ── slot_data_size upper bound ───────────────────────────────────── */
 
 static int test_fr_slot_data_size_limit(void)
@@ -832,6 +879,7 @@ int test_venc_frame_ring(void)
 	failures += test_fr_get_fill();
 	failures += test_fr_read_oversize();
 	failures += test_fr_read_null_guard();
+	failures += test_fr_read_wait_wakeup();
 	failures += test_fr_slot_data_size_limit();
 	failures += test_fr_double_begin();
 

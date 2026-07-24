@@ -199,7 +199,12 @@ static int test_load_full_json(void)
 		 * here proves migration: the JSON value is ignored and the
 		 * always-on default (true) drives the cold-boot register hook. */
 		"  \"sensor\": { \"index\": 2, \"mode\": 3, \"unlockEnabled\": false },"
-		"  \"isp\": { \"sensorBin\": \"/etc/sensors/imx415.bin\" },"
+		/* aeEngine "custom" is retired/removed — parser must migrate a
+		 * stale value to "sdk" (with a warning) rather than reject it. */
+		"  \"isp\": { \"sensorBin\": \"/etc/sensors/imx415.bin\","
+		"    \"aeEngine\": \"custom\","
+		"    \"gainMax\": 8192, \"shutterMaxUs\": 8000,"
+		"    \"gainMin\": 1500, \"shutterMinUs\": 200 },"
 		"  \"image\": { \"mirror\": true, \"flip\": true },"
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
 		/* "codec" above is intentionally legacy — parser must silently drop it. */
@@ -228,6 +233,12 @@ static int test_load_full_json(void)
 	CHECK("load_unlock_legacy_ignored",
 		cfg.sensor.unlock_enabled == true);   /* JSON had false; default wins */
 	CHECK("load_isp_bin", strcmp(cfg.isp.sensor_bin, "/etc/sensors/imx415.bin") == 0);
+	CHECK("load_ae_engine_custom_migrates_sdk",
+		strcmp(cfg.isp.ae_engine, "sdk") == 0);   /* JSON had "custom"; falls back */
+	CHECK("load_isp_gain_max", cfg.isp.gain_max == 8192);
+	CHECK("load_isp_shutter_max", cfg.isp.shutter_max_us == 8000);
+	CHECK("load_isp_gain_min", cfg.isp.gain_min == 1500);
+	CHECK("load_isp_shutter_min", cfg.isp.shutter_min_us == 200);
 	CHECK("load_mirror", cfg.image.mirror == true);
 	CHECK("load_flip", cfg.image.flip == true);
 	CHECK("load_rc", strcmp(cfg.video0.rc_mode, "vbr") == 0);
@@ -1053,6 +1064,86 @@ static int test_save_layout_populated_round_trip(void)
 	return failures;
 }
 
+/* Guards the step-5 config export: a field settable via /api/v1/set but
+ * missing from venc_config_to_json_string() is invisible in /api/v1/config
+ * and the WebUI.  Load detect.* from JSON, render via the API serializer, and
+ * confirm the camelCase keys survive a render->reload round-trip. */
+static int test_detect_export_roundtrip(void)
+{
+	int failures = 0;
+	const char *json =
+		"{ \"detect\": { \"enabled\": true, "
+		"\"plugin\": \"/root/libwaybeam_detect.so\", "
+		"\"modelPath\": \"/root/models/m.img\", "
+		"\"inferInterval\": 3, \"osd\": false, "
+		"\"confThresh\": 0.2, \"nmsIou\": 0.5, "
+		"\"netWidth\": 800, \"netHeight\": 448, "
+		"\"modelId\": 1 } }";
+
+	char *path = write_temp_json(json);
+	CHECK("detect_ro_tmpfile", path != NULL);
+	if (!path) return failures;
+
+	VencConfig cfg;
+	venc_config_defaults(&cfg);
+	int ret = venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("detect_load_ok", ret == 0);
+	CHECK("detect_enabled", cfg.detect.enabled == true);
+	CHECK("detect_interval", cfg.detect.infer_interval == 3);
+	/* A typo'd key here would silently leave the plugin on its 0.40
+	 * default, which is precisely the threshold INT8 quantization makes
+	 * too high -- so assert the parse, not just the round-trip. */
+	CHECK("detect_conf_thresh", cfg.detect.conf_thresh > 0.199f &&
+		cfg.detect.conf_thresh < 0.201f);
+	CHECK("detect_nms_iou", cfg.detect.nms_iou > 0.499f &&
+		cfg.detect.nms_iou < 0.501f);
+	CHECK("detect_net_width", cfg.detect.net_width == 800);
+	CHECK("detect_net_height", cfg.detect.net_height == 448);
+	/* Defaulting this to 0 relabels every box as VisDrone "pedestrian",
+	 * so the parse has to actually take effect, not just round-trip. */
+	CHECK("detect_model_id", cfg.detect.model_id == 1);
+
+	char *rendered = venc_config_to_json_string(&cfg);
+	CHECK("detect_render_ok", rendered != NULL);
+	if (rendered) {
+		/* step-5 export must include the camelCase keys */
+		CHECK("detect_export_has_plugin",
+			strstr(rendered, "\"plugin\"") != NULL);
+		CHECK("detect_export_has_modelPath",
+			strstr(rendered, "\"modelPath\"") != NULL);
+		CHECK("detect_export_has_inferInterval",
+			strstr(rendered, "\"inferInterval\"") != NULL);
+		CHECK("detect_export_has_confThresh",
+			strstr(rendered, "\"confThresh\"") != NULL);
+		CHECK("detect_export_has_netWidth",
+			strstr(rendered, "\"netWidth\"") != NULL);
+		CHECK("detect_export_has_modelId",
+			strstr(rendered, "\"modelId\"") != NULL);
+
+		char *path2 = write_temp_json(rendered);
+		free(rendered);
+		if (path2) {
+			VencConfig cfg2;
+			venc_config_defaults(&cfg2);
+			ret = venc_config_load(path2, &cfg2);
+			unlink(path2);
+			free(path2);
+			CHECK("detect_reload_ok", ret == 0);
+			CHECK("detect_roundtrip_enabled",
+				cfg2.detect.enabled == true);
+			CHECK("detect_roundtrip_interval",
+				cfg2.detect.infer_interval == 3);
+			CHECK("detect_roundtrip_model",
+				strcmp(cfg2.detect.model_path,
+					"/root/models/m.img") == 0);
+		}
+	}
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_config(void)
@@ -1079,5 +1170,7 @@ int test_venc_config(void)
 	failures += test_save_layout_byte_equal();
 	failures += test_save_layout_populated_round_trip();
 	failures += test_resilience_preset_expansion();
+	failures += test_detect_export_roundtrip();
 	return failures;
 }
+

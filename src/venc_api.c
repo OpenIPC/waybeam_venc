@@ -383,6 +383,24 @@ static const FieldUi ui_pause_stab = {
 	"framing=off or zoom."
 };
 
+/* UI descriptors for the per-frame size caps (0.45.0).  Rendered as a
+ * "Frame size caps" group purely from capabilities — the caps were API-only
+ * until now (no static SECTIONS rows). */
+static const FieldUi ui_max_i_bytes = {
+	"Frame size caps", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
+	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
+	"When either cap is > 0 the RC priority switches to framebits-first so "
+	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
+	"An IDR is requested after each apply. Applied live."
+};
+static const FieldUi ui_max_p_bytes = {
+	"Frame size caps", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
+	"Hard per-frame cap on the encoded P-frame size in bytes. 0 = unlimited. "
+	"When either cap is > 0 the RC priority switches to framebits-first so "
+	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
+	"An IDR is requested after each apply. Applied live."
+};
+
 static const FieldDesc g_fields[] = {
 	FIELD(system, web_port,        FT_UINT16, MUT_RESTART),
 	FIELD(system, overclock_level, FT_INT,    MUT_RESTART),
@@ -393,6 +411,9 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(isp, sensor_bin,         FT_STRING, MUT_LIVE),
 	FIELD(isp, gain_max,           FT_UINT,   MUT_LIVE),
+	FIELD(isp, shutter_max_us,     FT_UINT,   MUT_LIVE),
+	FIELD(isp, gain_min,           FT_UINT,   MUT_LIVE),
+	FIELD(isp, shutter_min_us,     FT_UINT,   MUT_LIVE),
 	FIELD(isp, awb_mode,           FT_STRING, MUT_LIVE),
 	FIELD(isp, awb_ct,             FT_UINT,   MUT_LIVE),
 
@@ -408,6 +429,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, bitrate,         FT_UINT,   MUT_LIVE),
 	FIELD(video0, gop_size,        FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
+	FIELD_UI(video0, max_i_bytes,  FT_UINT,   MUT_LIVE, &ui_max_i_bytes),
+	FIELD_UI(video0, max_p_bytes,  FT_UINT,   MUT_LIVE, &ui_max_p_bytes),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
 	FIELD(outgoing, server,            FT_STRING, MUT_LIVE),
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
@@ -505,6 +528,13 @@ static const FieldDesc g_fields[] = {
 	FIELD(attitude, axis_down,    FT_STRING, MUT_RESTART),
 	FIELD(attitude, trim_roll_deg,  FT_FLOAT, MUT_RESTART),
 	FIELD(attitude, trim_pitch_deg, FT_FLOAT, MUT_RESTART),
+
+	FIELD(detect, enabled,        FT_BOOL,   MUT_RESTART),
+	FIELD(detect, plugin,         FT_STRING, MUT_RESTART),
+	FIELD(detect, model_path,     FT_STRING, MUT_RESTART),
+	FIELD(detect, firmware_path,  FT_STRING, MUT_RESTART),
+	FIELD(detect, infer_interval, FT_INT,    MUT_RESTART),
+	FIELD(detect, osd,            FT_BOOL,   MUT_RESTART),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -528,11 +558,16 @@ static const FieldAlias g_field_aliases[] = {
 	{ "system.overclockLevel", "system.overclock_level" },
 	{ "isp.sensorBin", "isp.sensor_bin" },
 	{ "isp.gainMax", "isp.gain_max" },
+	{ "isp.shutterMaxUs", "isp.shutter_max_us" },
+	{ "isp.gainMin", "isp.gain_min" },
+	{ "isp.shutterMinUs", "isp.shutter_min_us" },
 	{ "isp.awbMode", "isp.awb_mode" },
 	{ "isp.awbCt", "isp.awb_ct" },
 	{ "video0.rcMode", "video0.rc_mode" },
 	{ "video0.gopSize", "video0.gop_size" },
 	{ "video0.qpDelta", "video0.qp_delta" },
+	{ "video0.maxIBytes", "video0.max_i_bytes" },
+	{ "video0.maxPBytes", "video0.max_p_bytes" },
 	{ "outgoing.maxPayloadSize", "outgoing.max_payload_size" },
 	{ "outgoing.audioPort", "outgoing.audio_port" },
 	{ "fpv.roiEnabled", "fpv.roi_enabled" },
@@ -577,6 +612,14 @@ static const FieldAlias g_field_aliases[] = {
 	{ "attitude.axisDown", "attitude.axis_down" },
 	{ "attitude.trimRollDeg", "attitude.trim_roll_deg" },
 	{ "attitude.trimPitchDeg", "attitude.trim_pitch_deg" },
+	{ "detect.modelPath", "detect.model_path" },
+	{ "detect.firmwarePath", "detect.firmware_path" },
+	{ "detect.inferInterval", "detect.infer_interval" },
+	{ "detect.confThresh", "detect.conf_thresh" },
+	{ "detect.nmsIou", "detect.nms_iou" },
+	{ "detect.netWidth", "detect.net_width" },
+	{ "detect.netHeight", "detect.net_height" },
+	{ "detect.modelId", "detect.model_id" },
 };
 
 static const char *canonicalize_field_key(const char *key)
@@ -774,9 +817,8 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 			return "awb_mode must be 'auto' or 'ct_manual'";
 	}
 	if (strcmp(key, "isp.ae_engine") == 0) {
-		if (strcmp(cfg->isp.ae_engine, "sdk") != 0 &&
-		    strcmp(cfg->isp.ae_engine, "custom") != 0)
-			return "ae_engine must be 'sdk' or 'custom'";
+		if (strcmp(cfg->isp.ae_engine, "sdk") != 0)
+			return "ae_engine must be 'sdk'";
 	}
 	if (strcmp(key, "isp.sensor_bin") == 0) {
 		/* Empty string opts into the /etc/sensors/<sensor>.bin fallback;
@@ -1071,6 +1113,9 @@ typedef enum {
 	LIVE_GROUP_QP_DELTA,
 	LIVE_GROUP_ROI,
 	LIVE_GROUP_GAIN_MAX,
+	LIVE_GROUP_SHUTTER_MAX,
+	LIVE_GROUP_GAIN_MIN,
+	LIVE_GROUP_SHUTTER_MIN,
 	LIVE_GROUP_AWB,
 	LIVE_GROUP_VERBOSE,
 	LIVE_GROUP_OUTGOING,
@@ -1080,6 +1125,7 @@ typedef enum {
 	LIVE_GROUP_ISP_BIN,
 	LIVE_GROUP_SNAPSHOT_QUALITY,
 	LIVE_GROUP_PAUSE_STAB,
+	LIVE_GROUP_MAX_FRAME_SIZE,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1228,6 +1274,12 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_ROI;
 	if (strcmp(canonical_key, "isp.gain_max") == 0)
 		return LIVE_GROUP_GAIN_MAX;
+	if (strcmp(canonical_key, "isp.shutter_max_us") == 0)
+		return LIVE_GROUP_SHUTTER_MAX;
+	if (strcmp(canonical_key, "isp.gain_min") == 0)
+		return LIVE_GROUP_GAIN_MIN;
+	if (strcmp(canonical_key, "isp.shutter_min_us") == 0)
+		return LIVE_GROUP_SHUTTER_MIN;
 	if (strcmp(canonical_key, "isp.awb_mode") == 0 ||
 	    strcmp(canonical_key, "isp.awb_ct") == 0)
 		return LIVE_GROUP_AWB;
@@ -1249,6 +1301,9 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_SNAPSHOT_QUALITY;
 	if (strcmp(canonical_key, "video0.pause_stab") == 0)
 		return LIVE_GROUP_PAUSE_STAB;
+	if (strcmp(canonical_key, "video0.max_i_bytes") == 0 ||
+	    strcmp(canonical_key, "video0.max_p_bytes") == 0)
+		return LIVE_GROUP_MAX_FRAME_SIZE;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1266,6 +1321,12 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "fpv.roi_*";
 	case LIVE_GROUP_GAIN_MAX:
 		return "isp.gain_max";
+	case LIVE_GROUP_SHUTTER_MAX:
+		return "isp.shutter_max_us";
+	case LIVE_GROUP_GAIN_MIN:
+		return "isp.gain_min";
+	case LIVE_GROUP_SHUTTER_MIN:
+		return "isp.shutter_min_us";
 	case LIVE_GROUP_AWB:
 		return "isp.awb_*";
 	case LIVE_GROUP_VERBOSE:
@@ -1284,6 +1345,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "snapshot.quality";
 	case LIVE_GROUP_PAUSE_STAB:
 		return "video0.pauseStab";
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		return "video0.maxIBytes/maxPBytes";
 	default:
 		return "unknown";
 	}
@@ -1417,6 +1480,12 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_roi_qp != NULL;
 	case LIVE_GROUP_GAIN_MAX:
 		return g_cb->apply_gain_max != NULL;
+	case LIVE_GROUP_SHUTTER_MAX:
+		return g_cb->apply_shutter_max != NULL;
+	case LIVE_GROUP_GAIN_MIN:
+		return g_cb->apply_gain_min != NULL;
+	case LIVE_GROUP_SHUTTER_MIN:
+		return g_cb->apply_shutter_min != NULL;
 	case LIVE_GROUP_AWB:
 		return g_cb->apply_awb_mode != NULL;
 	case LIVE_GROUP_VERBOSE:
@@ -1440,6 +1509,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality != NULL;
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab != NULL;
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		return g_cb->apply_max_frame_size != NULL;
 	default:
 		return 0;
 	}
@@ -1472,6 +1543,15 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_GAIN_MAX:
 		dst->isp.gain_max = src->isp.gain_max;
+		break;
+	case LIVE_GROUP_SHUTTER_MAX:
+		dst->isp.shutter_max_us = src->isp.shutter_max_us;
+		break;
+	case LIVE_GROUP_GAIN_MIN:
+		dst->isp.gain_min = src->isp.gain_min;
+		break;
+	case LIVE_GROUP_SHUTTER_MIN:
+		dst->isp.shutter_min_us = src->isp.shutter_min_us;
 		break;
 	case LIVE_GROUP_AWB:
 		if (touched && touched->awb_mode) {
@@ -1514,6 +1594,10 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_PAUSE_STAB:
 		dst->video0.pause_stab = src->video0.pause_stab;
+		break;
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		dst->video0.max_i_bytes = src->video0.max_i_bytes;
+		dst->video0.max_p_bytes = src->video0.max_p_bytes;
 		break;
 	default:
 		break;
@@ -1589,6 +1673,12 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_roi_qp(cfg->fpv.roi_qp);
 	case LIVE_GROUP_GAIN_MAX:
 		return g_cb->apply_gain_max(cfg->isp.gain_max);
+	case LIVE_GROUP_SHUTTER_MAX:
+		return g_cb->apply_shutter_max(cfg->isp.shutter_max_us);
+	case LIVE_GROUP_GAIN_MIN:
+		return g_cb->apply_gain_min(cfg->isp.gain_min);
+	case LIVE_GROUP_SHUTTER_MIN:
+		return g_cb->apply_shutter_min(cfg->isp.shutter_min_us);
 	case LIVE_GROUP_AWB:
 		mode = strcmp(cfg->isp.awb_mode, "ct_manual") == 0 ? 1 : 0;
 		return g_cb->apply_awb_mode(mode, cfg->isp.awb_ct);
@@ -1632,6 +1722,9 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality(cfg->snapshot.quality);
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab(cfg->video0.pause_stab);
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		return g_cb->apply_max_frame_size(cfg->video0.max_i_bytes,
+			cfg->video0.max_p_bytes);
 	default:
 		return -2;
 	}
@@ -1883,7 +1976,8 @@ static int make_live_set_response_locked(const VencConfig *cfg,
 }
 
 static int apply_live_set_query(SetQueryParam *params, size_t param_count,
-	int single_response, int *status_code, char **response_json)
+	int single_response, int persist, int *status_code,
+	char **response_json)
 {
 	LiveApplyGroup group_order[LIVE_GROUP_COUNT];
 	LiveBatchTouched touched;
@@ -1953,8 +2047,15 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	 * Done after the mutex is released to avoid holding it across fsync.
 	 * The helper already logs failures to stderr and caches the
 	 * last-saved snapshot, so repeated identical sets skip the flash
-	 * write entirely. */
-	(void)venc_api_save_config_to_disk(&actual_cfg);
+	 * write entirely.
+	 *
+	 * /api/v1/live/set passes persist=0: the change applies to the
+	 * running config only — no flash write.  Built for high-cadence
+	 * automated writers (waybeam-link adaptive actuation); a later
+	 * persisting /set snapshots the whole running config, volatile
+	 * changes included (one config struct, by design). */
+	if (persist)
+		(void)venc_api_save_config_to_disk(&actual_cfg);
 	return 0;
 }
 
@@ -2130,8 +2231,8 @@ static int process_restart_set_query(const SetQueryParam *param,
 	return rc;
 }
 
-static int process_single_set_query(const char *query, int *status_code,
-	char **response_json)
+static int process_single_set_query(const char *query, int persist,
+	int *status_code, char **response_json)
 {
 	char key[128], val[256];
 	const char *canonical_key;
@@ -2155,15 +2256,25 @@ static int process_single_set_query(const char *query, int *status_code,
 
 	init_single_set_param(&param, key, canonical_key, val, f);
 	if (f->mut == MUT_LIVE) {
-		return apply_live_set_query(&param, 1, 1, status_code,
+		return apply_live_set_query(&param, 1, 1, persist,
+			status_code, response_json);
+	}
+
+	/* Restart-class fields respawn the pipeline, which reloads from
+	 * disk — a volatile value would be silently discarded.  Reject on
+	 * the live endpoint rather than pretend. */
+	if (!persist) {
+		*status_code = 400;
+		return make_error_json("invalid_request",
+			"restart-class field requires persistence; use /api/v1/set",
 			response_json);
 	}
 
 	return process_restart_set_query(&param, status_code, response_json);
 }
 
-static int process_multi_live_set_query(const char *query, int *status_code,
-	char **response_json)
+static int process_multi_live_set_query(const char *query, int persist,
+	int *status_code, char **response_json)
 {
 	SetQueryParam params[SET_QUERY_MAX_PARAMS];
 	const char *parse_error = NULL;
@@ -2177,13 +2288,14 @@ static int process_multi_live_set_query(const char *query, int *status_code,
 			response_json);
 	}
 	if (param_count < 2)
-		return process_single_set_query(query, status_code, response_json);
+		return process_single_set_query(query, persist, status_code,
+			response_json);
 
-	return apply_live_set_query(params, param_count, 0, status_code,
-		response_json);
+	return apply_live_set_query(params, param_count, 0, persist,
+		status_code, response_json);
 }
 
-static int process_set_query(const char *query, int *status_code,
+static int process_set_query(const char *query, int persist, int *status_code,
 	char **response_json)
 {
 	if (!status_code || !response_json)
@@ -2193,10 +2305,11 @@ static int process_set_query(const char *query, int *status_code,
 	*response_json = NULL;
 
 	if (query && strchr(query, '&'))
-		return process_multi_live_set_query(query, status_code,
-			response_json);
+		return process_multi_live_set_query(query, persist,
+			status_code, response_json);
 
-	return process_single_set_query(query, status_code, response_json);
+	return process_single_set_query(query, persist, status_code,
+		response_json);
 }
 
 /* ── Route handlers ──────────────────────────────────────────────────── */
@@ -2211,7 +2324,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.12.1\","
+		"\"contract_version\":\"0.13.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2350,7 +2463,29 @@ static int handle_set(int fd, const HttpRequest *req, void *ctx)
 
 	(void)ctx;
 
-	rc = process_set_query(req->query, &status, &json);
+	rc = process_set_query(req->query, 1, &status, &json);
+	if (rc != 0 || !json) {
+		free(json);
+		return httpd_send_error(fd, 500, "internal_error", "out of memory");
+	}
+
+	rc = httpd_send_json(fd, status, json);
+	free(json);
+	return rc;
+}
+
+/* /api/v1/live/set — /set's field surface, applied to the running config
+ * only (no flash write).  Serves MUT_LIVE fields; restart-class fields are
+ * rejected (a respawn reloads from disk and would discard the value). */
+static int handle_live_set(int fd, const HttpRequest *req, void *ctx)
+{
+	char *json = NULL;
+	int status = 500;
+	int rc;
+
+	(void)ctx;
+
+	rc = process_set_query(req->query, 0, &status, &json);
 	if (rc != 0 || !json) {
 		free(json);
 		return httpd_send_error(fd, 500, "internal_error", "out of memory");
@@ -2662,7 +2797,7 @@ static int handle_attitude_calibrate(int fd, const HttpRequest *req,
 
 	snprintf(q, sizeof(q), "attitude.trim_roll_deg=%.2f",
 		(double)roll);
-	if (process_set_query(q, &status, &resp) != 0 || status != 200) {
+	if (process_set_query(q, 1, &status, &resp) != 0 || status != 200) {
 		free(resp);
 		return httpd_send_error(fd, 500, "internal_error",
 			"failed to persist trim_roll_deg");
@@ -2671,7 +2806,7 @@ static int handle_attitude_calibrate(int fd, const HttpRequest *req,
 	resp = NULL;
 	snprintf(q, sizeof(q), "attitude.trim_pitch_deg=%.2f",
 		(double)pitch);
-	if (process_set_query(q, &status, &resp) != 0 || status != 200) {
+	if (process_set_query(q, 1, &status, &resp) != 0 || status != 200) {
 		free(resp);
 		return httpd_send_error(fd, 500, "internal_error",
 			"failed to persist trim_pitch_deg");
@@ -3305,6 +3440,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/config.json",  handle_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/capabilities", handle_capabilities, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/set",          handle_set, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/live/set",     handle_live_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/get",          handle_get, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/fps/config",   handle_fps_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/fps/live",     handle_fps_live, NULL);

@@ -17,6 +17,7 @@
 #include <time.h>
 
 struct DebugOsdState; /* forward declaration — see debug_osd.h */
+struct Star6eIpuDetect; /* forward declaration — see star6e_ipu_yolo.c */
 
 /* Hard VENC encoder-input frame-rate ceiling on Infinity6E.  The SDK's
  * _MI_VENC_VerifyFps rejects any input FPS > 120 and silently resets it to
@@ -70,6 +71,7 @@ typedef struct {
 	/* Dual VENC (gemini mode) — heap-allocated, NULL when inactive */
 	struct Star6eDualVenc *dual;
 	struct DebugOsdState *debug_osd;  /* NULL if debug OSD disabled */
+	struct Star6eIpuDetect *detect;   /* NULL when IPU detection inactive */
 	Star6ePrecropRect active_precrop; /* precrop currently programmed into VIF
 	                                   * (includes overscan offsets) */
 } Star6ePipelineState;
@@ -145,12 +147,11 @@ int star6e_pipeline_set_pause_stab(bool paused);
 void star6e_pipeline_zoom_status(Star6eZoomStatus *out);
 
 /** Service custom 3A (AWB/AE) at regular intervals. */
-/** One-shot legacy-AE cold-boot fps re-kick.  Call once ~1.5s after pipeline
- *  start from the run loop; re-issues MI_SNR_SetFps to force the sensor timing
- *  register to the configured fps (the init-time kick fires before the ISP bin
- *  settles and can leave the sensor locked low on a cold boot).  No-op when
- *  isp.legacy_ae is off (CUS3A uses its own frame-15 kick). */
-void star6e_pipeline_legacy_fps_rekick(const Star6ePipelineState *state,
+/** One-shot cold-boot fps re-kick.  Call once ~1.5s after pipeline start from
+ *  the run loop; re-issues MI_SNR_SetFps to force the sensor timing register to
+ *  the configured fps (the init-time kick fires before the ISP bin settles and
+ *  can leave the sensor locked low on a cold boot).  No-op when fps is 0. */
+void star6e_pipeline_cold_boot_fps_rekick(const Star6ePipelineState *state,
 	const VencConfig *vcfg);
 
 void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
@@ -167,15 +168,14 @@ int star6e_pipeline_cap_exposure_for_fps(uint32_t fps,
 /** Reload the ISP tuning bin against the running pipeline.
  *  configured_path is the new bin location (NULL/empty falls back to
  *  /etc/sensors/<sensor>.bin keyed off sensor_name).  vcfg supplies
- *  contextual state (video0.fps for the exposure cap, isp.legacy_ae for
- *  the SetFps kick) — its isp.sensor_bin is NOT consulted.  No-op when
- *  the resolved path matches the bin already loaded.  Reapplies the
- *  FPS-derived exposure cap on success since the bin's AE limits may
- *  override it; in legacy-AE mode also kicks MI_SNR_SetFps so the
- *  sensor's physical shutter register isn't left at the bin's cold-boot
- *  value (which would lock the sensor below the configured fps — see
- *  star6e_pipeline.c bind_and_finalize_pipeline comment).  Returns 0 on
- *  success / no-op, -1 on resolve or SDK failure. */
+ *  contextual state (video0.fps for the exposure cap) — its isp.sensor_bin
+ *  is NOT consulted.  No-op when the resolved path matches the bin already
+ *  loaded.  Reapplies the FPS-derived exposure cap on success since the
+ *  bin's AE limits may override it, and kicks MI_SNR_SetFps so the sensor's
+ *  physical shutter register isn't left at the bin's cold-boot value (which
+ *  would lock the sensor below the configured fps — see star6e_pipeline.c
+ *  bind_and_finalize_pipeline comment).  Returns 0 on success / no-op, -1 on
+ *  resolve or SDK failure. */
 int star6e_pipeline_load_isp_bin_live(const char *configured_path,
 	const VencConfig *vcfg, const char *sensor_name,
 	MI_SNR_PAD_ID_e pad_id, uint32_t sensor_framerate);

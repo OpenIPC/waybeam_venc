@@ -1,5 +1,6 @@
 #include "star6e_pipeline.h"
 #include "star6e_framing.h"
+#include "star6e_ipu_yolo.h"
 #include "star6e_framing_host.h"
 #if HAVE_FRAMING_STAB
 #include "star6e_framing_stab.h"
@@ -361,22 +362,22 @@ void star6e_pipeline_cus3a_reset(void)
 	g_cus3a_handoff_done = 0;
 }
 
-/* Delayed legacy-AE cold-boot fps re-kick.  The pipeline-init MI_SNR_SetFps
+/* Delayed cold-boot fps re-kick.  The pipeline-init MI_SNR_SetFps
  * (bind_and_finalize_pipeline) fires before the ISP bin's AE has settled, so on
  * a cold boot the sensor's physical timing register can be left below the
  * configured fps (observed ~70fps @ target 90; a warm restart keeps the kernel
- * sensor state so it shows ~90).  CUS3A handles this via its frame-15 thread
- * kick; legacy AE has no periodic thread, so re-issue SetFps once from the run
- * loop ~1.5s after start, after the bin load + AE converge, to force the sensor
- * register to the target.  No-op when legacy_ae is off (CUS3A path) or fps is 0. */
-void star6e_pipeline_legacy_fps_rekick(const Star6ePipelineState *state,
+ * sensor state so it shows ~90).  The supervisory AE enforcer only touches the
+ * ISP exposure limit, not the sensor timing register, so re-issue SetFps once
+ * from the run loop ~1.5s after start, after the bin load + AE converge, to
+ * force the sensor register to the target.  No-op when fps is 0. */
+void star6e_pipeline_cold_boot_fps_rekick(const Star6ePipelineState *state,
 	const VencConfig *vcfg)
 {
-	if (!state || !vcfg || !vcfg->isp.legacy_ae)
+	if (!state || !vcfg)
 		return;
 	if (state->sensor.fps == 0)
 		return;
-	printf("[waybeam] legacy cold-boot fps re-kick: SetFps(%u)\n",
+	printf("[waybeam] cold-boot fps re-kick: SetFps(%u)\n",
 		state->sensor.fps);
 	fflush(stdout);
 	MI_SNR_SetFps(state->sensor.pad_id, state->sensor.fps);
@@ -1879,14 +1880,14 @@ int star6e_pipeline_load_isp_bin_live(const char *configured_path,
 		star6e_pipeline_cap_exposure_for_fps(vcfg->video0.fps,
 			vcfg->isp.shutter_rule_180);
 
-	/* Legacy-AE writes the bin's cold-boot shutter (often ~100 ms) directly
-	 * to the sensor register, which the SetExposureLimit cap above doesn't
-	 * touch.  Kick MI_SNR_SetFps to force the sensor driver to reconfigure
-	 * timing — without this, swapping to a darker bin can lock the sensor
-	 * at ~12 fps until reinit (cold_boot_fps_lock memory).  CUS3A mode
-	 * handles this via its periodic fps_kick logic, so skip the kick when
-	 * legacy_ae is off. */
-	if (vcfg->isp.legacy_ae && sensor_framerate > 0) {
+	/* The ISP bin's AE writes the bin's cold-boot shutter (often ~100 ms)
+	 * directly to the sensor register, which the SetExposureLimit cap above
+	 * doesn't touch.  Kick MI_SNR_SetFps to force the sensor driver to
+	 * reconfigure timing — without this, swapping to a darker bin can lock
+	 * the sensor at ~12 fps until reinit (cold_boot_fps_lock memory).  The
+	 * supervisory AE enforcer only touches the exposure limit, so the
+	 * pipeline owns this kick. */
+	if (sensor_framerate > 0) {
 		MI_SNR_SetFps(pad_id, sensor_framerate);
 		/* SetFps can reprogram sensor timing, which on some sensors also
 		 * resets the orientation registers.  This is a discrete runtime
@@ -2013,6 +2014,20 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
 	}
 
+	/* IPU object-detection tap (VPE port1).  Mutually exclusive with a
+	 * framing module (stab), which already owns the single VPE port1.  Skip
+	 * with a note when framing is active; otherwise start best-effort (never
+	 * fatal to the stream). */
+	if (vcfg->detect.enabled) {
+		if (g_framing) {
+			fprintf(stderr, "[waybeam] detect: skipped — video0.framing "
+				"owns VPE port1 (detect and stab are mutually "
+				"exclusive)\n");
+		} else {
+			star6e_ipu_yolo_start(state, vcfg);
+		}
+	}
+
 	/* Bring up the JPEG snapshot subsystem on the same VPE source port the
 	 * main channel just bound to.  Failure is non-fatal — /api/v1/snapshot.jpg
 	 * just serves 503 if init fails.  Config from venc.json snapshot.*
@@ -2078,14 +2093,13 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate,
 		vcfg->isp.shutter_rule_180);
 
-	/* Cold-boot fix: with legacyAe the ISP bin's AE may initialize the
-	 * sensor at a shutter exceeding the frame period.  SetExposureLimit
-	 * only constrains the AE algorithm, not the physical sensor register.
-	 * MI_SNR_SetFps forces the sensor driver to reconfigure timing,
-	 * resetting the shutter to fit the frame period.  When CUS3A is
-	 * active it handles this via the fps_kick logic; when legacyAe is
-	 * active we must do it here. */
-	if (vcfg->isp.legacy_ae && pconf->exposure_cap_us > 0 &&
+	/* Cold-boot fix: the ISP bin's AE may initialize the sensor at a shutter
+	 * exceeding the frame period.  SetExposureLimit only constrains the AE
+	 * algorithm, not the physical sensor register.  MI_SNR_SetFps forces the
+	 * sensor driver to reconfigure timing, resetting the shutter to fit the
+	 * frame period.  The supervisory AE enforcer only touches the exposure
+	 * limit, so the pipeline owns this kick. */
+	if (pconf->exposure_cap_us > 0 &&
 	    pconf->sensor_framerate > 0) {
 		MI_SNR_SetFps(state->sensor.pad_id, pconf->sensor_framerate);
 	}
@@ -2277,6 +2291,12 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	 * must run while the SDK still holds a consistent view of the VPE
 	 * source.  Idempotent; safe even if init was skipped or failed. */
 	venc_jpeg_shutdown();
+
+	/* Stop the IPU detection reader (joins before DisablePort(0,1), MMU-safe)
+	 * and tear down its backend.  Idempotent; no-op when detection inactive.
+	 * Detect and framing are mutually exclusive, so at most one of these
+	 * two blocks does work. */
+	star6e_ipu_yolo_stop(state);
 
 	/* Stop the stabilization detector thread: park the detector, disable the
 	 * tiny port1 tap, and join the thread; port0 stays a normal VPE→VENC bind
@@ -2494,6 +2514,26 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	ret = bind_and_finalize_pipeline(state, vcfg, &pconf, sdk_quiet);
 	if (ret != 0)
 		goto fail_venc;
+
+	/* Must run AFTER bind_and_finalize_pipeline(): it calls
+	 * star6e_output_init() -> star6e_output_reset(), which memsets the
+	 * whole output struct and would otherwise zero these GDR/SVC-T
+	 * tagging fields. */
+	state->output.gdr_active =
+		(vcfg->video0.intra_refresh_mode[0] != '\0' &&
+		 strcmp(vcfg->video0.intra_refresh_mode, "off") != 0) ? 1 : 0;
+	state->output.svct_active = vcfg->video0.ref_base > 0 ? 1 : 0;
+	{
+		IntraRefreshDerived gdr_ir;
+		(void)star6e_pipeline_intra_refresh_derive(
+			vcfg, pconf.image_height, venc_fps, pconf.rc_codec,
+			&gdr_ir);
+		uint32_t clen = (gdr_ir.total_rows && gdr_ir.lines)
+			? (gdr_ir.total_rows + gdr_ir.lines - 1) / gdr_ir.lines
+			: 0;
+		state->output.gdr_cycle_len = clen > 255 ? 255 : (uint8_t)clen;
+		state->output.gdr_counter = 0;
+	}
 
 	return 0;
 

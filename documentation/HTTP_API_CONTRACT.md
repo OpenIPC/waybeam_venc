@@ -8,7 +8,9 @@
 - Keep endpoints lean and focused on direct operational value.
 - Accepted `/api/v1/set` and `/api/v1/defaults` changes are persisted to the
   registered config path before the response returns. Manual `/api/v1/restart`
-  still reloads exactly what is already on disk.
+  still reloads exactly what is already on disk. `/api/v1/live/set` is the
+  deliberate exception: it applies live fields to the running config without
+  touching disk (for high-cadence automated writers).
 - Keep JSON payloads simple and descriptive.
 - Keep mutability semantics explicit:
   - `live` — applied immediately without pipeline restart.
@@ -16,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.12.1`
+- `contract_version`: `0.13.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -376,6 +378,36 @@ Error `400` — multi-set included a restart-required field:
 
 The same camelCase aliases listed above are accepted here for
 Majestic-oriented clients.
+
+### `GET /api/v1/live/set?<field_name>=<value>`
+
+`/api/v1/set`'s field surface, applied to the **running config only — no
+write to `/etc/waybeam.json`**. Built for high-cadence automated writers
+(waybeam-link adaptive bitrate/caps/fps actuation), where persist-on-set
+would wear flash and boot into the last adaptive transient.
+
+```bash
+# Volatile bitrate change: applied live, gone after restart
+curl "http://<device-ip>/api/v1/live/set?video0.bitrate=4096"
+
+# Multi-set works identically (all fields must be live)
+curl "http://<device-ip>/api/v1/live/set?video0.maxIBytes=60000&video0.maxPBytes=12000"
+```
+
+Semantics:
+- **Live fields only.** Restart-required fields are rejected with `400`
+  (`"restart-class field requires persistence; use /api/v1/set"`) — a
+  pipeline reinit reloads from disk, which would silently discard a volatile
+  value.
+- Responses (success and error) are byte-identical in shape to
+  `/api/v1/set`.
+- A later persisting `/api/v1/set` or `/api/v1/defaults` snapshots the
+  **whole running config, earlier volatile changes included** — one config
+  struct, by design. Deployments that must keep a field volatile should
+  route all writers of that field through `/live/set` (waybeam-link's
+  single-bitrate-authority rule).
+- Detection: builds without this endpoint answer `404 no matching route`,
+  so clients can probe once and fall back to `/api/v1/set`.
 
 ### `video0.qp_delta`
 
@@ -1380,9 +1412,19 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
-| `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
+| `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.46.0` (additive — new config fields):
+  - Added `isp.gain_min` (min sensor gain floor) and `isp.shutter_min_us`
+    (min exposure floor, µs) to the config schema.  Both default `0` =
+    "use the ISP bin's calibrated floor" (no override), symmetric with the
+    existing `isp.gain_max` / `isp.shutter_max_us` ceilings.  The
+    supervisory cus3a thread writes them into `minSensorGain` /
+    `minShutterUs` of the ISP exposure limit; each floor is clamped to not
+    exceed its ceiling, and `isp.shutter_rule_180` (min==max pin) overrides
+    a manual `shutter_min`.  `MUT_LIVE`, both backends.
+  - Added `isp.gainMin` / `isp.shutterMinUs` camelCase aliases.
 - `0.12.1` (additive — new config field):
   - Added `isp.shutter_rule_180` (boolean, default `false`) to config
     schema.  When `true`, pins exposure to exactly 1/(2×fps) — sets

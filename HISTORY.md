@@ -1,5 +1,273 @@
 # History
 
+## [0.51.0] - 2026-07-24
+
+Detector tuning surface: expose the confidence/NMS thresholds, the tap
+geometry, and the wire `model_id` as config (#191). These rode into the fork
+under the 0.50.0 tag without their own bump; versioned here so the config is
+documented and the version uniquely identifies the build.
+
+- **`detect.confThresh` / `detect.nmsIou`** now reach the plugin. The plugin
+  ABI has carried these since the boundary landed, but the host passed zeros so
+  every backend ran on its built-in `0.40` / `0.45`. `0.40` is too high for the
+  small-object workload — INT8 quantization costs ~30% of the FP32 score on
+  small objects — and the ground tracker confirms weak detections over time, so
+  running the detector at ~`0.20` and letting the tracker's 2-hit confirmation
+  reject noise is the intended architecture. `<=0` = plugin default.
+- **`detect.netWidth` / `detect.netHeight`** replace the hardcoded `640x352`
+  VPE port1 tap. That geometry was inherited from the collaborator's VisDrone
+  model, not chosen for this sensor, and is the single largest constraint on
+  small-object recall. Validated at start: both dims must be multiples of 32
+  (the head strides 8/16/32) and must match the compiled `.img` (the backend
+  already rejects a mismatched frame). `0` -> `640` / `352`.
+- **`detect.modelId`** puts a configurable class-table selector on the DETECT
+  sidecar trailer (see `documentation/RTP_SIDECAR_PROTOCOL.md`). It was
+  hardcoded to VisDrone, so a one-class SAR-person model announced itself as
+  VisDrone-10 and every box came out labelled "pedestrian". `model_id` cannot
+  be derived — the plugin loads whatever `.img` `detect.modelPath` names — so it
+  is operator config, registered alongside `netWidth`/`netHeight`. The host now
+  calls the plugin's `describe()` hook at start and warns when the reported
+  class count contradicts the configured id; unknown ids skip the check (a
+  private `model_id` is legitimate).
+- All new members appended at the END of `VencConfigDetect` — the config ABI is
+  append-only (SigmaStar ISP bin loading breaks if `VencConfig`'s layout
+  shifts). Host tests **2074/0**; cross-build clean both backends.
+- **Docs**: adds `documentation/RTP_SIDECAR_PROTOCOL.md` — a self-contained
+  in-tree spec for the RTP sidecar wire format (FRAME base, trailer ordering,
+  ENC_INFO/TRANSPORT_INFO/ATTITUDE/DETECT, and the `model_id` registry),
+  tracking the canonical `include/rtp_sidecar.h`.
+
+## [0.50.0] - 2026-07-23
+
+Volatile config writes: `GET /api/v1/live/set`.
+
+- **New endpoint `/api/v1/live/set`** — `/set`'s field surface applied to the
+  running config only, no write to `/etc/waybeam.json`.  Built for
+  high-cadence automated writers (waybeam-link adaptive bitrate / frame-cap /
+  fps actuation, waybeam-link spec Pass 73): persist-on-set at controller
+  cadence wears flash and reboots into the last adaptive transient.
+- Live (MUT_LIVE) fields only; restart-required fields answer `400`
+  ("restart-class field requires persistence; use /api/v1/set") because a
+  pipeline reinit reloads from disk and would silently discard the value.
+  Response shapes are byte-identical to `/set`; single- and multi-set both
+  supported.
+- A later persisting `/set` / `/defaults` snapshots the whole running config,
+  volatile changes included (one config struct, by design).
+- Builds without the endpoint 404 — clients probe once and fall back to the
+  persisting `/set` (waybeam-link does exactly this).
+- Contract version 0.12.1 -> 0.13.0 (non-breaking endpoint addition).
+
+## [0.49.0] - 2026-07-19
+
+WebUI exposure for the per-frame size caps.
+
+- **`video0.maxIBytes` / `video0.maxPBytes` in the dashboard** — the 0.45.0
+  frame-size caps were API-only; they now carry data-driven UI metadata
+  (`FIELD_UI`) and render as a "Frame size caps" group from
+  `/api/v1/capabilities`. No dashboard.html change — the group comes entirely
+  from the capabilities feed, tooltips included (cap semantics, the
+  framebits-first/bitrate-first RC-priority flip, IDR-on-apply).
+
+## [0.48.0] - 2026-07-19
+
+Star6E NPU object detection (#183): pluggable object detection on the idle
+IPU, results streamed as sidecar metadata and drawn on the debug OSD.
+
+- **Detector plugin boundary** (`include/detect_plugin.h`): the host owns the
+  VPE port1 tap (model-input-size NV12, drop-not-block), the reader thread,
+  config, and the carriers; a dlopen'd plugin `.so` (`detect.plugin`) owns the
+  IPU device and the decode and returns `DetectBox[]`.  New model = config
+  change, no venc rebuild; all model-specific code (models, decode, class
+  tables, usage docs) lives with the plugin, out of this repo.
+- **RTP sidecar DETECT trailer** (flag 0x10, appended last): per-frame
+  detection metadata — 16 B header (model_id, schema_ver, count, detect_seq,
+  payload_len, age_ms) + TLV body with normalized-u16 BOX records.  Attached
+  every frame while a subscriber is present, for RF-loss resilience.  The
+  sidecar send path was rebuilt around a 512 B datagram buffer with
+  flag-ordered variable trailers (spec: coordination `protocols/rtp-sidecar.md`).
+- **Debug-OSD box rendering** (`detect.osd`, needs `debug.showOsd`): the
+  encode-thread OSD pass scales the published snapshot onto the canvas and
+  draws palette-colored rects per class plus a `det N` row; snapshots older
+  than 700 ms are not drawn.
+- Reader publishes a mutex double-buffered snapshot (<= 64 boxes) consumed by
+  both the sidecar and the OSD; lock held only for the copy, never across an
+  IPU invoke.  Detection is best-effort — any bring-up failure logs and the
+  stream continues without it.  `detect` config block is trailing/append-only;
+  detect and `framing=stab` are mutually exclusive (both claim VPE port1).
+- WebUI: new **Detection** dashboard section exposing the `detect.*` config
+  fields (enabled, plugin, modelPath, firmwarePath, inferInterval, osd).
+- New host tests: `tests/test_detect_wire.c` (39 cases) for the trailer
+  builder; sidecar send-path call sites updated.
+
+
+## [0.47.0] - 2026-07-18
+
+Retire the Star6E `aeEngine=custom` userspace AE and remove the `custom` value
+entirely (mirrors Maruko's 0.22.0 move).
+
+- **`aeEngine=custom` is removed.**  The `cus3a` thread never did AE convergence —
+  the ISP firmware/bin AE always drives it, in both engine modes.  Since 0.46.0
+  made the thread enforce gain/shutter limits under `sdk` too, the only thing
+  `custom` still did was run the fps-derived shutter cap and the cold-boot fps
+  kick from the thread instead of the pipeline.  Star6E now always runs the single
+  limits-only enforcer beside the firmware AE.  `isp.aeEngine` accepts only `sdk`;
+  any other value (including a stale `custom` in an old config) warns and falls
+  back to `sdk`, so existing configs still load.
+- Behaviour for the default (`sdk`) path is unchanged: convergence, cold-boot fps
+  recovery (pipeline `cap_exposure_for_fps` + `MI_SNR_SetFps` kicks, now
+  unconditional), and gain/shutter min/max enforcement all behave exactly as in
+  0.46.0.  The retirement does **not** adopt custom's continuous fps-derived
+  shutter cap — the pipeline already caps at init and on bin reload.
+- Removed the now-dead custom-only internals from `star6e_cus3a` (the
+  `limits_only`/`sensor_fps` config fields, the `MI_SNR_SetFps` symbol + the
+  frame-15 cold-boot kick, and `compute_max_shutter`'s fps fallback) and made the
+  pipeline's three cold-boot `SetFps` kicks unconditional.  `start_custom_ae` →
+  `start_ae_enforcer`, `star6e_pipeline_legacy_fps_rekick` →
+  `star6e_pipeline_cold_boot_fps_rekick`.
+- Dropped the vestigial `VencConfigIsp::legacy_ae` / `ae_mode` derived fields, the
+  `MarukoConfig::ae_mode` mirror, and both backends' retirement-NOTE branches —
+  `custom` no longer exists to record.
+- `make verify` clean both backends; `test-werror` + `test-asan` **1979/0**.
+  Device-verified on `.201` (IMX335): `sdk` enforcer clamps the live firmware AE
+  (gainMax 5000→gain 5000, revert→30000); cold-boot fps holds 60.  `.201`
+  restored to its 0.45.0 baseline.
+
+## [0.46.0] - 2026-07-18
+
+Manual minimum exposure / gain floors for the supervisory AE.
+
+- **New `isp.gainMin` / `isp.shutterMinUs` live controls** — set an explicit
+  minimum sensor gain and minimum exposure (µs) floor for the 3A, completing
+  the manual min/max envelope alongside the existing `isp.gainMax` /
+  `isp.shutterMaxUs` ceilings.  Both default `0` = "use the ISP bin's
+  calibrated floor" (no override).
+- The supervisory cus3a thread writes the floors into `minSensorGain` /
+  `minShutterUs` of the ISP exposure limit on startup and re-enforces them
+  each tick.  Each floor is clamped so it can never exceed its ceiling, and
+  `isp.shutterRule180` (which pins `min==max`) takes precedence over a manual
+  `shutterMin`.  Setting a floor back to `0` restores the ISP bin's calibrated
+  floor (the thread captures `minSensorGain`/`minShutterUs` from the bin at
+  startup and falls back to it, mirroring the ceiling's `bin_max_*` fallback).
+  `MUT_LIVE`, both Star6E and Maruko backends.  Device-verified on `.201`
+  (IMX335) and `.233` (IMX415): floors apply, clamp to ceiling, pin overrides
+  shutter floor, and `0` restores the bin default.
+- **Star6E: the supervisory thread now runs as a limits-only enforcer under the
+  SDK firmware AE too** (`aeEngine=sdk`), so `gainMin/Max` + `shutterMin/Max`
+  work without switching to the custom AE (Maruko already enforced in both
+  modes).  The thread starts whenever `aeFps>0`; in `sdk`/`legacy_ae` it sets
+  `limits_only` — it enforces only explicit user gain/shutter min/max (with the
+  bin baseline restored on `0`) and skips the fps-derived shutter cap and the
+  cold-boot fps kick, which the pipeline already owns in legacy mode.
+  Device-verified on `.201` in `sdk`: all four knobs apply and fully revert, and
+  a binding `gainMax` genuinely clamps the live firmware AE (long gain 20129 →
+  5000 → 3000, luma tracks; recovers on revert) — the AE stays converged.
+- camelCase aliases `isp.gainMin` / `isp.shutterMinUs`; added to the config
+  schema, pretty-printer, JSON export, default configs, and HTTP API contract.
+
+## [0.45.0] - 2026-07-18
+
+Live per-frame I/P frame-size caps (MaxISize/MaxPSize) with RC priority.
+
+- **New `video0.maxIBytes` / `video0.maxPBytes` live controls** — cap the
+  per-frame encoded I-frame and P-frame size via the MI_VENC RC params
+  `u32MaxISize` / `u32MaxPSize`. `MUT_LIVE`, applied atomically as a group;
+  0 = unlimited (default).
+- **RC priority switch** — when either cap is > 0, RC priority is set to
+  `FRAMEBITS_FIRST` so the encoder treats the size cap as a hard ceiling;
+  when both return to 0, `BITRATE_FIRST` is restored. An IDR is requested
+  after each apply.
+- **Dual-backend parity** — Star6E (2-arg `MI_VENC_SetRcPriority`) and
+  Maruko (3-arg with VeDev), both loaded as optional dlsym symbols
+  (NULL-safe). Mode-aware `GetRcParam` → set the correct RC union member
+  (H265/H264 × CBR/VBR/AVBR) → `SetRcParam` → `SetRcPriority`.
+- **`SetRcPriority` takes a POINTER to the enum** — `MI_VENC_SetRcPriority`'s
+  last arg is `MI_VENC_RcPriority_e *peRcPriority`, not the value (verified
+  against the i6e/i6c SDK headers). The initial implementation passed the
+  enum value, so the SDK dereferenced `0x2` as a pointer and faulted the
+  encoder pipeline (SCL teardown + "Sensor abnormal"). Both backends now
+  pass the address of a temporary. Device-verified: Star6E .201 (P-cap 5619→
+  1868 kbps at maxPBytes=2000, no crash) and Maruko .233 (priority=framebits,
+  no crash).
+- Config JSON: `maxIBytes` / `maxPBytes` camelCase load/save/render.
+- Adds `specs/2026-07-17-capped-vbr-rc-mode/` (requirements + plan) for a
+  follow-on capped-VBR profile.
+
+## [0.44.0] - 2026-07-18
+
+Live FPS change improvements and exposure-based FPS override.
+
+- **Reduced live FPS change stream stall** — `apply_fps()` (Star6E) and
+  `maruko_apply_fps()` now skip the VPE→VENC unbind/rebind when the
+  requested FPS matches the currently delivered FPS (no-op early-out),
+  and request an IDR frame immediately after a successful rebind so the
+  decoder recovers without waiting for the next GOP boundary.
+- **New `isp.shutterMaxUs` live control** — exposes the CUS3A supervisory
+  thread's `shutter_max_us` as a `MUT_LIVE` API field.  Setting this
+  above the frame period (e.g. 33333 µs at 60 fps bound) forces the
+  sensor to skip frames, reducing effective output FPS proportionally
+  without the ~0.5 s bind-rebind stall.  Bitrate scales with effective
+  FPS.  0 = automatic (1/sensor_fps).  Both Star6E and Maruko backends
+  supported.  Dashboard ISP section updated with the new control.
+- Config JSON: `isp.shutterMaxUs` parsed and serialized (persists across
+  restarts).  Pipeline startup applies a non-zero persisted value to the
+  CUS3A config (subordinate to `shutterRule180` when both are set).
+
+## [0.43.0] - 2026-07-15
+
+Frame-SHM tagging for GDR and SVC-T enhance-layer frames.
+
+- **New `VencFrameMeta` flag bits** — `VENC_FRAME_FLAG_GDR` (0x02) and
+  `VENC_FRAME_FLAG_ENHANCE` (0x04) in `include/venc_frame_ring.h`. No
+  struct size change; uses bits 1–2 of the existing `flags` byte. Old
+  consumers ignore unknown bits — no ring version bump needed.
+- **GDR cycle position** — the former `reserved` field is replaced by
+  `gdr_pos` (0-based position in the refresh cycle) and `gdr_len` (cycle
+  length in frames). The transport layer can use these to apply stronger
+  FEC or ARQ near the end of the cycle where the refresh completes.
+  Cycle length is derived at pipeline init from `ceil(total_ctu_rows /
+  lines_per_frame)`. Counter resets on each IDR.
+- **GDR tagging** — when intra refresh is active (resilience preset is not
+  "off"), every non-IDR frame is tagged with `VENC_FRAME_FLAG_GDR` to
+  indicate a rolling intra stripe is present. Both Star6E and Maruko
+  backends track `gdr_active` on the output struct.
+- **SVC-T enhance tagging** — when temporal scalability is configured
+  (`ref_base > 0`), frames with `refType == ENHANCE_P_NOTFORREF` (the
+  droppable top enhance layer) are tagged with `VENC_FRAME_FLAG_ENHANCE`.
+  Both backends track `svct_active` on the output struct.
+- `frame_shm_consumer_test` reports GDR and ENHANCE frame counts plus
+  cycle length in both per-second interval output and the final summary.
+
+Device-verification fixes (Star6E IMX335 .201):
+- **Fixed: Star6E GDR/SVC-T fields zeroed by output reset.** The pipeline
+  set `gdr_active`/`svct_active`/`gdr_cycle_len` before
+  `bind_and_finalize_pipeline()`, which calls `star6e_output_init()` →
+  `star6e_output_reset()` (a full `memset`), wiping them — so Star6E emitted
+  zero GDR/ENHANCE tags. The assignment now runs after finalize.
+- **Fixed: wrong `ENHANCE_P_NOTFORREF` refType constant (both backends).**
+  It was `4` (the HiSilicon enum value); the SigmaStar i6e/i6c enum inserts
+  `BASE_P_REFTOIDR` at index 1, making `ENHANCE_P_NOTFORREF` = `5` (value 4
+  is `ENHANCE_P_REFBYENHANCE`, a referenced, non-droppable frame).
+  Consolidated into one shared define per backend
+  (`STAR6E_REFTYPE_ENHANCE_P_NOTFORREF` in `star6e.h`,
+  `MARUKO_REFTYPE_ENHANCE_P_NOTFORREF` in `maruko_video.h`), which also
+  corrects the pre-existing TRAIL_R→TRAIL_N error-resilience rewrite in
+  `star6e_runtime.c` / `maruko_pipeline.c` that shared the same wrong value.
+  Verified on i6e: 1:1 SVC-T → 50% frames tagged ENHANCE and rewritten to
+  TRAIL_N; reference frames stay TRAIL_R.
+
+## [0.42.1] - 2026-07-11
+
+- **Frame-SHM wait wakeup hardening.** `venc_frame_ring_read_wait()` now re-checks
+  the ring after publishing `consumer_waiting` and before entering the futex wait,
+  closing a lost-wake race where a consumer could sleep even though a frame had
+  already been committed. The standalone frame-SHM consumer now sizes its read
+  buffer from the attached ring header instead of assuming 512 KiB slots.
+- **Frame-SHM ring geometry tuned for realtime.** The `frame-shm://` ring now
+  allocates 8 slots × 384 KiB (~3 MiB) instead of 16 × 512 KiB (~8 MiB) on both
+  Star6E and Maruko backends. Observed ≤1080p IDRs are ≤28 KiB, so 384 KiB
+  retains large headroom while a drop-not-block realtime ring needs far fewer
+  than 16 in-flight slots. Consumers read the geometry from the ring header, so
+  no consumer change is required.
 ## [0.42.0] - 2026-07-11
 
 Full-frame SHM emissions — a new `frame-shm://` URI scheme that transfers

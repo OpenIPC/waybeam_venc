@@ -320,6 +320,63 @@ static int apply_qp_delta(int delta)
 	return 0;
 }
 
+static int apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
+{
+	MI_VENC_ChnAttr_t attr = {0};
+	MI_VENC_RcParam_t param = {0};
+	MI_VENC_RcPriority_e pri;
+
+	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
+		return -1;
+	if (MI_VENC_GetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
+		return -1;
+
+	switch (attr.rate.mode) {
+	case I6_VENC_RATEMODE_H265CBR:
+		param.stParamH265Cbr.u32MaxISize = max_i_bytes;
+		param.stParamH265Cbr.u32MaxPSize = max_p_bytes;
+		break;
+	case I6_VENC_RATEMODE_H264CBR:
+		param.stParamH264Cbr.u32MaxISize = max_i_bytes;
+		param.stParamH264Cbr.u32MaxPSize = max_p_bytes;
+		break;
+	case I6_VENC_RATEMODE_H265VBR:
+		param.stParamH265Vbr.u32MaxISize = max_i_bytes;
+		param.stParamH265Vbr.u32MaxPSize = max_p_bytes;
+		break;
+	case I6_VENC_RATEMODE_H264VBR:
+		param.stParamH264VBR.u32MaxISize = max_i_bytes;
+		param.stParamH264VBR.u32MaxPSize = max_p_bytes;
+		break;
+	case I6_VENC_RATEMODE_H265AVBR:
+		param.stParamH265Avbr.u32MaxISize = max_i_bytes;
+		param.stParamH265Avbr.u32MaxPSize = max_p_bytes;
+		break;
+	case I6_VENC_RATEMODE_H264AVBR:
+		param.stParamH264Avbr.u32MaxISize = max_i_bytes;
+		param.stParamH264Avbr.u32MaxPSize = max_p_bytes;
+		break;
+	default:
+		return -1;
+	}
+
+	if (MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
+		return -1;
+
+	pri = (max_i_bytes > 0 || max_p_bytes > 0)
+		? E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
+		: E_MI_VENC_RC_PRIORITY_BITRATE_FIRST;
+	MI_VENC_SetRcPriority(g_star6e_control_ctx.venc_chn, pri);
+
+	if (request_idr() != 0)
+		return -1;
+	printf("> maxFrameSize changed: I=%u P=%u bytes, priority=%s\n",
+		max_i_bytes, max_p_bytes,
+		pri == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
+			? "framebits" : "bitrate");
+	return 0;
+}
+
 static int apply_encoder_fps(uint32_t fps)
 {
 	MI_VENC_ChnAttr_t attr = {0};
@@ -377,6 +434,8 @@ static int apply_fps(uint32_t fps)
 			sensor_fps);
 		fps = sensor_fps;
 	}
+	if (fps == g_star6e_control_ctx.delivered_fps)
+		return 0;
 	/* Decouple delivery from rate control: the VPE->VENC bind DELIVERS the
 	 * true fps (VENC encodes it fine — the block does ~143fps), but the RC
 	 * fpsNum is capped to STAR6E_VENC_INPUT_FPS_MAX because _MI_VENC_VerifyFps
@@ -431,6 +490,7 @@ static int apply_fps(uint32_t fps)
 			(void)apply_bitrate(cfg_kbps);
 	}
 
+	request_idr();
 	printf("> FPS delivered %u, RC fpsNum %u (bind %u:%u)\n", fps, rc_fps,
 		sensor_fps, fps);
 	return 0;
@@ -440,6 +500,27 @@ static int apply_gain_max(uint32_t gain)
 {
 	if (star6e_cus3a_running())
 		star6e_cus3a_set_gain_max(gain);
+	return 0;
+}
+
+static int apply_shutter_max(uint32_t us)
+{
+	if (star6e_cus3a_running())
+		star6e_cus3a_set_shutter_max(us);
+	return 0;
+}
+
+static int apply_gain_min(uint32_t gain)
+{
+	if (star6e_cus3a_running())
+		star6e_cus3a_set_gain_min(gain);
+	return 0;
+}
+
+static int apply_shutter_min(uint32_t us)
+{
+	if (star6e_cus3a_running())
+		star6e_cus3a_set_shutter_min(us);
 	return 0;
 }
 
@@ -1255,6 +1336,9 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_qp_delta = apply_qp_delta,
 	.apply_roi_qp = apply_roi_qp,
 	.apply_gain_max = apply_gain_max,
+	.apply_shutter_max = apply_shutter_max,
+	.apply_gain_min = apply_gain_min,
+	.apply_shutter_min = apply_shutter_min,
 	.apply_verbose = apply_verbose,
 	.apply_output_enabled = apply_output_enabled,
 	.apply_server = apply_server,
@@ -1272,6 +1356,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.query_audio_status = query_audio_status,
 	.apply_zoom = apply_zoom,
 	.apply_isp_bin = apply_isp_bin,
+	.apply_max_frame_size = apply_max_frame_size,
 	.apply_snapshot_quality = venc_jpeg_set_quality,
 	.apply_pause_stab = apply_pause_stab,
 	.query_attitude = query_attitude,

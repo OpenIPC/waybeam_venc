@@ -257,8 +257,12 @@ static int i6c_venc_load(maruko_venc_impl *venc)
 		int (*)(int, int, void *), "MI_VENC_SetRcParam");
 	LOAD_SYM(venc, "libmi_venc.so", fnSetInputSourceConfig,
 		int (*)(int, int, void *), "MI_VENC_SetInputSourceConfig");
-	/* IntraRefresh is optional — older Maruko drops may lack the symbol.
+	/* Optional — older Maruko drops may lack these symbols.
 	 * Loader does not fail if dlsym misses; callers must NULL-check. */
+	/* MI_VENC_SetRcPriority(VeDev, VeChn, MI_VENC_RcPriority_e *) — the
+	 * priority arg is a POINTER to the enum, not the value. */
+	LOAD_SYM(venc, "libmi_venc.so", fnSetRcPriority,
+		int (*)(int, int, void *), "MI_VENC_SetRcPriority");
 	LOAD_SYM(venc, "libmi_venc.so", fnSetIntraRefresh,
 		int (*)(int, int, void *), "MI_VENC_SetIntraRefresh");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetIntraRefresh,

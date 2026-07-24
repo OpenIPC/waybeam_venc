@@ -49,6 +49,24 @@
 #define RTP_SIDECAR_FLAG_ENC_INFO       0x02
 #define RTP_SIDECAR_FLAG_TRANSPORT_INFO 0x04 /* transport stats trailer follows */
 #define RTP_SIDECAR_FLAG_ATTITUDE       0x08 /* attitude trailer follows */
+#define RTP_SIDECAR_FLAG_DETECT         0x10 /* detection trailer follows (LAST,
+                                              * variable-length — see below)   */
+
+/* DETECT trailer (protocols/rtp-sidecar.md).  Variable length, always the last
+ * trailer so the fixed ones keep computable offsets.  The host serialises the
+ * whole trailer (header + TLV body) and hands the sidecar opaque bytes; the
+ * sidecar copies them verbatim and never parses tags. */
+#define RTP_SIDECAR_DETECT_MAX        24    /* max objects packed per trailer   */
+#define RTP_SIDECAR_DGRAM_MAX         512   /* sender assembly buffer (all
+                                             * trailers + max DETECT fit)       */
+#define RTP_SIDECAR_DETECT_SCHEMA_V1  1     /* schema_ver: standard BOX tag     */
+#define RTP_SIDECAR_DETECT_TRUNCATED  0x0001 /* header.flags bit0               */
+#define RTP_SIDECAR_DETECT_TAG_BOX    0x01  /* TLV tag: normalized bbox (10 B)  */
+/* model_id registry — a consumer-side class-table selector, allocated in
+ * protocols/rtp-sidecar.md.  Keep the two in step: the number is the only
+ * thing on the wire that says what `cls` means. */
+#define RTP_SIDECAR_DETECT_MODEL_VISDRONE 0 /* VisDrone-10 labels               */
+#define RTP_SIDECAR_DETECT_MODEL_PERSON   1 /* single class: "person" (SAR)     */
 
 /*
  * Frame type values carried in the optional encoder-feedback trailer.
@@ -185,6 +203,37 @@ typedef struct {
 	uint16_t imu_age_ms;       /* newest-sample age at capture, saturating */
 	uint16_t reserved;         /* 0                                        */
 } RtpSidecarAttitudeWire;     /* 12 bytes */
+
+/**
+ * Optional detection trailer header — venc → probe, 16 bytes, followed by a
+ * `payload_len`-byte TLV body.  Appended LAST (after ATTITUDE) when
+ * RTP_SIDECAR_FLAG_DETECT is set.  The host builds header+body; the sidecar
+ * carries it opaquely.  TLV records are `[tag u8][len u8][value…]`; consumers
+ * skip unknown tags by len.  See protocols/rtp-sidecar.md.
+ */
+typedef struct {
+	uint16_t model_id;       /* class-table selector (0 = VisDrone-10)     */
+	uint16_t schema_ver;     /* RTP_SIDECAR_DETECT_SCHEMA_V1               */
+	uint16_t object_count;   /* detections included (≤ RTP_SIDECAR_DETECT_MAX) */
+	uint16_t flags;          /* RTP_SIDECAR_DETECT_TRUNCATED               */
+	uint32_t detect_seq;     /* monotonic inference id (dedup / freshness) */
+	uint16_t payload_len;    /* bytes of TLV body following (= count×12)   */
+	uint16_t age_ms;         /* snapshot staleness at frame encode, sat.   */
+} RtpSidecarDetectHdr;       /* 16 bytes; TLV body follows */
+
+/**
+ * Value of a BOX TLV record (tag RTP_SIDECAR_DETECT_TAG_BOX, len 10) — one
+ * detection.  Coords are NORMALIZED 0..65535 of frame W/H, corner form, so the
+ * consumer scales by its own decoded resolution with no model geometry needed.
+ */
+typedef struct {
+	uint16_t x1;             /* left   (normalized)                        */
+	uint16_t y1;             /* top    (normalized)                        */
+	uint16_t x2;             /* right  (normalized)                        */
+	uint16_t y2;             /* bottom (normalized)                        */
+	uint8_t  score;          /* class probability × 255                    */
+	uint8_t  cls;            /* class id (labelled via model_id)           */
+} RtpSidecarDetectBoxWire;   /* 10 bytes */
 
 typedef struct {
 	RtpSidecarFrame       frame;
@@ -357,5 +406,24 @@ int rtp_sidecar_send_frame_full(RtpSidecarSender *s,
 	const RtpSidecarEncInfo *enc_info,
 	const RtpSidecarTransportInfo *transport_info,
 	const RtpSidecarAttitudeInfo *attitude_info);
+
+/**
+ * Same as rtp_sidecar_send_frame_full but optionally appends the opaque DETECT
+ * trailer (RTP_SIDECAR_FLAG_DETECT) after ATTITUDE.  detect_blob points at a
+ * fully serialised trailer (RtpSidecarDetectHdr + TLV body, network byte order)
+ * that the caller built — the sidecar copies it verbatim and never parses tags.
+ * detect_blob == NULL or detect_len == 0 → identical to send_frame_full.  The
+ * blob is silently dropped (flag left clear) if it would overflow the datagram
+ * assembly buffer (RTP_SIDECAR_DGRAM_MAX); the caller bounds it so this cannot
+ * happen for a well-formed trailer.
+ */
+int rtp_sidecar_send_frame_detect(RtpSidecarSender *s,
+	uint32_t ssrc, uint32_t rtp_ts,
+	uint16_t seq_first, uint16_t seq_count,
+	uint64_t capture_us, uint64_t frame_ready_us,
+	const RtpSidecarEncInfo *enc_info,
+	const RtpSidecarTransportInfo *transport_info,
+	const RtpSidecarAttitudeInfo *attitude_info,
+	const void *detect_blob, uint16_t detect_len);
 
 #endif /* RTP_SIDECAR_H */

@@ -3,6 +3,7 @@
 #include "attitude_est.h"
 #include "audio_codec.h"
 #include "debug_osd.h"
+#include "detect_wire.h"
 #include "idr_rate_limit.h"
 #include "imu_bmi270.h"
 #include "imu_ring.h"
@@ -12,9 +13,11 @@
 #include "sdk_quiet.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
+#include "star6e_ipu_yolo.h"
 #include "star6e_iq.h"
 #include "star6e_pipeline.h"
 #include "star6e.h"
+#include "timing.h"
 #include "venc_api.h"
 #include "venc_config.h"
 #include "venc_httpd.h"
@@ -291,7 +294,9 @@ static uint32_t star6e_scene_frame_size(const MI_VENC_Stream_t *s)
 /* HEVC NAL types relevant for non-reference rewriting */
 #define HEVC_NAL_TRAIL_N 0
 #define HEVC_NAL_TRAIL_R 1
-#define SS_REFTYPE_ENHANCE_P_NOTFORREF 4
+/* STAR6E_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in star6e.h. Was locally
+ * 4 (HiSilicon value) — wrong for the SigmaStar enum, so the TRAIL_N rewrite
+ * marked referenced-enhance frames (or nothing under shallow SVC-T). */
 
 /* Locate the NAL header byte 0 inside a payload buffer that may or may not
  * begin with a start-code prefix (00 00 01 / 00 00 00 01).  Returns the
@@ -533,13 +538,17 @@ static int runtime_request_idr(void)
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
-static void start_custom_ae(const Star6ePipelineState *ps,
+/* Start the supervisory AE limit enforcer.  This is the sole AE path on
+ * Star6E: the ISP firmware/bin AE does convergence and this thread re-asserts
+ * the user's gain/shutter min/max on the exposure limit each tick.  The
+ * historical aeEngine=custom userspace governor was retired — both engine
+ * values now run this same enforcer (see start_ae_enforcer's caller). */
+static void start_ae_enforcer(const Star6ePipelineState *ps,
 	const VencConfig *vcfg)
 {
 	Star6eCus3aConfig ae_cfg;
 
 	star6e_cus3a_config_defaults(&ae_cfg);
-	ae_cfg.sensor_fps = ps->sensor.fps;
 	if (vcfg->isp.ae_fps > 0)
 		ae_cfg.ae_fps = vcfg->isp.ae_fps;
 	if (vcfg->isp.gain_max > 0)
@@ -547,7 +556,13 @@ static void start_custom_ae(const Star6ePipelineState *ps,
 	if (vcfg->isp.shutter_rule_180 && ps->sensor.fps > 0) {
 		ae_cfg.shutter_max_us = 1000000 / (ps->sensor.fps * 2);
 		ae_cfg.shutter_pin = 1;
+	} else if (vcfg->isp.shutter_max_us > 0) {
+		ae_cfg.shutter_max_us = vcfg->isp.shutter_max_us;
 	}
+	if (vcfg->isp.gain_min > 0)
+		ae_cfg.gain_min = vcfg->isp.gain_min;
+	if (vcfg->isp.shutter_min_us > 0)
+		ae_cfg.shutter_min_us = vcfg->isp.shutter_min_us;
 	ae_cfg.verbose = vcfg->system.verbose;
 	star6e_cus3a_start(&ae_cfg);
 }
@@ -718,7 +733,7 @@ static void *dual_rec_thread_fn(void *arg)
 					 * knob for inter-frame-coded video. */
 					(void)star6e_video_send_frame(&d->video,
 						&d->output, &stream, 1, 0, NULL,
-						NULL);
+						NULL, NULL, 0);
 				} else if (d->ts_recorder) {
 					star6e_ts_recorder_write_stream(
 						d->ts_recorder, &stream);
@@ -805,14 +820,23 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	scene_init(&ctx->scene, ctx->vcfg.video0.scene_threshold,
 		ctx->vcfg.video0.scene_holdoff);
 
-	if (!vcfg->isp.legacy_ae)
-		start_custom_ae(ps, vcfg);
+	/* AE runs in ONE mode on Star6E: the SDK firmware/bin AE converges and
+	 * the supervisory thread enforces the gain/shutter limits beside it.  The
+	 * thread needs aeFps>0 for a tick rate. */
+	if (vcfg->isp.ae_fps > 0)
+		start_ae_enforcer(ps, vcfg);
 
 	if (vcfg->fpv.roi_enabled) {
 		star6e_controls_apply_roi_qp(vcfg->fpv.roi_qp);
 	}
 	if (vcfg->video0.qp_delta != 0) {
 		star6e_controls_apply_qp_delta(vcfg->video0.qp_delta);
+	}
+	if (vcfg->video0.max_i_bytes > 0 || vcfg->video0.max_p_bytes > 0) {
+		const VencApplyCallbacks *cb = star6e_controls_callbacks();
+		if (cb->apply_max_frame_size)
+			cb->apply_max_frame_size(vcfg->video0.max_i_bytes,
+				vcfg->video0.max_p_bytes);
 	}
 
 	if (!ps->output_enabled) {
@@ -1047,7 +1071,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * Only active when refPred is enabled (ref_base > 0) — otherwise the
 	 * encoder produces a flat single-ref stream and every frame matters. */
 	if (vcfg->video0.ref_base > 0 &&
-	    stream.h265Info.refType == SS_REFTYPE_ENHANCE_P_NOTFORREF) {
+	    stream.h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF) {
 		star6e_patch_stream_to_trail_n(&stream);
 	}
 
@@ -1079,9 +1103,36 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		if (vcfg->attitude.enabled && ps->imu)
 			att_ptr = attitude_frame_update(vcfg, &att_info);
 
+		/* Detection: serialise the latest IPU snapshot into a DETECT
+		 * trailer, but only when detection is active AND a sidecar
+		 * subscriber is live — the blob is dead weight otherwise.  The
+		 * object cap keeps the trailer well under the datagram buffer,
+		 * so the full buffer is a safe budget. */
+		uint8_t detect_buf[RTP_SIDECAR_DGRAM_MAX];
+		const void *detect_ptr = NULL;
+		uint16_t detect_len = 0;
+		if (vcfg->detect.enabled &&
+		    rtp_sidecar_is_subscribed(&ps->video.sidecar)) {
+			Star6eDetectSnapshot snap;
+			if (star6e_ipu_yolo_snapshot(ps, &snap)) {
+				uint64_t now_us = wb_monotonic_us();
+				uint64_t age = now_us > snap.produced_us
+					? (now_us - snap.produced_us) / 1000 : 0;
+				size_t len = detect_wire_build(detect_buf,
+					sizeof(detect_buf), snap.boxes, snap.count,
+					(uint16_t)vcfg->detect.model_id, snap.seq,
+					age > 0xFFFF ? 0xFFFF : (uint16_t)age,
+					snap.net_w, snap.net_h, sizeof(detect_buf));
+				if (len > 0) {
+					detect_ptr = detect_buf;
+					detect_len = (uint16_t)len;
+				}
+			}
+		}
+
 		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
 			ps->output_enabled, vcfg->system.verbose, &enc_info,
-			att_ptr);
+			att_ptr, detect_ptr, detect_len);
 	}
 
 	/* Orientation (image.flip / image.mirror) is applied once at bring-up
@@ -1272,6 +1323,74 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 					zoom.crop_w, zoom.crop_h,
 					zoom.crop_x, zoom.crop_y);
 			}
+
+			/* Detection boxes (detect.osd): scale net-space boxes
+			 * onto the canvas — the port1 tap squashes the full
+			 * FOV linearly per axis, so net->canvas is a straight
+			 * ratio (the same mapping the sidecar normalizes by).
+			 * A stale snapshot (reader stalled) is not drawn. */
+			if (vcfg->detect.enabled && vcfg->detect.osd) {
+				Star6eDetectSnapshot snap;
+				static const uint16_t det_col[] = {
+					DEBUG_OSD_RED, DEBUG_OSD_GREEN,
+					DEBUG_OSD_YELLOW, DEBUG_OSD_CYAN,
+					DEBUG_OSD_BLUE, DEBUG_OSD_WHITE,
+				};
+				const unsigned ncol =
+					sizeof(det_col) / sizeof(det_col[0]);
+
+				if (star6e_ipu_yolo_snapshot(ps, &snap) &&
+				    snap.count > 0 &&
+				    snap.net_w && snap.net_h &&
+				    wb_monotonic_us() - snap.produced_us <
+					700000) {
+					uint32_t cw = ps->image_width;
+					uint32_t chh = ps->image_height;
+					int di;
+
+					for (di = 0; di < snap.count; di++) {
+						const DetectBox *b =
+							&snap.boxes[di];
+						/* Plugin coords cross an ABI
+						 * boundary — clamp the low
+						 * side before the float ->
+						 * unsigned conversion (UB on
+						 * negatives). */
+						float fx1 = b->x1 < 0.0f ?
+							0.0f : b->x1;
+						float fy1 = b->y1 < 0.0f ?
+							0.0f : b->y1;
+						float fx2 = b->x2 < 0.0f ?
+							0.0f : b->x2;
+						float fy2 = b->y2 < 0.0f ?
+							0.0f : b->y2;
+						uint32_t x1 = (uint32_t)(fx1
+							* cw / snap.net_w);
+						uint32_t y1 = (uint32_t)(fy1
+							* chh / snap.net_h);
+						uint32_t x2 = (uint32_t)(fx2
+							* cw / snap.net_w);
+						uint32_t y2 = (uint32_t)(fy2
+							* chh / snap.net_h);
+
+						if (x2 >= cw)  x2 = cw - 1;
+						if (y2 >= chh) y2 = chh - 1;
+						if (x1 >= x2 || y1 >= y2)
+							continue;
+						debug_osd_rect(ps->debug_osd,
+							(uint16_t)x1,
+							(uint16_t)y1,
+							(uint16_t)(x2 - x1),
+							(uint16_t)(y2 - y1),
+							det_col[(unsigned)
+								b->cls % ncol],
+							0);
+					}
+					debug_osd_text(ps->debug_osd,
+						osd_row++, "det", "%d",
+						snap.count);
+				}
+			}
 		}
 
 		debug_osd_end_frame(ps->debug_osd);
@@ -1341,7 +1460,7 @@ static int star6e_runner_run(void *opaque)
 	Star6eRunnerContext *ctx = opaque;
 	struct timespec cus3a_ts_last = {0};
 	struct timespec run_start;
-	int legacy_fps_kick_done = 0;
+	int cold_boot_fps_kick_done = 0;
 	unsigned int idle_counter = 0;
 	int handled;
 	int ret;
@@ -1403,18 +1522,17 @@ static int star6e_runner_run(void *opaque)
 			return ret;
 		}
 
-		/* One-shot legacy-AE cold-boot fps re-kick ~1.5s after start,
-		 * once the ISP bin load + AE have settled (the init-time kick
-		 * fires too early and doesn't stick on a cold boot).  No-op in
-		 * CUS3A mode (its thread does the frame-15 kick). */
-		if (!legacy_fps_kick_done) {
+		/* One-shot cold-boot fps re-kick ~1.5s after start, once the ISP
+		 * bin load + AE have settled (the init-time kick fires too early
+		 * and doesn't stick on a cold boot). */
+		if (!cold_boot_fps_kick_done) {
 			struct timespec now;
 			clock_gettime(CLOCK_MONOTONIC, &now);
 			if ((now.tv_sec - run_start.tv_sec) +
 			    (now.tv_nsec - run_start.tv_nsec) / 1e9 >= 1.5) {
-				star6e_pipeline_legacy_fps_rekick(&ctx->ps,
+				star6e_pipeline_cold_boot_fps_rekick(&ctx->ps,
 					&ctx->vcfg);
-				legacy_fps_kick_done = 1;
+				cold_boot_fps_kick_done = 1;
 			}
 		}
 	}

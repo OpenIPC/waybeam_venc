@@ -10,6 +10,8 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 
+/* MARUKO_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in maruko_video.h. */
+
 typedef struct {
 	MarukoOutput *output;
 	venc_ring_t *ring;
@@ -304,15 +306,18 @@ void maruko_video_init_rtp_state(MarukoRtpState *rtp,
 }
 
 static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
-	venc_frame_ring_t *frame_ring)
+	MarukoOutput *output)
 {
 	VencFrameMeta meta;
+	venc_frame_ring_t *frame_ring;
 	size_t total_bytes = 0;
 	unsigned int i;
 	int is_idr = 0;
 
-	if (!stream || !frame_ring)
+	if (!stream || !output || !output->frame_ring)
 		return 0;
+
+	frame_ring = output->frame_ring;
 
 	/* IDR detection from packType.h265Nalu (types 19, 20) */
 	for (i = 0; i < stream->count && !is_idr; ++i) {
@@ -341,6 +346,19 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 		? (uint32_t)stream->packet[0].timestamp : 0;
 	meta.codec = VENC_FRAME_CODEC_H265;
 	meta.flags = is_idr ? VENC_FRAME_FLAG_IDR : 0;
+	if (!is_idr && output->gdr_active) {
+		meta.flags |= VENC_FRAME_FLAG_GDR;
+		meta.gdr_pos = output->gdr_counter;
+		meta.gdr_len = output->gdr_cycle_len;
+		output->gdr_counter++;
+		if (output->gdr_counter >= output->gdr_cycle_len)
+			output->gdr_counter = 0;
+	} else if (is_idr) {
+		output->gdr_counter = 0;
+	}
+	if (output->svct_active &&
+	    stream->h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF)
+		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
 	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0)
 		return 0;
@@ -405,7 +423,7 @@ size_t maruko_video_send_frame(const i6c_venc_strm *stream,
 		return 0;
 
 	if (output->frame_ring)
-		return maruko_send_frame_ring(stream, output->frame_ring);
+		return maruko_send_frame_ring(stream, output);
 
 	if (output->socket_handle < 0 && !output->ring)
 		return 0;

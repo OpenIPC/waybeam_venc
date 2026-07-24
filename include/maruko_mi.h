@@ -129,6 +129,7 @@ typedef struct {
 	int (*fnSetInputSourceConfig)(int dev, int chn, void *cfg);
 	/* Optional — Maruko SDK exports these but older drops may not.
 	 * Code paths must NULL-check before invoking. */
+	int (*fnSetRcPriority)(int dev, int chn, void *priority); /* MI_VENC_RcPriority_e * */
 	int (*fnSetIntraRefresh)(int dev, int chn, void *cfg);
 	int (*fnGetIntraRefresh)(int dev, int chn, void *cfg);
 	int (*fnSetRefParam)(int dev, int chn, void *p);

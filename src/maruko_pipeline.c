@@ -2429,6 +2429,22 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		return -1;
 	ctx->venc_started = 1;
 
+	ctx->output.gdr_active =
+		(ctx->cfg.intra_refresh_mode[0] != '\0' &&
+		 strcmp(ctx->cfg.intra_refresh_mode, "off") != 0) ? 1 : 0;
+	ctx->output.svct_active = ctx->cfg.ref_base > 0 ? 1 : 0;
+	{
+		IntraRefreshDerived gdr_ir;
+		(void)maruko_intra_refresh_derive(&ctx->cfg,
+			ctx->cfg.image_height, ctx->sensor.fps,
+			ctx->cfg.rc_codec, &gdr_ir);
+		uint32_t clen = (gdr_ir.total_rows && gdr_ir.lines)
+			? (gdr_ir.total_rows + gdr_ir.lines - 1) / gdr_ir.lines
+			: 0;
+		ctx->output.gdr_cycle_len = clen > 255 ? 255 : (uint8_t)clen;
+		ctx->output.gdr_counter = 0;
+	}
+
 	MI_U32 venc_device = (MI_U32)ctx->venc_device;
 	assign_maruko_ports(ctx, venc_device);
 
@@ -2634,12 +2650,9 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		 * thread ticks the same algo at sensor_fps/3 (floor 30 Hz).
 		 * Device-measured @1080p100: 70.0% (old native) / 52.8% (old
 		 * throttle) → 39.4%, with full vendor image quality.  The
-		 * historical isp.aeEngine modes are accepted but ignored —
-		 * paced beats both on every axis (HISTORY 0.22.0). */
-		if (ctx->cfg.ae_mode[0] &&
-		    strcmp(ctx->cfg.ae_mode, "throttle") == 0)
-			printf("> [maruko] NOTE: isp.aeEngine=custom is "
-				"retired; paced native 3A is always used\n");
+		 * historical isp.aeEngine=custom mode was retired in 0.22.0 and
+		 * the value removed entirely in 0.47.0 — paced native is the only
+		 * AE (HISTORY 0.22.0). */
 
 		/* Experimental bench toggle: WAYBEAM_NO_3A=1 freezes 3A entirely —
 		 * pause the vendor auto-run (SetRunMode OFF) and start NO pacer /
@@ -2674,7 +2687,12 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 				ae_cfg.shutter_max_us =
 					1000000 / (ctx->sensor.fps * 2);
 				ae_cfg.shutter_pin = 1;
+			} else if (ctx->cfg.isp_shutter_max_us > 0) {
+				ae_cfg.shutter_max_us =
+					ctx->cfg.isp_shutter_max_us;
 			}
+			ae_cfg.gain_min      = ctx->cfg.isp_gain_min;
+			ae_cfg.shutter_min_us = ctx->cfg.isp_shutter_min_us;
 			ae_cfg.verbose       = ctx->cfg.verbose;
 			(void)maruko_cus3a_start(&ae_cfg);
 		} else if (ctx->cfg.verbose) {
@@ -3816,7 +3834,8 @@ static void maruko_pipeline_log_verbose_frame(MarukoBackendContext *ctx,
  * (type 0) to know which frames are non-reference. */
 #define HEVC_NAL_TRAIL_N 0
 #define HEVC_NAL_TRAIL_R 1
-#define MARUKO_REFTYPE_ENHANCE_P_NOTFORREF 4
+/* MARUKO_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in maruko_video.h. Was
+ * locally 4 (HiSilicon value) — wrong for the SigmaStar enum. */
 
 static size_t maruko_nal_header_idx(const uint8_t *buf, size_t len)
 {

@@ -93,14 +93,14 @@ int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name)
 	memset(&output->batch, 0, sizeof(output->batch));
 	output->batch.socket_handle = -1;
 
-	output->frame_ring = venc_frame_ring_create(shm_name, 16, 512 * 1024);
+	output->frame_ring = venc_frame_ring_create(shm_name, 8, 384 * 1024);
 	if (!output->frame_ring) {
 		fprintf(stderr, "ERROR: [maruko] venc_frame_ring_create(%s) failed\n",
 			shm_name);
 		return -1;
 	}
 
-	printf("> [maruko] Frame-SHM output: %s (512 KB slots)\n", shm_name);
+	printf("> [maruko] Frame-SHM output: %s (384 KB slots)\n", shm_name);
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
 }

@@ -56,24 +56,13 @@ typedef struct {
 
 typedef struct {
 	char sensor_bin[VENC_CONFIG_STRING_MAX];
-	/* Unified AE engine selector — replaces the per-backend
-	 * `legacy_ae` (Star6E) + `ae_mode` (Maruko) pair.  Two values:
-	 *   "sdk"    — SDK firmware runs AE.  Star6E: skip start_custom_ae
-	 *              and let the ISP bin's AE drive (legacy_ae=true).
-	 *              Maruko: NATIVE AE algo runs inside 3A_Proc_0 at
-	 *              sensor rate (ae_mode="native").
-	 *   "custom" — userspace cus3a takes over.  Star6E: start_custom_ae
-	 *              spins the supervisory thread (legacy_ae=false).
-	 *              Maruko: no-op AE adaptor + supervisory SetAeParam
-	 *              thread at ae_fps Hz (ae_mode="throttle").
-	 *
-	 * The parser keeps the per-backend `legacy_ae` + `ae_mode` struct
-	 * fields populated from this selector so existing call sites in
-	 * star6e_runtime.c, star6e_pipeline.c, and maruko_pipeline.c need
-	 * no change.  Unknown values fall back to "sdk". */
-	char ae_engine[8];     /* "sdk" (default) | "custom" */
-	bool legacy_ae;        /* derived from ae_engine (Star6E call sites) */
-	char ae_mode[16];      /* derived from ae_engine (Maruko call sites) */
+	/* AE engine selector.  "sdk" is the only value: the SDK firmware/bin AE
+	 * drives convergence and a supervisory thread enforces the gain/shutter
+	 * limits beside it (Star6E), or the paced-native 3A runs (Maruko).  The
+	 * historical "custom" userspace governor was retired (Maruko 0.22.0,
+	 * Star6E 0.47.0) and the value removed entirely — any non-"sdk" value now
+	 * warns and falls back to "sdk". */
+	char ae_engine[8];     /* "sdk" (only valid value) */
 	uint32_t ae_fps;       /* custom AE rate in Hz (default 15) */
 	uint32_t gain_max;     /* max sensor gain (0 = use ISP bin default) */
 	char awb_mode[16];     /* "auto" or "ct_manual" */
@@ -88,6 +77,16 @@ typedef struct {
 	                        * auto-exposure.  At 60 fps the cap becomes
 	                        * 1/120 s (8333 µs).  false = default
 	                        * frame-period cap (1/fps). */
+	uint32_t shutter_max_us; /* live exposure cap in µs (0 = auto from
+	                          * sensor_fps).  Setting this above the frame
+	                          * period forces the sensor to skip frames,
+	                          * reducing effective output FPS. */
+	uint32_t gain_min;       /* min sensor gain floor (0 = use ISP bin
+	                          * default).  Raises the darkest-scene gain the
+	                          * supervisory AE may pick. */
+	uint32_t shutter_min_us; /* min exposure floor in µs (0 = use ISP bin
+	                          * default).  Overridden by shutter_rule_180,
+	                          * which pins min==max. */
 } VencConfigIsp;
 
 typedef struct {
@@ -107,6 +106,8 @@ typedef struct {
 	uint32_t bitrate;      /* kbps */
 	double gop_size;       /* seconds between keyframes; 0 = all-intra */
 	int qp_delta;              /* relative I/P QP delta, -12..12 */
+	uint32_t max_i_bytes;      /* per-frame I-frame size cap (bytes); 0=unlimited */
+	uint32_t max_p_bytes;      /* per-frame P-frame size cap (bytes); 0=unlimited */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
 	/* Derived from `resilience` preset only.  Not part of the JSON
@@ -290,6 +291,41 @@ typedef struct {
 	uint32_t height;    /* 0 → inherit from main stream */
 } VencConfigSnapshot;
 
+/* IPU NPU object detection (Star6E only). Feeds a VPE port1 NV12 tap to a
+ * detector backend (see detect_plugin.h). Mutually exclusive with
+ * video0.framing=stab (both claim the single VPE port1). Lives in its own
+ * TRAILING VencConfig member — the config ABI is append-only. */
+typedef struct {
+	bool enabled;          /* run the IPU detector                        */
+	char plugin[VENC_CONFIG_STRING_MAX];        /* detector plugin .so path  */
+	char model_path[VENC_CONFIG_STRING_MAX];    /* offline .img; "" = default */
+	char firmware_path[VENC_CONFIG_STRING_MAX]; /* IPU fw; "" = plugin default */
+	int  infer_interval;   /* run 1 of every N captured frames (>=1)       */
+	bool osd;              /* draw boxes on the debug OSD (needs
+	                          debug.showOsd; native backends have no
+	                          vehicle overlay of their own)              */
+	/* Appended 2026-07-23 — new members go at the END; the config ABI is
+	 * append-only (SigmaStar ISP bin loading breaks if VencConfig's
+	 * layout shifts). */
+	float    conf_thresh;  /* detector keep threshold; <=0 -> plugin
+	                          default (0.40).  Worth lowering: INT8
+	                          quantization costs ~30% of the FP32 score on
+	                          small objects, and the ground tracker is
+	                          built to confirm weak detections over time
+	                          rather than trust any single frame.        */
+	float    nms_iou;      /* NMS IoU; <=0 -> plugin default (0.45)      */
+	uint32_t net_width;    /* VPE port1 tap + model input; 0 -> 640.     */
+	uint32_t net_height;   /* 0 -> 352.  MUST match the compiled .img —
+	                          the backend rejects a mismatched frame.    */
+	uint32_t model_id;     /* class-table selector put on the wire (see
+	                          RTP_SIDECAR_DETECT_MODEL_* and the registry
+	                          in protocols/rtp-sidecar.md).  Cannot be
+	                          derived: the plugin loads whatever .img the
+	                          config names, so only the operator knows
+	                          which label table the boxes belong to.
+	                          0 = VisDrone-10, 1 = SAR person.           */
+} VencConfigDetect;
+
 /* ── Top-level config ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -307,6 +343,7 @@ typedef struct {
 	VencConfigSnapshot snapshot;
 	VencConfigDebug debug;
 	VencConfigAttitude attitude;  /* trailing — ABI append-only */
+	VencConfigDetect detect;      /* trailing — ABI append-only */
 } VencConfig;
 
 typedef enum {

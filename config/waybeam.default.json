@@ -13,6 +13,9 @@
     "aeEngine": "sdk",
     "aeFps": 15,
     "gainMax": 0,
+    "shutterMaxUs": 0,
+    "gainMin": 0,
+    "shutterMinUs": 0,
     "awbMode": "auto",
     "awbCt": 5500,
     "keepAspect": true,
@@ -30,6 +33,8 @@
     "bitrate": 8192,
     "gopSize": 1.0,
     "qpDelta": -4,
+    "maxIBytes": 0,
+    "maxPBytes": 0,
     "sceneThreshold": 0,
     "sceneHoldoff": 2,
     "resilience": "off",
@@ -111,5 +116,18 @@
     "axisDown": "+z",
     "trimRollDeg": 0.0,
     "trimPitchDeg": 0.0
+  },
+  "detect": {
+    "enabled": false,
+    "plugin": "/root/libwaybeam_detect.so",
+    "modelPath": "",
+    "firmwarePath": "",
+    "inferInterval": 1,
+    "confThresh": 0.0,
+    "nmsIou": 0.0,
+    "netWidth": 640,
+    "netHeight": 352,
+    "modelId": 0,
+    "osd": true
   }
 }

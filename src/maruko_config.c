@@ -40,7 +40,7 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->show_osd = 0;
 	cfg->ae_fps = 15;
 	cfg->isp_gain_max = 0;
-	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s", "native");
+	cfg->isp_gain_min = 0;
 	snprintf(cfg->intra_refresh_mode, sizeof(cfg->intra_refresh_mode),
 		"%s", "off");
 	cfg->ref_base = 0;
@@ -139,8 +139,9 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->show_osd = vcfg->debug.show_osd ? 1 : 0;
 	cfg->ae_fps = vcfg->isp.ae_fps;
 	cfg->isp_gain_max = vcfg->isp.gain_max;
-	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s",
-		vcfg->isp.ae_mode[0] ? vcfg->isp.ae_mode : "native");
+	cfg->isp_shutter_max_us = vcfg->isp.shutter_max_us;
+	cfg->isp_gain_min = vcfg->isp.gain_min;
+	cfg->isp_shutter_min_us = vcfg->isp.shutter_min_us;
 	cfg->imu = vcfg->imu;
 	cfg->audio = vcfg->audio;
 	cfg->audio_port = vcfg->outgoing.audio_port;
