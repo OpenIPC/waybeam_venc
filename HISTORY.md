@@ -1,5 +1,31 @@
 # History
 
+## [0.51.1] - 2026-07-24
+
+Detector hardening follow-ups from the v0.51.0 upstream review — four
+defensive fixes, no behavioural change on the normal path.
+
+- **Idempotent `libmi_sys` load** (`star6e_ipu_yolo.c`) — the detector opened
+  `libmi_sys.so` on every start and never closed it, so each SIGHUP reinit with
+  `detect.enabled` bumped the dlopen refcount unboundedly. The handle is now
+  cached in a file-static and opened once for the run.
+- **Float→pixel clamp before the cast** (`star6e_runtime.c`) — the debug-OSD box
+  path clamped only the low side before the `float`→`uint32_t` conversion, so a
+  huge/`inf`/`NaN` edge from an out-of-contract plugin hit implementation-defined
+  UB before the high clamp ran. New `osd_box_px()` helper does the full range
+  clamp (negatives, `inf`, `NaN` → in-range) in float, then casts.
+- **NaN-safe wire quantization** (`detect_wire.c`) — `norm_coord()` / `score_u8()`
+  used `<=0` / `>=1` guards that a `NaN` slips through (all comparisons false),
+  reaching an implementation-defined cast. Reordered to `!(x > 0)` so `NaN` maps
+  to 0. Adds four `test_detect_wire` cases (negative / huge / `inf` / `NaN`
+  coords and scores) asserting the wire output stays in range.
+- **ipu_probe overflow guard** (`tools/ipu_probe.c`, dev-only) — the tensor
+  element count is now checked against `size_t` multiply overflow and the
+  source `aligned_buf_size` before `malloc`/dequant, so a malformed `.img` fed
+  to the bring-up tool can no longer short-allocate or over-read.
+- `make test-werror` / `test-asan` **2078/0**; cross-build clean both backends;
+  `ipu-probe` clean under `-Wall -Wextra`.
+
 ## [0.51.0] - 2026-07-24
 
 Detector tuning surface: expose the confidence/NMS thresholds, the tap

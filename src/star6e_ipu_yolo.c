@@ -125,14 +125,19 @@ typedef struct Star6eIpuDetect {
 
 static int iy_load_sys_symbols(Star6eIpuDetect *d)
 {
-	void *h = dlopen("libmi_sys.so", RTLD_LAZY | RTLD_GLOBAL);
-	if (!h)
-		return -1;
-	d->get_fd = (iy_get_fd_fn)dlsym(h, "MI_SYS_GetFd");
-	d->close_fd = (iy_close_fd_fn)dlsym(h, "MI_SYS_CloseFd");
-	d->get_buf = (iy_get_buf_fn)dlsym(h, "MI_SYS_ChnOutputPortGetBuf");
-	d->put_buf = (iy_put_buf_fn)dlsym(h, "MI_SYS_ChnOutputPortPutBuf");
-	/* handle intentionally leaked: libmi_sys stays resident for the run */
+	/* libmi_sys stays resident for the whole run, so open it once and
+	 * cache the handle: a fresh dlopen on every detect start (each SIGHUP
+	 * reinit) would bump the refcount unboundedly and never dlclose. */
+	static void *sys_h;
+	if (!sys_h) {
+		sys_h = dlopen("libmi_sys.so", RTLD_LAZY | RTLD_GLOBAL);
+		if (!sys_h)
+			return -1;
+	}
+	d->get_fd = (iy_get_fd_fn)dlsym(sys_h, "MI_SYS_GetFd");
+	d->close_fd = (iy_close_fd_fn)dlsym(sys_h, "MI_SYS_CloseFd");
+	d->get_buf = (iy_get_buf_fn)dlsym(sys_h, "MI_SYS_ChnOutputPortGetBuf");
+	d->put_buf = (iy_put_buf_fn)dlsym(sys_h, "MI_SYS_ChnOutputPortPutBuf");
 	if (!d->get_buf || !d->put_buf)
 		return -1;
 	return 0;

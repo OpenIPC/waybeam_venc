@@ -5,6 +5,7 @@
 #include "rtp_sidecar.h"
 
 #include <arpa/inet.h>
+#include <math.h>
 #include <string.h>
 
 /* Minimal consumer-side walker: parse a DETECT trailer, collecting BOX records
@@ -190,6 +191,38 @@ int test_detect_wire(void)
 		CHECK("skip_parse", parse_detect(craft, sizeof(craft), &d) == 0);
 		CHECK("skip_boxes", d.boxes_parsed == 2);
 		CHECK("skip_unknown", d.unknown_tags == 1);
+	}
+
+	/* 7. Out-of-contract coords/scores from a misbehaving plugin must clamp
+	 *    to the wire range — never an implementation-defined float->int cast.
+	 *    One box per build keeps ordering deterministic (no score sort). */
+	{
+		struct {
+			DetectBox b;
+			uint16_t  exp_x2;   /* expected normalized x2 */
+			uint8_t   exp_score;
+			const char *tag;
+		} cases[] = {
+			{ { -50.0f, -1.0f, 1.0e9f, 1.0e9f, -0.3f, 1 },
+			  65535, 0, "extreme_neg_and_huge" },
+			{ { 0.0f, 0.0f, INFINITY, INFINITY, INFINITY, 2 },
+			  65535, 255, "extreme_inf" },
+			{ { NAN, NAN, NAN, NAN, NAN, 3 },
+			  0, 0, "extreme_nan" },
+			{ { 0.0f, 0.0f, 320.0f, 176.0f, 0.5f, 4 },
+			  32768, 128, "extreme_sane" },
+		};
+		for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			size_t n = detect_wire_build(buf, sizeof(buf),
+				&cases[i].b, 1, 0, 1, 0, 640, 352, sizeof(buf));
+			ParsedDetect d;
+			CHECK(cases[i].tag,
+				parse_detect(buf, n, &d) == 0 &&
+				d.boxes_parsed == 1 &&
+				d.box[0].x1 <= 65535 &&
+				d.box[0].x2 == cases[i].exp_x2 &&
+				d.box[0].score == cases[i].exp_score);
+		}
 	}
 
 	return failures;
