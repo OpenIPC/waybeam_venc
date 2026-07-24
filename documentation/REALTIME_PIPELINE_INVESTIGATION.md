@@ -222,7 +222,7 @@ under the full realtime chain (FIFO-FULL / half-rate), we can lower HMAX
 or retune blanking in `drivers/sensor_imx335_star6e.c` — the exact trick
 already used for the IMX415 100 fps timing wall (HISTORY 0.26.0/0.27.0).
 
-## 6. Verification plan (i6e bench board)
+## 6. Verification plan (bench .13, `root@192.168.1.13`)
 
 1. `make verify` (both backends), then deploy via
    `scripts/star6e_direct_deploy.sh cycle` with `sensor.mode=4`,
@@ -246,7 +246,7 @@ already used for the IMX415 100 fps timing wall (HISTORY 0.26.0/0.27.0).
 
 ## 6a. Bench result (2026-07-18, `.201` Star6E / IMX335, mode 4 = 1080p120)
 
-Verified on the Star6E bench board (the primary bench was unreachable). **Verdict: this i6e
+Verified on `192.168.2.201` (`.13` was unreachable). **Verdict: this i6e
 firmware rejects a streaming VPE→VENC bind — the feature is a safe, correct
 no-op here and always falls back to FRAMEBASE.**
 

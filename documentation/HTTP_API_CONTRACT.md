@@ -531,7 +531,7 @@ curl "http://<device-ip>/api/v1/set?outgoing.server=udp://<receiver-ip>:5600"
   - `shm://NAME` — shared-memory RTP-packet ring buffer
   - `frame-shm://NAME` — shared-memory **whole-frame** ring buffer (Annex-B
     frames, no RTP); for a same-host FEC consumer. Wire format:
-    `include/venc_frame_ring.h`.
+    `protocols/frame-shm.md` in the coordination repo.
 - No pipeline restart required.
 - An IDR keyframe is issued after the change for stream continuity.
 - If `connectedUdp` is enabled, the UDP socket is re-connected to the new destination.

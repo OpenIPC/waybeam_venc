@@ -1007,9 +1007,9 @@ IDR) followed by the raw frame. On a full ring (consumer stalled or gone)
 the encoder drops the frame and keeps running — it never blocks. Like
 `shm://` it is video-only (a nonzero `audioPort` uses a dedicated local
 UDP audio destination) and cannot be switched to/from live (restart
-required). The wire format (ring header, `VencFrameMeta`, SPSC ordering)
-is specified in the canonical header `include/venc_frame_ring.h`;
-validate a live ring with `tools/frame_shm_consumer_test.c`.
+required). Wire format is specified in the coordination repo at
+`protocols/frame-shm.md`; validate a live ring with
+`tools/frame_shm_consumer_test.c`.
 
 A negative `audioPort` (e.g. `-1`) selects **record-only** mode: the audio
 capture/encode thread still runs and feeds the recording, but no output
