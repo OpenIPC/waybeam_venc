@@ -1,5 +1,42 @@
 # History
 
+## [0.51.0] - 2026-07-24
+
+Detector tuning surface: expose the confidence/NMS thresholds, the tap
+geometry, and the wire `model_id` as config (#191). These rode into the fork
+under the 0.50.0 tag without their own bump; versioned here so the config is
+documented and the version uniquely identifies the build.
+
+- **`detect.confThresh` / `detect.nmsIou`** now reach the plugin. The plugin
+  ABI has carried these since the boundary landed, but the host passed zeros so
+  every backend ran on its built-in `0.40` / `0.45`. `0.40` is too high for the
+  small-object workload — INT8 quantization costs ~30% of the FP32 score on
+  small objects — and the ground tracker confirms weak detections over time, so
+  running the detector at ~`0.20` and letting the tracker's 2-hit confirmation
+  reject noise is the intended architecture. `<=0` = plugin default.
+- **`detect.netWidth` / `detect.netHeight`** replace the hardcoded `640x352`
+  VPE port1 tap. That geometry was inherited from the collaborator's VisDrone
+  model, not chosen for this sensor, and is the single largest constraint on
+  small-object recall. Validated at start: both dims must be multiples of 32
+  (the head strides 8/16/32) and must match the compiled `.img` (the backend
+  already rejects a mismatched frame). `0` -> `640` / `352`.
+- **`detect.modelId`** puts a configurable class-table selector on the DETECT
+  sidecar trailer (see `documentation/RTP_SIDECAR_PROTOCOL.md`). It was
+  hardcoded to VisDrone, so a one-class SAR-person model announced itself as
+  VisDrone-10 and every box came out labelled "pedestrian". `model_id` cannot
+  be derived — the plugin loads whatever `.img` `detect.modelPath` names — so it
+  is operator config, registered alongside `netWidth`/`netHeight`. The host now
+  calls the plugin's `describe()` hook at start and warns when the reported
+  class count contradicts the configured id; unknown ids skip the check (a
+  private `model_id` is legitimate).
+- All new members appended at the END of `VencConfigDetect` — the config ABI is
+  append-only (SigmaStar ISP bin loading breaks if `VencConfig`'s layout
+  shifts). Host tests **2074/0**; cross-build clean both backends.
+- **Docs**: adds `documentation/RTP_SIDECAR_PROTOCOL.md` — a self-contained
+  in-tree spec for the RTP sidecar wire format (FRAME base, trailer ordering,
+  ENC_INFO/TRANSPORT_INFO/ATTITUDE/DETECT, and the `model_id` registry),
+  tracking the canonical `include/rtp_sidecar.h`.
+
 ## [0.50.0] - 2026-07-23
 
 Volatile config writes: `GET /api/v1/live/set`.
