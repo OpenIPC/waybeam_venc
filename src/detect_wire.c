@@ -24,18 +24,18 @@ static uint16_t norm_coord(float v, uint16_t dim)
 	if (dim == 0)
 		return 0;
 	float f = v / (float)dim;
-	if (f <= 0.0f)
+	if (!(f > 0.0f))          /* <=0, or NaN (all comparisons false) */
 		return 0;
-	if (f >= 1.0f)
+	if (f >= 1.0f)            /* also catches +inf */
 		return 65535;
 	return (uint16_t)(f * 65535.0f + 0.5f);
 }
 
 static uint8_t score_u8(float s)
 {
-	if (s <= 0.0f)
+	if (!(s > 0.0f))          /* <=0, or NaN */
 		return 0;
-	if (s >= 1.0f)
+	if (s >= 1.0f)            /* also catches +inf */
 		return 255;
 	return (uint8_t)(s * 255.0f + 0.5f);
 }

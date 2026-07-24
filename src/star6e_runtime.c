@@ -1005,6 +1005,23 @@ static int star6e_runtime_handle_reinit(int *handled)
 	return 0;
 }
 
+/* Map a plugin box edge (net-input coords) to a canvas pixel, doing the whole
+ * range clamp in float BEFORE the cast so a negative/huge/inf/NaN edge from an
+ * out-of-contract plugin cannot trigger float->unsigned UB.  `net` is non-zero
+ * at the call sites; guarded anyway. */
+static uint32_t osd_box_px(float v, uint32_t canvas, uint32_t net)
+{
+	float r;
+	if (canvas == 0 || net == 0)
+		return 0;
+	r = v * (float)canvas / (float)net;
+	if (!(r >= 0.0f))                 /* negative, or NaN (compares false) */
+		r = 0.0f;
+	if (r > (float)(canvas - 1))      /* also catches +inf */
+		r = (float)(canvas - 1);
+	return (uint32_t)r;
+}
+
 static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	struct timespec *cus3a_ts_last, unsigned int *idle_counter)
 {
@@ -1351,30 +1368,15 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 					for (di = 0; di < snap.count; di++) {
 						const DetectBox *b =
 							&snap.boxes[di];
-						/* Plugin coords cross an ABI
-						 * boundary — clamp the low
-						 * side before the float ->
-						 * unsigned conversion (UB on
-						 * negatives). */
-						float fx1 = b->x1 < 0.0f ?
-							0.0f : b->x1;
-						float fy1 = b->y1 < 0.0f ?
-							0.0f : b->y1;
-						float fx2 = b->x2 < 0.0f ?
-							0.0f : b->x2;
-						float fy2 = b->y2 < 0.0f ?
-							0.0f : b->y2;
-						uint32_t x1 = (uint32_t)(fx1
-							* cw / snap.net_w);
-						uint32_t y1 = (uint32_t)(fy1
-							* chh / snap.net_h);
-						uint32_t x2 = (uint32_t)(fx2
-							* cw / snap.net_w);
-						uint32_t y2 = (uint32_t)(fy2
-							* chh / snap.net_h);
+						uint32_t x1 = osd_box_px(b->x1,
+							cw, snap.net_w);
+						uint32_t y1 = osd_box_px(b->y1,
+							chh, snap.net_h);
+						uint32_t x2 = osd_box_px(b->x2,
+							cw, snap.net_w);
+						uint32_t y2 = osd_box_px(b->y2,
+							chh, snap.net_h);
 
-						if (x2 >= cw)  x2 = cw - 1;
-						if (y2 >= chh) y2 = chh - 1;
 						if (x1 >= x2 || y1 >= y2)
 							continue;
 						debug_osd_rect(ps->debug_osd,

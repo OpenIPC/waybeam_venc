@@ -25,6 +25,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 /* ── IPU private MMA pool ───────────────────────────────────────────────
@@ -112,19 +113,54 @@ static void print_tensor(const char *tag, unsigned int i, const IpuTensorDesc *t
 		(double)t->scalar, t->zero_pnt, t->aligned_buf_size);
 }
 
+/* Source bytes per element for the dequantizable formats (0 = unsupported),
+ * mirroring the element sizes detect_dequant_buffer reads. */
+static size_t ipu_fmt_elem_size(IpuFmt fmt)
+{
+	switch (fmt) {
+	case IPU_FMT_U8:
+	case IPU_FMT_INT8:  return 1;
+	case IPU_FMT_INT16: return 2;
+	case IPU_FMT_INT32:
+	case IPU_FMT_FP32:  return 4;
+	default:            return 0;
+	}
+}
+
 /* Dump dequantized stats for one output tensor. */
 static void dump_output_stats(const IpuTensorDesc *desc, const IpuTensor *ten)
 {
 	size_t count = 1;
 	unsigned int d;
 	float *vals;
-	size_t i;
+	size_t i, esz;
 	float mn, mx, sum;
 
-	for (d = 0; d < desc->dimension && d < 8; d++)
+	for (d = 0; d < desc->dimension && d < 8; d++) {
+		/* A malformed .img can carry a garbage shape; guard the running
+		 * product so count*elemsize below cannot wrap on 32-bit size_t
+		 * (short alloc -> heap overflow) or over-read the source. */
+		if (desc->shape[d] != 0 &&
+		    count > SIZE_MAX / desc->shape[d]) {
+			printf("    (tensor shape overflows)\n");
+			return;
+		}
 		count *= desc->shape[d];
+	}
 	if (count == 0 || !ten->data[0]) {
 		printf("    (no data)\n");
+		return;
+	}
+	esz = ipu_fmt_elem_size(desc->format);
+	if (esz == 0) {
+		printf("    (format %s not dequantizable)\n",
+			star6e_ipu_fmt_name(desc->format));
+		return;
+	}
+	if (count > SIZE_MAX / sizeof(*vals) ||
+	    (desc->aligned_buf_size > 0 &&
+	     count > (size_t)desc->aligned_buf_size / esz)) {
+		printf("    (tensor %zu elems exceeds source buffer)\n", count);
 		return;
 	}
 
