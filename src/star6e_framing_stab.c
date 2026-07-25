@@ -1943,6 +1943,7 @@ static int star6e_stab_fill_prepare(const VencConfig *vcfg, uint32_t src_w,
 
 const FramingModule star6e_framing_stab = {
 	.preset_name   = "stab",
+	.uses_vpe_port1 = true,   /* HW-crop stab: 256x256 motion tap on port1 */
 	.enabled       = star6e_stab_enabled,
 	.prepare       = star6e_stab_prepare,
 	.setup_ports   = star6e_stab_setup_ports,
@@ -1959,6 +1960,7 @@ const FramingModule star6e_framing_stab = {
  * Both presets carry the live pauseStab toggle (D13 software ramp). */
 const FramingModule star6e_framing_stab_fill = {
 	.preset_name   = "stab-fill",
+	.uses_vpe_port1 = false,  /* drains the full port0 frame; no port1 tap */
 	.enabled       = star6e_stab_fill_enabled,
 	.prepare       = star6e_stab_fill_prepare,
 	.setup_ports   = star6e_stab_setup_ports,

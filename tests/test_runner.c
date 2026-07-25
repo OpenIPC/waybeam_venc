@@ -43,6 +43,7 @@ extern int test_framing_stab_accuracy(void);
 extern int test_venc_frame_ring(void);
 extern int test_detect_dequant(void);
 extern int test_detect_wire(void);
+extern int test_star6e_vpe_ports(void);
 
 int main(void)
 {
@@ -160,6 +161,9 @@ int main(void)
 
 	printf("\n--- test_detect_wire ---\n");
 	failures += test_detect_wire();
+
+	printf("\n--- test_star6e_vpe_ports ---\n");
+	failures += test_star6e_vpe_ports();
 
 	printf("\n=== Results: %d passed, %d failed ===\n",
 		g_test_pass_count, g_test_fail_count);

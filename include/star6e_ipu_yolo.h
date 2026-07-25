@@ -35,6 +35,11 @@ typedef struct {
 	uint64_t  produced_us;  /* wb_monotonic_us at inference completion     */
 	uint16_t  net_w;        /* model input width  (box coord space)        */
 	uint16_t  net_h;        /* model input height                          */
+	uint16_t  model_id;     /* class-table selector of the model that
+	                           produced these boxes — latched WITH the boxes
+	                           so a live model swap flips the wire model_id
+	                           in lockstep with the first new-model DETECT,
+	                           never tagging old boxes with the new id      */
 } Star6eDetectSnapshot;
 
 /* Start the detector: resolve + init the configured backend, create the
@@ -43,6 +48,20 @@ typedef struct {
  * pipeline continues without detection (returns 0 — detection is best-effort,
  * never fatal to the stream).  state->detect is set when active. */
 int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg);
+
+/* Live-swap the detector model without respawning the pipeline: tear down and
+ * re-create only the detector plugin + VPE port1 tap channel while the encoder
+ * keeps running, so the video0 RTP stream is uninterrupted.  Reads the new
+ * model_path / model_id / conf_thresh / nms_iou from vcfg.  MUST run on the
+ * pipeline (encode) thread — the same thread that queries the snapshot — so the
+ * swap is atomic w.r.t. the DETECT consumer and the failure path (which frees
+ * the context) can never race a snapshot() read.
+ *
+ * Returns 0 when the new model is live; -1 when the swap could not be done live
+ * (net geometry changed — caller must take the MUT_RESTART path — or no
+ * detector was running) or the new model failed to load (detection is left
+ * cleanly OFF; best-effort, never fatal to the stream). */
+int star6e_ipu_yolo_reload(Star6ePipelineState *state, const VencConfig *vcfg);
 
 /* Stop the detector: join the reader (before DisablePort — MMU-safe), deinit
  * the backend, disable port1, free the context.  Safe when inactive. */

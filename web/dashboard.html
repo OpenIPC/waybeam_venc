@@ -679,7 +679,12 @@ const TOOLTIPS = {
 'attitude.invertPitch':'Flip pitch sign after mount rotation. Requires restart',
 'detect.enabled':'Run the NPU object detector (Star6E only). Needs a detector plugin .so deployed on the device. Mutually exclusive with video0.framing=stab (both claim VPE port1). Requires restart',
 'detect.plugin':'Path to the detector plugin .so. The plugin owns the model runtime and decode; it is deployed separately from waybeam. Requires restart',
-'detect.modelPath':'Compiled model file handed to the plugin. Empty = plugin default. Requires restart',
+'detect.modelPath':'Compiled model .img handed to the plugin. Empty = plugin default. Applied live: the detector swaps to the new model without a pipeline respawn, so the video0 stream is uninterrupted (net geometry must be unchanged). Pre-stage both .img files (e.g. on SD) and switch with no restart.',
+'detect.modelId':'Class-table selector stamped on the RTP sidecar DETECT trailer (0 = VisDrone-10, 1 = SAR person). Set it together with modelPath so consumers label the new model\'s boxes correctly. Applied live.',
+'detect.confThresh':'Detector keep threshold [0,1); 0 = plugin default (0.40). Applied live.',
+'detect.nmsIou':'NMS IoU threshold [0,1); 0 = plugin default (0.45). Applied live.',
+'detect.netWidth':'VPE port1 tap + model input width. 0 = 640. Must match the compiled .img and be a multiple of 32 (>=64). Requires restart (the VPE port is recreated).',
+'detect.netHeight':'VPE port1 tap + model input height. 0 = 352. Must match the compiled .img and be a multiple of 32 (>=64). Requires restart (the VPE port is recreated).',
 'detect.firmwarePath':'NPU firmware handed to the plugin. Empty = plugin/SDK default. Requires restart',
 'detect.inferInterval':'Run inference on 1 of every N captured frames. 1 = every frame. Default: 1. Requires restart',
 'detect.osd':'Draw detection boxes on the debug OSD (needs debug.showOsd). Detections always stream on the RTP sidecar DETECT trailer regardless. Requires restart',
@@ -740,7 +745,7 @@ const SECTIONS = [
 {id:'fpv',title:'FPV',keys:['fpv.roiEnabled','fpv.roiQp','fpv.roiSteps','fpv.roiCenter','fpv.noiseLevel']},
 {id:'imu',title:'IMU',keys:['imu.enabled','imu.i2cDevice','imu.i2cAddr','imu.sampleRateHz','imu.gyroRangeDps','imu.calFile','imu.calSamples']},
 {id:'attitude',title:'Attitude',keys:['attitude.enabled','attitude.axisFwd','attitude.axisDown','attitude.trimRollDeg','attitude.trimPitchDeg','attitude.mountDeg','attitude.invertRoll','attitude.invertPitch']},
-{id:'detect',title:'Detection',keys:['detect.enabled','detect.plugin','detect.modelPath','detect.firmwarePath','detect.inferInterval','detect.osd']},
+{id:'detect',title:'Detection',keys:['detect.enabled','detect.plugin','detect.modelPath','detect.modelId','detect.confThresh','detect.nmsIou','detect.netWidth','detect.netHeight','detect.firmwarePath','detect.inferInterval','detect.osd']},
 {id:'record',title:'Recording',keys:['record.enabled','record.mode','record.format','record.dir','record.maxSeconds','record.maxMB','record.bitrate','record.fps','record.gopSize','record.server']}
 ];
 

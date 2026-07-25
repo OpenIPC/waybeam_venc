@@ -1135,9 +1135,13 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 				uint64_t now_us = wb_monotonic_us();
 				uint64_t age = now_us > snap.produced_us
 					? (now_us - snap.produced_us) / 1000 : 0;
+				/* model_id comes from the snapshot (latched with the
+				 * boxes), not vcfg — so a live model swap flips it in
+				 * lockstep with the first new-model DETECT instead of
+				 * tagging the last old-model boxes with the new id. */
 				size_t len = detect_wire_build(detect_buf,
 					sizeof(detect_buf), snap.boxes, snap.count,
-					(uint16_t)vcfg->detect.model_id, snap.seq,
+					snap.model_id, snap.seq,
 					age > 0xFFFF ? 0xFFFF : (uint16_t)age,
 					snap.net_w, snap.net_h, sizeof(detect_buf));
 				if (len > 0) {
@@ -1517,6 +1521,11 @@ static int star6e_runner_run(void *opaque)
 		if (handled) {
 			continue;
 		}
+
+		/* Service any pending detector live model-swap on this (pipeline)
+		 * thread, between frames, so the VPE port1 recreate is atomic w.r.t.
+		 * the per-frame detect snapshot query below. */
+		star6e_controls_service_detect_reload();
 
 		ret = star6e_runtime_process_stream(ctx, &cus3a_ts_last,
 			&idle_counter);

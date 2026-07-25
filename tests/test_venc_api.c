@@ -46,6 +46,7 @@ typedef struct {
 	int apply_max_payload_calls;
 	int apply_zoom_calls;
 	int apply_isp_bin_calls;
+	int apply_detect_reload_calls;
 
 	uint32_t last_bitrate;
 	uint32_t last_fps;
@@ -328,6 +329,12 @@ static int test_apply_isp_bin(const char *path)
 	return g_api_cb_state.fail_isp_bin ? -1 : 0;
 }
 
+static int test_apply_detect_reload(void)
+{
+	g_api_cb_state.apply_detect_reload_calls++;
+	return 0;
+}
+
 /* Whitebox access to internal functions via extern declarations.
  * These are static in venc_api.c — we re-declare them here for testing.
  * This pattern matches the waybeam-hub test approach. */
@@ -463,6 +470,116 @@ static int test_multi_set_live_success(void)
 	CHECK("multi set bitrate value", g_api_cb_state.last_bitrate == 4096);
 	CHECK("multi set verbose value", g_api_cb_state.last_verbose == true);
 	CHECK("multi set response array", strstr(response, "\"applied\"") != NULL);
+
+	return failures;
+}
+
+/* detect.modelPath is now a live field: setting it fires apply_detect_reload
+ * (the detector swaps its .img without a pipeline respawn) instead of the
+ * MUT_RESTART reinit, so the video0 RTP stream is uninterrupted. */
+static int test_detect_model_path_live_reload(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_detect_reload = test_apply_detect_reload;
+
+	CHECK("detect modelPath+modelId live ok",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"detect.modelPath=/sd/person.img&detect.modelId=1",
+			&status, response, sizeof(response)) == 0);
+	CHECK("detect live status 200", status == 200);
+	CHECK("detect live model_path cfg",
+		strcmp(cfg.detect.model_path, "/sd/person.img") == 0);
+	CHECK("detect live model_id cfg", cfg.detect.model_id == 1);
+	/* One grouped reload for the whole detect batch, not one per field. */
+	CHECK("detect live reload once",
+		g_api_cb_state.apply_detect_reload_calls == 1);
+	/* No reinit: the stream keeps running through a live swap. */
+	CHECK("detect live no reinit", strstr(response,
+		"\"reinit_pending\":true") == NULL);
+
+	return failures;
+}
+
+/* Missing apply_detect_reload (e.g. Maruko, no live detector path) → 501, the
+ * standard "not supported" preflight for a live field with no callback. */
+static int test_detect_model_path_no_callback(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));   /* apply_detect_reload = NULL */
+
+	(void)apply_set_query_http(&cfg, "star6e", &cb,
+		"detect.modelPath=/sd/x.img", &status, response, sizeof(response));
+	CHECK("detect no-callback status 501", status == 501);
+
+	return failures;
+}
+
+/* detect.netWidth stays MUT_RESTART (tap geometry needs the VPE port
+ * recreated): a single set persists + requests reinit, never a live reload. */
+static int test_detect_net_width_restart(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_detect_reload = test_apply_detect_reload;
+
+	CHECK("detect netWidth set ok",
+		apply_set_query_http(&cfg, "star6e", &cb, "detect.netWidth=416",
+			&status, response, sizeof(response)) == 0);
+	CHECK("detect netWidth status 200", status == 200);
+	CHECK("detect netWidth cfg", cfg.detect.net_width == 416);
+	CHECK("detect netWidth reinit pending",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+	CHECK("detect netWidth no live reload",
+		g_api_cb_state.apply_detect_reload_calls == 0);
+
+	return failures;
+}
+
+/* Geometry / threshold validators reject out-of-range detect values. */
+static int test_detect_field_validation(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_detect_reload = test_apply_detect_reload;
+
+	/* netWidth not a multiple of 32 → 409 validation error. */
+	(void)apply_set_query_http(&cfg, "star6e", &cb, "detect.netWidth=100",
+		&status, response, sizeof(response));
+	CHECK("detect netWidth ragged rejected", status == 409);
+
+	/* confThresh out of [0,1) → 409. */
+	(void)apply_set_query_http(&cfg, "star6e", &cb, "detect.confThresh=1.5",
+		&status, response, sizeof(response));
+	CHECK("detect confThresh out of range rejected", status == 409);
 
 	return failures;
 }
@@ -1306,6 +1423,10 @@ int test_venc_api(void)
 	failures += test_register_with_callbacks();
 	failures += test_field_support_by_backend();
 	failures += test_multi_set_live_success();
+	failures += test_detect_model_path_live_reload();
+	failures += test_detect_model_path_no_callback();
+	failures += test_detect_net_width_restart();
+	failures += test_detect_field_validation();
 	failures += test_multi_set_awb_grouped_apply();
 	failures += test_multi_set_video_timing_grouped_apply();
 	failures += test_multi_set_rejects_restart_fields();

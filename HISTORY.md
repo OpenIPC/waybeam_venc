@@ -1,5 +1,105 @@
 # History
 
+## [0.52.0] - 2026-07-25
+
+Hot-swap the offline NPU detector `.img` without respawning the pipeline, so
+the main video0 RTP stream is uninterrupted (no gap, no keyframe reset, no
+reconnect) when only the model changes. Detection runs off the VPE0 port1 tap,
+independent of the video0 encode path, so a detector-only reload is clean.
+
+- **Detector-only reload entrypoint** (`star6e_ipu_yolo.c`) — the init is
+  factored into `iy_load_graph()` / `iy_unload_graph()` halves (plugin dlopen,
+  VPE port1 tap create, backend init) plus an `iy_stop_reader()` reader-join
+  helper. New `star6e_ipu_yolo_reload(state, vcfg)` tears down and re-creates
+  only the detector plugin + tap channel while the encoder keeps running.
+- **Geometry guard** — the live path is taken only when `net_width`/`net_height`
+  are unchanged; a dims change needs the VPE port recreated, so it falls back to
+  the full `MUT_RESTART` respawn. The multiple-of-32 / min-64 checks are shared
+  by start and reload via `iy_resolve_net_dims()`.
+- **Model geometry is now verified against the tap** — plugin ABI bumped to `2`,
+  adding a required `model_dims()` that reports the loaded `.img`'s REAL input
+  geometry, plus `net_width`/`net_height` in `DetectBackendConfig`. The host
+  compares the two and refuses a mismatch (`iy_check_model_dims()`), because
+  config is not evidence of what a model expects. Since `model_path` is live but
+  the dims are restart-scope, pointing `model_path` at a different-geometry
+  model was previously accepted silently and left an "active" detector that
+  never detected — the backend rejects every frame and `process()` errors are
+  not logged. A refusal names both geometries and the exact `netWidth`/
+  `netHeight` to set, leaves detection off, releases the port1 claim, and does
+  not disturb the stream. ABI is an exact match (no compatibility window during
+  beta), so an ABI-1 plugin is rejected at load with a clear diagnostic.
+- **Swap cost, measured** — a model change does not respawn the pipeline, drop
+  frames at the transport, force a keyframe, or reconnect, but it is not free:
+  the NPU graph load runs on the pipeline thread (which is what makes it atomic
+  against the per-frame snapshot), so frame output stalls for its duration. On
+  Star6E .232 at 100 fps the stall was **~100-450 ms** on some runs and
+  **~2.2-2.5 s** on others, with no in-between. The fast runs correlate with a
+  freshly booted or freshly restarted process and the slow ones with a pipeline
+  respawn having happened, but that did not hold in every trial (one
+  init-script restart stayed slow, another came back fast), so the trigger is
+  **not isolated** — it is not memory pressure, not file I/O (a pre-warmed
+  `.img` reads in 0.01 s with the stall unchanged), and not accumulation across
+  reloads (flat within a process). Treat **~2.5 s** as the planning number.
+  Only a `model_path` change pays this; see the in-place path below.
+- **Only a model change reloads the graph** — `model_id` is a label stamped into
+  the snapshot and `conf_thresh` / `nms_iou` are decode-time knobs, yet all
+  three shared `LIVE_GROUP_DETECT` and so rebuilt the NPU graph, paying the full
+  stall to change a number. `star6e_ipu_yolo_reload()` now compares the
+  requested `model_path` against what is loaded and, when it is unchanged,
+  applies the label and thresholds in place — the graph and the tap are never
+  torn down. Thresholds go through the new optional ABI-3 `set_thresholds()`
+  with the reader briefly parked (it parks between frames) so the decode is not
+  reading them as they are written; a backend without it falls back to the full
+  reload. Measured on .232 in the slow regime: threshold-only **50 ms** and
+  `model_id`-only **0 ms**, against ~2300 ms before.
+- **Mutability wiring** (`venc_api.c`) — `detect.model_path` is now `MUT_LIVE`,
+  and `detect.model_id` / `conf_thresh` / `nms_iou` are newly settable
+  (`MUT_LIVE`); a new `LIVE_GROUP_DETECT` applies them via `apply_detect_reload`
+  instead of setting `g_reinit`. `detect.net_width` / `net_height` are settable
+  as `MUT_RESTART`. Added range validators for the four new fields.
+- **Atomicity + concurrency** — the swap runs on the pipeline (encode) thread
+  via a request posted by the HTTP apply hook and serviced between frames
+  (`star6e_controls_service_detect_reload`), so it is atomic w.r.t. the
+  per-frame `DETECT` snapshot query and the failure path (which frees the
+  detector context) can never race a `snapshot()` read. The request carries a
+  full `VencConfig` snapshot taken under `g_cfg_mutex`, and the pipeline thread
+  reloads from a private copy of it — so the (potentially slow) NPU graph load
+  never reads the live config lock-free, even if the HTTP wait times out or a
+  second `/set` arrives. A `paused` flag quiesces the consumer across the swap;
+  the `DETECT` sidecar trailer is simply absent for the duration of the swap
+  (consumers already tolerate "no DETECT"). The wire `model_id` is latched into
+  the detector snapshot alongside the boxes, so it flips in lockstep with the
+  first new-model `DETECT` (never tagging the last old-model boxes with the new
+  id), and the `describe()` class-count cross-check re-runs after each reload.
+- Both `.img` files can be pre-staged (e.g. on SD); switching needs no
+  `/api/v1/restart`. Changing `netWidth`/`netHeight` still takes the full
+  respawn path (unchanged). No change to the RTP-sidecar wire ABI.
+- Contract `0.14.0`; `test_venc_api` gains four detect live/restart/validation
+  cases (2089/0); both backends build clean.
+
+### VPE port-ownership arbiter + `vpe_taps` observability
+
+Cross-feature alignment for the VPE0 scaler outputs, so the detector and the
+stab framing tap cannot both program the single second scaler, and an operator
+can see the allocation.
+
+- **Arbiter** (`star6e_vpe_ports.{c,h}`) — a single owner for VPE0 **port1**
+  (the lone second scaler output): stab XOR detect. `star6e_vpe_port1_claim()`
+  refuses a second claim while it is held; the pipeline claims it for the stab
+  motion tap and for the detector, so their mutual exclusion is now enforced by
+  the arbiter instead of an ad-hoc `if (g_framing)`. `FramingModule` gains a
+  `uses_vpe_port1` flag (stab=true; stab-fill=false — it drains port0 and
+  composes in SW, so it takes no port1 tap but stays detect-exclusive by an
+  explicit resource policy).
+- **Observability** — the arbiter publishes a `runtime.vpe_taps` block to
+  `/api/v1/config` via `venc_api_set_vpe_taps()`: `port0` lists the 1:N
+  consumers of the shared main output (`main` always; `jpeg`/`record` when
+  those channels are up — the JPEG snapshot is a port0 consumer, not a second
+  tap), and `port1` names its sole owner or `null`. Star6E only; absent on
+  Maruko.
+- `test_star6e_vpe_ports` covers claim/refuse/release/idempotence and the
+  published JSON (2103/0).
+
 ## [0.51.1] - 2026-07-24
 
 Detector hardening follow-ups from the v0.51.0 upstream review — four

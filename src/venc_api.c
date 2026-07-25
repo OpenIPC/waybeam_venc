@@ -119,6 +119,37 @@ int venc_api_get_active_precrop(uint16_t *x, uint16_t *y,
 	return valid;
 }
 
+/* VPE tap map published by the Star6E port arbiter (star6e_vpe_ports.c) and
+ * emitted in /api/v1/config runtime.vpe_taps.  Guarded by its own mutex: the
+ * pipeline thread writes it, the httpd thread reads it in handle_config. */
+static pthread_mutex_t g_vpe_taps_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_vpe_taps[192];
+static int g_vpe_taps_valid;
+
+void venc_api_set_vpe_taps(const char *json_obj)
+{
+	pthread_mutex_lock(&g_vpe_taps_mutex);
+	if (json_obj && json_obj[0]) {
+		snprintf(g_vpe_taps, sizeof(g_vpe_taps), "%s", json_obj);
+		g_vpe_taps_valid = 1;
+	} else {
+		g_vpe_taps_valid = 0;
+	}
+	pthread_mutex_unlock(&g_vpe_taps_mutex);
+}
+
+int venc_api_get_vpe_taps(char *buf, size_t buf_size)
+{
+	int valid;
+
+	pthread_mutex_lock(&g_vpe_taps_mutex);
+	valid = g_vpe_taps_valid;
+	if (valid && buf && buf_size > 0)
+		snprintf(buf, buf_size, "%s", g_vpe_taps);
+	pthread_mutex_unlock(&g_vpe_taps_mutex);
+	return valid;
+}
+
 void venc_api_set_config_path(const char *path)
 {
 	pthread_mutex_lock(&g_cfg_mutex);
@@ -531,7 +562,17 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(detect, enabled,        FT_BOOL,   MUT_RESTART),
 	FIELD(detect, plugin,         FT_STRING, MUT_RESTART),
-	FIELD(detect, model_path,     FT_STRING, MUT_RESTART),
+	/* model_path/model_id/conf_thresh/nms_iou apply live: the detector plugin
+	 * + VPE tap are re-created without respawning the pipeline, so the video0
+	 * RTP stream is uninterrupted (see LIVE_GROUP_DETECT / apply_detect_reload).
+	 * net_width/net_height stay MUT_RESTART — a tap-geometry change needs the
+	 * VPE port recreated, which only the full respawn path does. */
+	FIELD(detect, model_path,     FT_STRING, MUT_LIVE),
+	FIELD(detect, model_id,       FT_UINT,   MUT_LIVE),
+	FIELD(detect, conf_thresh,    FT_FLOAT,  MUT_LIVE),
+	FIELD(detect, nms_iou,        FT_FLOAT,  MUT_LIVE),
+	FIELD(detect, net_width,      FT_UINT,   MUT_RESTART),
+	FIELD(detect, net_height,     FT_UINT,   MUT_RESTART),
 	FIELD(detect, firmware_path,  FT_STRING, MUT_RESTART),
 	FIELD(detect, infer_interval, FT_INT,    MUT_RESTART),
 	FIELD(detect, osd,            FT_BOOL,   MUT_RESTART),
@@ -971,6 +1012,31 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		    v > VENC_OUTPUT_PAYLOAD_CEILING_BYTES)
 			return "outgoing.max_payload_size must be in range [576, 4000]";
 	}
+	if (strcmp(key, "detect.net_width") == 0 ||
+	    strcmp(key, "detect.net_height") == 0) {
+		/* Tap/model dims must be a multiple of 32 (>=64) — the YOLO head
+		 * strides 8/16/32.  0 opts into the default (640x352).  Mirrors the
+		 * check in star6e_ipu_yolo.c so a bad value is rejected before the
+		 * respawn instead of just disabling detection at bring-up. */
+		uint32_t v = strcmp(key, "detect.net_width") == 0 ?
+			cfg->detect.net_width : cfg->detect.net_height;
+		if (v != 0 && (v % 32 != 0 || v < 64))
+			return "detect.netWidth/netHeight must be 0 (default) or a "
+				"multiple of 32 (>=64)";
+	}
+	if (strcmp(key, "detect.conf_thresh") == 0) {
+		float v = cfg->detect.conf_thresh;
+		/* <=0 means "plugin default"; a positive value is a probability. */
+		if (!isfinite(v) || v < 0.0f || v >= 1.0f)
+			return "detect.confThresh must be in range [0, 1) "
+				"(0 = plugin default)";
+	}
+	if (strcmp(key, "detect.nms_iou") == 0) {
+		float v = cfg->detect.nms_iou;
+		if (!isfinite(v) || v < 0.0f || v >= 1.0f)
+			return "detect.nmsIou must be in range [0, 1) "
+				"(0 = plugin default)";
+	}
 	return NULL;
 }
 
@@ -1126,6 +1192,7 @@ typedef enum {
 	LIVE_GROUP_SNAPSHOT_QUALITY,
 	LIVE_GROUP_PAUSE_STAB,
 	LIVE_GROUP_MAX_FRAME_SIZE,
+	LIVE_GROUP_DETECT,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1304,6 +1371,11 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	if (strcmp(canonical_key, "video0.max_i_bytes") == 0 ||
 	    strcmp(canonical_key, "video0.max_p_bytes") == 0)
 		return LIVE_GROUP_MAX_FRAME_SIZE;
+	if (strcmp(canonical_key, "detect.model_path") == 0 ||
+	    strcmp(canonical_key, "detect.model_id") == 0 ||
+	    strcmp(canonical_key, "detect.conf_thresh") == 0 ||
+	    strcmp(canonical_key, "detect.nms_iou") == 0)
+		return LIVE_GROUP_DETECT;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1347,6 +1419,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "video0.pauseStab";
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return "video0.maxIBytes/maxPBytes";
+	case LIVE_GROUP_DETECT:
+		return "detect.model_path/model_id/conf_thresh/nms_iou";
 	default:
 		return "unknown";
 	}
@@ -1511,6 +1585,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_pause_stab != NULL;
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return g_cb->apply_max_frame_size != NULL;
+	case LIVE_GROUP_DETECT:
+		return g_cb->apply_detect_reload != NULL;
 	default:
 		return 0;
 	}
@@ -1598,6 +1674,16 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		dst->video0.max_i_bytes = src->video0.max_i_bytes;
 		dst->video0.max_p_bytes = src->video0.max_p_bytes;
+		break;
+	case LIVE_GROUP_DETECT:
+		/* Copy the whole live detector group; the backend re-reads all four
+		 * from the committed config on reload, and unchanged members equal
+		 * the base anyway (new_cfg starts as a copy of old_cfg). */
+		snprintf(dst->detect.model_path, sizeof(dst->detect.model_path),
+			"%s", src->detect.model_path);
+		dst->detect.model_id    = src->detect.model_id;
+		dst->detect.conf_thresh = src->detect.conf_thresh;
+		dst->detect.nms_iou     = src->detect.nms_iou;
 		break;
 	default:
 		break;
@@ -1725,6 +1811,11 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return g_cb->apply_max_frame_size(cfg->video0.max_i_bytes,
 			cfg->video0.max_p_bytes);
+	case LIVE_GROUP_DETECT:
+		/* cfg is already committed to g_cfg (commit_config_locked above),
+		 * so the backend reads the new model_path/model_id/conf/iou from the
+		 * live config when it performs the swap on the pipeline thread. */
+		return g_cb->apply_detect_reload();
 	default:
 		return -2;
 	}
@@ -2324,7 +2415,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.13.0\","
+		"\"contract_version\":\"0.14.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2335,7 +2426,9 @@ static int handle_config(int fd, const HttpRequest *req, void *ctx)
 {
 	uint16_t px = 0, py = 0, pw = 0, ph = 0;
 	int precrop_valid;
-	char runtime[160];
+	char taps[192];
+	int taps_valid;
+	char runtime[384];
 
 	(void)req; (void)ctx;
 	pthread_mutex_lock(&g_cfg_mutex);
@@ -2345,12 +2438,22 @@ static int handle_config(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 500, "internal_error",
 			"failed to serialize config");
 
+	/* runtime block: active_precrop (VIF capture rect) and vpe_taps (VPE
+	 * scaler-output ownership).  Either may be absent; emit the object only
+	 * when at least one is present, comma-joining what is. */
 	precrop_valid = venc_api_get_active_precrop(&px, &py, &pw, &ph);
-	if (precrop_valid) {
-		snprintf(runtime, sizeof(runtime),
-			",\"runtime\":{\"active_precrop\":"
-			"{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u}}",
-			px, py, pw, ph);
+	taps_valid = venc_api_get_vpe_taps(taps, sizeof(taps));
+	if (precrop_valid || taps_valid) {
+		int n = snprintf(runtime, sizeof(runtime), ",\"runtime\":{");
+		if (precrop_valid)
+			n += snprintf(runtime + n, sizeof(runtime) - n,
+				"\"active_precrop\":{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u}",
+				px, py, pw, ph);
+		if (taps_valid)
+			n += snprintf(runtime + n, sizeof(runtime) - n,
+				"%s\"vpe_taps\":%s",
+				precrop_valid ? "," : "", taps);
+		snprintf(runtime + n, sizeof(runtime) - n, "}");
 	} else {
 		runtime[0] = '\0';
 	}

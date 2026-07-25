@@ -1,6 +1,7 @@
 #include "star6e_pipeline.h"
 #include "star6e_framing.h"
 #include "star6e_ipu_yolo.h"
+#include "star6e_vpe_ports.h"
 #include "star6e_framing_host.h"
 #if HAVE_FRAMING_STAB
 #include "star6e_framing_stab.h"
@@ -1955,6 +1956,10 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate,
 		vcfg->isp.shutter_rule_180);
 
+	/* VPE port arbiter: port0 now carries "main"; port1 starts free.  Framing
+	 * and detect claim port1 below (mutually exclusive on the single tap). */
+	star6e_vpe_ports_begin();
+
 	g_framing = star6e_framing_select(vcfg);
 	if (g_framing) {
 		/* Framing module owns the VPE port0 → VENC path.  The "stab" preset
@@ -1992,6 +1997,10 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		 * wait above has already fired star6e_ae_crop_mark_ready(), so
 		 * this emits immediately rather than queueing. */
 		g_framing->apply_ae_crop();
+		/* Reserve port1 for the stab motion tap so the detector below is
+		 * refused it (stab-fill rides port0 and claims nothing). */
+		if (g_framing->uses_vpe_port1)
+			(void)star6e_vpe_port1_claim(g_framing->preset_name);
 	} else {
 		bind_src_fps = state->sensor.mode.maxFps ?
 			state->sensor.mode.maxFps : pconf->sensor_framerate;
@@ -2014,17 +2023,27 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
 	}
 
-	/* IPU object-detection tap (VPE port1).  Mutually exclusive with a
-	 * framing module (stab), which already owns the single VPE port1.  Skip
-	 * with a note when framing is active; otherwise start best-effort (never
-	 * fatal to the stream). */
+	/* IPU object-detection tap (VPE port1).  Two ways it can be refused:
+	 *   - stab holds port1 (the arbiter claim below fails), or
+	 *   - stab-fill is active: it drains port0 (no port1 conflict), but its
+	 *     SW compose + blit plus the IPU detector together exceed the
+	 *     validated Star6E budget, so they stay mutually exclusive by policy.
+	 * Otherwise start best-effort (never fatal to the stream); if start fails
+	 * to bring the detector up, release the port1 claim so it reads free. */
 	if (vcfg->detect.enabled) {
-		if (g_framing) {
-			fprintf(stderr, "[waybeam] detect: skipped — video0.framing "
-				"owns VPE port1 (detect and stab are mutually "
-				"exclusive)\n");
+		const char *blocker = NULL;
+		if (g_framing && !g_framing->uses_vpe_port1)
+			blocker = g_framing->preset_name;   /* stab-fill: resource policy */
+		else if (star6e_vpe_port1_claim("detect") != 0)
+			blocker = star6e_vpe_port1_owner();  /* stab owns the tap */
+
+		if (blocker) {
+			fprintf(stderr, "[waybeam] detect: skipped — framing '%s' active "
+				"(VPE port1 owner / resource policy)\n", blocker);
 		} else {
 			star6e_ipu_yolo_start(state, vcfg);
+			if (!state->detect)
+				star6e_vpe_port1_release("detect");
 		}
 	}
 
@@ -2042,7 +2061,13 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 			.channel = snap->channel,
 			.enabled = snap->enabled,
 		};
-		(void)venc_jpeg_init(&jcfg);
+		/* The JPEG channel binds 1:N alongside the encoder on port0 (idle
+		 * until a snapshot is pulled), so it is a port0 consumer, not a
+		 * second tap.  init() is always called (it sets internal state even
+		 * when disabled); report the tap only when it actually came up. */
+		int jpeg_rc = venc_jpeg_init(&jcfg);
+		if (jcfg.enabled && jpeg_rc == 0)
+			star6e_vpe_port0_set("jpeg", true);
 	}
 
 	if (star6e_output_init(&state->output, &pconf->output_setup) != 0) {
@@ -2308,6 +2333,10 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 		g_framing = NULL;
 	}
 
+	/* Release the VPE port arbiter: port1 owner (stab/detect) is freed and the
+	 * runtime.vpe_taps observability block is cleared for the stopped pipeline. */
+	star6e_vpe_ports_end();
+
 	/* MI teardown order: StopRecvPic each VENC consumer BEFORE unbinding
 	 * its input port.  The previous Star6E order unbound VPE→VENC first and
 	 * only then stopped VENC, leaving the kernel SDK still encoding/flushing
@@ -2538,6 +2567,10 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	return 0;
 
 fail_venc:
+	/* bind_and_finalize_pipeline() called star6e_vpe_ports_begin(); release it
+	 * so a failed bring-up does not leave a stale runtime.vpe_taps / port1
+	 * owner behind (no-op when begin() had not run). */
+	star6e_vpe_ports_end();
 	star6e_pipeline_stop_venc(state->venc_channel);
 fail_vpe:
 	star6e_pipeline_stop_vpe();
@@ -2634,6 +2667,8 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	MI_SYS_SetChnOutputPortDepth(&d->port, 8, 56);
 
 	state->dual = d;
+	/* ch1 binds 1:N alongside the encoder on port0 — another port0 consumer. */
+	star6e_vpe_port0_set("record", true);
 	printf("> Dual VENC: ch1 = %u kbps %u fps (mode: %s)\n",
 		bitrate, fps, mode);
 	return 0;
@@ -2666,4 +2701,5 @@ void star6e_pipeline_stop_dual(Star6ePipelineState *state)
 	free(d->stream_packs);
 	free(d);
 	state->dual = NULL;
+	star6e_vpe_port0_set("record", false);
 }

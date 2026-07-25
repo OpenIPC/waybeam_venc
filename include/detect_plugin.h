@@ -26,7 +26,32 @@
 
 #include <stdint.h>
 
-#define DETECT_PLUGIN_ABI 1u
+/*
+ * ABI version.  The host requires an EXACT match and rejects anything else —
+ * during beta there is no compatibility window, so there is deliberately no
+ * "older plugin, reduced checking" mode: every accepted plugin supports the
+ * full vtable below.  Bump this whenever the vtable or a struct layout
+ * changes, and rebuild the plugins.
+ *
+ *   1  initial: init / process / set_display / deinit / describe.
+ *   2  adds model_dims() plus the net_width/net_height config fields, so the
+ *      host verifies the tap geometry against the model's real input dims
+ *      rather than trusting config.
+ *   3  adds set_thresholds(), so conf/iou can change without rebuilding the
+ *      NPU graph.  Numbered separately from 2 even though both landed in the
+ *      same unmerged change: a vtable field was appended, so a host built
+ *      against 3 reading set_thresholds on a plugin built against 2 would read
+ *      past that plugin's struct.  The version bump turns that into a clean
+ *      refusal instead — which is the whole point of the field.
+ *
+ * Note for any future compatibility window: `abi` bounds how much of
+ * DetectBackend the host may read, because the PLUGIN owns that struct (it
+ * returns a static one, sized by the header it compiled against) — reading a
+ * field its ABI predates is out of bounds.  DetectBackendConfig is the other
+ * direction (host-allocated, passed by pointer), so appending fields there is
+ * always safe.
+ */
+#define DETECT_PLUGIN_ABI 3u
 
 /* One detection.  Box coords are FP32 PIXELS in the model's NETWORK space
  * (e.g. 640x352), corner form.  24-byte layout (see ABI note above). */
@@ -61,6 +86,11 @@ typedef struct {
 	int         display_h;
 	float       conf_thresh;     /* <=0 -> plugin default */
 	float       nms_iou;         /* <=0 -> plugin default */
+	/* ABI 2+: the tap geometry frames will arrive at.  A backend MAY refuse
+	 * init() on a mismatch with its model; the host checks independently via
+	 * model_dims(), so a backend that ignores these is still covered. */
+	uint32_t    net_width;
+	uint32_t    net_height;
 } DetectBackendConfig;
 
 /*
@@ -77,6 +107,23 @@ typedef struct {
  *  describe(&names)          optional; set *names to a static array of class
  *                            label strings and return the class count, or 0 /
  *                            leave the field pointer NULL if not provided.
+ *  model_dims(&w,&h)         REQUIRED.  Report the loaded model's REAL input
+ *                            geometry (what the compiled .img expects), not
+ *                            what config asked for.  Valid only after a
+ *                            successful init(); 0 on success, <0 if unknown.
+ *                            The host compares this against the tap it created
+ *                            and refuses a mismatch — the only way to catch
+ *                            "operator pointed model_path at a
+ *                            different-geometry .img", since config is not
+ *                            evidence of what the model wants.
+ *  set_thresholds(conf,iou)  optional.  Update the decode thresholds in place,
+ *                            without reloading the model.  Both are decode-time
+ *                            knobs, so rebuilding the NPU graph to change one
+ *                            costs hundreds of ms to seconds of frame output
+ *                            for nothing.  A NULL here is legal — the host then
+ *                            falls back to a full reload, which is correct but
+ *                            slow.  Called only while the host has quiesced the
+ *                            frame consumer, so it need not be thread-safe.
  */
 typedef struct DetectBackend {
 	const char *name;
@@ -87,6 +134,8 @@ typedef struct DetectBackend {
 	void (*set_display)(int width, int height);
 	void (*deinit)(void);
 	int  (*describe)(const char *const **class_names);
+	int  (*model_dims)(uint32_t *width, uint32_t *height);    /* ABI 2, required */
+	void (*set_thresholds)(float conf_thresh, float nms_iou); /* ABI 3, optional */
 } DetectBackend;
 
 /*

@@ -112,7 +112,8 @@ Response `200`:
       "debug": { "showOsd": false }
     },
     "runtime": {
-      "active_precrop": { "x": 0, "y": 240, "w": 2560, "h": 1440 }
+      "active_precrop": { "x": 0, "y": 240, "w": 2560, "h": 1440 },
+      "vpe_taps": { "port0": ["main", "jpeg"], "port1": "detect" }
     }
   }
 }
@@ -125,6 +126,16 @@ part of the editable config:
   any sensor overscan offsets or SCL crop origin). Present whenever a
   Star6E or Maruko pipeline has been started; absent before pipeline start
   or after pipeline stop.
+- `vpe_taps` — VPE scaler-output ownership (Star6E only; absent on Maruko
+  and before pipeline start). `port0` is the main SCL output, a 1:N-shareable
+  buffer listing its consumers (`main` — the H.265 encoder, always present;
+  plus `jpeg` when the snapshot channel is up and `record` when a dual/record
+  channel is bound — these bind alongside on the same buffer, not a second
+  scaler). `port1` is the **single** second scaler output: a string naming its
+  sole owner (`"stab"` or `"detect"`), or `null` when free. The arbiter refuses
+  a second `port1` claim, so `stab` and `detect` are mutually exclusive on the
+  hardware; `stab-fill` rides `port0` only (no `port1` tap) but stays mutually
+  exclusive with `detect` by resource policy.
 
 ### `GET /api/v1/capabilities`
 
@@ -1412,9 +1423,52 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
+| `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **501** | Star6E hot-swaps the NPU detector `.img` in place (VPE port1 + plugin re-created on the pipeline thread) without respawning the pipeline, provided `net_width`/`net_height` are unchanged. The stream keeps running (no reconnect, no drops), but a `model_path` change stalls frame output while the graph loads — budget ~2.5 s, see the `0.14.0` note. `model_id`/`conf_thresh`/`nms_iou` are applied in place without a graph reload (~0-50 ms). A model whose real input geometry disagrees with the tap is refused and leaves detection off. Maruko has no detector path (`apply_detect_reload` unset → 501). |
+| `detect.net_width` / `net_height` | restart | **501** | Tap geometry: the VPE port output is fixed at create, so a dims change takes the full respawn path. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.14.0` (additive — detector live model swap):
+  - `detect.model_path` changed from `MUT_RESTART` to `MUT_LIVE`, and
+    `detect.model_id` / `detect.conf_thresh` / `detect.nms_iou` are now
+    settable (`MUT_LIVE`).  Changing any of them re-creates only the NPU
+    detector plugin + VPE port1 tap on the pipeline thread — the video0
+    encode/RTP path keeps running, so there is no pipeline respawn, keyframe
+    reset, reconnect, or transport drop.  A **`model_path` change is not free**,
+    though: the NPU graph load runs on the pipeline thread (that is what makes
+    the swap atomic against the per-frame `DETECT` snapshot), so frame output
+    stalls while it runs.  Measured on Star6E .232 at 100 fps: **~100-450 ms**
+    on some runs, **~2.2-2.5 s** on others, with nothing in between and the
+    trigger not isolated (not memory pressure, not file I/O, not accumulation
+    across reloads).  Budget for **~2.5 s**.
+  - `model_id` / `conf_thresh` / `nms_iou` do **not** reload the graph: when the
+    requested `model_path` matches what is loaded, the label and thresholds are
+    applied in place (thresholds via the plugin's optional `set_thresholds()`,
+    falling back to a full reload if the backend lacks it).  Measured cost:
+    ~50 ms for a threshold change, ~0 ms for `model_id`, versus ~2300 ms before.
+    So live threshold tuning is cheap; only swapping the `.img` is expensive.
+    The sidecar `model_id` flips to the new value in lockstep with the first
+    new-model `DETECT` trailer.  Star6E only; Maruko returns `501` (no
+    `apply_detect_reload`).
+  - The host now verifies the loaded model's **real** input geometry (reported
+    by the plugin via the new ABI-2 `model_dims()`) against the VPE port1 tap
+    it created, and refuses a mismatch — `net_width`/`net_height` are config,
+    not evidence of what a `.img` expects.  Because `model_path` is live but
+    the dims are restart-scope, pointing `model_path` at a different-geometry
+    model used to be accepted silently and left an "active" detector that
+    never detected (the backend rejects every frame and `process()` errors are
+    not logged).  A refused swap logs both geometries and the exact
+    `netWidth`/`netHeight` to set, leaves detection off, and releases the
+    port1 claim (`runtime.vpe_taps.port1` reads `null`); the stream is
+    unaffected.  Note `/set` still returns `200` — the reload is serviced
+    asynchronously on the pipeline thread, so the stored value is accepted
+    even when the model is then rejected; check `runtime.vpe_taps` or the log
+    for the outcome.
+  - `detect.net_width` / `detect.net_height` are now settable as
+    `MUT_RESTART` (a tap-geometry change needs the VPE port recreated).
+    Both must be `0` (default) or a multiple of 32 (`>=64`).
+  - `detect.confThresh` / `nmsIou` accept `[0, 1)` (0 = plugin default);
+    `netWidth` / `netHeight` accept `0` or a `>=64` multiple of 32.
 - `0.46.0` (additive — new config fields):
   - Added `isp.gain_min` (min sensor gain floor) and `isp.shutter_min_us`
     (min exposure floor, µs) to the config schema.  Both default `0` =

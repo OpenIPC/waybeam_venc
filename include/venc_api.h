@@ -97,6 +97,16 @@ typedef struct {
 	 * timeout (attitude/IMU not running) or implausible gravity.
 	 * NULL when unsupported. */
 	int (*attitude_calibrate_level)(float *roll_deg, float *pitch_deg);
+	/* Live-swap the offline NPU detector .img without respawning the
+	 * pipeline.  Fired when detect.model_path/model_id/conf_thresh/nms_iou
+	 * change with the net geometry unchanged; the backend re-creates only the
+	 * detector plugin + VPE tap while the encoder keeps running, so the
+	 * video0 RTP stream is uninterrupted.  Reads the freshly-committed
+	 * detect.* fields from the config.  Returns 0 once applied (detection is
+	 * best-effort, so a failed swap that leaves detection off is not surfaced
+	 * as an error — the requested config is kept).  NULL when the backend has
+	 * no live detector path (e.g. Maruko). */
+	int (*apply_detect_reload)(void);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.
@@ -165,6 +175,18 @@ void venc_api_set_active_precrop(uint16_t x, uint16_t y,
 void venc_api_clear_active_precrop(void);
 int  venc_api_get_active_precrop(uint16_t *x, uint16_t *y,
 	uint16_t *w, uint16_t *h);
+
+/* VPE scaler-output tap map for /api/v1/config runtime.vpe_taps (Star6E only).
+ * The backend's port arbiter publishes a JSON object string
+ * (e.g. {"port0":["main","jpeg"],"port1":"detect"}) on every change; pass NULL
+ * to clear.  Stored verbatim and emitted inside the config runtime block, so
+ * an operator/CI can see which feature owns the single second scaler (port1)
+ * and who rides the shared main output (port0).  venc_api does not interpret
+ * the string — it only relays it. */
+void venc_api_set_vpe_taps(const char *json_obj);
+/* Copy the stored tap-map object into buf (NUL-terminated).  Returns 1 when a
+ * map is published (buf filled), 0 otherwise (buf untouched). */
+int  venc_api_get_vpe_taps(char *buf, size_t buf_size);
 
 /* Record status callback — set by backend to expose status to HTTP API. */
 typedef struct {
