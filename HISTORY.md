@@ -1,5 +1,51 @@
 # History
 
+## [0.55.0] - 2026-07-25
+
+Debug OSD: an actual-bitrate row on both backends, and the Maruko-only
+diagnostic rows brought across to Star6E.
+
+**New `br` row (both backends).** Shows the encoder's real output rate against
+its configured RC target, e.g. `br: 8123/10000k`. The rate is summed from the
+encoder's own per-frame sizes (`star6e_scene_frame_size` /
+`maruko_scene_frame_size`) over the OSD's existing 1 Hz window, **not** from
+bytes handed to the transport — so it stays truthful when `output_enabled` is 0
+and excludes packetization overhead. The gap between actual and target is the RC
+undershoot/overshoot, which is also the fastest way to tell an encoder problem
+from a link problem: an encoder tracking target while the picture stutters points
+at the radio. Previously this number was only reachable via `[verbose]` log
+lines (gated on `system.verbose`) or a subscribed sidecar probe.
+
+**Star6E gains four rows Maruko already had.** Both backends share the
+`src/debug_osd.c` renderer, but row *content* is written at each backend's own
+call site, and Star6E's had fallen behind:
+
+- `exp` — shutter µs, sensor/ISP gain, gain ceiling.
+- `ae` — scene luma, AE target, and stable/adjusting/at-limit state.
+- `awb` — R/B gains, colour temperature, stable state.
+- `stab` / `sfil` — Kalman correction (`a`) and raw detector measurement (`m`)
+  in stab pixels, plus pause state. Hidden when no stab thread runs.
+
+New `star6e_controls_ae_osd_status()` reuses the AE/AWB query machinery already
+in `star6e_controls.c` (`ae_diag_snapshot_collect`, the `AeExpoInfo_t` /
+`IspExposureLimit` / `AwbQueryInfo_t` typedefs, the `MI_ISP_AWB_QueryInfo`
+dlopen pattern) — no new SDK bindings. Shutter/gain fall back to
+`MI_SNR_GetPlaneInfo` when the ISP AE query does not answer, which is what keeps
+the row populated under CUS3A/userspace-3A. `star6e_framing_stab_osd_status()`
+mirrors its Maruko counterpart. All of it refreshes at 1 Hz on the existing OSD
+tick, never per frame — each AE/AWB refresh dlopens libmi_isp and round-trips
+several MI_ISP getters.
+
+**Two rows deliberately not ported.** Maruko's AR centre-crop `crop` row reads
+`ctx->scl_crop_*`, an i6c-only feature with no Star6E counterpart (Star6E's
+`crop` row remains the zoom-derived one). Star6E's `det` detection-box overlay
+stays Star6E-only — it is fed by the i6e IPU.
+
+No renderer changes were needed: `debug_osd_text()` self-clips against the canvas
+height and paints its own per-row background, so extra rows need no panel resize
+or row-count constant. The added rows are conditional on their data being valid,
+so an idle box does not pay for all of them.
+
 ## [0.54.0] - 2026-07-25
 
 Startup NPU scrub: every Star6E start runs a bare `MI_IPU_CreateDevice` +

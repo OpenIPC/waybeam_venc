@@ -309,6 +309,12 @@ static FramingKalman g_stab_kalman = {
  * teardown, no MMU storm.  Flipped via set_live under g_stab_path_lock. */
 static pthread_mutex_t g_stab_path_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int    g_stab_paused;
+/* Debug-OSD snapshot: last detector measurement + the Kalman correction
+ * actually applied, both in stab pixels.  Written by the detector thread at
+ * the framing_kalman_step() site, read at 1 Hz by the pipeline thread's OSD
+ * refresh — plain volatiles, torn reads are cosmetic on a diagnostic row. */
+static volatile int g_stab_osd_acc_x, g_stab_osd_acc_y;
+static volatile int g_stab_osd_meas_x, g_stab_osd_meas_y;
 /* User-controlled pan center as parts-per-thousand of (src_w, src_h).
  * 500/500 = exact center.  Updated live via star6e_stab_set_pan() so
  * the existing zoomX/zoomY HTTP controls steer the stabilized framing
@@ -1316,6 +1322,10 @@ static void *star6e_stab_thread_main(void *arg)
 						framing_kalman_step(&g_stab_kalman, meas_dx, meas_dy,
 							g_stab_paused, tau, max_x, max_y,
 							&acc_x, &acc_y);
+						g_stab_osd_meas_x = (int)meas_dx;
+						g_stab_osd_meas_y = (int)meas_dy;
+						g_stab_osd_acc_x = acc_x;
+						g_stab_osd_acc_y = acc_y;
 					}
 				dbg_frame++;
 				if ((dbg_frame % 120) == 0)
@@ -1939,6 +1949,24 @@ static int star6e_stab_fill_prepare(const VencConfig *vcfg, uint32_t src_w,
 	*enc_w = g_stab_enc_w;
 	*enc_h = g_stab_enc_h;
 	return 0;
+}
+
+/* Debug-OSD snapshot: last detector measurement + Kalman correction (both in
+ * stab pixels — SCL-input px for "stab", encode px for "stab-fill").  Returns
+ * 0 when no stab thread is running (row hidden).  Called from the pipeline's
+ * 1 Hz debug-OSD refresh (see star6e_framing_stab.h). */
+int star6e_framing_stab_osd_status(int *acc_x, int *acc_y,
+	int *meas_x, int *meas_y, int *paused, int *fill)
+{
+	if (!g_stab_running)
+		return 0;
+	if (acc_x)  *acc_x = g_stab_osd_acc_x;
+	if (acc_y)  *acc_y = g_stab_osd_acc_y;
+	if (meas_x) *meas_x = g_stab_osd_meas_x;
+	if (meas_y) *meas_y = g_stab_osd_meas_y;
+	if (paused) *paused = g_stab_paused;
+	if (fill)   *fill = g_stab_fill_mode;
+	return 1;
 }
 
 const FramingModule star6e_framing_stab = {

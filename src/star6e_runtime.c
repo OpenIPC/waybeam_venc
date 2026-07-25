@@ -13,6 +13,9 @@
 #include "sdk_quiet.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
+#if HAVE_FRAMING_STAB
+#include "star6e_framing_stab.h"
+#endif
 #include "star6e_ipu.h"
 #include "star6e_ipu_yolo.h"
 #include "star6e_iq.h"
@@ -1023,6 +1026,13 @@ static uint32_t osd_box_px(float v, uint32_t canvas, uint32_t net)
 	return (uint32_t)r;
 }
 
+/* Encoded bytes accumulated since the debug OSD's last 1 Hz refresh.  Summed
+ * from the encoder's own frame sizes rather than the transport's byte count so
+ * the row stays truthful with output disabled and excludes packetization
+ * overhead — it reads the encoder against its RC target, not the wire.  Single
+ * writer (the pipeline thread, which is also the only reader). */
+static uint64_t g_osd_enc_bytes;
+
 static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	struct timespec *cus3a_ts_last, unsigned int *idle_counter)
 {
@@ -1097,6 +1107,8 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		RtpSidecarEncInfo enc_info;
 		uint32_t frame_size = star6e_scene_frame_size(&stream);
 		uint8_t is_idr = star6e_scene_is_idr(&stream);
+
+		g_osd_enc_bytes += frame_size;
 
 		scene_update(&ctx->scene, frame_size, is_idr,
 			star6e_scene_request_idr, &ps->venc_channel);
@@ -1266,6 +1278,8 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		static unsigned int osd_prev_frame;
 		static struct timespec osd_prev_ts;
 		static unsigned int osd_fps;
+		static unsigned int osd_kbps;
+		static Star6eAeOsdStatus osd_ae;
 		struct timespec osd_now;
 
 			/* HW-crop stab outputs the cropped encoded dim on port0, so the
@@ -1283,6 +1297,14 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			osd_fps = (unsigned int)(df * 1000 / (unsigned long)osd_ms);
 			osd_prev_frame = ps->video.frame_counter;
 			osd_prev_ts = osd_now;
+			/* bytes*8/ms is bits/ms, i.e. kbps directly. */
+			osd_kbps = (unsigned int)(g_osd_enc_bytes * 8 /
+				(uint64_t)osd_ms);
+			g_osd_enc_bytes = 0;
+			/* AE/AWB readouts ride the same 1Hz window — each
+			 * refresh dlopens libmi_isp and round-trips several
+			 * MI_ISP getters. */
+			star6e_controls_ae_osd_status(&osd_ae);
 		}
 
 		debug_osd_text(ps->debug_osd, 0, "fps", "%u", osd_fps);
@@ -1299,8 +1321,57 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		debug_osd_text(ps->debug_osd, 3, "enc", "%ux%u h265",
 			ps->image_width, ps->image_height);
 
+		/* Actual encoded rate against the configured RC target — the
+		 * gap between the two is the RC undershoot/overshoot, and it
+		 * separates an encoder problem from a link problem at a
+		 * glance (a healthy encoder tracking target while the picture
+		 * stutters points at the radio, not here). */
+		debug_osd_text(ps->debug_osd, 4, "br", "%u/%uk",
+			osd_kbps, vcfg->video0.bitrate);
+
 		{
-			int osd_row = 4;
+			int osd_row = 5;
+
+#if HAVE_FRAMING_STAB
+			/* Stabilization telemetry: Kalman correction (a) +
+			 * raw detector measurement (m), in stab pixels.
+			 * "sfil" = stab-fill (correction applied as the
+			 * compose shift), "stab" = HW-crop.  Hidden when no
+			 * stab thread runs. */
+			{
+				int sx, sy, mx, my, sp, sf;
+				if (star6e_framing_stab_osd_status(&sx, &sy,
+				    &mx, &my, &sp, &sf))
+					debug_osd_text(ps->debug_osd, osd_row++,
+						sf ? "sfil" : "stab",
+						"a%+d%+d m%+d%+d%s",
+						sx, sy, mx, my,
+						sp ? " paused" : "");
+			}
+#endif
+
+			if (osd_ae.ae_valid) {
+				debug_osd_text(ps->debug_osd, osd_row++,
+					"exp", "%uus sg%u/%u ig%u",
+					osd_ae.shutter_us,
+					osd_ae.sgain_x1024, osd_ae.max_sgain,
+					osd_ae.igain_x1024);
+			}
+			if (osd_ae.ae_info_valid) {
+				debug_osd_text(ps->debug_osd, osd_row++,
+					"ae", "y%u t%u %s",
+					osd_ae.luma_y, osd_ae.scene_target,
+					osd_ae.boundary ? "bound" :
+					osd_ae.stable ? "stable" : "adj");
+			}
+			if (osd_ae.awb_valid) {
+				debug_osd_text(ps->debug_osd, osd_row++,
+					"awb", "r%u b%u %uk %s",
+					osd_ae.rgain, osd_ae.bgain,
+					osd_ae.color_temp,
+					osd_ae.awb_stable ? "stable" : "adj");
+			}
+
 			Star6eIntraRefreshStatus ir;
 			Star6eRefPredStatus      rp;
 			star6e_pipeline_intra_refresh_status(&ir);

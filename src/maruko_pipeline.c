@@ -3889,6 +3889,14 @@ static void maruko_patch_stream_to_trail_n(i6c_venc_strm *s)
 		maruko_patch_pack_to_trail_n(&s->packet[i]);
 }
 
+/* Encoded bytes accumulated since the debug OSD's last 1 Hz refresh.  Summed
+ * from the encoder's own frame sizes rather than the transport's byte count so
+ * the row stays truthful with output disabled and excludes packetization
+ * overhead — it reads the encoder against its RC target, not the wire.  Single
+ * writer (the pipeline thread, which is also the only reader).  Mirrors
+ * g_osd_enc_bytes in star6e_runtime.c. */
+static uint64_t g_osd_enc_bytes;
+
 static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	MarukoStreamRuntime *rt, const i6c_venc_stat *stat)
 {
@@ -3961,6 +3969,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		static unsigned int osd_prev_frame;
 		static struct timespec osd_prev_ts;
 		static unsigned int osd_fps;
+		static unsigned int osd_kbps;
 		static MarukoAeOsdStatus osd_ae;
 		struct timespec osd_now;
 
@@ -3975,6 +3984,10 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			osd_fps = (unsigned int)(df * 1000 / (unsigned long)osd_ms);
 			osd_prev_frame = rt->frame_counter;
 			osd_prev_ts = osd_now;
+			/* bytes*8/ms is bits/ms, i.e. kbps directly. */
+			osd_kbps = (unsigned int)(g_osd_enc_bytes * 8 /
+				(uint64_t)osd_ms);
+			g_osd_enc_bytes = 0;
 			/* AE/AWB readouts ride the same 1Hz window — each
 			 * refresh round-trips several MI_ISP getters. */
 			maruko_controls_ae_osd_status(&osd_ae);
@@ -3995,8 +4008,16 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			ctx->cfg.image_width, ctx->cfg.image_height,
 			ctx->cfg.rc_codec == PT_H265 ? "h265" : "h264");
 
+		/* Actual encoded rate against the configured RC target — the
+		 * gap between the two is the RC undershoot/overshoot, and it
+		 * separates an encoder problem from a link problem at a
+		 * glance (a healthy encoder tracking target while the picture
+		 * stutters points at the radio, not here). */
+		debug_osd_text(ctx->debug_osd, 4, "br", "%u/%uk",
+			osd_kbps, ctx->cfg.venc_max_rate);
+
 		{
-			int osd_row = 4;
+			int osd_row = 5;
 
 			/* AR centre-crop readout: the AR base crop rect (WxH+X+Y),
 			 * i.e. the sub-window of the sensor selected to match the
@@ -4107,6 +4128,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	int codec = (ctx->cfg.rc_codec == PT_H265) ? 1 : 0;
 	uint32_t frame_size = maruko_scene_frame_size(&stream);
 	uint8_t is_idr = maruko_scene_is_idr(&stream, codec);
+	g_osd_enc_bytes += frame_size;
 	scene_update(&ctx->scene, frame_size, is_idr,
 		maruko_scene_request_idr, ctx);
 	RtpSidecarEncInfo enc_info = {0};
