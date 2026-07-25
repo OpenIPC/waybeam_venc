@@ -46,7 +46,12 @@ void debug_osd_text(DebugOsdState *osd, int row, const char *label,
                     const char *fmt, ...)
 	__attribute__((format(printf, 4, 5)));
 
-/** CPU usage sampler — call once per frame, reads /proc/stat at ~2 Hz. */
+/** CPU usage sampler — call once per frame, reads /proc/stat at ~2 Hz.
+ *  Returns busy time as a percentage of total capacity across all cores
+ *  (100% = every core saturated), as a sliding ~2s average. Derived from the
+ *  `idle` field against a wall clock; the /proc/stat busy fields are NOT used
+ *  because SigmaStar kernels credit them late and in batches. See the comment
+ *  in debug_osd.c and documentation/STAR6E_CPU_PROFILE.md. */
 void debug_osd_sample_cpu(DebugOsdState *osd);
 int debug_osd_get_cpu(DebugOsdState *osd);
 

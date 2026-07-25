@@ -1,31 +1,58 @@
 #include "debug_osd.h"
 
 /* ── CPU usage sampler (shared, /proc/stat) ────────────────────────────
- * Snapshot ring at 500ms cadence; CPU% is computed over the span from
- * the oldest retained snapshot (~1s with OSD_CPU_RING=2 — the oldest of
- * two 500ms-spaced snapshots is one full interval back at steady state),
- * so the OSD readout is a sliding 1-second average instead of a jumpy
- * 500ms delta, while still refreshing every 500ms. */
+ * Reports busy time as a percentage of TOTAL capacity across every core, so
+ * 100% means every core saturated (unchanged from the original semantics).
+ *
+ * IMPORTANT — do NOT compute the denominator from the /proc/stat busy fields
+ * on SigmaStar. On these 4.9 kernels `user` and `system` are credited late and
+ * in batches, so over short windows they are wildly wrong while `idle` and the
+ * per-task counters stay accurate. Measured on SSC338Q over 2s windows: the
+ * field sum swung 287..605 jiffies for a constant load (`system` alone 6..236,
+ * and 10..319 for a syscall-free busy loop that cannot produce system time),
+ * and field-derived busy came to just 0.11x the true value. That is precisely
+ * why busybox `top` shows this binary oscillating 2..25% when it is in fact
+ * steady, and the OSD inherited the same bug by dividing by that sum.
+ *
+ * So: derive busy from IDLE against a WALL-CLOCK denominator.
+ *   avail = elapsed_seconds * USER_HZ * ncores   (capacity, in jiffies)
+ *   busy% = (avail - delta_idle) / avail * 100
+ * Only `idle` (trustworthy) and CLOCK_MONOTONIC are used; the bursty fields
+ * are never read. Details: documentation/STAR6E_CPU_PROFILE.md.
+ *
+ * Snapshot ring at 500ms cadence, span = OSD_CPU_RING * 500ms, so the readout
+ * is a sliding ~2s average that still refreshes every 500ms. 2s is where
+ * idle-derived busy measured stable (+/-2.5% on a constant load) while
+ * remaining responsive enough to watch a mode change land. */
 #if defined(PLATFORM_STAR6E) || defined(PLATFORM_MARUKO)
 
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
+#include <unistd.h>
 
-#define OSD_CPU_RING 2
+#define OSD_CPU_RING 4     /* 4 x 500ms cadence => ~2s sliding window */
 
 typedef struct {
-	struct { unsigned long long total, idle; } ring[OSD_CPU_RING];
+	struct {
+		unsigned long long idle; /* idle + iowait jiffies */
+		struct timespec ts;      /* when this snapshot was taken */
+	} ring[OSD_CPU_RING];
 	int count;                 /* snapshots stored (saturates at RING) */
 	int head;                  /* next write index; oldest when full */
 	int pct;                   /* last computed CPU% */
-	struct timespec ts;        /* last snapshot time */
+	struct timespec ts;        /* last snapshot time (cadence gate) */
+	long hz;                   /* USER_HZ for /proc/stat, always 100 */
+	int ncores;                /* cpuN lines in /proc/stat, probed once */
 } OsdCpuSampler;
 
 static void osd_cpu_sample(OsdCpuSampler *cs)
 {
 	struct timespec now;
 	unsigned long long user, nice, sys, idle, iowait, irq, softirq;
-	unsigned long long total, idle_all;
+	unsigned long long idle_all;
+	char line[256];
+	int have = 0, cores = 0;
 	FILE *f;
 
 	clock_gettime(CLOCK_MONOTONIC, &now);
@@ -35,27 +62,56 @@ static void osd_cpu_sample(OsdCpuSampler *cs)
 
 	f = fopen("/proc/stat", "r");
 	if (!f) return;
-	if (fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu",
-	           &user, &nice, &sys, &idle, &iowait, &irq, &softirq) != 7) {
-		fclose(f);
-		return;
+	/* The aggregate "cpu " line comes first, then one "cpuN" line per core,
+	 * then non-cpu keys. One pass gets both the idle counter and the core
+	 * count. Lines are ~110 bytes, well inside the buffer. */
+	while (fgets(line, sizeof line, f)) {
+		if (strncmp(line, "cpu", 3) != 0) break;
+		if (line[3] == ' ') {
+			if (sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu",
+			           &user, &nice, &sys, &idle, &iowait, &irq,
+			           &softirq) == 7)
+				have = 1;
+		} else if (line[3] >= '0' && line[3] <= '9') {
+			cores++;
+		}
 	}
 	fclose(f);
+	if (!have) return;
 
-	total = user + nice + sys + idle + iowait + irq + softirq;
+	if (cs->hz <= 0) {
+		cs->hz = sysconf(_SC_CLK_TCK);
+		if (cs->hz <= 0) cs->hz = 100;
+	}
+	if (cs->ncores <= 0) cs->ncores = cores > 0 ? cores : 1;
+
 	idle_all = idle + iowait;
 
 	if (cs->count > 0) {
 		/* When the ring is full, head (about to be overwritten) is the
 		 * oldest retained snapshot; while filling, index 0 is. */
 		int oldest = (cs->count == OSD_CPU_RING) ? cs->head : 0;
-		unsigned long long dt = total - cs->ring[oldest].total;
-		unsigned long long di = idle_all - cs->ring[oldest].idle;
-		cs->pct = dt > 0 ? (int)((dt - di) * 100 / dt) : 0;
+		long span_ms =
+			(now.tv_sec - cs->ring[oldest].ts.tv_sec) * 1000L +
+			(now.tv_nsec - cs->ring[oldest].ts.tv_nsec) / 1000000L;
+		if (span_ms > 0) {
+			unsigned long long avail =
+				(unsigned long long)span_ms *
+				(unsigned long long)cs->hz *
+				(unsigned long long)cs->ncores / 1000ULL;
+			unsigned long long di = idle_all - cs->ring[oldest].idle;
+			/* Clamp: idle is sampled a hair after the wall clock, so a
+			 * fully idle box can round to di slightly over avail. */
+			unsigned long long busy = (avail > di) ? avail - di : 0;
+			if (avail > 0) {
+				cs->pct = (int)(busy * 100ULL / avail);
+				if (cs->pct > 100) cs->pct = 100;
+			}
+		}
 	}
 
-	cs->ring[cs->head].total = total;
 	cs->ring[cs->head].idle = idle_all;
+	cs->ring[cs->head].ts = now;
 	cs->head = (cs->head + 1) % OSD_CPU_RING;
 	if (cs->count < OSD_CPU_RING) cs->count++;
 	cs->ts = now;
