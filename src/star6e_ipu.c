@@ -2,6 +2,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <dlfcn.h>
 
@@ -93,6 +95,61 @@ void star6e_ipu_unload(void)
 	if (g_mi_ipu.mi_sys_handle)
 		dlclose(g_mi_ipu.mi_sys_handle);
 	memset(&g_mi_ipu, 0, sizeof(g_mi_ipu));
+}
+
+int star6e_ipu_scrub(void)
+{
+	IpuDevAttr dev;
+	struct timespec t0, t1;
+	int loaded_here = 0;
+	long ms;
+
+	/* No mi_ipu.ko loaded → nothing to scrub (and nothing that could
+	 * have been poisoned).  Gate on the device node so non-NPU boxes
+	 * stay silent instead of logging a dlopen failure every boot. */
+	if (access("/dev/mi_ipu", F_OK) != 0)
+		return 0;
+
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+
+	if (!g_mi_ipu.handle) {
+		if (star6e_ipu_load() != 0)
+			return -1;
+		loaded_here = 1;
+	}
+
+	/* Idempotent when the host already ran MI_SYS_Init. */
+	if (g_mi_ipu.fnSysInit)
+		g_mi_ipu.fnSysInit(0);
+
+	/* The var-buf size only bounds this throwaway device's dynamic
+	 * allocations — any non-zero value is accepted; no network is
+	 * loaded through it. */
+	memset(&dev, 0, sizeof(dev));
+	dev.max_dyn_buf_size = 0x400000;
+	dev.yuv420_walign = 16;
+	dev.yuv420_halign = 2;
+	dev.rgb_walign = 16;
+
+	if (g_mi_ipu.fnCreateDevice(&dev, NULL, NULL, 0) != 0) {
+		fprintf(stderr, "[ipu-scrub] CreateDevice failed — skipped\n");
+		if (loaded_here)
+			star6e_ipu_unload();
+		return -1;
+	}
+	if (g_mi_ipu.fnDestroyDevice() != 0)
+		fprintf(stderr, "[ipu-scrub] DestroyDevice failed — throwaway "
+			"device leaks until exit; a later detector start may "
+			"fail its own CreateDevice\n");
+
+	if (loaded_here)
+		star6e_ipu_unload();
+
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	ms = (t1.tv_sec - t0.tv_sec) * 1000 +
+		(t1.tv_nsec - t0.tv_nsec) / 1000000;
+	fprintf(stderr, "[ipu-scrub] NPU driver state reconciled (%ld ms)\n", ms);
+	return 0;
 }
 
 const char *star6e_ipu_fmt_name(IpuFmt fmt)

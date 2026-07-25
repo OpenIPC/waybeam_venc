@@ -677,7 +677,7 @@ const TOOLTIPS = {
 'attitude.mountDeg':'Legacy output-side rotation about the camera axis (0/90/180/270). Prefer axisFwd/axisDown; leave 0 after axis calibration. Requires restart',
 'attitude.invertRoll':'Flip roll sign after mount rotation (use if the AHI tilts the wrong way). Requires restart',
 'attitude.invertPitch':'Flip pitch sign after mount rotation. Requires restart',
-'detect.enabled':'Run the NPU object detector (Star6E only). Needs a detector plugin .so deployed on the device. Mutually exclusive with video0.framing=stab (both claim VPE port1). Requires restart',
+'detect.enabled':'Run the NPU object detector (Star6E only). Needs a detector plugin .so deployed on the device. Mutually exclusive with video0.framing=stab (both claim VPE port1). Applied live — the detector starts/stops without interrupting the stream',
 'detect.plugin':'Path to the detector plugin .so. The plugin owns the model runtime and decode; it is deployed separately from waybeam. Requires restart',
 'detect.modelPath':'Compiled model .img handed to the plugin. Empty = plugin default. Applied live: the detector swaps to the new model without a pipeline respawn, so the video0 stream is uninterrupted (net geometry must be unchanged). Pre-stage both .img files (e.g. on SD) and switch with no restart.',
 'detect.modelId':'Class-table selector stamped on the RTP sidecar DETECT trailer (0 = VisDrone-10, 1 = SAR person). Set it together with modelPath so consumers label the new model\'s boxes correctly. Applied live.',

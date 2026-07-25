@@ -126,6 +126,14 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
  *  Also clears pipeline-level persist state so the next start is cold. */
 void star6e_pipeline_stop(Star6ePipelineState *state);
 
+/** Start / stop the IPU detection tap on a running pipeline, under the VPE
+ *  port1 arbiter (start applies the framing-conflict policy and returns 0 only
+ *  if detection is up).  Called by the initial bring-up and by the live
+ *  `detect.enabled` toggle — both on the pipeline thread. */
+int star6e_pipeline_detect_start(Star6ePipelineState *state,
+	const VencConfig *vcfg);
+void star6e_pipeline_detect_stop(Star6ePipelineState *state);
+
 /** Disable VPE prescaler (cleanup during shutdown). */
 void star6e_pipeline_vpe_scl_preset_shutdown(void);
 

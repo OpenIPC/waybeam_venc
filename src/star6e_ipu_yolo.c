@@ -352,6 +352,28 @@ static int iy_resolve_net_dims(const VencConfig *vcfg, uint32_t *net_w,
 	return 0;
 }
 
+/* Release the port1 tap: depth-reset THEN disable, in that order — the (2,4)
+ * user output depth registered at enable time is ours to release.  Leaving it
+ * registered keeps the kernel SCL queueing port1 output tasks for a consumer
+ * that no longer exists; a successor process that never touches port1 then
+ * inherits a stale queue whose fence never completes (`outputtask's fence is
+ * not finished` on vpe0_P0_MAIN).  Every path that enabled port1 — success
+ * teardown AND load-failure unwind — must come through here so the two calls
+ * can't drift apart. */
+static void iy_port1_teardown(Star6eIpuDetect *d)
+{
+	MI_S32 dret, rret;
+
+	if (!d->port1_enabled)
+		return;
+	rret = MI_SYS_SetChnOutputPortDepth(&d->vpe1_port, 0, 0);
+	dret = MI_VPE_DisablePort(0, 1);
+	if (rret != 0 || dret != 0)
+		fprintf(stderr, "[ipu-yolo] port1 teardown: depth_reset=%d "
+			"disable=%d\n", (int)rret, (int)dret);
+	d->port1_enabled = 0;
+}
+
 /* Load the model-specific half of the detector: dlopen the plugin, resolve +
  * ABI-check the backend, create the VPE port1 tap, and init the backend on the
  * configured model.  On any failure everything this call opened is torn back
@@ -439,15 +461,13 @@ static int iy_load_graph(Star6eIpuDetect *d, const VencConfig *vcfg,
 		if (d->backend->init(&cfg) != 0) {
 			fprintf(stderr, "[ipu-yolo] backend '%s' init failed\n",
 				d->backend->name);
-			MI_VPE_DisablePort(0, 1);
-			d->port1_enabled = 0;
+			iy_port1_teardown(d);
 			d->backend = NULL;
 			goto fail_plugin;
 		}
 		if (iy_check_model_dims(d, net_w, net_h) != 0) {
 			d->backend->deinit();
-			MI_VPE_DisablePort(0, 1);
-			d->port1_enabled = 0;
+			iy_port1_teardown(d);
 			d->backend = NULL;
 			goto fail_plugin;
 		}
@@ -475,10 +495,11 @@ static void iy_unload_graph(Star6eIpuDetect *d)
 		d->backend->deinit();
 		d->backend = NULL;
 	}
-	if (d->port1_enabled) {
-		MI_VPE_DisablePort(0, 1);
-		d->port1_enabled = 0;
-	}
+	/* (Not the cause of the detect-off respawn wedge — the teardown calls
+	 * were device-verified to succeed there — but the depth registration
+	 * is ours to release, and leaving it set is the kind of stale state
+	 * that wedge class feeds on.) */
+	iy_port1_teardown(d);
 	if (d->plugin_handle) {
 		dlclose(d->plugin_handle);
 		d->plugin_handle = NULL;

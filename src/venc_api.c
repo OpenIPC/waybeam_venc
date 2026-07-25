@@ -560,7 +560,13 @@ static const FieldDesc g_fields[] = {
 	FIELD(attitude, trim_roll_deg,  FT_FLOAT, MUT_RESTART),
 	FIELD(attitude, trim_pitch_deg, FT_FLOAT, MUT_RESTART),
 
-	FIELD(detect, enabled,        FT_BOOL,   MUT_RESTART),
+	/* Live, NOT MUT_RESTART: a respawn triggered while detection is running
+	 * leaves the successor's pipeline permanently frameless (stuck ISP CMDQ —
+	 * see star6e_controls_service_detect_reload), and toggling the detector
+	 * in place is both safe and what the operator wants anyway (no stream
+	 * outage).  The port1 tap is created/destroyed live by the same code the
+	 * model swap already uses. */
+	FIELD(detect, enabled,        FT_BOOL,   MUT_LIVE),
 	FIELD(detect, plugin,         FT_STRING, MUT_RESTART),
 	/* model_path/model_id/conf_thresh/nms_iou apply live: the detector plugin
 	 * + VPE tap are re-created without respawning the pipeline, so the video0
@@ -1371,7 +1377,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	if (strcmp(canonical_key, "video0.max_i_bytes") == 0 ||
 	    strcmp(canonical_key, "video0.max_p_bytes") == 0)
 		return LIVE_GROUP_MAX_FRAME_SIZE;
-	if (strcmp(canonical_key, "detect.model_path") == 0 ||
+	if (strcmp(canonical_key, "detect.enabled") == 0 ||
+	    strcmp(canonical_key, "detect.model_path") == 0 ||
 	    strcmp(canonical_key, "detect.model_id") == 0 ||
 	    strcmp(canonical_key, "detect.conf_thresh") == 0 ||
 	    strcmp(canonical_key, "detect.nms_iou") == 0)
@@ -1420,7 +1427,7 @@ static const char *live_group_name(LiveApplyGroup group)
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return "video0.maxIBytes/maxPBytes";
 	case LIVE_GROUP_DETECT:
-		return "detect.model_path/model_id/conf_thresh/nms_iou";
+		return "detect.enabled/model_path/model_id/conf_thresh/nms_iou";
 	default:
 		return "unknown";
 	}
@@ -1676,9 +1683,13 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		dst->video0.max_p_bytes = src->video0.max_p_bytes;
 		break;
 	case LIVE_GROUP_DETECT:
-		/* Copy the whole live detector group; the backend re-reads all four
-		 * from the committed config on reload, and unchanged members equal
-		 * the base anyway (new_cfg starts as a copy of old_cfg). */
+		/* Copy the whole live detector group; the backend re-reads all of
+		 * them from the committed config on reload, and unchanged members
+		 * equal the base anyway (new_cfg starts as a copy of old_cfg).
+		 * `enabled` MUST be here — the apply callback decides start vs stop
+		 * vs reload from the committed value, so omitting it silently turns
+		 * a toggle into a same-state reload. */
+		dst->detect.enabled     = src->detect.enabled;
 		snprintf(dst->detect.model_path, sizeof(dst->detect.model_path),
 			"%s", src->detect.model_path);
 		dst->detect.model_id    = src->detect.model_id;

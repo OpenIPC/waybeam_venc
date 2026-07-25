@@ -13,6 +13,7 @@
 #include "sdk_quiet.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
+#include "star6e_ipu.h"
 #include "star6e_ipu_yolo.h"
 #include "star6e_iq.h"
 #include "star6e_pipeline.h"
@@ -1440,6 +1441,13 @@ static int star6e_runner_init(void *opaque)
 		return ret;
 	}
 	ctx->system_initialized = 1;
+
+	/* Always, before any VIF/VPE/ISP bring-up: reconcile NPU driver
+	 * state a predecessor may have poisoned (see star6e_ipu_scrub).
+	 * Unconditional by design — the poison survives process exit and
+	 * fd release, so no flag carried from the previous instance can
+	 * be trusted to know whether it is needed. */
+	(void)star6e_ipu_scrub();
 
 	venc_httpd_start(ctx->vcfg.system.web_port);
 	ctx->httpd_started = 1;

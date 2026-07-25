@@ -1393,12 +1393,41 @@ void star6e_controls_service_detect_reload(void)
 		return;
 
 	if (g_star6e_control_ctx.pipeline) {
-		(void)star6e_ipu_yolo_reload(g_star6e_control_ctx.pipeline, &cfg);
-		/* If the swap left the detector down (bad new model, thread create
-		 * failure), free the port1 claim so runtime.vpe_taps reads truthfully.
-		 * A no-op when "detect" does not own port1. */
-		if (!g_star6e_control_ctx.pipeline->detect)
-			star6e_vpe_port1_release("detect");
+		Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
+
+		/* detect.enabled is applied HERE rather than by a MUT_RESTART
+		 * respawn.  A respawn from a detect-active instance leaves the
+		 * successor permanently frameless: the ISP CMDQ stays stuck
+		 * mid-WAIT on ISP_TRIG and storms `ISP_IRQ_WQ_FRAME_START add WQ
+		 * error!` forever.  Device-localized on .232 to the inherited
+		 * /dev/mi_sys fd — the respawn child holds a copy, so that open
+		 * file's driver release never runs.  Closing it in the child is
+		 * this SoC's confirmed deadlock (see venc_respawn.c), and closing
+		 * every OTHER /dev/mi_* plus settling 8 s did not help, so no
+		 * fork+exec respawn can recover.  Toggling the tap in place skips
+		 * the respawn entirely — and costs no stream outage.
+		 *
+		 * Same thread, same atomicity as the model swap below, so the
+		 * per-frame snapshot() consumer never sees a half-built detector. */
+		if (!cfg.detect.enabled) {
+			if (ps->detect) {
+				fprintf(stderr, "[ipu-yolo] detect.enabled=false: "
+					"stopping detector\n");
+				star6e_pipeline_detect_stop(ps);
+			}
+		} else if (!ps->detect) {
+			fprintf(stderr, "[ipu-yolo] detect.enabled=true: "
+				"starting detector\n");
+			(void)star6e_pipeline_detect_start(ps, &cfg);
+		} else {
+			(void)star6e_ipu_yolo_reload(ps, &cfg);
+			/* If the swap left the detector down (bad new model, thread
+			 * create failure), free the port1 claim so runtime.vpe_taps
+			 * reads truthfully.  A no-op when "detect" does not own
+			 * port1. */
+			if (!ps->detect)
+				star6e_vpe_port1_release("detect");
+		}
 	}
 
 	pthread_mutex_lock(&g_detect_reload.lock);

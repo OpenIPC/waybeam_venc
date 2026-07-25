@@ -89,6 +89,59 @@ void star6e_framing_register_builtins(void)
 #endif
 }
 
+/* Bring the IPU object-detection tap (VPE port1) up under the arbiter.  Two
+ * ways it can be refused:
+ *   - stab holds port1 (the arbiter claim fails), or
+ *   - stab-fill is active: it drains port0 (no port1 conflict), but its SW
+ *     compose + blit plus the IPU detector together exceed the validated
+ *     Star6E budget, so they stay mutually exclusive by policy.
+ * Best-effort (never fatal to the stream); on failure the port1 claim is
+ * released so runtime.vpe_taps reads free.  Returns 0 iff detection is
+ * running on return.
+ *
+ * Shared by the initial bring-up and the live `detect.enabled` toggle, so the
+ * refusal policy cannot drift between them.  Must be called on the pipeline
+ * thread — it starts the detector whose snapshot that thread reads.
+ */
+int star6e_pipeline_detect_start(Star6ePipelineState *state,
+	const VencConfig *vcfg)
+{
+	const char *blocker = NULL;
+
+	if (!state || !vcfg)
+		return -1;
+	if (state->detect)
+		return 0;   /* already running */
+
+	if (g_framing && !g_framing->uses_vpe_port1)
+		blocker = g_framing->preset_name;   /* stab-fill: resource policy */
+	else if (star6e_vpe_port1_claim("detect") != 0)
+		blocker = star6e_vpe_port1_owner();  /* stab owns the tap */
+
+	if (blocker) {
+		fprintf(stderr, "[waybeam] detect: skipped — framing '%s' active "
+			"(VPE port1 owner / resource policy)\n", blocker);
+		return -1;
+	}
+
+	star6e_ipu_yolo_start(state, vcfg);
+	if (!state->detect) {
+		star6e_vpe_port1_release("detect");
+		return -1;
+	}
+	return 0;
+}
+
+/* Tear the detector down and hand port1 back.  Idempotent.  Same threading
+ * rule as _detect_start. */
+void star6e_pipeline_detect_stop(Star6ePipelineState *state)
+{
+	if (!state || !state->detect)
+		return;
+	star6e_ipu_yolo_stop(state);
+	star6e_vpe_port1_release("detect");
+}
+
 static void star6e_pipeline_reset(Star6ePipelineState *state)
 {
 	if (!state)
@@ -146,6 +199,17 @@ static void star6e_pipeline_pre_init_teardown(void)
 	 * calls exit(127) when called on a non-existent channel under dlopen. */
 	MI_VPE_ChannelAttr_t probe_attr;
 	if (MI_VPE_GetChannelAttr(0, &probe_attr) == 0) {
+		/* port1 too, not just port0.  port1 is the optional second-scaler
+		 * tap (detect / stab), so an unclean exit can leave it enabled and
+		 * the teardown below would then run with a live port still
+		 * registered.  Hygiene, not the fix for the detect-off respawn
+		 * wedge — on that path port1 was verified already disabled.
+		 * Reached only when the probe says the channel exists, so this
+		 * cannot trip the dlopen exit(127) path. */
+		MI_S32 p1 = MI_VPE_DisablePort(0, 1);
+		if (p1 == 0)
+			fprintf(stderr, "[waybeam] pre-init: stale VPE port1 was "
+				"enabled — disabled\n");
 		(void)MI_VPE_DisablePort(0, 0);
 		(void)MI_VPE_StopChannel(0);
 		(void)MI_VPE_DestroyChannel(0);
@@ -2023,29 +2087,8 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
 	}
 
-	/* IPU object-detection tap (VPE port1).  Two ways it can be refused:
-	 *   - stab holds port1 (the arbiter claim below fails), or
-	 *   - stab-fill is active: it drains port0 (no port1 conflict), but its
-	 *     SW compose + blit plus the IPU detector together exceed the
-	 *     validated Star6E budget, so they stay mutually exclusive by policy.
-	 * Otherwise start best-effort (never fatal to the stream); if start fails
-	 * to bring the detector up, release the port1 claim so it reads free. */
-	if (vcfg->detect.enabled) {
-		const char *blocker = NULL;
-		if (g_framing && !g_framing->uses_vpe_port1)
-			blocker = g_framing->preset_name;   /* stab-fill: resource policy */
-		else if (star6e_vpe_port1_claim("detect") != 0)
-			blocker = star6e_vpe_port1_owner();  /* stab owns the tap */
-
-		if (blocker) {
-			fprintf(stderr, "[waybeam] detect: skipped — framing '%s' active "
-				"(VPE port1 owner / resource policy)\n", blocker);
-		} else {
-			star6e_ipu_yolo_start(state, vcfg);
-			if (!state->detect)
-				star6e_vpe_port1_release("detect");
-		}
-	}
+	if (vcfg->detect.enabled)
+		(void)star6e_pipeline_detect_start(state, vcfg);
 
 	/* Bring up the JPEG snapshot subsystem on the same VPE source port the
 	 * main channel just bound to.  Failure is non-fatal — /api/v1/snapshot.jpg

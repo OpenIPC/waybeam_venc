@@ -1,5 +1,91 @@
 # History
 
+## [0.54.0] - 2026-07-25
+
+Startup NPU scrub: every Star6E start runs a bare `MI_IPU_CreateDevice` +
+`MI_IPU_DestroyDevice` cycle before pipeline bring-up (`star6e_ipu_scrub`,
+measured 0.1–2.2 s depending on how cold the IPU firmware is, no-op when
+`/dev/mi_ipu` is absent). This closes the residual ISP-CMDQ
+wedge left open by 0.53.0, and fresh bench work on a healthy box narrowed that
+wedge considerably:
+
+- **The actual wedge condition** (reproduced 2/2, all other paths clean): the
+  detector was started **at pipeline bring-up** (from config at init), later
+  stopped **live**, and then a fork+exec respawn fired — the successor, which
+  never touches the IPU, wedges at ISP init. A detector started *live* on a
+  running pipeline does not poison the same sequence (1/2 sessions' worth of
+  contrary lore came from a degraded box).
+- **Not actually broken on a healthy box**: external stop/start with *any* gap
+  (the "wait ~20 s" rule measured earlier was an artifact of accumulated wedge
+  damage — kernel-side MMA chunks and the per-device proc entries drain within
+  ~1-2 s of teardown); and a `MUT_RESTART` respawn while detection is *running*
+  (the successor re-creates the IPU device from the carried config and
+  reconciles the state).
+- **Maruko/i6c**: setting `detect.enabled` now returns HTTP 501 (the live-apply
+  group requires the backend's `apply_detect_reload` callback, which only
+  Star6E registers). Intentional — previously the set was accepted and burned a
+  full respawn on a backend that has no detector at all; an explicit refusal is
+  more honest than a pointless restart.
+- **Why the scrub works**: whatever state a predecessor's IPU teardown leaves
+  behind is reset by the next IPU device create — from any process. Running the
+  cycle before VIF/VPE/ISP bring-up makes every successor a reconciler
+  regardless of its detect config. Verified 2/2 on the previously-wedging
+  sequence, plus clean cold starts and live toggles. A scrub *after* the ISP
+  has wedged does not recover it, hence startup placement, and unconditional —
+  the poison survives process exit, so no flag from the previous instance can
+  know whether it is needed.
+
+## [0.53.0] - 2026-07-25
+
+`detect.enabled` is applied live instead of by a `MUT_RESTART` respawn. The
+respawn was leaving the successor pipeline permanently frameless on Star6E, and
+no respawn-side fix is possible — the state is pinned by an fd the child cannot
+close.
+
+- **The wedge** — after `/api/v1/set?detect.enabled=false`, the fresh process
+  never emitted a frame: `fps/live` 0, `framesSent` stuck, `waiting for encoder
+  data...`. Its ISP CMDQ sits mid-`WAIT` on the `ISP_TRIG` event with a corrupt
+  ring read pointer (`r=0x03000026` where a healthy ring reads `0x30000260`), so
+  `FrameStartProc` can never claim buffer space — `MDrvCmdqWriteCommandMask cmdq
+  buffer isn't available(0)` and then an endless `ISP_IRQ_WQ_FRAME_START add WQ
+  error!` storm. VPE's input FIFO never drains (`EnsureInputPortFifoEmpty ... no
+  response in 1000ms`, `mod7 dev0 pass0 infer timeout`), and the storm floods the
+  console hard enough to make the box unresponsive. `S95waybeam restart` often
+  did not clear it. Reproduced 3/3 on .232 (SSC338Q / IMX335).
+- **Root cause: the inherited `/dev/mi_sys` fd**, not time and not port state.
+  Eliminated on device, in order: a stale-enabled port1 or stale user depth (the
+  dying process's `SetChnOutputPortDepth(0,0)` and `DisablePort(0,1)` both
+  returned 0, and the successor found port1 already disabled); a 3 s settle
+  inside the parent's teardown; post-exit settles of 4.5 s and 15 s in the
+  respawn child; `cold_vif` plus 4 s; closing every inherited `/dev/mi_*` except
+  `mi_sys` plus 8 s. An external stop/start — every fd closed at exit — is clean
+  with a 20 s gap and wedges with 1 s. Closing `mi_sys` in the child is this
+  SoC's confirmed deadlock, so **no fork+exec respawn can recover from a
+  detect-active parent**. A successor that re-creates an IPU device reconciles
+  the state, which is why detect on->on restarts and live model swaps never
+  showed it.
+- **Fix: `detect.enabled` is `MUT_LIVE`** (`venc_api.c`), routed through the
+  existing `LIVE_GROUP_DETECT` / `apply_detect_reload` service, which now
+  dispatches start / stop / reload from the committed value. No respawn happens
+  on the transition at all, so the wedge cannot be reached — and toggling the
+  detector no longer costs a ~25 s stream outage.
+- **Start/stop policy factored out** (`star6e_pipeline_detect_start/_stop`) so
+  the port1 arbiter claim and the framing-conflict refusal cannot drift between
+  the initial bring-up and the live toggle. Both run on the pipeline thread, the
+  same thread that reads the detect snapshot.
+- **`copy_live_group_fields()` now copies `detect.enabled`** — omitting it
+  silently turned the toggle into a same-state reload (the value never reached
+  the committed config).
+- **Teardown hygiene** — `iy_unload_graph()` releases the port1 user output
+  depth it registered before disabling the port, and the pre-init teardown
+  disables VPE port1 as well as port0. Neither caused the wedge; both are state
+  this code registers and should release.
+
+Known limitation: any *other* `MUT_RESTART` change made while detection is
+running (e.g. `video0.size`) still respawns and still hits the wedge above.
+Disable detection first, or restart the process externally. A general fix needs
+the respawn to exec from a process forked before any `/dev/mi_*` is opened.
+
 ## [0.52.0] - 2026-07-25
 
 Hot-swap the offline NPU detector `.img` without respawning the pipeline, so

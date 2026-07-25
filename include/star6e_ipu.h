@@ -118,6 +118,17 @@ int star6e_ipu_load(void);
 /** Close the library and zero the binding table. */
 void star6e_ipu_unload(void);
 
+/** Reconcile stale NPU driver state with a bare CreateDevice+DestroyDevice
+ *  cycle.  A predecessor process that ran the IPU detector can leave kernel-
+ *  side state that permanently wedges the successor's ISP CMDQ (stuck
+ *  mid-WAIT on ISP_TRIG, endless `ISP_IRQ_WQ_FRAME_START add WQ error!`
+ *  storm) — device-localized on .232: an IPU device create resets that state,
+ *  and nothing else short of it reliably does.  Must run BEFORE VIF/VPE/ISP
+ *  bring-up; a scrub after the ISP has wedged does not recover it.  No-op
+ *  (returns 0) when /dev/mi_ipu is absent.  Failures are soft (-1, logged) —
+ *  the pipeline proceeds without the scrub. */
+int star6e_ipu_scrub(void);
+
 /** Human-readable name for an IpuFmt (for diagnostics). */
 const char *star6e_ipu_fmt_name(IpuFmt fmt);
 
