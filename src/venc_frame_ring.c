@@ -93,6 +93,14 @@ venc_frame_ring_t *venc_frame_ring_create(const char *shm_name,
 	hdr->epoch = (uint32_t)((uint64_t)ts.tv_sec * 1000 +
 		ts.tv_nsec / 1000000);
 
+	/* Producer health (protocols/frame-shm.md).  Counters first, marker
+	 * last, and the whole group before init_complete -- a consumer must
+	 * never see VHLT set over uninitialised counters. */
+	hdr->full_drops = 0;
+	hdr->throttle_permille = 1000;
+	__atomic_store_n(&hdr->health_magic, VENC_FRAME_RING_HEALTH_MAGIC,
+		__ATOMIC_RELEASE);
+
 	__atomic_store_n(&hdr->init_complete, 1, __ATOMIC_RELEASE);
 
 	r = (venc_frame_ring_t *)calloc(1, sizeof(*r));

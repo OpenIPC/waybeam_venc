@@ -105,6 +105,14 @@ int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name)
 	return 0;
 }
 
+int maruko_output_frame_ring_fill(
+	const MarukoOutput *output, venc_frame_ring_fill_t *out)
+{
+	if (!output || !output->frame_ring || !out)
+		return -1;
+	return venc_frame_ring_get_fill(output->frame_ring, out);
+}
+
 void maruko_output_observe_pressure(MarukoOutput *output)
 {
 	uint8_t fill_pct = 0;

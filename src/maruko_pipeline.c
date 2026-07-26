@@ -26,6 +26,7 @@
 #include "venc_api.h"
 #include "venc_httpd.h"
 #include "venc_jpeg.h"
+#include "venc_shm_throttle.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -3897,6 +3898,74 @@ static void maruko_patch_stream_to_trail_n(i6c_venc_strm *s)
  * g_osd_enc_bytes in star6e_runtime.c. */
 static uint64_t g_osd_enc_bytes;
 
+/* frame-shm ring-fill bitrate clamp state — byte-symmetric with the Star6E
+ * side (src/star6e_runtime.c star6e_service_shm_throttle).  Both backends
+ * share one control law on purpose: a per-backend divergence in shared
+ * behaviour is a standing drift trap in this repo. */
+static VencShmThrottle g_shm_throttle;
+static int g_shm_throttle_ready;
+/* Last factor successfully programmed into the encoder. */
+static uint16_t g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+
+static void maruko_service_shm_throttle(MarukoOutput *output,
+	const VencConfig *vcfg)
+{
+	venc_frame_ring_fill_t fill;
+	uint64_t now_us;
+	uint16_t want;
+	int edge;
+
+	if (!output || !vcfg)
+		return;
+	if (maruko_output_frame_ring_fill(output, &fill) != 0) {
+		/* Release the clamp on a transport switch away from
+		 * frame-shm — see the star6e_runtime equivalent. */
+		g_shm_throttle_ready = 0;
+		output->throttle_permille = 0;  /* 0 = not reported */
+		if (g_applied_permille != VENC_SHM_THROTTLE_FULL_PERMILLE &&
+		    maruko_controls_set_output_throttle(
+			VENC_SHM_THROTTLE_FULL_PERMILLE) == 0)
+			g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+		return;
+	}
+
+	now_us = wb_monotonic_us();
+	if (!g_shm_throttle_ready) {
+		venc_shm_throttle_reset(&g_shm_throttle, now_us);
+		g_shm_throttle_ready = 1;
+	}
+
+	venc_shm_throttle_set_enabled(&g_shm_throttle,
+		vcfg->outgoing.shm_throttle, now_us);
+	venc_shm_throttle_observe(&g_shm_throttle, fill.used_slots,
+		fill.full_drops);
+	(void)venc_shm_throttle_tick(&g_shm_throttle, now_us);
+
+	/* Applied-value comparison, not tick()'s flag — see the
+	 * star6e_runtime equivalent for why the retry matters. */
+	want = venc_shm_throttle_permille(&g_shm_throttle);
+	if (want != g_applied_permille &&
+	    maruko_controls_set_output_throttle(want) == 0)
+		g_applied_permille = want;
+	output->throttle_permille = want;
+	/* Publish into the ring header so the consumer can see that the
+	 * producer has already reduced its own rate -- below 1000 is
+	 * direct evidence that the consumer's rate model is optimistic
+	 * (protocols/frame-shm.md). */
+	venc_frame_ring_set_throttle(output->frame_ring, want);
+
+	edge = venc_shm_throttle_floor_edge(&g_shm_throttle);
+	if (edge > 0)
+		fprintf(stderr,
+			"WARNING: [maruko] shm throttle pinned at floor %u%% "
+			"— the consumer is not draining\n",
+			VENC_SHM_THROTTLE_FLOOR_PERMILLE / 10);
+	else if (edge < 0)
+		/* stderr for the same buffering reason as star6e_runtime. */
+		fprintf(stderr,
+			"> [maruko] shm throttle left the floor, recovering\n");
+}
+
 static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	MarukoStreamRuntime *rt, const i6c_venc_stat *stat)
 {
@@ -4013,8 +4082,18 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		 * separates an encoder problem from a link problem at a
 		 * glance (a healthy encoder tracking target while the picture
 		 * stutters points at the radio, not here). */
-		debug_osd_text(ctx->debug_osd, 4, "br", "%u/%uk",
-			osd_kbps, ctx->cfg.venc_max_rate);
+		{
+			/* See the star6e_runtime equivalent. */
+			char osd_thr[16];
+			unsigned int thr = ctx->output.throttle_permille;
+
+			osd_thr[0] = '\0';
+			if (thr > 0 && thr < VENC_SHM_THROTTLE_FULL_PERMILLE)
+				snprintf(osd_thr, sizeof(osd_thr), " thr%u%%",
+					thr / 10);
+			debug_osd_text(ctx->debug_osd, 4, "br", "%u/%uk%s",
+				osd_kbps, ctx->cfg.venc_max_rate, osd_thr);
+		}
 
 		{
 			int osd_row = 5;
@@ -4146,6 +4225,11 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		total_bytes = maruko_video_send_frame(&stream, &ctx->output,
 			&rt->rtp_state, &rt->param_sets, &ctx->cfg,
 			MARUKO_PKTZR_VERBOSE_ACTIVE(ctx) ? &frame_pktzr : NULL);
+
+		/* frame-shm ring-fill bitrate clamp — see the matching call
+		 * in star6e_runtime.c.  Unconditional by design. */
+		maruko_service_shm_throttle(&ctx->output,
+			maruko_controls_vcfg());
 	}
 
 	/* Mirror mode: write chn 0 frames to whichever recorder is active
@@ -4232,7 +4316,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		 * maruko_output_observe_pressure() above — read the cache
 		 * instead of re-querying.  One SIOCOUTQ ioctl / ring-fill
 		 * load per frame, not two. */
-		if (ctx->output.ring ||
+		if (ctx->output.ring || ctx->output.frame_ring ||
 		    ((ctx->output.transport == VENC_OUTPUT_URI_UNIX ||
 		      ctx->output.transport == VENC_OUTPUT_URI_UDP) &&
 		     ctx->output.socket_handle >= 0)) {
@@ -4240,6 +4324,8 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			tinfo.fill_pct = ctx->output.last_fill_pct;
 			tinfo.in_pressure = ctx->output.in_pressure ? 1 : 0;
 			tinfo.pressure_drops = ctx->output.pressure_drops;
+			/* frame-shm only; 0 elsewhere = "not reported". */
+			tinfo.throttle_permille = ctx->output.throttle_permille;
 			tinfo.transport_drops = ctx->output.last_full_drops;
 			tinfo.packets_sent = ctx->output.last_writes;
 			tinfo_ptr = &tinfo;

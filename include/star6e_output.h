@@ -82,6 +82,11 @@ typedef struct {
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
 	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
 	Star6eOutputBatch batch;
+	/* Last clamp factor published by the frame-shm ring-fill throttle
+	 * (include/venc_shm_throttle.h), 1000 = unclamped.  Cached here so
+	 * the sidecar emit path can report it without reaching into the
+	 * backend control layer. */
+	uint16_t throttle_permille;
 	/* Transport-pressure observation cache (telemetry only — never gates
 	 * frame transmission).  Populated by star6e_output_observe_pressure
 	 * once per frame on the producer thread and read by the sidecar emit
@@ -167,6 +172,15 @@ int star6e_output_is_frame_shm(const Star6eOutput *output);
  *  there is a sidecar subscriber — the data has no other live consumer
  *  on the producer hot path. */
 void star6e_output_observe_pressure(Star6eOutput *output);
+
+/* Snapshot the frame-shm ring occupancy for the bitrate clamp
+ * (include/venc_shm_throttle.h).  Returns -1 when the active transport is
+ * not frame-shm://.  Deliberately NOT star6e_output_observe_pressure() -- that
+ * one is gated on a live sidecar subscription, and the clamp is a safety
+ * mechanism that must run whether or not anyone is watching. */
+int star6e_output_frame_ring_fill(
+	const Star6eOutput *output, venc_frame_ring_fill_t *out);
+
 
 /** Begin accumulating RTP packets for a frame. When the transport is UDP
  *  and SHM is not in use, subsequent star6e_output_send_rtp_parts() calls

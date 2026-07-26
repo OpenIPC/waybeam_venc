@@ -13,6 +13,7 @@
 #include "star6e_vpe_ports.h"
 #include "venc_api.h"
 #include "venc_jpeg.h"
+#include "venc_shm_throttle.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -202,11 +203,31 @@ static uint32_t rc_compensate_kbps(uint32_t kbps, uint32_t delivered_fps)
 	return kbps;
 }
 
-static int apply_bitrate(uint32_t kbps)
+/* Published clamp factor from the frame-shm ring-fill throttle
+ * (include/venc_shm_throttle.h).  Written by the pipeline thread, read on
+ * every bitrate apply including from the httpd thread — RELAXED atomics are
+ * enough, it is a naturally aligned advisory scalar. */
+static uint16_t g_output_throttle_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+
+/* want_idr=0 is the throttle path.  apply_bitrate() normally forces an IDR
+ * so the decoder resyncs against the new RC state, but the clamp re-programs
+ * the encoder as often as every 200 ms while the ring is backed up, and an
+ * IDR is the largest frame the encoder can emit — IDR-ing our way through
+ * congestion would feed the exact queue we are trying to drain.  Small
+ * between-IDR rate changes are absorbed by the rate controller anyway, which
+ * is the same reasoning the rate-limit gate below already relies on. */
+static int apply_bitrate_ex(uint32_t kbps, int want_idr)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bits;
 
+	/* Order is pinned: clamp first so the throttle scales the *requested*
+	 * rate, then the >120 fps exact-CBR compensation, then the absolute
+	 * MIN/MAX rails last so neither correction can push the programmed
+	 * value outside what the encoder accepts. */
+	kbps = venc_shm_throttle_scale(
+		__atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED),
+		kbps);
 	kbps = rc_compensate_kbps(kbps, g_star6e_control_ctx.delivered_fps);
 	if (kbps > VENC_BITRATE_MAX_KBPS)
 		kbps = VENC_BITRATE_MAX_KBPS;
@@ -250,9 +271,40 @@ static int apply_bitrate(uint32_t kbps)
 	 * after the window expires — acceptable because the encoder rate
 	 * controller absorbs small between-IDR changes without decoder
 	 * resync. */
-	if (idr_rate_limit_allow(g_star6e_control_ctx.venc_chn))
+	if (want_idr && idr_rate_limit_allow(g_star6e_control_ctx.venc_chn))
 		(void)MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1);
 	return 0;
+}
+
+static int apply_bitrate(uint32_t kbps)
+{
+	return apply_bitrate_ex(kbps, 1);
+}
+
+int star6e_controls_set_output_throttle(uint16_t permille)
+{
+	uint32_t cfg_kbps;
+	int rc;
+
+	__atomic_store_n(&g_output_throttle_permille, permille,
+		__ATOMIC_RELAXED);
+
+	/* Re-program from the *configured* bitrate so the clamp is a pure
+	 * multiplier on it — video0.bitrate is never written, which is what
+	 * keeps an external rate controller's write-on-change cache coherent
+	 * and the WebUI slider truthful. */
+	if (!venc_api_cfg_trylock())
+		return -1;  /* config transaction in flight; retry next window */
+	cfg_kbps = g_star6e_control_ctx.vcfg
+		? g_star6e_control_ctx.vcfg->video0.bitrate : 0;
+	rc = cfg_kbps > 0 ? apply_bitrate_ex(cfg_kbps, 0) : 0;
+	venc_api_cfg_unlock();
+	return rc;
+}
+
+uint16_t star6e_controls_output_throttle(void)
+{
+	return __atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED);
 }
 
 static int apply_encoder_gop(uint32_t gop_size)
@@ -1372,6 +1424,12 @@ static char *query_transport_status(void)
 	const char *transport;
 	int pos;
 	uint32_t pressure_drops;
+	/* Clamp state, reported alongside the ring so an operator can see the
+	 * gap between the bitrate they set and the one actually programmed.
+	 * video0.bitrate itself is deliberately untouched (D1). */
+	uint16_t permille = star6e_controls_output_throttle();
+	uint32_t cfg_kbps = g_star6e_control_ctx.vcfg
+		? g_star6e_control_ctx.vcfg->video0.bitrate : 0;
 
 	if (!ps)
 		return NULL;
@@ -1435,7 +1493,9 @@ static char *query_transport_status(void)
 			"\"framesSent\":%llu,"
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
-			"\"usedSlots\":%u}}",
+			"\"usedSlots\":%u,"
+			"\"throttlePermille\":%u,"
+			"\"effectiveBitrateKbps\":%u}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1444,7 +1504,9 @@ static char *query_transport_status(void)
 			(unsigned long long)fill.writes,
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
-			(unsigned)fill.used_slots);
+			(unsigned)fill.used_slots,
+			(unsigned)permille,
+			(unsigned)venc_shm_throttle_scale(permille, cfg_kbps));
 	} else if ((ps->output.transport == VENC_OUTPUT_URI_UNIX ||
 	            ps->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           ps->output.socket_handle >= 0) {

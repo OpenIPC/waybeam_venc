@@ -138,7 +138,7 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 			 * instead of two.  Trailer is only emitted when the
 			 * runtime decided to observe (i.e. a probe is
 			 * subscribed); same thread, no atomic load needed. */
-			if (output->ring ||
+			if (output->ring || output->frame_ring ||
 			    ((output->transport == VENC_OUTPUT_URI_UNIX ||
 			      output->transport == VENC_OUTPUT_URI_UDP) &&
 			     output->socket_handle >= 0)) {
@@ -146,6 +146,10 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 				tinfo.fill_pct = output->last_fill_pct;
 				tinfo.in_pressure = output->in_pressure ? 1 : 0;
 				tinfo.pressure_drops = output->pressure_drops;
+				/* frame-shm only; 0 elsewhere, which the wire
+				 * doc defines as "not reported". */
+				tinfo.throttle_permille =
+					output->throttle_permille;
 				/* Socket transports leave transport_drops /
 				 * packets_sent at 0 — future work will count
 				 * sendmsg(EAGAIN/ENOBUFS) inside

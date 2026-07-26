@@ -57,6 +57,11 @@ typedef struct {
 	VencOutputUriType transport;
 	venc_ring_t *ring;
 	venc_frame_ring_t *frame_ring;
+	/* Last clamp factor published by the frame-shm ring-fill throttle
+	 * (include/venc_shm_throttle.h), 1000 = unclamped.  Cached here so
+	 * the sidecar emit path can report it without reaching into the
+	 * backend control layer. */
+	uint16_t throttle_permille;
 	int requested_connected_udp; /* user preference, persisted for apply_server */
 	int connected_udp;           /* actual kernel state — set by configure() */
 	uint32_t send_errors;
@@ -96,6 +101,15 @@ int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name);
  *  only be called when there is a sidecar subscriber — the data has
  *  no other live consumer on the producer hot path. */
 void maruko_output_observe_pressure(MarukoOutput *output);
+
+/* Snapshot the frame-shm ring occupancy for the bitrate clamp
+ * (include/venc_shm_throttle.h).  Returns -1 when the active transport is
+ * not frame-shm://.  Deliberately NOT maruko_output_observe_pressure() -- that
+ * one is gated on a live sidecar subscription, and the clamp is a safety
+ * mechanism that must run whether or not anyone is watching. */
+int maruko_output_frame_ring_fill(
+	const MarukoOutput *output, venc_frame_ring_fill_t *out);
+
 
 /** Change output destination URI without stopping streaming (udp:// or unix://). */
 int maruko_output_apply_server(MarukoOutput *output, const char *uri);

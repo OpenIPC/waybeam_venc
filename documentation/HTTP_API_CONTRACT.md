@@ -1284,6 +1284,27 @@ Response `200` (SHM ring transport, common for `outgoing.server=shm://...`):
 }
 ```
 
+Response `200` (frame-shm ring, with the ring-fill bitrate clamp engaged):
+```json
+{
+  "ok": true,
+  "data": {
+    "active": true,
+    "transport": "frame-shm",
+    "fillPct": 25,
+    "inPressure": false,
+    "transportDrops": 0,
+    "pressureDrops": 0,
+    "framesSent": 41207,
+    "oversizeDrops": 0,
+    "slotCount": 8,
+    "usedSlots": 2,
+    "throttlePermille": 640,
+    "effectiveBitrateKbps": 6400
+  }
+}
+```
+
 Response `200` (UDP/Unix kernel-buffer fill_pct):
 ```json
 {
@@ -1315,6 +1336,13 @@ Field reference:
 | `packetsSent` | (SHM only) Lifetime writes accepted by the ring |
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
+| `throttlePermille` | (frame-shm only) Ring-fill bitrate clamp, `1000` = unclamped, `250` = floor.  A **clamp, not a veto** — `video0.bitrate` in `/api/v1/config` is never modified, so an external rate controller's writes all still succeed |
+| `effectiveBitrateKbps` | (frame-shm only) `video0.bitrate` scaled by `throttlePermille`; what the encoder is actually programmed to |
+
+A `throttlePermille` below `1000` means the consumer is not draining the ring
+fast enough for the configured bitrate.  Pinned at `250` the clamp has spent
+all its authority and drops may resume — that case is also logged once on
+entry and once on exit.  Disable with `outgoing.shmThrottle=false` (live).
 
 Error `501` — backend has no transport observability hook.
 
@@ -1469,6 +1497,18 @@ divergence is listed.  As of `contract_version: 0.12.1`:
     Both must be `0` (default) or a multiple of 32 (`>=64`).
   - `detect.confThresh` / `nmsIou` accept `[0, 1)` (0 = plugin default);
     `netWidth` / `netHeight` accept `0` or a `>=64` multiple of 32.
+- `0.57.0` (additive — new config field + new response fields):
+  - Added `outgoing.shm_throttle` (boolean, default `true`, `MUT_LIVE`,
+    alias `outgoing.shmThrottle`).  Enables the `frame-shm://` ring-fill
+    bitrate clamp; inert on every other transport.  Both backends.
+  - `GET /api/v1/transport/status` gains `throttlePermille` and
+    `effectiveBitrateKbps` on the `frame-shm` branch only.
+  - The clamp never writes `video0.bitrate`, so `GET /api/v1/config` and
+    every `set` response are unaffected by it.  Read the effective rate
+    from `transport/status`, not from the config.
+  - Sidecar `TRANSPORT_INFO` trailer: `_pad[2]` became
+    `throttle_permille` (u16, network order).  Trailer stays 16 bytes and
+    later trailers keep their offsets; `0` means "not reported".
 - `0.46.0` (additive — new config fields):
   - Added `isp.gain_min` (min sensor gain floor) and `isp.shutter_min_us`
     (min exposure floor, µs) to the config schema.  Both default `0` =

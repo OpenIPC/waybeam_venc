@@ -225,6 +225,9 @@ typedef struct {
 	                                     *       video decoder instability at the receiver
 	                                     * >0   = dedicated UDP audio port */
 	uint16_t sidecar_port;              /* 0 = disabled */
+	bool shm_throttle;                  /* frame-shm:// ring-fill bitrate
+	                                     * clamp (include/venc_shm_throttle.h).
+	                                     * Inert on every other transport. */
 } VencConfigOutgoing;
 
 typedef struct {

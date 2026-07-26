@@ -26,6 +26,7 @@
 #include "venc_config.h"
 #include "venc_httpd.h"
 #include "venc_respawn.h"
+#include "venc_shm_throttle.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -1033,6 +1034,89 @@ static uint32_t osd_box_px(float v, uint32_t canvas, uint32_t net)
  * writer (the pipeline thread, which is also the only reader). */
 static uint64_t g_osd_enc_bytes;
 
+/* frame-shm ring-fill bitrate clamp state (include/venc_shm_throttle.h).
+ * Owned by the pipeline thread; zero-initialised, so the first service call
+ * seeds it.  File-static like g_osd_enc_bytes above — one output, one
+ * pipeline thread. */
+static VencShmThrottle g_shm_throttle;
+static int g_shm_throttle_ready;
+/* Last factor successfully programmed into the encoder. */
+static uint16_t g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+
+static void star6e_service_shm_throttle(Star6eOutput *output,
+	const VencConfig *vcfg)
+{
+	venc_frame_ring_fill_t fill;
+	uint64_t now_us;
+	uint16_t want;
+	int edge;
+
+	if (!output || !vcfg)
+		return;
+	if (star6e_output_frame_ring_fill(output, &fill) != 0) {
+		/* Not a frame-shm transport (or the ring went away across a
+		 * reinit).  Release the clamp — a live transport switch away
+		 * from frame-shm must not leave the encoder pinned at
+		 * whatever the ring last asked for — and drop the state so a
+		 * later frame-shm run starts from a fresh window. */
+		g_shm_throttle_ready = 0;
+		output->throttle_permille = 0;  /* 0 = not reported */
+		if (g_applied_permille != VENC_SHM_THROTTLE_FULL_PERMILLE &&
+		    star6e_controls_set_output_throttle(
+			VENC_SHM_THROTTLE_FULL_PERMILLE) == 0)
+			g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+		return;
+	}
+
+	now_us = wb_monotonic_us();
+	if (!g_shm_throttle_ready) {
+		venc_shm_throttle_reset(&g_shm_throttle, now_us);
+		g_shm_throttle_ready = 1;
+	}
+
+	venc_shm_throttle_set_enabled(&g_shm_throttle,
+		vcfg->outgoing.shm_throttle, now_us);
+	venc_shm_throttle_observe(&g_shm_throttle, fill.used_slots,
+		fill.full_drops);
+	(void)venc_shm_throttle_tick(&g_shm_throttle, now_us);
+
+	/* Drive the apply off "what did we last successfully program?"
+	 * rather than off tick()'s changed flag.  The apply can legitimately
+	 * fail (trylock lost to an in-flight config transaction), and a
+	 * factor that then stops changing — pinned at the floor is exactly
+	 * that — would never be retried.  Comparing against the applied
+	 * value both retries and keeps the write-on-change property. */
+	want = venc_shm_throttle_permille(&g_shm_throttle);
+	if (want != g_applied_permille &&
+	    star6e_controls_set_output_throttle(want) == 0)
+		g_applied_permille = want;
+	output->throttle_permille = want;
+	/* Publish into the ring header so the consumer can see that the
+	 * producer has already reduced its own rate -- below 1000 is
+	 * direct evidence that the consumer's rate model is optimistic
+	 * (protocols/frame-shm.md). */
+	venc_frame_ring_set_throttle(output->frame_ring, want);
+
+	/* Log the floor transitions only.  Pinned at the floor the clamp has
+	 * spent all its authority and the ring is still backing up — that is
+	 * a consumer problem, and silence there reads as "working". */
+	edge = venc_shm_throttle_floor_edge(&g_shm_throttle);
+	if (edge > 0)
+		fprintf(stderr,
+			"WARNING: shm throttle pinned at floor %u%% — the "
+			"consumer is not draining %s\n",
+			VENC_SHM_THROTTLE_FLOOR_PERMILLE / 10,
+			output->frame_ring ? output->frame_ring->name : "");
+	else if (edge < 0)
+		/* stderr, not stdout: stdout is fully buffered once the
+		 * daemon's output is redirected to a file, so the recovery
+		 * line sat unflushed while the entry warning (stderr) showed
+		 * up immediately -- the pair read as "pinned, never
+		 * recovered" on a box that had in fact recovered. */
+		fprintf(stderr,
+			"> shm throttle left the floor, recovering\n");
+}
+
 static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	struct timespec *cus3a_ts_last, unsigned int *idle_counter)
 {
@@ -1167,6 +1251,12 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
 			ps->output_enabled, vcfg->system.verbose, &enc_info,
 			att_ptr, detect_ptr, detect_len);
+
+		/* frame-shm ring-fill bitrate clamp.  Runs unconditionally
+		 * (no subscription gate — it is a safety mechanism, not
+		 * telemetry) and only costs two relaxed atomic loads plus a
+		 * compare per frame when the transport isn't frame-shm. */
+		star6e_service_shm_throttle(&ps->output, vcfg);
 	}
 
 	/* Orientation (image.flip / image.mirror) is applied once at bring-up
@@ -1326,8 +1416,21 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		 * separates an encoder problem from a link problem at a
 		 * glance (a healthy encoder tracking target while the picture
 		 * stutters points at the radio, not here). */
-		debug_osd_text(ps->debug_osd, 4, "br", "%u/%uk",
-			osd_kbps, vcfg->video0.bitrate);
+		{
+			/* Append the clamp when it is engaged, so a target the
+			 * encoder is deliberately not chasing does not read as
+			 * RC undershoot.  Absent when unclamped — the common
+			 * case should stay uncluttered. */
+			char osd_thr[16];
+			unsigned int thr = ps->output.throttle_permille;
+
+			osd_thr[0] = '\0';
+			if (thr > 0 && thr < VENC_SHM_THROTTLE_FULL_PERMILLE)
+				snprintf(osd_thr, sizeof(osd_thr), " thr%u%%",
+					thr / 10);
+			debug_osd_text(ps->debug_osd, 4, "br", "%u/%uk%s",
+				osd_kbps, vcfg->video0.bitrate, osd_thr);
+		}
 
 		{
 			int osd_row = 5;

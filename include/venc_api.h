@@ -124,6 +124,19 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
  * before triggering reinit.  Pass NULL to disable save-on-restart. */
 void venc_api_set_config_path(const char *path);
 
+/* Try to take the config mutex that serialises the apply_* callbacks.
+ * Returns 1 on success (caller must venc_api_cfg_unlock), 0 if a config
+ * transaction is already in flight.
+ *
+ * For pipeline-thread control writes that must not collide with an HTTP
+ * apply doing its own SDK read-modify-write.  TRY, never block: a
+ * restart-class set holds this mutex across a full pipeline reinit, and
+ * stalling the encode loop behind that is far worse than skipping one
+ * advisory update.  Callers must therefore treat a 0 as normal and retry
+ * on their next cycle. */
+int venc_api_cfg_trylock(void);
+void venc_api_cfg_unlock(void);
+
 /* Return 1 if a config field is supported on the named backend.
  * field_key may be canonical (video0.scene_threshold) or an accepted
  * alias (video0.sceneThreshold). */

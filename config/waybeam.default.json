@@ -54,7 +54,8 @@
     "maxPayloadSize": 1400,
     "connectedUdp": true,
     "audioPort": 5601,
-    "sidecarPort": 5602
+    "sidecarPort": 5602,
+    "shmThrottle": true
   },
   "discovery": {
     "enabled": true,
