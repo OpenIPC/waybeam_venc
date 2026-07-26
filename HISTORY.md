@@ -105,24 +105,6 @@ the reference chain. Also device-confirmed: `video0.bitrate` reads 25000 (then
 60000) in `/api/v1/config` throughout, unchanged by the clamp; recovery from
 the floor is 250 -> 500 -> 750 -> 1000 in exactly 3 s with no overshoot, then
 pinned; and the floor warning fires exactly once on entry and once on exit.
-**Producer health in the ring header.** `health_magic` (`"VHLT"`) at offset
-76, `full_drops` u64 at 80, `throttle_permille` u16 at 88 — carved from the
-producer-owned pad on cache line 1. `sizeof` stays 192, `version` stays 1,
-nothing before them moves, and both external consumers
-(`radeon-vrx`, `waybeam-link`) address this header by *byte offset*, so the
-change is invisible to them. `_Static_assert`s now pin every header offset,
-because a reorder would move these out from under both consumers with
-nothing failing to compile.
-
-`full_drops` closes a structural blind spot: the counter is otherwise
-process-local to venc, so an ingress node cannot see the drops it is
-causing. `health_magic` is what stops a new consumer reading an old
-producer's zeroed pad as "no drops" — it is published last, after the
-counters and before `init_complete`. Consumers must treat a mismatched
-marker as "does not report health", and must never reject a ring because
-these bytes are non-zero; that check, applied to the per-frame meta, is what
-made `radeon-vrx` drop every delta frame against a #179 producer.
-Canonical spec: `protocols/frame-shm.md`.
 
 Not included: the bounded `outgoing.shm_block_us` net. It only engages after
 this clamp has already failed, and it blocks the encode thread — the
