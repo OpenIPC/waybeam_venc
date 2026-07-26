@@ -1149,10 +1149,24 @@ function renderSettings(){
       (groups[g] = groups[g] || []).push([key, cap]);
     }
     for(const [group, entries] of Object.entries(groups)){
-      const div = document.createElement('div');
-      div.className = 'section collapsed';
-      div.innerHTML = `<div class="section-header" onclick="this.parentElement.classList.toggle('collapsed')"><h3>${group}</h3><span class="section-chevron">▼</span></div><div class="section-body"></div>`;
-      const body = div.querySelector('.section-body');
+      // If ui.group names an existing section (e.g. "ISP", "Video"), append
+      // into that dropdown instead of spawning a near-duplicate one beside it.
+      // Lets a module field land in its natural home while still keeping its
+      // range/tooltip in capabilities rather than the hardcoded tables above.
+      let div = null, body = null;
+      for(const h of form.querySelectorAll('.section > .section-header > h3')){
+        if(h.textContent === group){
+          div = h.closest('.section');
+          body = div.querySelector('.section-body');
+          break;
+        }
+      }
+      if(!body){
+        div = document.createElement('div');
+        div.className = 'section collapsed';
+        div.innerHTML = `<div class="section-header" onclick="this.parentElement.classList.toggle('collapsed')"><h3>${group}</h3><span class="section-chevron">▼</span></div><div class="section-body"></div>`;
+        body = div.querySelector('.section-body');
+      }
       for(const [key, cap] of entries){
         const ui = cap.ui;
         const ctrl = ui.control || 'text';
@@ -1190,7 +1204,9 @@ function renderSettings(){
         row.innerHTML = `<div class="field-label" title="${tip}">${label} <span class="badge ${badgeClass}">${badgeText}</span>${unsupported?' <span class="badge badge-na">N/A</span>':''}</div><div>${input}</div>`;
         body.appendChild(row);
       }
-      form.appendChild(div);
+      /* Only append when this pass created the section; re-appending an
+       * existing one would yank it to the bottom of the form. */
+      if(div.parentElement !== form) form.appendChild(div);
     }
   }
 

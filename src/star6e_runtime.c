@@ -1364,7 +1364,16 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 					osd_ae.boundary ? "bound" :
 					osd_ae.stable ? "stable" : "adj");
 			}
-			if (osd_ae.awb_valid) {
+			if (osd_ae.awb_valid && osd_ae.awb_userspace) {
+				/* Userspace loop drives AWB: show the applied
+				 * gains and the running apply count (which is
+				 * the liveness signal — colour temperature is
+				 * not estimated in this mode). */
+				debug_osd_text(ps->debug_osd, osd_row++,
+					"awb", "r%u b%u usr#%u",
+					osd_ae.rgain, osd_ae.bgain,
+					osd_ae.awb_ticks);
+			} else if (osd_ae.awb_valid) {
 				debug_osd_text(ps->debug_osd, osd_row++,
 					"awb", "r%u b%u %uk %s",
 					osd_ae.rgain, osd_ae.bgain,

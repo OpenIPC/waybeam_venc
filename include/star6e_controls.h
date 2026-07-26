@@ -54,6 +54,10 @@ typedef struct {
 	unsigned rgain, bgain;  /* AWB channel gains, x1024 */
 	unsigned color_temp;    /* Kelvin */
 	int awb_stable;
+	int awb_userspace;      /* gains come from the star6e_awb loop, not the
+	                         * ISP-internal algorithm — colour temperature is
+	                         * not estimated in that mode */
+	uint32_t awb_ticks;     /* loop applies since start (userspace mode) */
 } Star6eAeOsdStatus;
 
 /** Query live AE + AWB state (ISP SDK queries; ~1Hz callers only — each call

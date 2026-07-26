@@ -12,6 +12,7 @@
     "sensorBin": "",
     "aeEngine": "sdk",
     "aeFps": 15,
+    "awbFps": 15,
     "gainMax": 0,
     "shutterMaxUs": 0,
     "gainMin": 0,

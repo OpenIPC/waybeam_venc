@@ -368,6 +368,22 @@ typedef struct {
  * dashboard.html edit / webui-blob rebuild.  Ranges mirror the validators in
  * validate_field(); 0 = "use preset default" where noted.  group = the
  * collapsible section title the renderer buckets them under. */
+static const FieldUi ui_awb_fps = {
+	"ISP", "AWB rate (Hz)", "number", 0, 30, 1, NULL,
+	/* Reads on BOTH backends — this text is served to Maruko too, where the
+	 * control is greyed out, so it must not assert the i6e-only behaviour as
+	 * if it were universal. */
+	"Rate of the Star6E userspace auto-white-balance loop. The i6e "
+	"ISP-internal AWB does not converge, so on that SoC AWB is driven from "
+	"userspace instead. "
+	"Deliberately decoupled from frame rate — the same cost at 120fps as at "
+	"60fps. Default 15. 0 stops the loop and hands AWB back to the ISP, "
+	"which leaves it wherever it last was. "
+	"Ignored while awbMode=ct_manual. Applied live. "
+	"Not on Maruko/I6C, whose AWB is driven by the SDK's own 3A through the "
+	"CUS3A RunOnce pacer (which i6e does not export) — there is no rate to "
+	"set, so the control is disabled."
+};
 static const FieldUi ui_stab_crop_pct = {
 	"Stabilization", "Stab crop %", "number", 60, 100, 1, NULL,
 	"Kept-frame percentage for framing=stab / stab-fill. 0 = preset default "
@@ -418,14 +434,14 @@ static const FieldUi ui_pause_stab = {
  * "Frame size caps" group purely from capabilities — the caps were API-only
  * until now (no static SECTIONS rows). */
 static const FieldUi ui_max_i_bytes = {
-	"Frame size caps", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
+	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
 	"When either cap is > 0 the RC priority switches to framebits-first so "
 	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
 	"An IDR is requested after each apply. Applied live."
 };
 static const FieldUi ui_max_p_bytes = {
-	"Frame size caps", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
+	"Video", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded P-frame size in bytes. 0 = unlimited. "
 	"When either cap is > 0 the RC priority switches to framebits-first so "
 	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
@@ -479,6 +495,7 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(isp, ae_engine,         FT_STRING, MUT_RESTART),
 	FIELD(isp, ae_fps,            FT_UINT,   MUT_RESTART),
+	FIELD_UI(isp, awb_fps,        FT_UINT,   MUT_LIVE,    &ui_awb_fps),
 	FIELD(isp, keep_aspect,       FT_BOOL,   MUT_RESTART),
 	FIELD(isp, shutter_rule_180,  FT_BOOL,   MUT_RESTART),
 
@@ -624,6 +641,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "fpv.noiseLevel", "fpv.noise_level" },
 	{ "isp.aeEngine", "isp.ae_engine" },
 	{ "isp.aeFps", "isp.ae_fps" },
+	{ "isp.awbFps", "isp.awb_fps" },
 	{ "isp.keepAspect", "isp.keep_aspect" },
 	{ "isp.shutterRule180", "isp.shutter_rule_180" },
 	{ "audio.sampleRate", "audio.sample_rate" },
@@ -699,6 +717,17 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	 * re-enable it without a config migration. */
 	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
 	    strcmp(canonical_key, "isp.keep_aspect") == 0)
+		return 0;
+
+	/* isp.awb_fps paces the Star6E userspace AWB loop (src/star6e_awb.c),
+	 * which exists because the i6e ISP-internal AWB does not converge.
+	 * Maruko has no such loop — its AWB is driven by the SDK's own 3A via
+	 * the CUS3A RunOnce pacer, which i6e does not export — so there is no
+	 * rate to set.  Advertise it unsupported: the WebUI greys the control
+	 * and the set-path rejects writes, rather than accepting a value that
+	 * would silently do nothing. */
+	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
+	    strcmp(canonical_key, "isp.awb_fps") == 0)
 		return 0;
 
 	/* Image stabilization (video0.framing=stab + the stab_* / pause_stab tuning
@@ -951,6 +980,15 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	if (strcmp(key, "video0.stab_accuracy") == 0) {
 		if (!framing_stab_accuracy_valid(cfg->video0.stab_accuracy))
 			return "stab_accuracy must be one of: auto, high, medium, low";
+	}
+	if (strcmp(key, "isp.awb_fps") == 0) {
+		/* Ceiling, not a tuning limit: the loop derives its sleep as
+		 * 1000/hz in integer ms, so anything above 1000 Hz would round
+		 * to a zero sleep and spin a core. 30 is already far past the
+		 * point where AWB tracking improves. */
+		if (cfg->isp.awb_fps > 30)
+			return "awb_fps must be in range [0, 30] "
+				"(0 = stop the userspace AWB loop)";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
@@ -1207,6 +1245,7 @@ typedef struct {
 	int video_gop;
 	int awb_mode;
 	int awb_ct;
+	int awb_fps;
 	int outgoing_enabled;
 	int outgoing_server;
 	int isp_sensor_bin;
@@ -1354,7 +1393,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	if (strcmp(canonical_key, "isp.shutter_min_us") == 0)
 		return LIVE_GROUP_SHUTTER_MIN;
 	if (strcmp(canonical_key, "isp.awb_mode") == 0 ||
-	    strcmp(canonical_key, "isp.awb_ct") == 0)
+	    strcmp(canonical_key, "isp.awb_ct") == 0 ||
+	    strcmp(canonical_key, "isp.awb_fps") == 0)
 		return LIVE_GROUP_AWB;
 	if (strcmp(canonical_key, "system.verbose") == 0)
 		return LIVE_GROUP_VERBOSE;
@@ -1447,6 +1487,8 @@ static void note_live_group_touch(LiveBatchTouched *touched,
 		touched->awb_mode = 1;
 	else if (strcmp(canonical_key, "isp.awb_ct") == 0)
 		touched->awb_ct = 1;
+	else if (strcmp(canonical_key, "isp.awb_fps") == 0)
+		touched->awb_fps = 1;
 	else if (strcmp(canonical_key, "outgoing.enabled") == 0)
 		touched->outgoing_enabled = 1;
 	else if (strcmp(canonical_key, "outgoing.server") == 0)
@@ -1568,6 +1610,16 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_SHUTTER_MIN:
 		return g_cb->apply_shutter_min != NULL;
 	case LIVE_GROUP_AWB:
+		/* Backstop, not the primary gate: awbFps is advertised
+		 * unsupported on backends without the loop (see
+		 * venc_api_field_supported_for_backend), so a write is normally
+		 * rejected before it reaches here.  This keeps the apply below
+		 * from calling through a NULL pointer if a future backend is
+		 * added without its gate entry. */
+		if (touched && touched->awb_fps && !g_cb->apply_awb_rate)
+			return 0;
+		if (touched && !touched->awb_mode && !touched->awb_ct)
+			return 1;
 		return g_cb->apply_awb_mode != NULL;
 	case LIVE_GROUP_VERBOSE:
 		return g_cb->apply_verbose != NULL;
@@ -1643,6 +1695,8 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		}
 		if (touched && touched->awb_ct)
 			dst->isp.awb_ct = src->isp.awb_ct;
+		if (touched && touched->awb_fps)
+			dst->isp.awb_fps = src->isp.awb_fps;
 		break;
 	case LIVE_GROUP_VERBOSE:
 		dst->system.verbose = src->system.verbose;
@@ -1777,6 +1831,15 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_SHUTTER_MIN:
 		return g_cb->apply_shutter_min(cfg->isp.shutter_min_us);
 	case LIVE_GROUP_AWB:
+		/* Rate first: it starts/stops the userspace loop, and the mode
+		 * apply below decides ownership from the committed awbFps. */
+		if (touched && touched->awb_fps) {
+			rc = g_cb->apply_awb_rate(cfg->isp.awb_fps);
+			if (rc != 0)
+				return -1;
+			if (!touched->awb_mode && !touched->awb_ct)
+				return 0;
+		}
 		mode = strcmp(cfg->isp.awb_mode, "ct_manual") == 0 ? 1 : 0;
 		return g_cb->apply_awb_mode(mode, cfg->isp.awb_ct);
 	case LIVE_GROUP_VERBOSE:

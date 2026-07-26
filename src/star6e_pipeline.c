@@ -2,6 +2,7 @@
 #include "star6e_framing.h"
 #include "star6e_ipu_yolo.h"
 #include "star6e_vpe_ports.h"
+#include "star6e_awb.h"
 #include "star6e_framing_host.h"
 #if HAVE_FRAMING_STAB
 #include "star6e_framing_stab.h"
@@ -332,20 +333,39 @@ static int star6e_pipeline_call_load_bin(const IspRuntimeLib *lib,
 	return ret;
 }
 
+/* MI_ISP_CUS3A_Enable(MI_U32 Channel, Cus3AEnable_t *data).  Each flag selects
+ * who OWNS that module: 1 = custom/userspace code, 0 = the ISP-internal
+ * algorithm.  It is not an "enable the algorithm" switch — setting bAWB=1
+ * without supplying an AWB implementation leaves AWB driven by nothing (and
+ * makes ct_manual inert), which is exactly why this is paired with the
+ * star6e_awb loop.
+ *
+ * MI_BOOL is `unsigned char` on i6e, so the struct is THREE BYTES.  The call
+ * previously passed `int p110[13] = {1,1,0}`, whose leading bytes
+ * 01 00 00 00 01 00 00 00 read as bAE=1, bAWB=0, bAF=0 — the AWB flag landed
+ * in padding.  That was harmless while nothing wanted userspace AWB, but the
+ * flag has to mean what it says now.  Maruko declares MI_BOOL[3] and was
+ * always correct.  Layout from the i6e SDK header (mi_isp_datatype.h). */
+typedef struct {
+	unsigned char bAE;
+	unsigned char bAWB;
+	unsigned char bAF;
+} Star6eCus3AEnable;
+
 static void star6e_pipeline_post_load_cus3a(const IspRuntimeLib *lib,
 	void *ctx)
 {
 	cus3a_fn_t fn_cus3a;
-	int p100[13] = {1, 0, 0};
-	int p110[13] = {1, 1, 0};
+	Star6eCus3AEnable ae_only  = {1, 0, 0};
+	Star6eCus3AEnable ae_awb   = {1, 1, 0};
 
 	(void)ctx;
 	fn_cus3a = (cus3a_fn_t)lib->cus3a_enable;
 	if (!fn_cus3a)
 		return;
 
-	fn_cus3a(0, p100);
-	fn_cus3a(0, p110);
+	fn_cus3a(0, &ae_only);
+	fn_cus3a(0, &ae_awb);
 }
 
 static int star6e_pipeline_load_isp_bin(const char *isp_bin_path,
@@ -381,37 +401,43 @@ static void star6e_pipeline_enable_cus3a(SdkQuietState *sdk_quiet)
 
 	fn = (cus3a_fn_t)dlsym(handle, "MI_ISP_CUS3A_Enable");
 	if (fn) {
-		int p100[13] = {1, 0, 0};
-		int p110[13] = {1, 1, 0};
+		Star6eCus3AEnable ae_only = {1, 0, 0};
+		Star6eCus3AEnable ae_awb  = {1, 1, 0};
 		MI_S32 ret;
 
 		sdk_quiet_begin(sdk_quiet);
-		fn(0, p100);
-		ret = fn(0, p110);
+		fn(0, &ae_only);
+		ret = fn(0, &ae_awb);
 		sdk_quiet_end(sdk_quiet);
 		if (ret != 0)
-			fprintf(stderr, "WARNING: MI_ISP_CUS3A_Enable(1,1,0) failed %d\n", ret);
+			fprintf(stderr, "WARNING: MI_ISP_CUS3A_Enable(AE+AWB) failed %d\n", ret);
 	}
 
 	dlclose(handle);
 }
 
-static void star6e_pipeline_cus3a_apply(SdkQuietState *sdk_quiet,
-	int params[13])
+/* Reachable from two threads — the pipeline thread's handoff tick and the HTTP
+ * thread's isp.awbMode change — so the symbol lookup is done under pthread_once
+ * rather than the usual lazy-static idiom, which would race on first use. */
+static void *g_cus3a_lib;
+static int (*g_cus3a_fn)(int channel, void *params);
+static pthread_once_t g_cus3a_once = PTHREAD_ONCE_INIT;
+
+static void star6e_cus3a_bind_once(void)
 {
-	static void *lib_handle = NULL;
-	static int (*fn)(int channel, void *params) = NULL;
-	static int initialized = 0;
+	g_cus3a_lib = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (g_cus3a_lib)
+		g_cus3a_fn = (int (*)(int, void *))dlsym(g_cus3a_lib,
+			"MI_ISP_CUS3A_Enable");
+}
 
-	if (!initialized) {
-		initialized = 1;
-		lib_handle = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
-		if (lib_handle) {
-			fn = (int (*)(int, void *))dlsym(lib_handle,
-				"MI_ISP_CUS3A_Enable");
-		}
-	}
+static void star6e_pipeline_cus3a_apply(SdkQuietState *sdk_quiet,
+	Star6eCus3AEnable *params)
+{
+	int (*fn)(int, void *);
 
+	pthread_once(&g_cus3a_once, star6e_cus3a_bind_once);
+	fn = g_cus3a_fn;
 	if (!fn)
 		return;
 
@@ -448,12 +474,36 @@ void star6e_pipeline_cold_boot_fps_rekick(const Star6ePipelineState *state,
 	MI_SNR_SetFps(state->sensor.pad_id, state->sensor.fps);
 }
 
+/* Which algorithm owns AWB.  1 = handed to userspace (our star6e_awb loop
+ * drives it); 0 = ISP-internal, which is what isp.awbMode=ct_manual needs so
+ * the existing MI_ISP_AWB_SetCTMwbAttr apply path still reaches the hardware.
+ * Read by the handoff below and re-applied live on a mode change. */
+static volatile int g_awb_userspace = 0;
+
+void star6e_pipeline_set_awb_userspace(int on)
+{
+	Star6eCus3AEnable en = {0, 0, 0};
+
+	g_awb_userspace = on ? 1 : 0;
+	en.bAWB = (unsigned char)g_awb_userspace;
+	/* NULL sdk_quiet: this runs off the HTTP thread, where suppressing
+	 * stdio would race the pipeline thread's own quiet windows. */
+	if (g_cus3a_handoff_done)
+		star6e_pipeline_cus3a_apply(NULL, &en);
+}
+
 void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 	struct timespec *ts_last)
 {
 	struct timespec now;
 	long long elapsed_ms;
-	int p000[13] = {0, 0, 0};
+	/* Hand AE back to the ISP-internal algorithm (as before — that is what
+	 * keeps AE cheap at high frame rates) but KEEP AWB in the CUS3A engine,
+	 * otherwise it stops converging the moment this fires and the boot-time
+	 * cast is frozen in for the life of the process. */
+	Star6eCus3AEnable handoff = {0, 0, 0};
+
+	handoff.bAWB = (unsigned char)g_awb_userspace;
 
 	if (g_cus3a_handoff_done || !ts_last)
 		return;
@@ -465,7 +515,7 @@ void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 	if (elapsed_ms < 1000)
 		return;
 
-	star6e_pipeline_cus3a_apply(sdk_quiet, p000);
+	star6e_pipeline_cus3a_apply(sdk_quiet, &handoff);
 	g_cus3a_handoff_done = 1;
 	/* Orientation (image.flip/mirror) is applied once at bring-up and holds
 	 * across this CUS3A handoff — device-verified on IMX335, so no re-apply
@@ -2156,6 +2206,21 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		star6e_pipeline_enable_cus3a(sdk_quiet);
 		g_isp_initialized = 1;
 	}
+	/* Userspace AWB: the ISP-internal algorithm does not converge here
+	 * (see star6e_awb.h).  Paused up front when the operator asked for a
+	 * fixed colour temperature — ct_manual keeps AWB on the ISP-internal
+	 * path so the existing MI_ISP_AWB_SetCTMwbAttr apply still works. */
+	if (vcfg->isp.awb_fps > 0 &&
+	    star6e_awb_start(vcfg->isp.awb_fps) == 0) {
+		int manual = strcmp(vcfg->isp.awb_mode, "auto") != 0;
+
+		star6e_awb_set_paused(manual);
+		/* Hand AWB over only when this loop will actually drive it.
+		 * awbFps=0, a failed start, or ct_manual all leave AWB with the
+		 * ISP-internal algorithm, which is also what the colour-
+		 * temperature apply path needs. */
+		star6e_pipeline_set_awb_userspace(!manual);
+	}
 	/* Reapply exposure cap after ISP bin load — the bin may reset AE
 	 * limits to its own defaults which could exceed the frame period. */
 	star6e_pipeline_cap_exposure_for_fps(pconf->sensor_framerate,
@@ -2280,6 +2345,8 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 {
 	if (!state)
 		return;
+
+	star6e_awb_stop();
 
 	/* Clear userspace persist flags.  runner_teardown follows with
 	 * MI_SYS_Exit, and the next pipeline_start always runs in a fresh

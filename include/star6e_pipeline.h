@@ -165,6 +165,12 @@ void star6e_pipeline_cold_boot_fps_rekick(const Star6ePipelineState *state,
 void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 	struct timespec *ts_last);
 
+/** Choose which algorithm owns AWB: 1 = userspace (the star6e_awb loop),
+ *  0 = ISP-internal (required by isp.awbMode=ct_manual, whose colour-
+ *  temperature apply path targets the internal algorithm).  Applied live when
+ *  the CUS3A handoff has already run. */
+void star6e_pipeline_set_awb_userspace(int on);
+
 /** Reset CUS3A handoff state (call on pipeline reinit). */
 void star6e_pipeline_cus3a_reset(void);
 

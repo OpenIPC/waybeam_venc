@@ -1,5 +1,81 @@
 # History
 
+## [0.56.0] - 2026-07-25
+
+Star6E AWB actually adapts now. `isp.awbMode=auto` was not adaptive: AWB latched
+whatever it estimated in the first second and never moved again, leaving a
+standing cast (a visible yellow on IMX335) that no scene change corrected.
+
+**Cause.** Two things in `star6e_pipeline.c` left AWB with nothing driving it.
+`MI_ISP_DisableUserspace3A` at ISP bin load kills the SDK 3A_Proc thread, and
+`MI_ISP_CUS3A_Enable(0, {0,0,0})` ~1 s after start returns every module to the
+ISP-internal algorithms. AE survives that (it is driven separately, which is
+why only colour looked wrong), but the internal AWB does not converge here.
+
+**Why not simply keep the SDK's 3A stack.** Because it runs per frame. Measured
+on .232: correct colour and genuine convergence at 60 fps for +6pp venc CPU, but
+at 120 fps it pins the CPU at 100% and the box is unusable. Maruko solves this
+with a `CUS3A_RunOnce` pacer — not portable, i6e `libmi_isp.so` exports no
+`RunOnce`/`RunOnceEn`/`SetRunMode` (i6c only).
+
+**What shipped instead** — a userspace AWB loop (`src/star6e_awb.c`) that runs at
+a rate we choose rather than per frame:
+
+    MI_ISP_AWB_GetAwbHwAvgStats   128x90 block R/G/B averages, computed by
+                                  hardware, free to read
+    grey-world + block rejection  a few hundred microseconds
+    MI_ISP_CUS3A_SetAwbParam      apply
+
+AWB is handed to userspace (`Cus3AEnable_t.bAWB = 1`) so this loop owns it.
+Because nothing is per frame, **cost is independent of frame rate** — that is the
+entire point, and it is what the SDK stack could not offer. Rate is
+`isp.awbFps` (default 15 Hz, 0 disables). Gains are damped (1/4 per tick) and
+gated by a 3% deadband so a settled scene stops rewriting them; degenerate
+scenes are handled by rejecting saturated/black blocks, requiring ≥5% of the
+frame usable, and clamping the result.
+
+`isp.awbMode=ct_manual` is unchanged for the operator and still hard-locks the
+colour temperature: it hands AWB back to the ISP-internal algorithm, which is
+what the existing `MI_ISP_AWB_SetCTMwbAttr` path applies through, and stands the
+loop down. `awbFps=0`, a failed loop start, or manual mode all leave AWB exactly
+where it is today.
+
+`isp.awbFps` applies **live** — retuning the rate, stopping the loop and
+restarting it all happen without a restart, because the rate is a plain store
+the loop thread reads on its next wake and ownership of the AWB module can be
+moved at any time. Crossing 0 in either direction moves that ownership: 0 hands
+AWB back to the ISP before standing the thread down, and a non-zero rate starts
+the loop and takes ownership only if the mode is `auto`. Range is clamped to
+[0, 30] — the loop sleeps `1000/hz` integer milliseconds, so a large enough rate
+would round to a zero sleep and spin a core. Backends without the loop (Maruko,
+whose AWB is driven by the SDK's own 3A) answer `501` rather than accept the
+write and silently do nothing with it.
+
+Related fix in the same area: `isp.awbMode=auto` handed AWB to the userspace
+loop unconditionally, including when `awbFps=0` meant no loop was running. That
+left the module owned by an algorithm that does not exist — strictly worse than
+the non-converging internal one it replaced. Ownership now follows the loop.
+
+The debug OSD `awb` row now reads the applied gains from the loop rather than
+`MI_ISP_AWB_QueryInfo` — that reports the ISP-internal algorithm's last state,
+which is frozen precisely because it is no longer running. In userspace mode the
+row reads `r<R> b<B> usr#<n>`, where `n` counts applied corrections and is the
+liveness signal (moving = tracking, steady = converged).
+
+**Device-verified on .232** (SSC338Q / IMX335): from the frozen 2111/2250 the
+loop converges to ~1128/3496 — within a few percent of both what the SDK's own
+AWB reached (1165/3254) and what grey-world predicts from the hardware stats
+(1104/3498). At **100 fps with NPU detection also running: 51% venc CPU**,
+0 CMDQ/ISP-WQ errors. A forced `ct_manual` excursion to 2800 K and back is
+recovered smoothly.
+
+**Do not "fix" the `int[]`-vs-struct call.** `Cus3AEnable_t` is
+`{MI_BOOL bAE, bAWB, bAF}` with `MI_BOOL = unsigned char`, so
+`int p110[13] = {1,1,0}` reads as `bAE=1, bAWB=0, bAF=0` — the AWB flag lands in
+padding. That is true but the accidental behaviour was benign, because
+`CUS3A_Enable` means "hand this module to *custom* code", not "run this algo".
+The struct is now passed correctly and `bAWB` is set deliberately.
+
 ## [0.55.0] - 2026-07-25
 
 Debug OSD: an actual-bitrate row on both backends, and the Maruko-only

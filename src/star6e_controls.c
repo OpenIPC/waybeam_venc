@@ -4,6 +4,7 @@
 #include "output_socket.h"
 #include "pipeline_common.h"
 #include "star6e_audio.h"
+#include "star6e_awb.h"
 #include "star6e_cus3a.h"
 #include "star6e_ipu_yolo.h"
 #include "star6e_iq.h"
@@ -724,6 +725,38 @@ static uint32_t ae_diag_isp_gain(const AeDiagSnapshot *snapshot)
 	return snapshot->plane.compGain;
 }
 
+typedef struct { uint32_t r, g, b; } AwbCus3aStatus;
+
+/* Applied AWB gains as the ISP reports them (MI_ISP_CUS3A_GetAwbStatus).  This
+ * is the truth under userspace AWB — MI_ISP_AWB_QueryInfo tracks the internal
+ * algorithm, which is not the one driving.  Returns 0 on success. */
+static int awb_cus3a_applied_gains(AwbCus3aStatus *out)
+{
+	typedef MI_S32 (*fn_t)(uint32_t, AwbCus3aInfo_t *);
+	void *handle = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	int rc = -1;
+
+	if (!handle)
+		return -1;
+	{
+		fn_t fn = (fn_t)dlsym(handle, "MI_ISP_CUS3A_GetAwbStatus");
+		AwbCus3aInfo_t info;
+
+		if (fn) {
+			memset(&info, 0, sizeof(info));
+			info.Size = sizeof(info);
+			if (fn(0, &info) == 0) {
+				out->r = info.CurRGain;
+				out->g = info.CurGGain;
+				out->b = info.CurBGain;
+				rc = 0;
+			}
+		}
+	}
+	dlclose(handle);
+	return rc;
+}
+
 void star6e_controls_ae_osd_status(Star6eAeOsdStatus *out)
 {
 	AeDiagSnapshot s;
@@ -769,6 +802,43 @@ void star6e_controls_ae_osd_status(Star6eAeOsdStatus *out)
 				}
 			}
 			dlclose(handle);
+		}
+	}
+
+	/* When the userspace loop owns AWB, MI_ISP_AWB_QueryInfo reports the
+	 * ISP-internal algorithm's last state — frozen precisely because that
+	 * algorithm is no longer running.  Show the applied gains instead.
+	 *
+	 * Ownership is decided from config, NOT from whether the loop thread
+	 * happens to be up yet: keying off liveness made the row render the
+	 * stale internal view (with its misleading "adj") for the first refresh
+	 * after a start or reinit, then flip format once the thread ticked. */
+	{
+		const VencConfig *vc = g_star6e_control_ctx.vcfg;
+		int owns = vc && vc->isp.awb_fps > 0 &&
+			strcmp(vc->isp.awb_mode, "auto") == 0;
+
+		if (owns) {
+			uint32_t lr = 0, lg = 0, lb = 0, lticks = 0;
+			int lpaused = 0;
+			AwbCus3aStatus st;
+
+			out->awb_valid = 1;
+			out->awb_userspace = 1;
+			out->color_temp = 0;   /* not estimated by the loop */
+			out->awb_stable = 0;
+			if (star6e_awb_status(&lr, &lg, &lb, &lticks, &lpaused))
+				out->awb_ticks = lticks;
+			/* Applied gains straight from the ISP — correct even
+			 * before the loop's first tick has populated its own
+			 * cache. */
+			if (awb_cus3a_applied_gains(&st) == 0) {
+				out->rgain = st.r;
+				out->bgain = st.b;
+			} else if (lr || lb) {
+				out->rgain = lr;
+				out->bgain = lb;
+			}
 		}
 	}
 }
@@ -1040,6 +1110,29 @@ static int apply_awb_mode(int mode, uint32_t ct)
 	if (!handle)
 		return -1;
 
+	/* Push the colour temperature on EVERY apply, not just under ct_manual.
+	 * Both isp.awbCt and isp.awbMode route here, so writing it only in the
+	 * manual branch meant setting awbCt while in auto was recorded in config
+	 * but never reached the hardware register: /api/v1/awb reported one CT
+	 * while config claimed another, silently, until the next restart.  The
+	 * write does not itself change who drives AWB — the mode attr set below
+	 * does that — so priming it here simply keeps config and ISP in step. */
+	if (ct > 0) {
+		fn_ctmwb_t fn_ctmwb = (fn_ctmwb_t)dlsym(handle,
+			"MI_ISP_AWB_SetCTMwbAttr");
+
+		if (fn_ctmwb) {
+			AwbCtMwb_t mwb = { .u32CT = ct };
+			MI_S32 ct_ret = fn_ctmwb(0, &mwb);
+
+			if (ct_ret != 0) {
+				fprintf(stderr, "WARNING: MI_ISP_AWB_SetCTMwbAttr(%u) "
+					"failed: 0x%08x\n", ct, (unsigned)ct_ret);
+				ret = -1;
+			}
+		}
+	}
+
 	if (mode == 0) {
 		fn_get_t fn_get = (fn_get_t)dlsym(handle,
 			"MI_ISP_AWB_GetAttr");
@@ -1061,7 +1154,23 @@ static int apply_awb_mode(int mode, uint32_t ct)
 						(unsigned)awb_ret);
 					ret = -1;
 				} else {
+					const VencConfig *vc =
+						g_star6e_control_ctx.vcfg;
+
 					printf("> AWB mode: auto\n");
+					/* Userspace loop owns AWB in auto —
+					 * the ISP-internal algorithm does not
+					 * converge on this platform.  Only hand
+					 * it over when that loop is actually
+					 * running: with awbFps=0 nothing would
+					 * drive AWB at all, which is worse than
+					 * the non-converging internal one. */
+					if (vc && vc->isp.awb_fps > 0) {
+						star6e_pipeline_set_awb_userspace(1);
+						star6e_awb_set_paused(0);
+					} else {
+						star6e_pipeline_set_awb_userspace(0);
+					}
 				}
 			} else {
 				ret = -1;
@@ -1070,20 +1179,13 @@ static int apply_awb_mode(int mode, uint32_t ct)
 			ret = -1;
 		}
 	} else {
-		fn_ctmwb_t fn_ctmwb = (fn_ctmwb_t)dlsym(handle,
-			"MI_ISP_AWB_SetCTMwbAttr");
 		fn_get_t fn_get = (fn_get_t)dlsym(handle, "MI_ISP_AWB_GetAttr");
 		fn_set_t fn_set = (fn_set_t)dlsym(handle, "MI_ISP_AWB_SetAttr");
 
-		if (fn_ctmwb && fn_get && fn_set) {
-			AwbCtMwb_t mwb = { .u32CT = ct };
-			MI_S32 awb_ret = fn_ctmwb(0, &mwb);
-
-			if (awb_ret != 0) {
-				fprintf(stderr, "WARNING: MI_ISP_AWB_SetCTMwbAttr(%u) failed: 0x%08x\n",
-					ct, (unsigned)awb_ret);
-				ret = -1;
-			} else {
+		if (fn_get && fn_set) {
+			/* CT was written above — for both modes. */
+			{
+				MI_S32 awb_ret;
 				AwbAttr_t attr;
 
 				memset(&attr, 0, sizeof(attr));
@@ -1097,6 +1199,11 @@ static int apply_awb_mode(int mode, uint32_t ct)
 						ret = -1;
 					} else {
 						printf("> AWB mode: ct_manual (%uK)\n", ct);
+						/* ISP-internal owns AWB again so
+						 * the CT apply above reaches the
+						 * hardware; our loop stands down. */
+						star6e_awb_set_paused(1);
+						star6e_pipeline_set_awb_userspace(0);
 					}
 				} else {
 					ret = -1;
@@ -1109,6 +1216,31 @@ static int apply_awb_mode(int mode, uint32_t ct)
 
 	dlclose(handle);
 	return ret;
+}
+
+/* Live rate change for the userspace AWB loop.  Retuning the rate is just a
+ * volatile store the loop thread picks up on its next wake, but crossing 0 in
+ * either direction also moves ownership of the AWB module, so it has to
+ * follow the same rule the pipeline uses at startup: hand AWB to userspace
+ * only while this loop is running AND the operator asked for auto. */
+static int apply_awb_rate(uint32_t hz)
+{
+	const VencConfig *vc = g_star6e_control_ctx.vcfg;
+	int manual = vc && strcmp(vc->isp.awb_mode, "auto") != 0;
+
+	if (hz == 0) {
+		star6e_pipeline_set_awb_userspace(0);
+		star6e_awb_stop();
+		printf("> AWB: userspace loop stopped (awbFps=0)\n");
+		return 0;
+	}
+
+	/* Already running: this is a no-op start that just retunes the rate. */
+	if (star6e_awb_start(hz) != 0)
+		return -1;
+	star6e_awb_set_paused(manual);
+	star6e_pipeline_set_awb_userspace(!manual);
+	return 0;
 }
 
 static int apply_output_enabled(bool on)
@@ -1513,6 +1645,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.query_awb_info = query_awb_info,
 	.query_isp_metrics = query_isp_metrics,
 	.apply_awb_mode = apply_awb_mode,
+	.apply_awb_rate = apply_awb_rate,
 	.query_iq_info = star6e_iq_query,
 	.apply_iq_param = star6e_iq_set,
 	.apply_max_payload_size = apply_max_payload_size,

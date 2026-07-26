@@ -35,6 +35,10 @@ typedef struct {
 	char *(*query_isp_metrics)(void);
 	/* AWB mode: 0=auto, 1=ct_manual. Returns 0 on success. */
 	int (*apply_awb_mode)(int mode, uint32_t ct);
+	/* Userspace AWB loop rate in Hz; 0 stops the loop and hands AWB back
+	 * to the ISP-internal algorithm.  NULL on backends that have no
+	 * userspace AWB loop (Maruko drives AWB from the SDK's own 3A). */
+	int (*apply_awb_rate)(uint32_t hz);
 	/* IQ query: returns malloc'd JSON string, caller frees. NULL if unsupported. */
 	char *(*query_iq_info)(void);
 	/* IQ set: param name + value string. Returns 0 on success, -1 on error. */
