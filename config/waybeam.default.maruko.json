@@ -96,6 +96,19 @@
     "width": 0,
     "height": 0
   },
+  "detect": {
+    "enabled": false,
+    "plugin": "/root/libwaybeam_detect.so",
+    "modelPath": "/tmp/yolov8n_448x800_ped_e20_i6c.img",
+    "firmwarePath": "",
+    "inferInterval": 2,
+    "confThresh": 0.2,
+    "nmsIou": 0.45,
+    "netWidth": 800,
+    "netHeight": 448,
+    "modelId": 1,
+    "osd": true
+  },
   "debug": {
     "showOsd": false
   },

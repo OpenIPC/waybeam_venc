@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.13.0`
+- `contract_version`: `0.15.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -1451,11 +1451,20 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
-| `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **501** | Star6E hot-swaps the NPU detector `.img` in place (VPE port1 + plugin re-created on the pipeline thread) without respawning the pipeline, provided `net_width`/`net_height` are unchanged. The stream keeps running (no reconnect, no drops), but a `model_path` change stalls frame output while the graph loads — budget ~2.5 s, see the `0.14.0` note. `model_id`/`conf_thresh`/`nms_iou` are applied in place without a graph reload (~0-50 ms). A model whose real input geometry disagrees with the tap is refused and leaves detection off. Maruko has no detector path (`apply_detect_reload` unset → 501). |
-| `detect.net_width` / `net_height` | restart | **501** | Tap geometry: the VPE port output is fixed at create, so a dims change takes the full respawn path. |
+| `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **live** | Both backends hot-swap the NPU detector on the pipeline thread without respawning video. Star6E uses VPE port 1; Maruko uses SCL port 3 and its drain-while-disable teardown. A model whose reported input geometry disagrees with the configured tap is refused and leaves detection off. |
+| `detect.net_width` / `net_height` | restart | restart | Tap geometry is fixed when the VPE/SCL detector port is created. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.15.0` (additive — Maruko detector parity):
+  - Maruko now implements the ABI-3 detector host on SCL port 3, including
+    live enable/disable and model reload, `detect.osd`, and the unchanged RTP
+    sidecar DETECT trailer. Detect fields no longer return 501 on Maruko.
+  - Detection is refused while Maruko stabilization or zoom is active until
+    the independent SCL-port crop can be mapped to encoded-frame coordinates.
+  - The default Maruko deployment uses an 800x448 I6C model. Small-flash
+    systems may store it as `/root/models/<name>.img.xz`; the init script
+    inflates the configured `/tmp/<name>.img` before startup.
 - `0.14.0` (additive — detector live model swap):
   - `detect.model_path` changed from `MUT_RESTART` to `MUT_LIVE`, and
     `detect.model_id` / `detect.conf_thresh` / `detect.nms_iou` are now

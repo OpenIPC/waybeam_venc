@@ -1,7 +1,9 @@
 #include "maruko_pipeline.h"
+#include "maruko_ipu_yolo.h"
 
 #include "audio_codec.h"
 #include "debug_osd.h"
+#include "detect_wire.h"
 #include "hevc_rtp.h"
 #include "idr_rate_limit.h"
 #include "intra_refresh.h"
@@ -3948,6 +3950,11 @@ static void maruko_service_shm_throttle(MarukoOutput *output,
 	    maruko_controls_set_output_throttle(want) == 0)
 		g_applied_permille = want;
 	output->throttle_permille = want;
+	/* Publish into the ring header so the consumer can see that the
+	 * producer has already reduced its own rate -- below 1000 is
+	 * direct evidence that the consumer's rate model is optimistic
+	 * (protocols/frame-shm.md). */
+	venc_frame_ring_set_throttle(output->frame_ring, want);
 
 	edge = venc_shm_throttle_floor_edge(&g_shm_throttle);
 	if (edge > 0)
@@ -3959,6 +3966,20 @@ static void maruko_service_shm_throttle(MarukoOutput *output,
 		/* stderr for the same buffering reason as star6e_runtime. */
 		fprintf(stderr,
 			"> [maruko] shm throttle left the floor, recovering\n");
+}
+
+static uint32_t maruko_osd_box_px(float v, uint32_t canvas, uint32_t net)
+{
+	float r;
+
+	if (canvas == 0 || net == 0)
+		return 0;
+	r = v * (float)canvas / (float)net;
+	if (!(r >= 0.0f))
+		r = 0.0f;
+	if (r > (float)(canvas - 1))
+		r = (float)(canvas - 1);
+	return (uint32_t)r;
 }
 
 static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
@@ -4186,6 +4207,51 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 					zoom.crop_w, zoom.crop_h,
 					zoom.crop_x, zoom.crop_y);
 			}
+
+			{
+				const VencConfig *vcfg = maruko_controls_vcfg();
+				MarukoDetectSnapshot snap;
+				static const uint16_t colors[] = {
+					DEBUG_OSD_RED, DEBUG_OSD_GREEN,
+					DEBUG_OSD_YELLOW, DEBUG_OSD_CYAN,
+					DEBUG_OSD_BLUE, DEBUG_OSD_WHITE,
+				};
+				int di;
+
+				if (vcfg && vcfg->detect.enabled &&
+				    vcfg->detect.osd &&
+				    maruko_ipu_yolo_snapshot(ctx, &snap) &&
+				    snap.count > 0 && snap.net_w && snap.net_h &&
+				    wb_monotonic_us() - snap.produced_us < 700000) {
+					for (di = 0; di < snap.count; di++) {
+						const DetectBox *b = &snap.boxes[di];
+						uint32_t x1 = maruko_osd_box_px(b->x1,
+							ctx->cfg.image_width,
+							snap.net_w);
+						uint32_t y1 = maruko_osd_box_px(b->y1,
+							ctx->cfg.image_height,
+							snap.net_h);
+						uint32_t x2 = maruko_osd_box_px(b->x2,
+							ctx->cfg.image_width,
+							snap.net_w);
+						uint32_t y2 = maruko_osd_box_px(b->y2,
+							ctx->cfg.image_height,
+							snap.net_h);
+						if (x1 >= x2 || y1 >= y2)
+							continue;
+						debug_osd_rect(ctx->debug_osd,
+							(uint16_t)x1, (uint16_t)y1,
+							(uint16_t)(x2 - x1),
+							(uint16_t)(y2 - y1),
+							colors[(unsigned)b->cls %
+								(sizeof(colors) /
+								sizeof(colors[0]))],
+							0);
+					}
+					debug_osd_text(ctx->debug_osd, osd_row++,
+						"det", "%d", snap.count);
+				}
+			}
 		}
 
 		debug_osd_end_frame(ctx->debug_osd);
@@ -4306,6 +4372,10 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	if (sidecar_subscribed) {
 		RtpSidecarTransportInfo tinfo;
 		const RtpSidecarTransportInfo *tinfo_ptr = NULL;
+		const VencConfig *vcfg = maruko_controls_vcfg();
+		uint8_t detect_buf[RTP_SIDECAR_DGRAM_MAX];
+		const void *detect_ptr = NULL;
+		uint16_t detect_len = 0;
 
 		/* Producer already cached fill_pct + lifetime stats inside
 		 * maruko_output_observe_pressure() above — read the cache
@@ -4325,10 +4395,30 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			tinfo.packets_sent = ctx->output.last_writes;
 			tinfo_ptr = &tinfo;
 		}
-		rtp_sidecar_send_frame_transport(&rt->sidecar,
+		if (vcfg && vcfg->detect.enabled) {
+			MarukoDetectSnapshot snap;
+			if (maruko_ipu_yolo_snapshot(ctx, &snap)) {
+				uint64_t now_us = wb_monotonic_us();
+				uint64_t age_ms = now_us > snap.produced_us ?
+					(now_us - snap.produced_us) / 1000 : 0;
+				size_t len = detect_wire_build(detect_buf,
+					sizeof(detect_buf), snap.boxes, snap.count,
+					snap.model_id, snap.seq,
+					age_ms > UINT16_MAX ? UINT16_MAX :
+						(uint16_t)age_ms,
+					snap.net_w, snap.net_h,
+					sizeof(detect_buf));
+				if (len > 0) {
+					detect_ptr = detect_buf;
+					detect_len = (uint16_t)len;
+				}
+			}
+		}
+		rtp_sidecar_send_frame_detect(&rt->sidecar,
 			rt->rtp_state.ssrc, frame_rtp_ts, seq_before,
 			(uint16_t)(rt->rtp_state.seq - seq_before),
-			capture_us, ready_us, &enc_info, tinfo_ptr);
+			capture_us, ready_us, &enc_info, tinfo_ptr, NULL,
+			detect_ptr, detect_len);
 	}
 
 	if (ctx->cfg.verbose)
@@ -4371,6 +4461,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			result = 1;
 			goto cleanup;
 		}
+		maruko_controls_service_detect_reload();
 
 		rc = maruko_pipeline_await_frame(ctx, &rt, &stat);
 		if (rc < 0)
@@ -4436,6 +4527,9 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 * disables its SCL tap port before we tear down port0 / the SCL channel
 	 * below (R6 — never disable the tapped port with the reader still live). */
 	maruko_pipeline_framing_stop();
+	/* Port 3 follows Maruko's drain-while-disable rule and must be gone
+	 * before SCL channel teardown. */
+	maruko_ipu_yolo_stop(ctx);
 
 	venc_api_clear_active_precrop();
 	maruko_pipeline_clear_zoom_status();

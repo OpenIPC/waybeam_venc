@@ -18,6 +18,10 @@ const VencApplyCallbacks *maruko_controls_callbacks(void);
  * through every helper. */
 const VencConfig *maruko_controls_vcfg(void);
 
+/** Service a queued detector enable/disable/model reload on the pipeline
+ * thread.  The HTTP callback only posts a coherent config snapshot. */
+void maruko_controls_service_detect_reload(void);
+
 /** Publish the frame-shm ring-fill clamp factor (permille, 250..1000) and
  *  re-program the encoder from the configured bitrate scaled by it.  Mirrors
  *  star6e_controls_set_output_throttle; video0.bitrate is never written. */

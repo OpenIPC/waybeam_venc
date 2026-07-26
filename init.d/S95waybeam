@@ -61,6 +61,33 @@ ensure_apfpv_udp_output() {
     fi
 }
 
+# Small Maruko flash layouts cannot hold the compiled detector image and its
+# runtime copy at once.  A deploy may therefore keep the configured /tmp model
+# as an xz archive under /root/models.  Inflate only the exact configured
+# basename before waybeam starts; failures are non-fatal because detection is
+# best-effort and the encoder must still boot.
+stage_detect_model() {
+    command -v json_cli >/dev/null 2>&1 || return 0
+    command -v xz >/dev/null 2>&1 || return 0
+    [ -f /etc/waybeam.json ] || return 0
+    model=$(json_cli -g .detect.modelPath --raw \
+        -i /etc/waybeam.json 2>/dev/null) || return 0
+    case "$model" in
+        /tmp/*.img)
+            archive="/root/models/$(basename "$model").xz"
+            [ -s "$archive" ] || return 0
+            tmp="${model}.new"
+            if xz -dc "$archive" > "$tmp"; then
+                mv "$tmp" "$model"
+                echo "detect: staged $(basename "$model") from flash archive"
+            else
+                rm -f "$tmp"
+                echo "Warning: failed to stage detector model $archive"
+            fi
+            ;;
+    esac
+}
+
 wait_exit() {
     # Wait up to 15 seconds for the daemon (and any orphan helper) to
     # fully exit.
@@ -83,6 +110,7 @@ start() {
     echo -n "Starting $DAEMON: "
     # apfpv boxes must come up in udp output mode (see helper above).
     ensure_apfpv_udp_output
+    stage_detect_model
     # waybeam reads /etc/waybeam.json from a fixed path; it has no -c flag.
     "$DAEMON_PATH" > "$LOG_PATH" 2>&1 &
     # Confirm the daemon survived the /proc-walk duplicate-instance

@@ -526,11 +526,20 @@ static int test_detect_model_path_live_reload(void)
 	CHECK("detect live no reinit", strstr(response,
 		"\"reinit_pending\":true") == NULL);
 
+	reset_api_cb_state();
+	CHECK("maruko detect modelPath live ok",
+		apply_set_query_http(&cfg, "maruko", &cb,
+			"detect.modelPath=/sd/person-i6c.img",
+			&status, response, sizeof(response)) == 0);
+	CHECK("maruko detect live status 200", status == 200);
+	CHECK("maruko detect live reload once",
+		g_api_cb_state.apply_detect_reload_calls == 1);
+
 	return failures;
 }
 
-/* Missing apply_detect_reload (e.g. Maruko, no live detector path) → 501, the
- * standard "not supported" preflight for a live field with no callback. */
+/* Missing apply_detect_reload on a minimal backend → 501, the standard
+ * "not supported" preflight for a live field with no callback. */
 static int test_detect_model_path_no_callback(void)
 {
 	int failures = 0;

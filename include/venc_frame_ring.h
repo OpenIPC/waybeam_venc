@@ -20,6 +20,7 @@
  * Memory ordering and futex wake follow the same pattern as venc_ring.
  */
 
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -32,6 +33,11 @@
 
 #define VENC_FRAME_RING_MAGIC   0x5646524D  /* "VFRM" */
 #define VENC_FRAME_RING_VERSION 1
+/* "VHLT" -- marks the producer-health fields on header line 1 as populated.
+ * A consumer MUST treat any other value (notably 0, from a pre-0.57
+ * producer) as "this producer does not report health" rather than as zero
+ * drops, and MUST NOT reject a ring because these bytes are non-zero. */
+#define VENC_FRAME_RING_HEALTH_MAGIC 0x56484C54u
 
 /* Metadata prepended to each frame in the slot's data[] */
 #define VENC_FRAME_META_SIZE    8
@@ -61,10 +67,27 @@ typedef struct __attribute__((aligned(64))) {
 	uint32_t init_complete;
 	uint8_t  _pad0[36];
 
-	/* Line 1: Producer-owned */
+	/* Line 1: Producer-owned.
+	 *
+	 * health_magic/full_drops/throttle_permille were carved out of the
+	 * old _pad1[52] in 0.57.0.  sizeof stays 192, `version` stays 1, and
+	 * nothing before them moves -- both external consumers address this
+	 * header by byte offset (radeon-vrx VFRM_OFF_*, waybeam-link
+	 * kFrHdr*), so the change is invisible to them.  See
+	 * protocols/frame-shm.md, which is the canonical spec.
+	 *
+	 * Why they exist: full_drops is otherwise process-local to the
+	 * producer (venc_frame_ring_t::stats below), so a consumer is
+	 * structurally blind to the drops it is causing.  health_magic is
+	 * what stops a new consumer reading an OLD producer's zeroed pad as
+	 * "no drops" -- it is set last, after everything else in the header
+	 * and before init_complete. */
 	uint64_t write_idx        __attribute__((aligned(64)));
 	uint32_t futex_seq;
-	uint8_t  _pad1[52];
+	uint32_t health_magic;      /* VENC_FRAME_RING_HEALTH_MAGIC, or 0 */
+	uint64_t full_drops;        /* lifetime full-ring drops */
+	uint16_t throttle_permille; /* 1000 = unclamped, 250 = floor */
+	uint8_t  _pad1[38];
 
 	/* Line 2: Consumer-owned */
 	uint64_t read_idx          __attribute__((aligned(64)));
@@ -82,6 +105,18 @@ _Static_assert(sizeof(venc_frame_ring_hdr_t) == 192,
                "venc_frame_ring_hdr_t must be exactly 192 bytes");
 _Static_assert(sizeof(VencFrameMeta) == VENC_FRAME_META_SIZE,
                "VencFrameMeta must be exactly 8 bytes");
+/* Consumers address these by byte offset, not through this struct, so a
+ * reorder here would silently move them out from under radeon-vrx and
+ * waybeam-link with nothing failing to compile.  Pin them. */
+_Static_assert(offsetof(venc_frame_ring_hdr_t, write_idx) == 64, "off 64");
+_Static_assert(offsetof(venc_frame_ring_hdr_t, futex_seq) == 72, "off 72");
+_Static_assert(offsetof(venc_frame_ring_hdr_t, health_magic) == 76, "off 76");
+_Static_assert(offsetof(venc_frame_ring_hdr_t, full_drops) == 80, "off 80");
+_Static_assert(offsetof(venc_frame_ring_hdr_t, throttle_permille) == 88,
+               "off 88");
+_Static_assert(offsetof(venc_frame_ring_hdr_t, read_idx) == 128, "off 128");
+_Static_assert(offsetof(venc_frame_ring_hdr_t, consumer_waiting) == 136,
+               "off 136");
 #endif
 
 /* Per-slot layout: 4-byte length prefix + data */
@@ -158,6 +193,17 @@ static inline int venc_frame_ring_get_fill(const venc_frame_ring_t *r,
 	return 0;
 }
 
+/* Publish the producer's self-imposed bitrate clamp (permille, 1000 =
+ * unclamped).  Producer-only; a no-op on an attached (consumer) ring. */
+static inline void venc_frame_ring_set_throttle(venc_frame_ring_t *r,
+	uint16_t permille)
+{
+	if (!r || !r->hdr || !r->is_owner)
+		return;
+	__atomic_store_n(&r->hdr->throttle_permille, permille,
+		__ATOMIC_RELAXED);
+}
+
 /* ── Inline helpers ──────────────────────────────────────────────────── */
 
 static inline venc_frame_ring_slot_t *venc_frame_ring_slot_at(
@@ -193,6 +239,13 @@ static inline int venc_frame_ring_begin_write(venc_frame_ring_t *r,
 
 	if (w - rd >= r->hdr->slot_count) {
 		r->stats.full_drops++;
+		/* Mirror into the shared header so the consumer can see the
+		 * drops it is causing.  Relaxed: our own cache line, and the
+		 * value is evidence for a rate controller, not an exact
+		 * accounting -- a reader may lag by a frame. */
+		if (r->is_owner)
+			__atomic_store_n(&r->hdr->full_drops,
+				r->stats.full_drops, __ATOMIC_RELAXED);
 		return -1;
 	}
 

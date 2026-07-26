@@ -228,7 +228,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->attitude.trim_roll_deg  = 0.0f;
 	cfg->attitude.trim_pitch_deg = 0.0f;
 
-	/* detect (IPU NPU object detection; Star6E only) */
+	/* detect (IPU NPU object detection; Star6E + Maruko) */
 	cfg->detect.enabled = false;
 	safe_strcpy(cfg->detect.plugin, sizeof(cfg->detect.plugin),
 		"/root/libwaybeam_detect.so");

@@ -1,5 +1,28 @@
 # History
 
+## [0.58.0] - 2026-07-26
+
+Maruko gains IPU object-detection parity with Star6E: a raw 800x448 NV12 tap
+on SCL port 3 feeds the shared ABI-3 plugin, publishes the unchanged DETECT
+sidecar trailer, draws optional debug-OSD boxes, and supports pipeline-thread
+enable/disable and model reload without restarting video. Teardown follows the
+i6c drain-while-disable rule so an IPU reader cannot pin ISP-to-SCL shutdown.
+
+The I6C model is platform-specific; an I6E `.img` is rejected. On the
+SSC378QE bench, `inferInterval=1` held the SCL buffer through every IPU invoke
+and reduced video from 59.7 to 38.0 fps while producing only 6.9 inferences/s.
+At the new Maruko default `inferInterval=2`, the alternate-frame drain breaks
+that backpressure loop: video stays at 59.7 fps and detection reaches 8.5-10.1
+Hz. The final 15-second sample measured 9.46 Hz with 51 ms median / 94 ms p95
+snapshot age and no new VENC ring-drop lines. Star6E's existing 800x448 bench
+is 9-10 Hz, 52/96 ms age, and 90 FRAME/s. Detector throughput and freshness
+are therefore at parity; encode rate remains the configured sensor/backend
+difference.
+
+Small-flash Maruko deployments can keep the model as an xz archive under
+`/root/models`; `S95waybeam` stages the exact configured `/tmp/*.img` before
+startup. Contract 0.15.0 records Maruko support for the existing detect fields.
+
 ## [0.57.0] - 2026-07-26
 
 `frame-shm://` egress no longer answers a full ring by throwing away an
@@ -105,6 +128,24 @@ the reference chain. Also device-confirmed: `video0.bitrate` reads 25000 (then
 60000) in `/api/v1/config` throughout, unchanged by the clamp; recovery from
 the floor is 250 -> 500 -> 750 -> 1000 in exactly 3 s with no overshoot, then
 pinned; and the floor warning fires exactly once on entry and once on exit.
+**Producer health in the ring header.** `health_magic` (`"VHLT"`) at offset
+76, `full_drops` u64 at 80, `throttle_permille` u16 at 88 — carved from the
+producer-owned pad on cache line 1. `sizeof` stays 192, `version` stays 1,
+nothing before them moves, and both external consumers
+(`radeon-vrx`, `waybeam-link`) address this header by *byte offset*, so the
+change is invisible to them. `_Static_assert`s now pin every header offset,
+because a reorder would move these out from under both consumers with
+nothing failing to compile.
+
+`full_drops` closes a structural blind spot: the counter is otherwise
+process-local to venc, so an ingress node cannot see the drops it is
+causing. `health_magic` is what stops a new consumer reading an old
+producer's zeroed pad as "no drops" — it is published last, after the
+counters and before `init_complete`. Consumers must treat a mismatched
+marker as "does not report health", and must never reject a ring because
+these bytes are non-zero; that check, applied to the per-frame meta, is what
+made `radeon-vrx` drop every delta frame against a #179 producer.
+Canonical spec: `protocols/frame-shm.md`.
 
 Not included: the bounded `outgoing.shm_block_us` net. It only engages after
 this clamp has already failed, and it blocks the encode thread — the

@@ -320,8 +320,8 @@ typedef struct {
 	                          built to confirm weak detections over time
 	                          rather than trust any single frame.        */
 	float    nms_iou;      /* NMS IoU; <=0 -> plugin default (0.45)      */
-	uint32_t net_width;    /* VPE port1 tap + model input; 0 -> 640.     */
-	uint32_t net_height;   /* 0 -> 352.  MUST match the compiled .img —
+	uint32_t net_width;    /* Detector tap + model input width.          */
+	uint32_t net_height;   /* MUST match the compiled .img —
 	                          the backend rejects a mismatched frame.    */
 	uint32_t model_id;     /* class-table selector put on the wire (see
 	                          RTP_SIDECAR_DETECT_MODEL_* and the registry

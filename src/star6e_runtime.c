@@ -1091,6 +1091,11 @@ static void star6e_service_shm_throttle(Star6eOutput *output,
 	    star6e_controls_set_output_throttle(want) == 0)
 		g_applied_permille = want;
 	output->throttle_permille = want;
+	/* Publish into the ring header so the consumer can see that the
+	 * producer has already reduced its own rate -- below 1000 is
+	 * direct evidence that the consumer's rate model is optimistic
+	 * (protocols/frame-shm.md). */
+	venc_frame_ring_set_throttle(output->frame_ring, want);
 
 	/* Log the floor transitions only.  Pinned at the floor the clamp has
 	 * spent all its authority and the ring is still backing up — that is
