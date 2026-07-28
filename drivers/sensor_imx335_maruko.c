@@ -826,14 +826,26 @@ static int pCus_poweron(ms_cus_sensor* handle, u32 idx)
 {
     ISensorIfAPI* sensor_if = handle->sensor_if_api;
 
-    /* Configure CSI receiver. Do NOT toggle power/reset pins here —
-     * the sensor stays powered from boot. Mode init functions that
-     * need a hardware reset (e.g. 60fps PLL change) call
-     * pCus_HardwareReset() explicitly. */
+    /* Full power-up sequence: drive PWDN and RESET explicitly rather than
+     * assuming the sensor is already live from boot.  Boards that hold the
+     * sensor in reset until a driver releases it answer no i2c at all, so
+     * every mode's init table NAKs and MI_SNR_Enable fails with
+     * "Sensor init fail!!" / "base init fail!!" — regardless of which mode
+     * is selected.  Releasing the pins here is harmless on boards that
+     * already leave the sensor running. */
+    sensor_if->PowerOff(idx, !handle->pwdn_POLARITY);
+    sensor_if->Reset(idx, !handle->reset_POLARITY);
     sensor_if->SetIOPad(idx, handle->sif_bus, handle->interface_attr.attr_mipi.mipi_lane_num);
     sensor_if->SetCSI_Clk(idx, CUS_CSI_CLK_216M);
     sensor_if->SetCSI_Lane(idx, handle->interface_attr.attr_mipi.mipi_lane_num, ENABLE);
     sensor_if->SetCSI_LongPacketType(idx, 0, 0x1C00, 0);
+
+    /* PWDN enable: the 1.8V & 2.9V rails need ~30ms to settle before RESET
+     * is released, then MCLK starts. */
+    sensor_if->PowerOff(idx, !handle->pwdn_POLARITY);
+    SENSOR_MSLEEP(31);
+    sensor_if->Reset(idx, !handle->reset_POLARITY);
+    SENSOR_UDELAY(1);
     sensor_if->MCLK(idx, 1, handle->mclk);
     return SUCCESS;
 }

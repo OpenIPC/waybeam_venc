@@ -1,5 +1,33 @@
 # History
 
+## [0.51.2] - 2026-07-28
+
+Maruko IMX335 driver fix — the sensor is now brought out of reset explicitly at
+power-on instead of being assumed live from boot.
+
+- **`pCus_poweron()` drives PWDN and RESET** (`drivers/sensor_imx335_maruko.c`) —
+  the function previously configured only the CSI receiver and MCLK, on the
+  assumption that "the sensor stays powered from boot", and deferred the pin
+  toggle to `pCus_HardwareReset()`. Nothing ever called that helper, so on any
+  board that holds the sensor in reset until a driver releases it the sensor
+  never answered i2c: every mode's init table NAK'd after 10 retries and
+  `MI_SNR_Enable` failed with `0xA01B201F`. The failure was independent of the
+  selected mode — both the window-crop path (`imx335_init_window_crop`,
+  `base init fail!!`) and the full-res path
+  (`pCus_init_mipi4lane_5m30fps_linear`, `Sensor init fail!!`) failed
+  identically, and it survived a full power-cycle, ruling out the documented
+  cold-boot enumeration wedge.
+
+  `pCus_poweron()` now performs the standard power-up sequence — deassert PWDN,
+  deassert RESET, configure the CSI receiver, re-assert PWDN enable, wait 31 ms
+  for the 1.8V/2.9V rails to settle, deassert RESET again, then start MCLK.
+  Releasing the pins is a no-op on boards that already leave the sensor
+  running, so this is safe for the existing bench configuration.
+
+  Device-verified on SSC378QE + IMX335: all six modes enumerate, mode 2
+  (2272x1704@60) selects and holds a steady 60.0 fps with no ISP FIFO-FULL and
+  no dropped frames.
+
 ## [0.51.1] - 2026-07-24
 
 Detector hardening follow-ups from the v0.51.0 upstream review — four
