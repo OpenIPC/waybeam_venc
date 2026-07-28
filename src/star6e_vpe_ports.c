@@ -114,6 +114,15 @@ const char *star6e_vpe_port1_owner(void)
 	return o;
 }
 
+void star6e_vpe_port1_owner_copy(char *buf, size_t len)
+{
+	if (!buf || len == 0)
+		return;
+	pthread_mutex_lock(&g_lock);
+	snprintf(buf, len, "%s", g_port1_owner);
+	pthread_mutex_unlock(&g_lock);
+}
+
 void star6e_vpe_port0_set(const char *consumer, bool present)
 {
 	if (!consumer)

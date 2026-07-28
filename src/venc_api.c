@@ -3653,6 +3653,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	pthread_mutex_unlock(&g_cfg_mutex);
 
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/snapshot.pgm", handle_snapshot_pgm, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/version",      handle_version, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config",       handle_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config.json",  handle_config, NULL);

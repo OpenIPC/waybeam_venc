@@ -7,6 +7,7 @@
  * video path keeps running.
  */
 #include "maruko_ipu_yolo.h"
+#include "maruko_scl_ports.h"
 
 #include "maruko_mi.h"
 #include "rtp_sidecar.h"
@@ -25,6 +26,7 @@
 
 #define MI_SYS_BUFDATA_FRAME 1
 #define MARUKO_DETECT_PORT 3
+#define MARUKO_DETECT_TAP_OWNER "detect"
 
 typedef struct { MI_U16 x, y, w, h; } DetectRect;
 typedef struct {
@@ -59,6 +61,7 @@ typedef struct {
 	void *plugin;
 	MI_SYS_ChnPort_t port;
 	int port_enabled;
+	int tap_claimed;
 	uint32_t net_w, net_h, model_id;
 	int infer_interval;
 	pthread_t reader;
@@ -302,6 +305,14 @@ int maruko_ipu_yolo_start(MarukoBackendContext *ctx,
 	d->model_id = vcfg->detect.model_id;
 	d->infer_interval = vcfg->detect.infer_interval > 0 ?
 		vcfg->detect.infer_interval : 1;
+	/* Hold SCL port3 for the whole run: the grayscale snapshot wants the
+	 * same tap transiently and must lose rather than reprogram it here. */
+	if (maruko_scl_tap_claim(MARUKO_DETECT_TAP_OWNER) != 0) {
+		fprintf(stderr, "[maruko-ipu] SCL tap busy; detection disabled\n");
+		free(d);
+		return 0;
+	}
+	d->tap_claimed = 1;
 	if (load_sys_symbols(d) != 0 ||
 	    load_backend(d, vcfg, vcfg->video0.width, vcfg->video0.height) != 0 ||
 	    enable_tap(ctx, d) != 0)
@@ -329,6 +340,8 @@ fail:
 		d->backend->deinit();
 	if (d->plugin)
 		dlclose(d->plugin);
+	if (d->tap_claimed)
+		maruko_scl_tap_release(MARUKO_DETECT_TAP_OWNER);
 	free(d);
 	fprintf(stderr, "[maruko-ipu] detection disabled\n");
 	return 0;
@@ -361,6 +374,10 @@ void maruko_ipu_yolo_stop(MarukoBackendContext *ctx)
 	if (d->plugin)
 		dlclose(d->plugin);
 	pthread_mutex_destroy(&d->lock);
+	/* Released only after the reader is joined and the port is disabled, so
+	 * a snapshot cannot claim the tap while this one is still tearing down. */
+	if (d->tap_claimed)
+		maruko_scl_tap_release(MARUKO_DETECT_TAP_OWNER);
 	free(d);
 }
 

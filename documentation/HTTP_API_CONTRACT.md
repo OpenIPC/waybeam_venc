@@ -838,6 +838,61 @@ Response `200`:
 {"ok":true,"data":{"imported":true}}
 ```
 
+### `GET /api/v1/snapshot.jpg`
+
+Capture one JPEG frame from the snapshot subsystem and return it as
+`image/jpeg`.  Gated by `snapshot.enabled`; returns `503`
+(`snapshot_disabled`) when the subsystem is off or the pipeline is not
+running, `504` (`snapshot_timeout`) if no frame arrives, `500`
+(`snapshot_failed`) on backend error.  Not a JSON endpoint on success.
+
+### `GET /api/v1/snapshot.pgm`
+
+Capture one **grayscale** frame and return it as a binary P5 PGM
+(`image/x-portable-graymap`): the luma (Y) plane of an uncompressed NV12
+frame, with no JPEG encode/decode step.
+
+Intended for freestanding on-device consumers that want raw grayscale — for
+example `tools/qr/qr_decode.c`. Pairing, commands, boot scheduling, and action
+dispatch are deliberately outside the waybeam binary and this endpoint.
+
+**Source and geometry.** The frame comes from a short-lived scaler tap,
+not from the encoder's output port — a user frame queue may only be
+registered on a port with no downstream hardware bind, and the encode port
+is bound to the H.265 encoder (registering one there faults the MI_SYS
+allocator).  The tap is programmed, drained for exactly one frame, and torn
+down per request; the encode path is never touched.
+
+| Backend | Tap | Contends with |
+|---|---|---|
+| Star6E (i6e) | VPE port1 | stab framing, NPU detection |
+| Maruko (i6c) | SCL port3 | NPU detection |
+
+Geometry starts from the configured snapshot size and caps the long side at
+**1280 px** (aspect-preserved, width 16-aligned) — PGM is self-describing,
+so read the real dimensions from the header rather than assuming the
+main-stream size.
+
+**The tap is exclusive.** Its other claimants own it for a whole run, so a
+capture attempted while one is active returns `409` (`snapshot_gray_busy`)
+rather than programming the tap underneath them.  Capture before those
+features start, or disable them.
+
+Shares the `snapshot.enabled` gate and the subsystem mutex with
+`snapshot.jpg` (the two never run concurrently).  Errors mirror
+`snapshot.jpg`, plus:
+
+| Status | Code | Meaning |
+|---|---|---|
+| `409` | `snapshot_gray_busy` | the scaler tap is held by stab framing or NPU detection |
+| `501` | `snapshot_gray_unsupported` | backend has no grayscale capture |
+
+Supported on both Star6E and Maruko.
+
+```bash
+curl -s http://<device-ip>/api/v1/snapshot.pgm | qr_decode
+```
+
 ### `GET /` (Web Dashboard)
 
 Serves a self-contained HTML dashboard (gzip-compressed, ~14KB). The dashboard

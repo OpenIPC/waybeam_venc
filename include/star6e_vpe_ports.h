@@ -2,6 +2,7 @@
 #define STAR6E_VPE_PORTS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /*
  * Arbiter + observability for the VPE0 scaler output ports (Star6E).
@@ -33,6 +34,12 @@ void star6e_vpe_ports_end(void);
 int  star6e_vpe_port1_claim(const char *owner);
 void star6e_vpe_port1_release(const char *owner);
 const char *star6e_vpe_port1_owner(void);   /* NULL when free */
+
+/* Copy the current port1 owner into `buf` ("" when free).  Unlike
+ * star6e_vpe_port1_owner(), the caller gets a private copy and so may run off
+ * the pipeline thread — the snapshot endpoint (HTTP thread) claims port1
+ * transiently and reports the winner when it loses. */
+void star6e_vpe_port1_owner_copy(char *buf, size_t len);
 
 /* Mark/clear a port0 1:N consumer for observability ("jpeg" | "record").
  * Unknown names are ignored. */

@@ -1,5 +1,119 @@
 # History
 
+## [0.59.0] - 2026-07-26
+
+New `GET /api/v1/snapshot.pgm` endpoint returns a grayscale frame as a binary
+P5 PGM — the luma plane of an uncompressed NV12 frame, with no JPEG
+encode/decode step. It rides the existing `snapshot.enabled` gate and the
+snapshot subsystem mutex, so `.jpg` and `.pgm` share one switch and never run
+concurrently. Implemented on both backends: Star6E taps VPE port1, Maruko taps
+SCL port3.
+
+On Star6E the grab programs a short-lived VPE **port1** tap, drains exactly one
+frame (`MI_SYS_ChnOutputPortGetBuf`, mirroring the detector tap in
+`star6e_ipu_yolo.c`), and tears the tap back down — resetting the user output
+depth before `MI_VPE_DisablePort` on every exit path. It deliberately does not
+touch port0: a user frame queue may only be registered on a port with no
+downstream hardware bind, and port0 is bound to the H.265 encoder (1:N with the
+MJPEG channel), where registering one makes the kernel SCL run user output
+tasks alongside the bind and trips a hard `BUG` in
+`_MI_SYS_IMPL_AllocBufDefaultPolicy` on the `vpe0_P0_MAIN` worker — stalling
+the live encode path and, on some runs, resetting the board.
+
+Because port1 is the single second scaler output, the capture takes it through
+the `star6e_vpe_ports` arbiter: stab framing and NPU detection own that tap for
+a whole run, so a capture attempted while either is active returns `409`
+(`snapshot_gray_busy`) instead of reprogramming the tap underneath them. Tap
+geometry starts from the configured snapshot size and caps the long side at
+1280 px (aspect-preserved, width 16-aligned); PGM is self-describing, so
+consumers read the real dimensions from the header. Capture failure is
+non-fatal — the endpoint serves an error and the encode path is unaffected.
+
+Maruko follows the same shape on i6c primitives. Every SCL output already has
+an owner — port0 is the main H.265 output (RING, 1:1), port1 carries the bound
+MJPEG channel, port2 is the stab tap — so the grayscale tap uses **port3**, the
+NPU detector's, arbitrated by the new `maruko_scl_ports` module so a capture
+loses to a running detector instead of reprogramming its tap mid-inference. The
+i6c MI_SYS entry points take a leading `u16 soc_id` and the port is configured
+through `SetPortConfig` with an explicit crop window, which the pipeline now
+publishes via `venc_jpeg_set_gray_crop()`.
+
+Ships a freestanding scanning backend under `tools/qr/`: `qr_decode.c`
+(vendored quirc, ISC) decodes P5 PGM captures with mirror, overlapping-tile,
+half-scale, light-denoise, and inverted passes. A required continuous black
+outer frame now supplies direct four-corner projective geometry for a
+Version-1 QR while keeping extraction in the original image; framed grids use
+3×3 majority sampling. The default output is limited to the minimal
+Version-1/Q alphanumeric envelope — exactly 16 characters, leading type `P` or
+`C` — while `--raw` keeps arbitrary-symbol bench diagnostics available.
+
+`qr_watch.sh` remains a standalone polling helper with no action dispatch. It
+reports `409`/`503` distinctly and can stream decodes with `-c`. Pairing,
+commands, boot scheduling, persistence, packaging, and service integration are
+deferred to a separate consumer work package. A deterministic host corpus
+compares stock and frame-assisted recognition across front, rotated, mirrored,
+small, and projectively compressed renders. Build with `make qr-decode`; run
+the core corpus with `make qr-test-host`. An extended 768-image Version-1/Q
+series sweeps marker width, four perspective ratios down to 0.35, rotation,
+perspective direction, and four defocus levels. The outer frame was identified
+in 768/768 cases; exact payload decode reached 709/768 (92.3%) versus stock
+quirc's 506/768 (65.9%). The SSC338Q Star6E bench reproduced those exact
+counts natively. The production decoder now strictly requires the bounded
+outer frame and never performs global finder discovery. It tries the frame's
+direct transform first, then—only after ECC failure—runs finder refinement in
+a tight ROI derived from the accepted frame. This preserves rejection of bare
+QRs while absorbing fisheye curvature that a four-corner homography cannot
+model. Opt-in `--stats` diagnostics report each applied pass, per-stage
+monotonic timings, frame/refinement/finder candidate counts, QR and envelope
+outcomes, and a final summary on stderr without contaminating payload-only
+stdout. `qr_watch.sh -v` exposes the same trace during polling.
+Continuous polling is completion-aware: the next snapshot starts immediately
+after the previous capture/decode returns unless that would place capture
+starts less than 0.5 seconds apart. This removes the former fixed post-decode
+sleep for direct on-camera stress testing; `-i` may still request a slower
+minimum start cadence.
+
+Live phone-display validation on the SSC338Q Star6E confirmed the combined
+path on real optical captures: the exact `P23456789ABCDEFG` envelope decoded
+through both `sharp/tile/refine` and `sharp/half/refine`. The initial
+five-frame run succeeded 2/5 times. Failed large presentations remain
+dominated by the bench camera's strong fisheye curvature; offline radial
+correction made those same frames decodable. The decoder now includes that
+compensation as a late, single-coefficient (`k1=-0.30`) nearest-neighbour
+fallback. It retries only corrected full-frame sharp and light-denoised images,
+and both remain subject to the mandatory frame gate; no unbounded finder path
+is introduced. A fresh live five-frame Star6E burst improved from 2/5 to 4/5
+exact decodes: one normal bounded refinement and three lens-corrected bounded
+refinements. The remaining miss found no acceptable frame even after
+correction.
+
+The bounded scan path retains its behavior-preserving reductions: symmetric
+frame geometry is scored once per candidate, nine-tile scans are deferred,
+blur-half no longer delays the fisheye fallback, radial correction precomputes
+invariant column terms, repeated cell coordinates are cached, and quirc
+retains high-water work buffers. The final standalone build prioritizes flash
+size with `-Os`, per-function/data sections, linker garbage collection, the
+existing Star6E NEON/VFPv4 flags, and quirc's single-precision perspective
+math. The stripped decoder is 30,288 bytes on Star6E and 30,136 bytes on
+Maruko, down from 63,052 bytes for the previous Star6E `-O3`/loop-unrolled
+build. On the saved hard 1280x720 fisheye capture, the size build decoded the
+same `lens-blur/full/refine` stage and exact payload in a 425 ms mean over 20
+runs (404–472 ms), versus 257 ms for the prior speed build. Sampling,
+thresholds, candidates, scan coverage, payloads, and the full 768-case counts
+remain unchanged.
+
+Merge-gate hardening caps PGM dimensions, detects decimal overflow, requires
+the endpoint's 255 maxval, handles allocation failures as fatal input errors,
+and accepts `--` before filenames beginning with a dash. New CLI regressions
+cover valid fixture decode, option ordering, malformed headers, duplicate
+inputs, and dimension limits. `qr_watch.sh` now uses a unique `mktemp` file
+per process with signal/exit cleanup rather than a shared symlink-prone path,
+and decoder execution failures no longer look like ordinary empty frames.
+The included Python generator forces Version 1/Q/alphanumeric metadata,
+validates the minimal envelope, and emits the exact bounded profile as SVG,
+binary-clean PNG, or decoder-ready PGM. The checked-in phone and CLI fixtures
+are generated by that tool.
+
 ## [0.58.0] - 2026-07-26
 
 Maruko gains IPU object-detection parity with Star6E: a raw 800x448 NV12 tap

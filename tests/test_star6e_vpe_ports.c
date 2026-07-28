@@ -49,9 +49,34 @@ int test_star6e_vpe_ports(void)
 		star6e_vpe_port1_owner() != NULL &&
 		strcmp(star6e_vpe_port1_owner(), "detect") == 0);
 
+	/* owner_copy(): private copy for off-pipeline-thread callers (the
+	 * snapshot endpoint reports the winner when its claim loses). */
+	{
+		char owner[16];
+		memset(owner, 'x', sizeof(owner));
+		star6e_vpe_port1_owner_copy(owner, sizeof(owner));
+		CHECK("owner_copy held", strcmp(owner, "detect") == 0);
+	}
+
 	/* Owner release frees port1; now stab can take it. */
 	star6e_vpe_port1_release("detect");
 	CHECK("port1 free after release", star6e_vpe_port1_owner() == NULL);
+
+	/* owner_copy() on a free port yields an empty string, not stale text. */
+	{
+		char owner[16];
+		memset(owner, 'x', sizeof(owner));
+		star6e_vpe_port1_owner_copy(owner, sizeof(owner));
+		CHECK("owner_copy free is empty", owner[0] == '\0');
+	}
+
+	/* A snapshot capture claims port1 transiently, like any other owner. */
+	CHECK("snapshot claim ok", star6e_vpe_port1_claim("snapshot") == 0);
+	CHECK("stab refused while snapshot holds",
+		star6e_vpe_port1_claim("stab") == -1);
+	star6e_vpe_port1_release("snapshot");
+	CHECK("port1 free after snapshot", star6e_vpe_port1_owner() == NULL);
+
 	CHECK("stab claim ok after free", star6e_vpe_port1_claim("stab") == 0);
 
 	/* port0 consumers accumulate in the published map. */

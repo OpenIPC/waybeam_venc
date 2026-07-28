@@ -26,7 +26,9 @@
 #include "maruko_mi.h"
 #include "sigmastar_types.h"
 #include "star6e.h"
+#include "maruko_scl_ports.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -46,6 +48,9 @@ static int      g_chn_created   = 0;
 static int      g_bound         = 0;
 static int      g_started       = 0;
 static uint32_t g_quality       = 80;
+/* Configured snapshot geometry, kept for the grayscale SCL tap (which does
+ * not go through the MJPEG channel and so cannot read it back from VENC). */
+static uint32_t g_snap_w, g_snap_h;
 
 void venc_jpeg_set_source(const void *port_opaque)
 {
@@ -77,6 +82,8 @@ int venc_jpeg_backend_init(const VencJpegConfig *cfg)
 	if (q > 99) q = 99;
 	if (q < 1)  q = 1;
 	g_quality = q;
+	g_snap_w = w;
+	g_snap_h = h;
 
 	/* CreateDev for MJPG device 8 — separate from main H.26x dev 0. */
 	i6c_venc_init init = {
@@ -263,6 +270,268 @@ stop:
 		(void)maruko_mi_venc_stop_recv(JPEG_VENC_DEV, JPEG_VENC_CHN);
 		g_started = 0;
 	}
+	return rc;
+}
+
+/* ── Grayscale (P5 PGM) capture ──────────────────────────────────────────
+ *
+ * Mirrors the Star6E path in star6e_jpeg.c, on i6c primitives: program a
+ * short-lived SCL tap, drain one uncompressed NV12 frame, copy its luma
+ * plane, tear the tap down.
+ *
+ * Port choice: every SCL output already has an owner — port0 is the main
+ * H.265 output (RING, 1:1), port1 carries the bound MJPEG channel, port2 is
+ * the stab tap.  Only **port3** (the NPU detector's) is available, and a user
+ * output depth may only ever be registered on a port with no downstream
+ * hardware bind (registering one on a bound port faults the MI_SYS allocator
+ * — the bug this endpoint shipped with on Star6E).  So port3 it is, taken
+ * through maruko_scl_ports so a capture loses to a running detector instead
+ * of reprogramming the tap underneath it.
+ *
+ * i6c ABI notes (these differ from i6e — see the SDK headers, never assume
+ * the Star6E layout): MI_SYS entry points carry a leading u16 soc_id, and the
+ * SCL port is configured through fnSetPortConfig(dev, chn, port, i6c_scl_port)
+ * with an explicit crop window rather than a VPE port-mode struct. */
+
+#define GRAY_TAP_PORT      3
+#define GRAY_TAP_OWNER     "snapshot"
+#define GRAY_BUFDATA_FRAME 1
+#define GRAY_TAP_MAX_DIM   1280u   /* long-side cap; QR/vision consumers */
+#define GRAY_MAX_DIM       8192u   /* sanity clamp on returned geometry */
+
+/* Layout copied from the proven detector definition in maruko_ipu_yolo.c. */
+typedef struct { MI_U16 x, y, w, h; } GrayRect;
+typedef struct {
+	int tile_mode, pixel_format, compress_mode, scan_mode;
+	int field_type, phy_layout_type;
+	MI_U16 width, height;
+	void *vir_addr[3];
+	MI_U64 phy_addr[3];
+	MI_U32 stride[3];
+	MI_U32 buf_size;
+	MI_U16 ring_start, ring_total;
+	struct { int type; union { MI_U32 global; } u; } isp;
+	GrayRect crop;
+} GrayFrameData;
+typedef struct {
+	MI_U64 pts, sideband;
+	int type;
+	MI_U8 eos, user_buf;
+	MI_U32 seq;
+	MI_U8 drop;
+	union { GrayFrameData frame; MI_U8 pad[512]; };
+	MI_U8 custom;
+} GrayBufInfo;
+
+typedef MI_S32 (*GrayGetBufFn)(MI_SYS_ChnPort_t *, GrayBufInfo *, MI_S32 *);
+typedef MI_S32 (*GrayPutBufFn)(MI_S32);
+typedef MI_S32 (*GrayMmapFn)(MI_U64 phy, MI_U32 size, void **vir, MI_U8 cache);
+typedef MI_S32 (*GrayMunmapFn)(void *vir, MI_U32 size);
+
+static GrayGetBufFn  g_gray_get_buf;
+static GrayPutBufFn  g_gray_put_buf;
+static GrayMmapFn    g_gray_mmap;
+static GrayMunmapFn  g_gray_munmap;
+static uint32_t g_gray_crop_x, g_gray_crop_y, g_gray_crop_w, g_gray_crop_h;
+
+void venc_jpeg_set_gray_crop(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+{
+	g_gray_crop_x = x;
+	g_gray_crop_y = y;
+	g_gray_crop_w = w;
+	g_gray_crop_h = h;
+}
+
+static int gray_load_syms(void)
+{
+	void *h = g_mi_sys.handle;
+
+	if (g_gray_get_buf && g_gray_put_buf && g_gray_mmap)
+		return 0;
+	if (!h)
+		return -1;
+	g_gray_get_buf = (GrayGetBufFn)dlsym(h, "MI_SYS_ChnOutputPortGetBuf");
+	g_gray_put_buf = (GrayPutBufFn)dlsym(h, "MI_SYS_ChnOutputPortPutBuf");
+	g_gray_mmap    = (GrayMmapFn)dlsym(h, "MI_SYS_Mmap");
+	g_gray_munmap  = (GrayMunmapFn)dlsym(h, "MI_SYS_Munmap");
+	if (!g_gray_get_buf || !g_gray_put_buf || !g_gray_mmap)
+		return -1;
+	return 0;
+}
+
+/* Tap geometry: the configured snapshot size with the long side capped.
+ * PGM is self-describing, so consumers read the real dims from the header. */
+static void gray_tap_dims(uint32_t *out_w, uint32_t *out_h)
+{
+	uint32_t w = g_snap_w ? g_snap_w : 1280;
+	uint32_t h = g_snap_h ? g_snap_h : 720;
+	uint32_t longest = (w > h) ? w : h;
+
+	if (longest > GRAY_TAP_MAX_DIM) {
+		w = (uint32_t)((uint64_t)w * GRAY_TAP_MAX_DIM / longest);
+		h = (uint32_t)((uint64_t)h * GRAY_TAP_MAX_DIM / longest);
+	}
+	w &= ~15u;
+	h &= ~1u;
+	if (w < 64) w = 64;
+	if (h < 64) h = 64;
+	*out_w = w;
+	*out_h = h;
+}
+
+/* Pack the Y plane of one NV12 frame into a malloc'd P5 PGM blob. */
+static int gray_frame_to_pgm(const GrayFrameData *fr, uint8_t **out_buf,
+	size_t *out_len)
+{
+	uint32_t w = fr->width, h = fr->height;
+	uint32_t stride = fr->stride[0] ? fr->stride[0] : w;
+	MI_U64 phy = fr->phy_addr[0];
+	void *vir = NULL;
+	char hdr[32];
+	int hlen;
+	size_t total;
+	uint8_t *out;
+	uint32_t row;
+
+	if (w == 0 || h == 0 || w > GRAY_MAX_DIM || h > GRAY_MAX_DIM || !phy)
+		return -EIO;
+	/* Non-cached (flag 0): reads see the latest DMA with no invalidate. */
+	if (g_gray_mmap(phy, stride * h, &vir, 0) != 0 || !vir)
+		return -EIO;
+
+	hlen = snprintf(hdr, sizeof(hdr), "P5\n%u %u\n255\n", w, h);
+	total = (size_t)hlen + (size_t)w * h;
+	out = malloc(total);
+	if (!out) {
+		g_gray_munmap(vir, stride * h);
+		return -ENOMEM;
+	}
+	memcpy(out, hdr, (size_t)hlen);
+	for (row = 0; row < h; ++row)
+		memcpy(out + hlen + (size_t)row * w,
+			(const uint8_t *)vir + (size_t)row * stride, w);
+	g_gray_munmap(vir, stride * h);
+
+	*out_buf = out;
+	*out_len = total;
+	return 0;
+}
+
+static int gray_drain_one(MI_SYS_ChnPort_t *tap, uint8_t **out_buf,
+	size_t *out_len, uint32_t timeout_ms)
+{
+	int64_t deadline = now_ms() + (int64_t)timeout_ms;
+
+	for (;;) {
+		GrayBufInfo buf;
+		MI_S32 handle = 0;
+
+		memset(&buf, 0, sizeof(buf));
+		if (g_gray_get_buf(tap, &buf, &handle) != 0) {
+			if (now_ms() >= deadline)
+				return -ETIMEDOUT;
+			usleep(2000);
+			continue;
+		}
+		if (buf.type != GRAY_BUFDATA_FRAME || !buf.frame.phy_addr[0]) {
+			g_gray_put_buf(handle);
+			if (now_ms() >= deadline)
+				return -ETIMEDOUT;
+			usleep(2000);
+			continue;
+		}
+		{
+			int rc = gray_frame_to_pgm(&buf.frame, out_buf, out_len);
+			g_gray_put_buf(handle);
+			return rc;
+		}
+	}
+}
+
+int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
+	uint32_t timeout_ms)
+{
+	MI_SYS_ChnPort_t tap;
+	i6c_scl_port p;
+	uint32_t tap_w = 0, tap_h = 0;
+	int port_enabled = 0, depth_set = 0, claimed = 0;
+	int rc;
+	MI_S32 ret;
+
+	if (!out_buf || !out_len)
+		return -EINVAL;
+	*out_buf = NULL;
+	*out_len = 0;
+	if (!g_have_scl_port || !g_mi_scl.fnSetPortConfig)
+		return -ENODEV;
+	if (g_gray_crop_w == 0 || g_gray_crop_h == 0)
+		return -ENODEV;   /* pipeline has not published a crop window yet */
+	if (gray_load_syms() != 0)
+		return -EIO;
+	if (timeout_ms == 0)
+		timeout_ms = 1500;
+
+	if (maruko_scl_tap_claim(GRAY_TAP_OWNER) != 0) {
+		char owner[16];
+		maruko_scl_tap_owner_copy(owner, sizeof(owner));
+		fprintf(stderr, "[jpeg-maruko] gray: SCL tap busy (owner=%s)\n",
+			owner[0] ? owner : "?");
+		return -EBUSY;
+	}
+	claimed = 1;
+
+	gray_tap_dims(&tap_w, &tap_h);
+
+	tap = (MI_SYS_ChnPort_t){ .module = I6_SYS_MOD_SCL, .device = 0,
+		.channel = 0, .port = GRAY_TAP_PORT };
+
+	memset(&p, 0, sizeof(p));
+	p.crop.x = (MI_U16)g_gray_crop_x;
+	p.crop.y = (MI_U16)g_gray_crop_y;
+	p.crop.width = (MI_U16)g_gray_crop_w;
+	p.crop.height = (MI_U16)g_gray_crop_h;
+	p.output.width = (MI_U16)tap_w;
+	p.output.height = (MI_U16)tap_h;
+	p.pixFmt = I6_PIXFMT_YUV420SP;
+	p.compress = (i6_common_compr)0;
+
+	ret = g_mi_scl.fnSetPortConfig(0, 0, GRAY_TAP_PORT, &p);
+	if (ret != 0) {
+		fprintf(stderr, "[jpeg-maruko] gray: SCL port%d config %ux%u failed "
+			"%d\n", GRAY_TAP_PORT, tap_w, tap_h, (int)ret);
+		rc = -EIO;
+		goto out;
+	}
+	ret = g_mi_scl.fnEnablePort(0, 0, GRAY_TAP_PORT);
+	if (ret != 0) {
+		fprintf(stderr, "[jpeg-maruko] gray: SCL port%d enable failed %d\n",
+			GRAY_TAP_PORT, (int)ret);
+		rc = -EIO;
+		goto out;
+	}
+	port_enabled = 1;
+
+	/* Legal here and only here: port3 carries no downstream bind. */
+	ret = g_mi_sys.fnSetChnOutputPortDepth(0, &tap, 2, 4);
+	if (ret != 0) {
+		fprintf(stderr, "[jpeg-maruko] gray: port%d depth failed %d\n",
+			GRAY_TAP_PORT, (int)ret);
+		rc = -EIO;
+		goto out;
+	}
+	depth_set = 1;
+
+	rc = gray_drain_one(&tap, out_buf, out_len, timeout_ms);
+
+out:
+	/* Depth reset BEFORE DisablePort, always — a stranded depth leaves the
+	 * kernel queueing output tasks for a consumer that is gone. */
+	if (depth_set)
+		(void)g_mi_sys.fnSetChnOutputPortDepth(0, &tap, 0, 0);
+	if (port_enabled)
+		(void)g_mi_scl.fnDisablePort(0, 0, GRAY_TAP_PORT);
+	if (claimed)
+		maruko_scl_tap_release(GRAY_TAP_OWNER);
 	return rc;
 }
 

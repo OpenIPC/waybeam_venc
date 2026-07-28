@@ -42,7 +42,7 @@ VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
 COMMON_CFLAGS := -Os -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VERSION=\"$(VENC_VERSION)\" -D_GNU_SOURCE -MMD -MP
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c lib/cJSON.c
 HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_respawn.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_wire.c
-MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c src/maruko_stabfill_probe.c src/maruko_ipu_yolo.c
+MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c src/maruko_stabfill_probe.c src/maruko_ipu_yolo.c src/maruko_scl_ports.c
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c src/star6e_ipu.c src/star6e_ipu_yolo.c src/star6e_vpe_ports.c src/star6e_awb.c
 # Image-stabilization framing module (Star6E).  STAB=1 (default) compiles it
 # in; STAB=0 drops the source + the -DHAVE_FRAMING_STAB define, so the binary
@@ -111,13 +111,17 @@ LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
         drivers-maruko ksrc-star6e drivers-star6e maruko-pull maruko-deploy maruko-full json_cli regscan \
         remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
-        webui webui-check
+        qr-decode qr-test-host qr-test-cli qr-test-extended webui webui-check
 
 help:
 	@echo "Targets:"
 	@echo "  make build       Build standalone binaries (default, SOC_BUILD=star6e)"
 	@echo "  make build SOC_BUILD=maruko"
 	@echo "  make lint        Fast warning check (-Wall -Werror, compile only)"
+	@echo "  make qr-decode   Build the freestanding QR decoder for SOC_BUILD"
+	@echo "  make qr-test-host Run the deterministic QR perspective corpus"
+	@echo "  make qr-test-cli Run decoder CLI and PGM parser regressions"
+	@echo "  make qr-test-extended Run the extended QR skew/defocus series"
 	@echo "  make lint SOC_BUILD=maruko"
 	@echo "  make stage       Build and stage runtime bundle in out/"
 	@echo "  make test        Run host-native unit tests"
@@ -222,6 +226,29 @@ $(IPU_PROBE_TARGET): $(IPU_PROBE_SRC) include/star6e_ipu.h include/detect_dequan
 	@mkdir -p $(@D)
 	$(CC) -Os -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Iinclude $(IPU_PROBE_SRC) -ldl -o $@
 
+# qr_decode — decode a QR code from a P5 PGM grayscale image. It is a
+# freestanding backend for scripts which fetch GET /api/v1/snapshot.pgm;
+# command/pairing semantics intentionally live outside this repository.
+# quirc (ISC) is vendored under tools/qr/quirc/. Cross-compiled for the target.
+QR_DECODE_TARGET := $(OUT_DIR)/qr_decode
+QR_DECODE_SRC    := tools/qr/qr_decode.c tools/qr/waybeam_qr_format.c \
+                    tools/qr/quirc/quirc.c \
+                    tools/qr/quirc/decode.c tools/qr/quirc/identify.c \
+                    tools/qr/quirc/version_db.c
+# Both supported targets are 32-bit ARM SoCs. quirc supports single-precision
+# perspective math specifically for this class of CPU; on Cortex-A7 this also
+# avoids the non-NEON double-precision path. Separate functions and data so
+# the standalone link can discard anything the bounded backend does not use.
+QR_MATH_CFLAGS   := -DQUIRC_FLOAT_TYPE=float -DQUIRC_USE_TGMATH
+QR_SIZE_CFLAGS   := -Os -ffunction-sections -fdata-sections
+QR_SIZE_LDFLAGS  := -Wl,--gc-sections
+qr-decode: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
+qr-decode: $(QR_DECODE_TARGET)
+
+$(QR_DECODE_TARGET): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
+	@mkdir -p $(@D)
+	$(CC) $(QR_SIZE_CFLAGS) $(SOC_CFLAGS) $(QR_MATH_CFLAGS) -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Itools/qr/quirc $(QR_DECODE_SRC) $(QR_SIZE_LDFLAGS) -lm -lrt -o $@
+
 stage: build
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
 	@if [ -n "$(DRV)" ]; then cp -f $(DRV)/*.so $(OUT_DIR)/lib/; fi
@@ -284,10 +311,11 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_venc_frame_ring.c \
                 tests/test_detect_dequant.c \
                 tests/test_detect_wire.c \
-                tests/test_star6e_vpe_ports.c
+                tests/test_star6e_vpe_ports.c \
+                tests/test_maruko_scl_ports.c
 # Production sources compiled into the test binary (pure-logic modules only).
 # sensor_select.c is included here; its MI_SNR_* deps are stubbed in test_sensor_select.c.
-TEST_LIB_SRCS := src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c lib/cJSON.c
+TEST_LIB_SRCS := src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c src/maruko_scl_ports.c lib/cJSON.c
 
 $(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/h26x_param_sets.h include/hevc_rtp.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h include/venc_frame_ring.h include/venc_shm_throttle.h
 	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $@
@@ -308,6 +336,33 @@ test-tsan:
 	./$(TEST_RUNNER)
 
 test-ci: test test-asan test-tsan
+
+QR_TEST_RUNNER := tests/test_qr_marker
+QR_HOST_DECODE := tests/qr_decode_host
+QR_TEST_SRCS   := tests/test_qr_marker.c tools/qr/waybeam_qr_format.c \
+		  tools/qr/quirc/quirc.c tools/qr/quirc/decode.c \
+		  tools/qr/quirc/identify.c tools/qr/quirc/version_db.c
+
+$(QR_TEST_RUNNER): $(QR_TEST_SRCS) tools/qr/waybeam_qr_format.h \
+		   tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
+	$(HOST_CC) -std=c99 -Wall -Wextra -g -O0 -D_GNU_SOURCE \
+		$(QR_MATH_CFLAGS) -Itools/qr -Itools/qr/quirc \
+		$(QR_TEST_SRCS) -lm -o $@
+
+qr-test-host: $(QR_TEST_RUNNER)
+	./$(QR_TEST_RUNNER)
+
+$(QR_HOST_DECODE): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h \
+		   tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
+	$(HOST_CC) $(QR_SIZE_CFLAGS) -Wall -Wextra -std=c99 -D_GNU_SOURCE \
+		$(QR_MATH_CFLAGS) -Itools/qr/quirc $(QR_DECODE_SRC) \
+		$(QR_SIZE_LDFLAGS) -lm -lrt -o $@
+
+qr-test-cli: $(QR_HOST_DECODE)
+	sh tests/test_qr_cli.sh "$(CURDIR)/$(QR_HOST_DECODE)"
+
+qr-test-extended: $(QR_TEST_RUNNER)
+	./$(QR_TEST_RUNNER) --extended
 
 toolchain:
 	@if [ ! -x "$(CC_BIN)" ]; then \
@@ -416,8 +471,8 @@ remote-test:
 
 # ── Verification targets ──────────────────────────────────────────────
 
-STAR6E_BINS := out/star6e/waybeam
-MARUKO_BINS := out/maruko/waybeam
+STAR6E_BINS := out/star6e/waybeam out/star6e/qr_decode
+MARUKO_BINS := out/maruko/waybeam out/maruko/qr_decode
 
 webui:
 	python3 tools/build_webui.py
@@ -425,9 +480,10 @@ webui:
 webui-check:
 	python3 tools/build_webui.py --check
 
-verify: webui-check
+verify: webui-check qr-test-host qr-test-cli
 	@echo "=== Building Maruko backend ==="
 	$(MAKE) build SOC_BUILD=maruko
+	$(MAKE) qr-decode SOC_BUILD=maruko
 	@echo ""
 	@echo "=== Verifying Maruko binaries ==="
 	@for f in $(MARUKO_BINS); do \
@@ -437,6 +493,7 @@ verify: webui-check
 	@echo ""
 	@echo "=== Building Star6E backend ==="
 	$(MAKE) build SOC_BUILD=star6e
+	$(MAKE) qr-decode SOC_BUILD=star6e
 	@echo ""
 	@echo "=== Verifying Star6E binaries ==="
 	@for f in $(STAR6E_BINS); do \
@@ -464,4 +521,6 @@ clean:
 	rm -rf out/star6e out/maruko
 	rm -f $(TIMING_PROBE_TARGET)
 	rm -f $(TEST_RUNNER)
+	rm -f $(QR_TEST_RUNNER)
+	rm -f $(QR_HOST_DECODE)
 	rm -f .build_soc

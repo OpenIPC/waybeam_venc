@@ -1,5 +1,6 @@
 #include "maruko_pipeline.h"
 #include "maruko_ipu_yolo.h"
+#include "maruko_scl_ports.h"
 
 #include "audio_codec.h"
 #include "debug_osd.h"
@@ -2525,6 +2526,10 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	 * round-trip through /api/v1/get|set. */
 	if (g_mi_scl_port1_enabled)
 		venc_jpeg_set_source(&ctx->scl_port1);
+	/* The grayscale tap programs SCL port3 itself and so needs the same crop
+	 * window the other taps are cut from. */
+	venc_jpeg_set_gray_crop(ctx->scl_crop_x, ctx->scl_crop_y,
+		ctx->scl_crop_w, ctx->scl_crop_h);
 	{
 		const VencConfigSnapshot *snap = &ctx->cfg.snapshot;
 		VencJpegConfig jcfg = {
@@ -4590,6 +4595,11 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	/* Tear down JPEG snapshot subsystem first — its MJPG VENC channel
 	 * is bound to the SCL port we're about to disable.  Idempotent. */
 	venc_jpeg_shutdown();
+	/* Both tap claimants are down by now (detector stopped above, snapshot
+	 * subsystem just shut down), so drop any lingering claim — a reinit must
+	 * not inherit a tap owner from the previous graph. */
+	maruko_scl_tap_reset();
+	venc_jpeg_set_gray_crop(0, 0, 0, 0);
 	if (g_mi_scl_port1_enabled) {
 		(void)g_mi_scl.fnDisablePort(0, 0, 1);
 		g_mi_scl_port1_enabled = 0;
