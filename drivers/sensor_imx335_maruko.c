@@ -826,14 +826,27 @@ static int pCus_poweron(ms_cus_sensor* handle, u32 idx)
 {
     ISensorIfAPI* sensor_if = handle->sensor_if_api;
 
-    /* Configure CSI receiver. Do NOT toggle power/reset pins here —
-     * the sensor stays powered from boot. Mode init functions that
-     * need a hardware reset (e.g. 60fps PLL change) call
-     * pCus_HardwareReset() explicitly. */
+    /* Full power-up sequence: drive PWDN and RESET explicitly rather than
+     * assuming the sensor is already live from boot.  Boards that hold the
+     * sensor in reset until a driver releases it answer no i2c at all, so
+     * every mode's init table NAKs and MI_SNR_Enable fails with
+     * "Sensor init fail!!" / "base init fail!!" — regardless of which mode
+     * is selected.  Same assert-then-release pulse as the IMX415 Maruko
+     * driver: hold PWDN+RESET low through CSI config, release PWDN, give the
+     * 1.8V/2.9V rails ~30ms to settle, release RESET, then start MCLK.  On
+     * boards where the sensor is already running this is a clean re-reset;
+     * the init tables are written afterwards either way. */
+    sensor_if->PowerOff(idx, handle->pwdn_POLARITY);
+    sensor_if->Reset(idx, handle->reset_POLARITY);
     sensor_if->SetIOPad(idx, handle->sif_bus, handle->interface_attr.attr_mipi.mipi_lane_num);
     sensor_if->SetCSI_Clk(idx, CUS_CSI_CLK_216M);
     sensor_if->SetCSI_Lane(idx, handle->interface_attr.attr_mipi.mipi_lane_num, ENABLE);
     sensor_if->SetCSI_LongPacketType(idx, 0, 0x1C00, 0);
+
+    sensor_if->PowerOff(idx, !handle->pwdn_POLARITY);
+    SENSOR_MSLEEP(31);
+    sensor_if->Reset(idx, !handle->reset_POLARITY);
+    SENSOR_UDELAY(1);
     sensor_if->MCLK(idx, 1, handle->mclk);
     return SUCCESS;
 }
