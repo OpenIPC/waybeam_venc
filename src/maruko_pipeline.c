@@ -3330,24 +3330,34 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	 * sensor already emits capt == output, so this is a no-op for modes 0-4. */
 	uint32_t scl_in_w = ctx->sensor.plane.capt.width;
 	uint32_t scl_in_h = ctx->sensor.plane.capt.height;
-	/* Always compute an AR-matched centre-crop, *ignoring* keep_aspect.
-	 * The I6C SCL cannot perform a single-axis (anamorphic) squeeze:
-	 * cropping the full width then downscaling only one axis stalls the
-	 * scaler and starves the encoder (device-verified 2026-07-04 on
-	 * ssc378qe — mode 4 1920x1080@100 -> 1440x1080 hung with 0 frames
-	 * until a 20s abort, and left the binned sensor wedged).  So the SCL
-	 * source-crop AR MUST match the output AR.  keep_aspect=false's
-	 * stretch-to-fill only ever "worked" when the ARs already matched
-	 * (where it is identical to keep_aspect=true); for a genuine AR
-	 * mismatch it requested a squeeze the hardware refuses, so we override
-	 * it here and crop instead. */
+	/* Honour keep_aspect: true centre-crops the source to the encode AR,
+	 * false passes the full sensor frame and lets the SCL scale both axes
+	 * non-uniformly (stretch-to-fill).
+	 *
+	 * A blanket override forcing the crop was added 2026-07-04 on the
+	 * strength of one device failure: mode 4 1920x1080@100 -> 1440x1080
+	 * hung with 0 frames.  That case is a *single-axis* squeeze — width
+	 * 1920->1440 with height unchanged at 1080 — which the SCL does refuse.
+	 * It does not generalise to a genuine two-axis non-uniform scale such
+	 * as 2496x1872 -> 1920x1080 (/1.30 wide, /1.73 tall), which the SCL
+	 * handles.  Overriding every AR mismatch broke stretch-to-fill for all
+	 * 4:3-sensor-to-16:9-output setups, so keep_aspect is passed through
+	 * again.
+	 *
+	 * Still true: a request that leaves one axis unscaled while the other
+	 * shrinks stalls the scaler — that one geometry keeps the centre-crop
+	 * override (device-verified fatal: 0 frames, wedged the binned
+	 * sensor), everything else passes through. */
+	bool single_axis_squeeze = !ctx->cfg.keep_aspect &&
+		(scl_in_w == out_w) != (scl_in_h == out_h);
 	PipelinePrecropRect precrop = pipeline_common_compute_precrop(
-		scl_in_w, scl_in_h, out_w, out_h, true);
-	if (!ctx->cfg.keep_aspect &&
-	    (precrop.w != scl_in_w || precrop.h != scl_in_h))
-		printf("> [maruko] note: keepAspect=false requests an anamorphic "
-			"squeeze the I6C SCL cannot do — using a centre-crop "
-			"%ux%u@%u,%u instead\n",
+		scl_in_w, scl_in_h, out_w, out_h,
+		ctx->cfg.keep_aspect || single_axis_squeeze);
+	if (single_axis_squeeze)
+		printf("> [maruko] note: keepAspect=false requests a "
+			"single-axis squeeze (%ux%u -> %ux%u) the I6C SCL "
+			"stalls on — using a centre-crop %ux%u@%u,%u instead\n",
+			scl_in_w, scl_in_h, out_w, out_h,
 			precrop.w, precrop.h, precrop.x, precrop.y);
 	/* configure_maruko_scl applies this AR rect as the SCL source crop
 	 * (real centre-crop), then scales it 1:1/uniformly to the encode
