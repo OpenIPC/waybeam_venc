@@ -1,5 +1,34 @@
 # History
 
+## [0.51.2] - 2026-07-30
+
+Maruko `isp.keepAspect=false` honours stretch-to-fill again.
+
+- **`keep_aspect` is passed through to the precrop again**
+  (`src/maruko_pipeline.c`) — v0.24.1 replaced the argument with a hardcoded
+  `true`, so every Maruko pipeline centre-cropped the sensor to the encode
+  aspect ratio and `isp.keepAspect=false` became a no-op (it only printed a
+  note saying the request had been overridden). That contradicts the
+  documented contract for the field: "when `false`, ... scales without
+  aspect-ratio cropping (image is stretched if sensor and encode AR differ)".
+
+  The override was justified by one device failure — mode 4 1920x1080@100 ->
+  1440x1080 hung with 0 frames — but that geometry is a *single-axis* squeeze
+  (width 1920->1440, height unchanged at 1080), which the SCL does refuse. It
+  does not generalise to a two-axis non-uniform scale, and blanket-overriding
+  every AR mismatch broke stretch-to-fill for every 4:3-sensor-to-16:9-output
+  setup.
+
+  Device-verified on SSC378QE + IMX335, mode 1 (2496x1872@50) ->
+  1920x1080 with `keepAspect=false`: no precrop applied
+  (`eff: 2496x1872`), SCL scales /1.30 wide and /1.73 tall, and the pipeline
+  holds a steady 50.0 fps with ISP `fifofullcnt=0` / `DropCnt=0` and VENC
+  `DropCnt=12` (start-up only). The full sensor field reaches the encoder.
+
+  A warning now fires for the geometry that genuinely does stall — one axis
+  left unscaled while the other shrinks — instead of silently rewriting every
+  caller's request.
+
 ## [0.51.1] - 2026-07-24
 
 Detector hardening follow-ups from the v0.51.0 upstream review — four
