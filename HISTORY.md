@@ -1,5 +1,33 @@
 # History
 
+## [0.60.1] - 2026-07-30
+
+Two Maruko fixes contributed by @tipoman9 (upstream PRs #103/#104, verified on
+SSC378QE + IMX335), inlined onto the fork with review amendments.
+
+- **IMX335 driver: full power-up pulse in `pCus_poweron()`**
+  (`drivers/sensor_imx335_maruko.c`) — the function only configured CSI and
+  MCLK and never touched PWDN/RESET (the toggle lived in
+  `pCus_HardwareReset()`, which nothing calls).  Boards that hold the sensor
+  in reset until the driver releases it therefore never answered i2c: every
+  mode's init table NAK'd and `MI_SNR_Enable` failed with `0xA01B201F`,
+  regardless of mode.  Amended from the contribution to the canonical SDK
+  sequence already used by the IMX415 Maruko driver: assert PWDN+RESET through
+  CSI config, release PWDN, 31 ms rail settle, release RESET, start MCLK — a
+  clean reset edge on every board, not just a pin release.
+
+- **`isp.keepAspect=false` honours stretch-to-fill again**
+  (`src/maruko_pipeline.c`) — v0.24.1 hardcoded the precrop to `keep_aspect=
+  true`, silently centre-cropping every AR-mismatched Maruko pipeline and
+  reducing `keepAspect=false` to a printed note, contradicting the documented
+  contract.  The override was justified by a *single-axis* squeeze failure
+  (1920x1080 -> 1440x1080, height unscaled — the I6C SCL genuinely refuses
+  that), but a two-axis non-uniform scale is fine (contributor-verified:
+  2496x1872 -> 1920x1080 at steady 50 fps, zero drops).  `keep_aspect` is
+  passed through again; amended from the contribution to **keep the
+  centre-crop override for the single-axis geometry** (device-verified fatal:
+  0 frames, wedged the binned sensor) instead of warn-and-proceed.
+
 ## [0.60.0] - 2026-07-30
 
 QR scanning moves to `GET /api/v1/snapshot.jpg`; `GET /api/v1/snapshot.pgm`
