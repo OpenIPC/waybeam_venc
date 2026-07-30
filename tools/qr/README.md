@@ -1,25 +1,27 @@
 # QR scanning backend
 
-`qr_decode` is a freestanding consumer of waybeam's grayscale snapshot
-endpoint. It reads a binary P5 PGM, identifies and decodes a QR symbol, checks
+`qr_decode` is a freestanding consumer of waybeam's snapshot endpoint. It
+reads a JPEG (or a binary P5 PGM), identifies and decodes a QR symbol, checks
 the minimal Waybeam transport envelope, and prints the 16-character payload.
 It does not interpret, authorize, persist, or execute that payload.
 
-The waybeam process remains responsible only for
-`GET /api/v1/snapshot.pgm`. Pairing, commands, boot scheduling, and service
-integration belong to a later standalone shell/action work package.
+The waybeam process remains responsible only for the snapshot endpoint,
+`GET /api/v1/snapshot.jpg` (the raw-PGM endpoint was retired in 0.60.0 — its
+per-request scaler tap could wedge the SoC).
+Pairing, commands, boot scheduling, and service integration belong to a later
+standalone shell/action work package.
 
 ## Pieces
 
 | File | Role |
 |---|---|
-| `qr_decode.c` | Freestanding PGM decoder and scan-pass orchestration. |
+| `qr_decode.c` | Freestanding JPEG/PGM decoder and scan-pass orchestration. |
 | `waybeam_qr_format.c` | Minimal Version-1/Q transport-envelope validation. |
 | `quirc/` | Vendored quirc library plus required outer-frame identification. |
 | `generate_qr.py` | Creates valid bounded SVG, PNG, or PGM markers. |
 | `qr_watch.sh` | Standalone polling helper; prints valid envelopes and performs no action. |
 | `tests/test_qr_marker.c` | Deterministic host perspective corpus and envelope tests. |
-| `tests/test_qr_cli.sh` | Decoder CLI, PGM hardening, and fixture regression tests. |
+| `tests/test_qr_cli.sh` | Decoder CLI, loader hardening, and fixture regression tests. |
 
 ## Minimal format
 
@@ -77,6 +79,13 @@ Stock quirc behavior is unchanged unless a caller enables marker mode.
 Render every module with integer scaling and no interpolation. The compressed
 edge still needs real sensor resolution: use roughly 3 px/module as a lab
 minimum and 4 px/module as a real-camera target.
+
+`snapshot.jpg` is sized by the `snapshot.width`/`snapshot.height` config
+(default: inherit the main stream), so those px/module budgets are spent
+against the MJPEG channel's resolution — set the channel larger when markers
+must decode from further away. JPEG q80 luma decodes markers reliably;
+`qr_decode` extracts the luma plane directly and its own tiling passes cover
+small codes anywhere in the frame.
 
 ## Generate a marker
 
@@ -221,9 +230,9 @@ completion.
 ## Standalone use
 
 ```bash
-curl -s http://127.0.0.1/api/v1/snapshot.pgm | qr_decode
-qr_decode --raw capture.pgm
-qr_decode --stats capture.pgm
+curl -s http://127.0.0.1/api/v1/snapshot.jpg | qr_decode
+qr_decode --raw capture.jpg
+qr_decode --stats capture.pgm   # PGM input still supported (bench corpora)
 ```
 
 For polling without action dispatch:
@@ -234,8 +243,13 @@ qr_watch.sh -c
 qr_watch.sh -c -v
 ```
 
-`snapshot.enabled` must be true. `qr_watch.sh` reports HTTP `409` when the
-scaler tap is occupied and `503` when snapshots are disabled. It exits after
+`snapshot.enabled` must be true. `qr_watch.sh` polls
+`GET /api/v1/snapshot.jpg`; use `-e` to point it elsewhere.
+
+The decode timings in the section above were measured on a 1280×720 capture;
+cost scales with the pixel count the endpoint returns.
+
+`qr_watch.sh` reports HTTP `503` when snapshots are disabled. It exits after
 the first decode by default; `-c` streams decoded envelopes continuously.
 The default stress cadence starts the next capture as soon as the preceding
 capture and decode return, while keeping capture starts at least 0.5 seconds

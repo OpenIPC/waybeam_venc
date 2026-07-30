@@ -60,20 +60,7 @@ void venc_jpeg_shutdown(void);
 int venc_jpeg_capture(uint8_t **out_buf, size_t *out_len,
 	uint32_t timeout_ms);
 
-/* Capture one grayscale frame as a binary P5 PGM (the luma/Y plane of the
- * same NV12 source the JPEG snapshot is derived from, at main-stream
- * resolution).  Allocates *out_buf (caller frees via venc_jpeg_free).
- * Returns 0 on success, -ENODEV if the snapshot subsystem is disabled,
- * -ETIMEDOUT if no frame within timeout_ms, -ENOSYS if the backend has no
- * grayscale hook, -EIO on SDK failure.
- *
- * Shares the snapshot subsystem's enable gate and mutex with
- * venc_jpeg_capture(): the two never run concurrently, and both are off
- * when snapshot.enabled is false. */
-int venc_jpeg_capture_gray(uint8_t **out_buf, size_t *out_len,
-	uint32_t timeout_ms);
-
-/* Free a buffer returned by venc_jpeg_capture() / venc_jpeg_capture_gray(). */
+/* Free a buffer returned by venc_jpeg_capture(). */
 void venc_jpeg_free(uint8_t *buf);
 
 /* Live-update MJPEG quality factor (1..99) on the running channel.
@@ -86,13 +73,6 @@ int venc_jpeg_set_quality(uint32_t q);
 /* HTTP handler for GET /api/v1/snapshot.jpg.  Returns image/jpeg on
  * success, application/json {ok:false,error:{...}} on failure. */
 int handle_snapshot_jpeg(int client_fd, const HttpRequest *req, void *ctx);
-
-/* HTTP handler for GET /api/v1/snapshot.pgm.  Returns a binary P5 PGM
- * (image/x-portable-graymap) on success, application/json
- * {ok:false,error:{...}} on failure.  Intended for on-device consumers
- * (e.g. a boot-time QR scan) that want raw grayscale without a JPEG
- * decode step. */
-int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx);
 
 /* ── Backend interface (implemented per-SOC) ─────────────────────────── */
 
@@ -111,22 +91,6 @@ int venc_jpeg_backend_init(const VencJpegConfig *cfg);
  * under the module lock.  Implementation does StartRecvPic → wait for
  * frame → GetStream → memcpy → ReleaseStream → StopRecvPic. */
 int venc_jpeg_backend_capture(uint8_t **out_buf, size_t *out_len,
-	uint32_t timeout_ms);
-
-/* Backend-private: register the scaler crop window the grayscale tap should
- * request.  Maruko needs it (its SCL taps are programmed with an explicit
- * crop); Star6E derives the tap from the VPE channel and ignores this.  Weak
- * no-op default, so a backend that does not need it links unchanged. */
-void venc_jpeg_set_gray_crop(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
-
-/* Backend-private: capture one grayscale frame as a complete binary P5
- * PGM blob (header + tightly-packed Y-plane rows).  Called from
- * venc_jpeg_capture_gray under the module lock.  Grabs an uncompressed
- * NV12 frame from the same VPE/SCL source the JPEG channel taps and
- * copies its luma plane.  Returns 0 on success (allocating *out_buf),
- * -ENOSYS when the backend does not implement grayscale capture,
- * -ETIMEDOUT if no frame arrives, -EIO on SDK failure. */
-int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 	uint32_t timeout_ms);
 
 /* Backend-private: destroy MJPEG channel.  Called from venc_jpeg_shutdown. */

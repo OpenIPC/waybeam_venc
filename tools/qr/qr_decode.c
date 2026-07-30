@@ -1,8 +1,10 @@
-/* qr_decode.c — decode a QR code from a binary P5 PGM (grayscale) image.
+/* qr_decode.c — decode a QR code from a JPEG or binary P5 PGM image.
  *
- * Reads a P5 PGM from a file argument (or stdin when the argument is "-" or
- * absent), finds a continuous outer-frame marker, and prints the payload of
- * the first successfully decoded QR code which passes the minimal Waybeam
+ * Reads the image from a file argument (or stdin when the argument is "-" or
+ * absent), sniffing the format from the first two bytes: JPEG (FF D8) is
+ * decoded to its luma plane via the vendored stb_image, P5 PGM is parsed
+ * directly.  Then finds a continuous outer-frame marker and prints the payload
+ * of the first successfully decoded QR code which passes the minimal Waybeam
  * transport-envelope checks. --raw disables those checks for diagnostics.
  *
  * Robustness for real captures (perspective, small codes in a large frame,
@@ -19,12 +21,13 @@
  * Exit codes:
  *   0  a QR code was decoded; payload written to stdout
  *   1  no QR code found / not decodable
- *   2  usage or input error (bad PGM, allocation failure)
+ *   2  usage or input error (bad image, allocation failure)
  *
- * Pairs with waybeam's GET /api/v1/snapshot.pgm endpoint:
- *   curl -s http://127.0.0.1/api/v1/snapshot.pgm | qr_decode
+ * Pairs with waybeam's GET /api/v1/snapshot.jpg endpoint:
+ *   curl -s http://127.0.0.1/api/v1/snapshot.jpg | qr_decode
  *
- * quirc (ISC) is vendored under tools/qr/quirc/.
+ * quirc (ISC) is vendored under tools/qr/quirc/; stb_image (public domain)
+ * under tools/qr/stb/, compiled JPEG-only in this TU.
  */
 
 #include "quirc.h"
@@ -36,6 +39,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* Vendored stb_image, JPEG decode only.  Never edit the vendored file; any
+ * build-side accommodation (like the unused-function silence for the parts
+ * the JPEG-only build never calls) lives here. */
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_JPEG
+#define STBI_NO_STDIO
+#define STBI_NO_HDR
+#define STBI_NO_LINEAR
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#include "stb_image.h"
+#pragma GCC diagnostic pop
 
 #define MIN_REGION   40   /* skip regions too small to hold a findable code */
 #define MAX_INPUT_DIM 4096u
@@ -146,19 +163,67 @@ static int allocation_failed(struct decode_stats *stats, const char *stage)
 	return 0;
 }
 
-/* Read the next unsigned integer from a P5 header, skipping whitespace and
- * '#' comment lines.  Returns 0 on success, -1 on EOF/format error. */
-static int pgm_read_uint(FILE *f, unsigned *out)
+/* Read the whole stream into a malloc'd buffer (needed for JPEG, which stb
+ * decodes from memory, and lets the format sniff work on stdin too).
+ * Bounded so a runaway pipe cannot exhaust RAM.  Returns the buffer (caller
+ * frees) and writes *len, or NULL on error. */
+#define MAX_INPUT_BYTES (64u * 1024u * 1024u)
+static uint8_t *slurp(FILE *f, size_t *len)
+{
+	size_t cap = 1u << 20, used = 0;
+	uint8_t *buf = malloc(cap);
+
+	if (!buf) {
+		fprintf(stderr, "qr_decode: out of memory\n");
+		return NULL;
+	}
+	for (;;) {
+		if (used == cap) {
+			if (cap >= MAX_INPUT_BYTES) {
+				fprintf(stderr, "qr_decode: input exceeds %u "
+					"bytes\n", MAX_INPUT_BYTES);
+				free(buf);
+				return NULL;
+			}
+			cap *= 2;
+			uint8_t *nb = realloc(buf, cap);
+			if (!nb) {
+				fprintf(stderr, "qr_decode: out of memory\n");
+				free(buf);
+				return NULL;
+			}
+			buf = nb;
+		}
+		size_t n = fread(buf + used, 1, cap - used, f);
+		used += n;
+		if (n == 0) {
+			if (ferror(f)) {
+				fprintf(stderr, "qr_decode: read error\n");
+				free(buf);
+				return NULL;
+			}
+			break;   /* EOF */
+		}
+	}
+	*len = used;
+	return buf;
+}
+
+/* Read the next unsigned integer from a P5 header in memory, skipping
+ * whitespace and '#' comment lines.  Advances *pos.  Returns 0 on success,
+ * -1 on end-of-buffer/format error. */
+static int pgm_read_uint(const uint8_t *buf, size_t len, size_t *pos,
+	unsigned *out)
 {
 	int c;
 
 	for (;;) {
-		c = fgetc(f);
-		if (c == EOF)
+		if (*pos >= len)
 			return -1;
+		c = buf[(*pos)++];
 		if (c == '#') {
-			while ((c = fgetc(f)) != EOF && c != '\n')
-				;
+			while (*pos < len && buf[*pos] != '\n')
+				(*pos)++;
 			continue;
 		}
 		if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
@@ -175,7 +240,9 @@ static int pgm_read_uint(FILE *f, unsigned *out)
 		if (v > (UINT_MAX - digit) / 10u)
 			return -1;
 		v = v * 10u + digit;
-		c = fgetc(f);
+		if (*pos >= len)
+			return -1;
+		c = buf[(*pos)++];
 	}
 	if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
 		return -1;
@@ -183,19 +250,17 @@ static int pgm_read_uint(FILE *f, unsigned *out)
 	return 0;
 }
 
-/* Load a binary P5 PGM into a freshly malloc'd 8-bit grayscale buffer.
- * Returns the pixel buffer (caller frees) and writes w/h, or NULL on error. */
-static uint8_t *pgm_load(FILE *f, unsigned *w, unsigned *h)
+/* Parse a binary P5 PGM from memory into a freshly malloc'd 8-bit grayscale
+ * buffer.  Same validations as the historical stream parser. */
+static uint8_t *pgm_from_mem(const uint8_t *buf, size_t len,
+	unsigned *w, unsigned *h)
 {
-	char magic[2] = {0};
+	size_t pos = 2;   /* past the sniffed "P5" magic */
 	unsigned maxval = 0;
 
-	if (fread(magic, 1, 2, f) != 2 || magic[0] != 'P' || magic[1] != '5') {
-		fprintf(stderr, "qr_decode: not a P5 PGM\n");
-		return NULL;
-	}
-	if (pgm_read_uint(f, w) != 0 || pgm_read_uint(f, h) != 0 ||
-	    pgm_read_uint(f, &maxval) != 0) {
+	if (pgm_read_uint(buf, len, &pos, w) != 0 ||
+	    pgm_read_uint(buf, len, &pos, h) != 0 ||
+	    pgm_read_uint(buf, len, &pos, &maxval) != 0) {
 		fprintf(stderr, "qr_decode: malformed PGM header\n");
 		return NULL;
 	}
@@ -210,16 +275,68 @@ static uint8_t *pgm_load(FILE *f, unsigned *w, unsigned *h)
 	 * pgm_read_uint already consumed it while scanning past maxval. */
 
 	size_t npix = (size_t)*w * *h;
+	if (len - pos < npix) {
+		fprintf(stderr, "qr_decode: short pixel data\n");
+		return NULL;
+	}
 	uint8_t *pix = malloc(npix);
 	if (!pix) {
 		fprintf(stderr, "qr_decode: out of memory\n");
 		return NULL;
 	}
-	if (fread(pix, 1, npix, f) != npix) {
-		fprintf(stderr, "qr_decode: short pixel data\n");
-		free(pix);
+	memcpy(pix, buf + pos, npix);
+	return pix;
+}
+
+/* Decode a JPEG from memory to its luma plane via stb_image. */
+static uint8_t *jpeg_from_mem(const uint8_t *buf, size_t len,
+	unsigned *w, unsigned *h)
+{
+	int iw = 0, ih = 0, comp = 0;
+	uint8_t *pix;
+
+	if (len > INT_MAX) {
+		fprintf(stderr, "qr_decode: JPEG too large\n");
 		return NULL;
 	}
+	pix = stbi_load_from_memory(buf, (int)len, &iw, &ih, &comp, 1);
+	if (!pix) {
+		fprintf(stderr, "qr_decode: JPEG decode failed: %s\n",
+			stbi_failure_reason());
+		return NULL;
+	}
+	if (iw <= 0 || ih <= 0 || (unsigned)iw > MAX_INPUT_DIM ||
+	    (unsigned)ih > MAX_INPUT_DIM) {
+		fprintf(stderr, "qr_decode: unsupported JPEG (w=%d h=%d; "
+			"need dimensions 1..%u)\n", iw, ih, MAX_INPUT_DIM);
+		stbi_image_free(pix);
+		return NULL;
+	}
+	*w = (unsigned)iw;
+	*h = (unsigned)ih;
+	/* stbi buffers come from malloc, so the caller's free() is fine. */
+	return pix;
+}
+
+/* Load a JPEG or binary P5 PGM into a freshly malloc'd 8-bit grayscale
+ * buffer, sniffing the format from the first two bytes.  Returns the pixel
+ * buffer (caller frees) and writes w/h, or NULL on error. */
+static uint8_t *image_load(FILE *f, unsigned *w, unsigned *h)
+{
+	size_t len = 0;
+	uint8_t *buf = slurp(f, &len);
+	uint8_t *pix = NULL;
+
+	if (!buf)
+		return NULL;
+	if (len >= 2 && buf[0] == 'P' && buf[1] == '5')
+		pix = pgm_from_mem(buf, len, w, h);
+	else if (len >= 2 && buf[0] == 0xFF && buf[1] == 0xD8)
+		pix = jpeg_from_mem(buf, len, w, h);
+	else
+		fprintf(stderr, "qr_decode: unrecognized input (need JPEG or "
+			"binary P5 PGM)\n");
+	free(buf);
 	return pix;
 }
 
@@ -860,7 +977,7 @@ int main(int argc, char **argv)
 
 	unsigned w = 0, h = 0;
 	uint64_t load_started = stats_now(&stats);
-	uint8_t *pix = pgm_load(f, &w, &h);
+	uint8_t *pix = image_load(f, &w, &h);
 	stats.load_us = stats_now(&stats) - load_started;
 	if (path)
 		fclose(f);

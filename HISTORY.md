@@ -1,5 +1,48 @@
 # History
 
+## [0.60.0] - 2026-07-30
+
+QR scanning moves to `GET /api/v1/snapshot.jpg`; `GET /api/v1/snapshot.pgm`
+(added 0.59.0) is **retired** and answers 404.  Contract 0.16.0.
+
+- **Why: the PGM path could kill the SoC.**  It captured through a
+  short-lived VPE port1 / SCL port3 tap programmed and torn down per request.
+  Device stress-testing on the Star6E bench showed the teardown can race an
+  in-flight MHAL buffer — `MI_VPE_IMPL_DisablePort ... mhal not return
+  buffer` — after which the whole VPE input FIFO jams
+  (`MI_SYS_IMPL_EnsureInputPortFifoEmpty ... no response in 1000ms!`
+  repeating) and the box ends in a kernel panic-reboot or a hard hang
+  needing a power cycle.  Two wedges in ~560 stressed captures; the race
+  window scales with frame size.  The race is kernel-side — userspace can
+  only stop rolling the dice.
+- **The MJPEG channel has no such cycle.**  It is created once at pipeline
+  start, stays bound, and pulse-encodes per capture (StartRecvPic →
+  GetStream → StopRecvPic) — the same path `snapshot.jpg` has always used.
+  Rapid back-to-back captures are safe, verified by re-running the same
+  kill suite against it.
+- **`qr_decode` now reads JPEG natively** (and still reads P5 PGM, sniffed
+  from the first two bytes; both work from a file or stdin).  Decode is the
+  vendored public-domain `stb_image` (`tools/qr/stb/`, JPEG-only build,
+  luma extracted directly).  The loader slurps bounded input to memory
+  first, so stdin JPEG works without seeking.
+- **`qr_decode` is built -O3 instead of -Os** — 1.66x faster end-to-end on
+  the Star6E bench (1265 ms vs 2206 ms on a 3.6 MB frame, best of 3) for
+  +24 KB of binary.  Decode latency is what the tool is judged on.
+- **VPE port1 / SCL port3 go back to stab framing and NPU detection
+  exclusively.**  The snapshot arbiter claim, the sticky `SetPortCrop`
+  restore discipline, the BSP-refusal fallback and the tap geometry helpers
+  are all deleted (~600 lines across both backends).  The 409
+  `snapshot_gray_busy` and 400 `bad_crop`/`bad_max_dim` error codes are gone.
+- **QR capture resolution now follows `snapshot.width`/`snapshot.height`**
+  (0 = inherit the main stream).  Size the MJPEG channel up when markers
+  must decode from further away — QR range scales with pixels per module.
+- **WebUI: new "Snapshot" card.**  `snapshot.enabled`, `quality`, `width`
+  and `height` carry `FIELD_UI` metadata, so the group renders from
+  `/api/v1/capabilities` with no dashboard edit; the section was API-only
+  before.
+- `qr_watch.sh` polls `snapshot.jpg`; `QR_TMP_PGM` env override renamed
+  `QR_TMP_IMG`.
+
 ## [0.59.0] - 2026-07-26
 
 New `GET /api/v1/snapshot.pgm` endpoint returns a grayscale frame as a binary

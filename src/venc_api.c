@@ -469,6 +469,32 @@ static const FieldUi ui_max_p_bytes = {
 	"An IDR is requested after each apply. Applied live."
 };
 
+/* UI descriptors for the snapshot subsystem.  The whole section was API-only
+ * (no static SECTIONS rows), so /snapshot.jpg could not be enabled or tuned
+ * from the dashboard at all — these give it a "Snapshot" group rendered
+ * purely from capabilities. */
+static const FieldUi ui_snapshot_enabled = {
+	"Snapshot", "Enabled", "toggle", 0, 0, 0, NULL,
+	"Gate for /api/v1/snapshot.jpg (MJPEG pulse-encode; also the QR-scan "
+	"source — qr_decode reads JPEG). Off means no MJPEG channel is "
+	"allocated and the endpoint answers 503."
+};
+static const FieldUi ui_snapshot_quality = {
+	"Snapshot", "JPEG quality", "number", 1, 99, 1, NULL,
+	"MJPEG q-factor for /api/v1/snapshot.jpg. Applied live on the running "
+	"channel."
+};
+static const FieldUi ui_snapshot_width = {
+	"Snapshot", "JPEG width", "number", 0, 8192, 16, NULL,
+	"Width of the MJPEG snapshot channel. 0 = inherit the main stream. This "
+	"is also the QR capture resolution — QR range scales with pixels per "
+	"module."
+};
+static const FieldUi ui_snapshot_height = {
+	"Snapshot", "JPEG height", "number", 0, 8192, 2, NULL,
+	"Height of the MJPEG snapshot channel. 0 = inherit the main stream."
+};
+
 static const FieldDesc g_fields[] = {
 	FIELD(system, web_port,        FT_UINT16, MUT_RESTART),
 	FIELD(system, overclock_level, FT_INT,    MUT_RESTART),
@@ -553,11 +579,11 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, gop_size,    FT_DOUBLE, MUT_RESTART),
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
 
-	FIELD(snapshot, enabled,   FT_BOOL,   MUT_RESTART),
-	FIELD(snapshot, quality,   FT_UINT,   MUT_LIVE),
+	FIELD_UI(snapshot, enabled, FT_BOOL, MUT_RESTART, &ui_snapshot_enabled),
+	FIELD_UI(snapshot, quality, FT_UINT, MUT_LIVE,    &ui_snapshot_quality),
 	FIELD(snapshot, channel,   FT_INT,    MUT_RESTART),
-	FIELD(snapshot, width,     FT_UINT,   MUT_RESTART),
-	FIELD(snapshot, height,    FT_UINT,   MUT_RESTART),
+	FIELD_UI(snapshot, width,  FT_UINT, MUT_RESTART, &ui_snapshot_width),
+	FIELD_UI(snapshot, height, FT_UINT, MUT_RESTART, &ui_snapshot_height),
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
@@ -2530,7 +2556,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.15.0\","
+		"\"contract_version\":\"0.16.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -3653,7 +3679,6 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	pthread_mutex_unlock(&g_cfg_mutex);
 
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
-	r |= venc_httpd_route("GET", "/api/v1/snapshot.pgm", handle_snapshot_pgm, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/version",      handle_version, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config",       handle_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config.json",  handle_config, NULL);

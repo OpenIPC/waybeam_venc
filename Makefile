@@ -120,7 +120,7 @@ help:
 	@echo "  make lint        Fast warning check (-Wall -Werror, compile only)"
 	@echo "  make qr-decode   Build the freestanding QR decoder for SOC_BUILD"
 	@echo "  make qr-test-host Run the deterministic QR perspective corpus"
-	@echo "  make qr-test-cli Run decoder CLI and PGM parser regressions"
+	@echo "  make qr-test-cli Run decoder CLI and image loader regressions"
 	@echo "  make qr-test-extended Run the extended QR skew/defocus series"
 	@echo "  make lint SOC_BUILD=maruko"
 	@echo "  make stage       Build and stage runtime bundle in out/"
@@ -226,10 +226,11 @@ $(IPU_PROBE_TARGET): $(IPU_PROBE_SRC) include/star6e_ipu.h include/detect_dequan
 	@mkdir -p $(@D)
 	$(CC) -Os -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Iinclude $(IPU_PROBE_SRC) -ldl -o $@
 
-# qr_decode — decode a QR code from a P5 PGM grayscale image. It is a
-# freestanding backend for scripts which fetch GET /api/v1/snapshot.pgm;
+# qr_decode — decode a QR code from a JPEG or P5 PGM grayscale image. It is a
+# freestanding backend for scripts which fetch GET /api/v1/snapshot.jpg;
 # command/pairing semantics intentionally live outside this repository.
-# quirc (ISC) is vendored under tools/qr/quirc/. Cross-compiled for the target.
+# quirc (ISC) is vendored under tools/qr/quirc/; stb_image (public domain,
+# JPEG-only build) under tools/qr/stb/. Cross-compiled for the target.
 QR_DECODE_TARGET := $(OUT_DIR)/qr_decode
 QR_DECODE_SRC    := tools/qr/qr_decode.c tools/qr/waybeam_qr_format.c \
                     tools/qr/quirc/quirc.c \
@@ -237,17 +238,25 @@ QR_DECODE_SRC    := tools/qr/qr_decode.c tools/qr/waybeam_qr_format.c \
                     tools/qr/quirc/version_db.c
 # Both supported targets are 32-bit ARM SoCs. quirc supports single-precision
 # perspective math specifically for this class of CPU; on Cortex-A7 this also
-# avoids the non-NEON double-precision path. Separate functions and data so
-# the standalone link can discard anything the bounded backend does not use.
+# avoids the non-NEON double-precision path.
 QR_MATH_CFLAGS   := -DQUIRC_FLOAT_TYPE=float -DQUIRC_USE_TGMATH
-QR_SIZE_CFLAGS   := -Os -ffunction-sections -fdata-sections
-QR_SIZE_LDFLAGS  := -Wl,--gc-sections
+# Optimize for SPEED, not size. Decode latency is what this tool is judged on:
+# a scan either lands inside the watcher's cadence or it does not, and the
+# identify/transform stages are float-heavy inner loops that -O3 unrolls and
+# vectorizes well on Cortex-A7 + NEON. Measured on the Star6E bench (imx335,
+# fixed grayscale captures, best of 3): -O3 was 1.66x faster than -Os
+# (1265 ms vs 2206 ms on a 3.6 MB frame) for +24 KB of binary — the wrong
+# trade to make for size on a device with megabytes of free overlay. Section
+# splitting plus --gc-sections stays: it drops what the bounded backend never
+# calls, and costs no speed.
+QR_OPT_CFLAGS    := -O3 -ffunction-sections -fdata-sections
+QR_GC_LDFLAGS    := -Wl,--gc-sections
 qr-decode: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
 qr-decode: $(QR_DECODE_TARGET)
 
-$(QR_DECODE_TARGET): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
+$(QR_DECODE_TARGET): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h tools/qr/stb/stb_image.h
 	@mkdir -p $(@D)
-	$(CC) $(QR_SIZE_CFLAGS) $(SOC_CFLAGS) $(QR_MATH_CFLAGS) -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Itools/qr/quirc $(QR_DECODE_SRC) $(QR_SIZE_LDFLAGS) -lm -lrt -o $@
+	$(CC) $(QR_OPT_CFLAGS) $(SOC_CFLAGS) $(QR_MATH_CFLAGS) -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Itools/qr/quirc -Itools/qr/stb $(QR_DECODE_SRC) $(QR_GC_LDFLAGS) -lm -lrt -o $@
 
 stage: build
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
@@ -353,10 +362,11 @@ qr-test-host: $(QR_TEST_RUNNER)
 	./$(QR_TEST_RUNNER)
 
 $(QR_HOST_DECODE): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h \
-		   tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
-	$(HOST_CC) $(QR_SIZE_CFLAGS) -Wall -Wextra -std=c99 -D_GNU_SOURCE \
-		$(QR_MATH_CFLAGS) -Itools/qr/quirc $(QR_DECODE_SRC) \
-		$(QR_SIZE_LDFLAGS) -lm -lrt -o $@
+		   tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h \
+		   tools/qr/stb/stb_image.h
+	$(HOST_CC) $(QR_OPT_CFLAGS) -Wall -Wextra -std=c99 -D_GNU_SOURCE \
+		$(QR_MATH_CFLAGS) -Itools/qr/quirc -Itools/qr/stb $(QR_DECODE_SRC) \
+		$(QR_GC_LDFLAGS) -lm -lrt -o $@
 
 qr-test-cli: $(QR_HOST_DECODE)
 	sh tests/test_qr_cli.sh "$(CURDIR)/$(QR_HOST_DECODE)"

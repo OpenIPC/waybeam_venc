@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.15.0`
+- `contract_version`: `0.16.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -204,7 +204,10 @@ edit or webui-blob rebuild is needed to surface a new module field.  Keys:
 dashboard's static schema.  The entire **Stabilization** section is data-driven:
 the four persisted `video0.stab_*` knobs (`stab_crop_pct`, `stab_kalman_q`,
 `stab_kalman_r`, `stab_recenter_speed`) plus the runtime-only `video0.pause_stab`
-(the live stab pause — not in `/api/v1/config`) are all surfaced this way.
+(the live stab pause — not in `/api/v1/config`) are all surfaced this way.  So
+is the **Snapshot** section (`snapshot.enabled`, `snapshot.quality`,
+`snapshot.width`, `snapshot.height`) — the switch for both snapshot endpoints,
+which was API-only before.
 
 ### `GET /api/v1/config.json`
 
@@ -846,51 +849,27 @@ Capture one JPEG frame from the snapshot subsystem and return it as
 running, `504` (`snapshot_timeout`) if no frame arrives, `500`
 (`snapshot_failed`) on backend error.  Not a JSON endpoint on success.
 
-### `GET /api/v1/snapshot.pgm`
+This is also the **QR-scanning source**: `tools/qr/qr_decode` reads JPEG
+directly (vendored stb_image, luma-only), so the boot-pairing flow is
+`curl … /snapshot.jpg | qr_decode`.  The MJPEG channel is created once at
+pipeline start and pulse-encoded per capture (`StartRecvPic → GetStream →
+StopRecvPic`) — rapid back-to-back captures are safe.  Frame geometry follows
+`snapshot.width`/`snapshot.height` (0 = inherit the main stream); QR range
+scales with pixels per module, so size the channel up for longer-distance
+markers.  Pairing, commands, boot scheduling, and action dispatch are
+deliberately outside the waybeam binary and this endpoint.
 
-Capture one **grayscale** frame and return it as a binary P5 PGM
-(`image/x-portable-graymap`): the luma (Y) plane of an uncompressed NV12
-frame, with no JPEG encode/decode step.
-
-Intended for freestanding on-device consumers that want raw grayscale — for
-example `tools/qr/qr_decode.c`. Pairing, commands, boot scheduling, and action
-dispatch are deliberately outside the waybeam binary and this endpoint.
-
-**Source and geometry.** The frame comes from a short-lived scaler tap,
-not from the encoder's output port — a user frame queue may only be
-registered on a port with no downstream hardware bind, and the encode port
-is bound to the H.265 encoder (registering one there faults the MI_SYS
-allocator).  The tap is programmed, drained for exactly one frame, and torn
-down per request; the encode path is never touched.
-
-| Backend | Tap | Contends with |
-|---|---|---|
-| Star6E (i6e) | VPE port1 | stab framing, NPU detection |
-| Maruko (i6c) | SCL port3 | NPU detection |
-
-Geometry starts from the configured snapshot size and caps the long side at
-**1280 px** (aspect-preserved, width 16-aligned) — PGM is self-describing,
-so read the real dimensions from the header rather than assuming the
-main-stream size.
-
-**The tap is exclusive.** Its other claimants own it for a whole run, so a
-capture attempted while one is active returns `409` (`snapshot_gray_busy`)
-rather than programming the tap underneath them.  Capture before those
-features start, or disable them.
-
-Shares the `snapshot.enabled` gate and the subsystem mutex with
-`snapshot.jpg` (the two never run concurrently).  Errors mirror
-`snapshot.jpg`, plus:
-
-| Status | Code | Meaning |
-|---|---|---|
-| `409` | `snapshot_gray_busy` | the scaler tap is held by stab framing or NPU detection |
-| `501` | `snapshot_gray_unsupported` | backend has no grayscale capture |
-
-Supported on both Star6E and Maruko.
+> **Retired:** `GET /api/v1/snapshot.pgm` (grayscale P5 PGM, added 0.59.0)
+> was removed in 0.60.0 and now answers `404`.  It captured through a
+> short-lived per-request VPE/SCL tap, and device stress-testing showed the
+> tap's enable/disable cycle can race an in-flight MHAL buffer and wedge the
+> whole VPE — up to a kernel panic or hard hang.  The MJPEG channel above has
+> no such cycle; consumers that want grayscale decode the JPEG's luma plane
+> (`qr_decode` does this natively).
 
 ```bash
-curl -s http://<device-ip>/api/v1/snapshot.pgm | qr_decode
+# QR scanning (boot pairing, bench)
+curl -s http://<device-ip>/api/v1/snapshot.jpg | qr_decode
 ```
 
 ### `GET /` (Web Dashboard)
@@ -1511,6 +1490,15 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.16.0` (breaking — snapshot.pgm retired):
+  - `GET /api/v1/snapshot.pgm` removed; answers `404`. Its per-request VPE/SCL
+    tap could wedge the SoC (device-verified: `DisablePort … mhal not return
+    buffer` → `EnsureInputPortFifoEmpty` storm). QR scanning now consumes
+    `GET /api/v1/snapshot.jpg`; `qr_decode` reads JPEG natively. Error codes
+    `bad_crop`, `bad_max_dim`, `snapshot_gray_busy` and
+    `snapshot_gray_unsupported` are gone with it.
+  - The `snapshot.*` config section is dashboard-visible (FieldUi group
+    "Snapshot", rendered from capabilities).
 - `0.15.0` (additive — Maruko detector parity):
   - Maruko now implements the ABI-3 detector host on SCL port 3, including
     live enable/disable and model reload, `detect.osd`, and the unchanged RTP

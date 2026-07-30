@@ -1506,6 +1506,26 @@ static int test_capabilities_emits_ui(void)
 				end && m && m < end);
 		}
 	}
+	/* The snapshot section is data-driven too — it has no static SECTIONS row,
+	 * so without this ui block neither snapshot endpoint is reachable from the
+	 * dashboard at all.  Confine the checks to the field's own object. */
+	{
+		const char *p = strstr(response, "\"snapshot.enabled\"");
+		CHECK("cap has snapshot.enabled", p != NULL);
+		if (p) {
+			const char *end = strchr(p, '}');
+			const char *g = strstr(p, "\"group\":\"Snapshot\"");
+			CHECK("cap snapshot.enabled ui group", end && g && g < end);
+		}
+		p = strstr(response, "\"snapshot.quality\"");
+		CHECK("cap has snapshot.quality", p != NULL);
+		if (p) {
+			const char *end = strchr(p, '}');
+			const char *c = strstr(p, "\"control\":\"number\"");
+			CHECK("cap snapshot.quality number control",
+				end && c && c < end);
+		}
+	}
 	return failures;
 }
 
@@ -1611,6 +1631,67 @@ static int test_capabilities_awb_fps_backend_gate(void)
 	return failures;
 }
 
+/* The snapshot surface is the single MJPEG route.  The PGM endpoints were
+ * retired in 0.60.0 (the per-request VPE tap could wedge the SoC — see
+ * HISTORY.md), so they must 404 rather than linger half-alive.  No backend is
+ * linked in the host runner, so the live route gets as far as the
+ * disabled-subsystem 503. */
+static int test_snapshot_routes(void)
+{
+	static const struct { const char *path; int want; } cases[] = {
+		{ "snapshot.jpg",        503 },
+		{ "snapshot.pgm",        404 },  /* retired 0.60.0 */
+		{ "snapshot-center.pgm", 404 },  /* never shipped */
+	};
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	size_t i;
+
+	venc_config_defaults(&cfg);
+	memset(&cb, 0, sizeof(cb));
+	if (venc_api_register(&cfg, "star6e", &cb) != 0) {
+		CHECK("snap-route register", 0);
+		return failures;
+	}
+	if (ensure_api_test_server() != 0) {
+		CHECK("snap-route server", 0);
+		return failures;
+	}
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+		char request[256], response[65536];
+		int status = 0, fd;
+		size_t sent = 0, req_len;
+
+		fd = connect_api_test_socket();
+		CHECK("snap-route connect", fd >= 0);
+		if (fd < 0)
+			continue;
+		req_len = (size_t)snprintf(request, sizeof(request),
+			"GET /api/v1/%s HTTP/1.0\r\n"
+			"Host: 127.0.0.1\r\n"
+			"\r\n", cases[i].path);
+		while (sent < req_len) {
+			ssize_t n = write(fd, request + sent, req_len - sent);
+			if (n < 0 && errno == EINTR)
+				continue;
+			if (n <= 0)
+				break;
+			sent += (size_t)n;
+		}
+		shutdown(fd, SHUT_WR);
+		CHECK("snap-route read",
+			read_http_response(fd, &status, response, sizeof(response)) == 0);
+		close(fd);
+		if (status != cases[i].want)
+			fprintf(stderr, "  snap-route '%s': got %d want %d\n",
+				cases[i].path, status, cases[i].want);
+		CHECK("snap-route status", status == cases[i].want);
+	}
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_api(void)
@@ -1649,6 +1730,7 @@ int test_venc_api(void)
 	failures += test_set_rejects_malformed_percent_escape();
 	failures += test_capabilities_emits_ui();
 	failures += test_capabilities_awb_fps_backend_gate();
+	failures += test_snapshot_routes();
 	stop_api_test_server();
 	return failures;
 }
