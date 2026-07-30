@@ -1,5 +1,19 @@
 # History
 
+## [0.60.2] - 2026-07-30
+
+Star6E IMX335 driver gets the same power-on fix as Maruko's in 0.60.1.
+
+- **`pCus_poweron()` asserts before releasing**
+  (`drivers/sensor_imx335_star6e.c`) — the first PWDN/RESET pair used the
+  release polarity, so the sequence was release → CSI config → release
+  again: no clean reset edge, the same flaw shape the 0.60.1 Maruko fix
+  amended.  Now the canonical SDK pulse used by both IMX415 drivers and the
+  0.60.1 Maruko IMX335 driver: assert PWDN+RESET through CSI config, release
+  PWDN, 31 ms rail settle, release RESET, start MCLK.  The IMX415 Star6E
+  driver already had the correct sequence — unchanged.
+  `sensors/star6e/sensor_imx335_star6e.ko` rebuilt (vermagic unchanged).
+
 ## [0.60.1] - 2026-07-30
 
 Two Maruko fixes contributed by @tipoman9 (upstream PRs #103/#104, verified on
