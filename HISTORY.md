@@ -28,6 +28,14 @@ SSC378QE + IMX335), inlined onto the fork with review amendments.
   centre-crop override for the single-axis geometry** (device-verified fatal:
   0 frames, wedged the binned sensor) instead of warn-and-proceed.
 
+- **`isp.keepAspect` un-gated on Maruko** (`src/venc_api.c`, contract
+  `0.16.1`, non-breaking) — found during device verification of the above:
+  the field was advertised `supported:false` on Maruko (added when the
+  blanket override made it a no-op), so `/api/v1/set` rejected it with
+  `not_implemented` and the WebUI greyed the control — the pipeline fix alone
+  was unreachable through the API.  Capabilities now report it supported;
+  dashboard tooltip rewritten for the single-axis-exception behaviour.
+
 ## [0.60.0] - 2026-07-30
 
 QR scanning moves to `GET /api/v1/snapshot.jpg`; `GET /api/v1/snapshot.pgm`

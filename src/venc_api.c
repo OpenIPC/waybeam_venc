@@ -758,16 +758,6 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	if (!canonical_key)
 		return 0;
 
-	/* isp.keep_aspect is a no-op on Maruko/I6C: the SCL cannot perform a
-	 * single-axis (anamorphic) squeeze, so the pipeline always centre-crops
-	 * to the output aspect ratio regardless of this flag.  Advertise it
-	 * unsupported so the WebUI greys the control and the set-path rejects
-	 * changes.  Kept in the schema (not removed) so a future HW path can
-	 * re-enable it without a config migration. */
-	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
-	    strcmp(canonical_key, "isp.keep_aspect") == 0)
-		return 0;
-
 	/* isp.awb_fps paces the Star6E userspace AWB loop (src/star6e_awb.c),
 	 * which exists because the i6e ISP-internal AWB does not converge.
 	 * Maruko has no such loop — its AWB is driven by the SDK's own 3A via
@@ -2556,7 +2546,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.16.0\","
+		"\"contract_version\":\"0.16.1\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);

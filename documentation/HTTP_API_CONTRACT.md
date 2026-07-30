@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.16.0`
+- `contract_version`: `0.16.1`
 - `status`: `active`
 
 ## Governance Rules
@@ -1490,6 +1490,13 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.16.1` (non-breaking):
+  - `isp.keepAspect` is now **supported on Maruko** — capabilities report
+    `supported:true` and `/api/v1/set` accepts it (previously rejected with
+    `not_implemented`). `false` passes the full sensor frame through and the
+    I6C SCL scales both axes non-uniformly (stretch-to-fill). Exception: a
+    single-axis squeeze (one axis already matching the output) stalls the
+    SCL, so that geometry is centre-cropped regardless, with a startup note.
 - `0.16.0` (breaking — snapshot.pgm retired):
   - `GET /api/v1/snapshot.pgm` removed; answers `404`. Its per-request VPE/SCL
     tap could wedge the SoC (device-verified: `DisablePort … mhal not return
