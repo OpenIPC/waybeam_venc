@@ -42,10 +42,13 @@ typedef struct {
 	int apply_qp_delta_calls;
 	int apply_verbose_calls;
 	int apply_awb_mode_calls;
+	int apply_awb_rate_calls;
+	uint32_t last_awb_rate;
 	int apply_server_calls;
 	int apply_max_payload_calls;
 	int apply_zoom_calls;
 	int apply_isp_bin_calls;
+	int apply_detect_reload_calls;
 
 	uint32_t last_bitrate;
 	uint32_t last_fps;
@@ -163,7 +166,9 @@ static int connect_api_test_socket(void)
 static int read_http_response(int fd, int *http_status, char *response_buf,
 	size_t response_buf_size)
 {
-	char raw[8192];
+	/* Must exceed the largest response under test — /api/v1/capabilities
+	 * grows with every config field and silently truncated here before. */
+	char raw[65536];
 	char *body;
 	size_t used = 0;
 	ssize_t n;
@@ -296,6 +301,13 @@ static int test_apply_awb_mode(int mode, uint32_t ct)
 	return 0;
 }
 
+static int test_apply_awb_rate(uint32_t hz)
+{
+	g_api_cb_state.apply_awb_rate_calls++;
+	g_api_cb_state.last_awb_rate = hz;
+	return 0;
+}
+
 static int test_apply_server(const char *uri)
 {
 	g_api_cb_state.apply_server_calls++;
@@ -326,6 +338,12 @@ static int test_apply_isp_bin(const char *path)
 	snprintf(g_api_cb_state.last_isp_bin,
 		sizeof(g_api_cb_state.last_isp_bin), "%s", path ? path : "");
 	return g_api_cb_state.fail_isp_bin ? -1 : 0;
+}
+
+static int test_apply_detect_reload(void)
+{
+	g_api_cb_state.apply_detect_reload_calls++;
+	return 0;
 }
 
 /* Whitebox access to internal functions via extern declarations.
@@ -433,6 +451,16 @@ static int test_field_support_by_backend(void)
 	CHECK("regular field supported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"video0.bitrate") == 1);
+	/* The userspace AWB loop is Star6E-only; Maruko greys the control. */
+	CHECK("awb_fps supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"isp.awb_fps") == 1);
+	CHECK("awb_fps unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"isp.awb_fps") == 0);
+	CHECK("awb_fps alias unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"isp.awbFps") == 0);
 
 	return failures;
 }
@@ -467,6 +495,125 @@ static int test_multi_set_live_success(void)
 	return failures;
 }
 
+/* detect.modelPath is now a live field: setting it fires apply_detect_reload
+ * (the detector swaps its .img without a pipeline respawn) instead of the
+ * MUT_RESTART reinit, so the video0 RTP stream is uninterrupted. */
+static int test_detect_model_path_live_reload(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_detect_reload = test_apply_detect_reload;
+
+	CHECK("detect modelPath+modelId live ok",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"detect.modelPath=/sd/person.img&detect.modelId=1",
+			&status, response, sizeof(response)) == 0);
+	CHECK("detect live status 200", status == 200);
+	CHECK("detect live model_path cfg",
+		strcmp(cfg.detect.model_path, "/sd/person.img") == 0);
+	CHECK("detect live model_id cfg", cfg.detect.model_id == 1);
+	/* One grouped reload for the whole detect batch, not one per field. */
+	CHECK("detect live reload once",
+		g_api_cb_state.apply_detect_reload_calls == 1);
+	/* No reinit: the stream keeps running through a live swap. */
+	CHECK("detect live no reinit", strstr(response,
+		"\"reinit_pending\":true") == NULL);
+
+	reset_api_cb_state();
+	CHECK("maruko detect modelPath live ok",
+		apply_set_query_http(&cfg, "maruko", &cb,
+			"detect.modelPath=/sd/person-i6c.img",
+			&status, response, sizeof(response)) == 0);
+	CHECK("maruko detect live status 200", status == 200);
+	CHECK("maruko detect live reload once",
+		g_api_cb_state.apply_detect_reload_calls == 1);
+
+	return failures;
+}
+
+/* Missing apply_detect_reload on a minimal backend → 501, the standard
+ * "not supported" preflight for a live field with no callback. */
+static int test_detect_model_path_no_callback(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));   /* apply_detect_reload = NULL */
+
+	(void)apply_set_query_http(&cfg, "star6e", &cb,
+		"detect.modelPath=/sd/x.img", &status, response, sizeof(response));
+	CHECK("detect no-callback status 501", status == 501);
+
+	return failures;
+}
+
+/* detect.netWidth stays MUT_RESTART (tap geometry needs the VPE port
+ * recreated): a single set persists + requests reinit, never a live reload. */
+static int test_detect_net_width_restart(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_detect_reload = test_apply_detect_reload;
+
+	CHECK("detect netWidth set ok",
+		apply_set_query_http(&cfg, "star6e", &cb, "detect.netWidth=416",
+			&status, response, sizeof(response)) == 0);
+	CHECK("detect netWidth status 200", status == 200);
+	CHECK("detect netWidth cfg", cfg.detect.net_width == 416);
+	CHECK("detect netWidth reinit pending",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+	CHECK("detect netWidth no live reload",
+		g_api_cb_state.apply_detect_reload_calls == 0);
+
+	return failures;
+}
+
+/* Geometry / threshold validators reject out-of-range detect values. */
+static int test_detect_field_validation(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_detect_reload = test_apply_detect_reload;
+
+	/* netWidth not a multiple of 32 → 409 validation error. */
+	(void)apply_set_query_http(&cfg, "star6e", &cb, "detect.netWidth=100",
+		&status, response, sizeof(response));
+	CHECK("detect netWidth ragged rejected", status == 409);
+
+	/* confThresh out of [0,1) → 409. */
+	(void)apply_set_query_http(&cfg, "star6e", &cb, "detect.confThresh=1.5",
+		&status, response, sizeof(response));
+	CHECK("detect confThresh out of range rejected", status == 409);
+
+	return failures;
+}
+
 static int test_multi_set_awb_grouped_apply(void)
 {
 	int failures = 0;
@@ -491,6 +638,72 @@ static int test_multi_set_awb_grouped_apply(void)
 	CHECK("multi awb mode value", g_api_cb_state.last_awb_mode == 1);
 	CHECK("multi awb ct value", g_api_cb_state.last_awb_ct == 6000);
 	CHECK("multi awb response alias", strstr(response, "isp.awbMode") != NULL);
+
+	return failures;
+}
+
+static int test_awb_rate_live_apply(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_awb_mode = test_apply_awb_mode;
+	cb.apply_awb_rate = test_apply_awb_rate;
+
+	/* Rate alone applies live and must NOT re-drive the AWB mode. */
+	CHECK("awbFps live ok",
+		apply_set_query_http(&cfg, "star6e", &cb, "isp.awbFps=10",
+			&status, response, sizeof(response)) == 0);
+	CHECK("awbFps live status 200", status == 200);
+	CHECK("awbFps live cfg", cfg.isp.awb_fps == 10);
+	CHECK("awbFps live rate call", g_api_cb_state.apply_awb_rate_calls == 1);
+	CHECK("awbFps live rate value", g_api_cb_state.last_awb_rate == 10);
+	CHECK("awbFps live no mode call",
+		g_api_cb_state.apply_awb_mode_calls == 0);
+	CHECK("awbFps live not restart",
+		strstr(response, "\"reinit_pending\":true") == NULL);
+
+	/* Batched with the mode: one call each, rate before mode so the mode
+	 * apply sees the committed rate when it decides AWB ownership. */
+	reset_api_cb_state();
+	CHECK("awbFps batch ok",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"isp.awbFps=0&isp.awbMode=auto",
+			&status, response, sizeof(response)) == 0);
+	CHECK("awbFps batch status 200", status == 200);
+	CHECK("awbFps batch cfg", cfg.isp.awb_fps == 0);
+	CHECK("awbFps batch rate call", g_api_cb_state.apply_awb_rate_calls == 1);
+	CHECK("awbFps batch rate value", g_api_cb_state.last_awb_rate == 0);
+	CHECK("awbFps batch mode call", g_api_cb_state.apply_awb_mode_calls == 1);
+
+	/* Out of range is rejected: 1000/hz is integer ms, so a large rate
+	 * would round the loop's sleep to zero and spin a core. */
+	reset_api_cb_state();
+	CHECK("awbFps range rejected",
+		apply_set_query_http(&cfg, "star6e", &cb, "isp.awbFps=5000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("awbFps range status 409", status == 409);
+	CHECK("awbFps range no apply",
+		g_api_cb_state.apply_awb_rate_calls == 0);
+
+	/* A backend without the loop advertises the field unsupported, so the
+	 * write is rejected up front rather than accepted and silently
+	 * dropped.  The WebUI greys the control off the same signal. */
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_awb_mode = test_apply_awb_mode;
+	CHECK("awbFps unsupported ok",
+		apply_set_query_http(&cfg, "maruko", &cb, "isp.awbFps=10",
+			&status, response, sizeof(response)) == 0);
+	CHECK("awbFps unsupported status 501", status == 501);
+	CHECK("awbFps unsupported message",
+		strstr(response, "not supported on this backend") != NULL);
 
 	return failures;
 }
@@ -1220,7 +1433,7 @@ static int test_capabilities_emits_ui(void)
 	VencConfig cfg;
 	VencApplyCallbacks cb;
 	int status = 0, fd;
-	char response[16384];
+	char response[65536];
 	char request[256];
 	size_t sent = 0, req_len;
 
@@ -1293,6 +1506,189 @@ static int test_capabilities_emits_ui(void)
 				end && m && m < end);
 		}
 	}
+	/* The snapshot section is data-driven too — it has no static SECTIONS row,
+	 * so without this ui block neither snapshot endpoint is reachable from the
+	 * dashboard at all.  Confine the checks to the field's own object. */
+	{
+		const char *p = strstr(response, "\"snapshot.enabled\"");
+		CHECK("cap has snapshot.enabled", p != NULL);
+		if (p) {
+			const char *end = strchr(p, '}');
+			const char *g = strstr(p, "\"group\":\"Snapshot\"");
+			CHECK("cap snapshot.enabled ui group", end && g && g < end);
+		}
+		p = strstr(response, "\"snapshot.quality\"");
+		CHECK("cap has snapshot.quality", p != NULL);
+		if (p) {
+			const char *end = strchr(p, '}');
+			const char *c = strstr(p, "\"control\":\"number\"");
+			CHECK("cap snapshot.quality number control",
+				end && c && c < end);
+		}
+	}
+	return failures;
+}
+
+/* The dashboard greys a control off `supported:false` in /api/v1/capabilities,
+ * so assert the JSON the browser actually consumes — not just the predicate
+ * behind it.  isp.awb_fps paces a loop only Star6E has; on Maruko the entry
+ * must still be present (schema is shared) but marked unsupported, with the
+ * tooltip explaining why. */
+static int test_capabilities_awb_fps_backend_gate(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0, fd;
+	char response[65536];
+	static const char *const req =
+		"GET /api/v1/capabilities HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+	size_t sent = 0, req_len = strlen(req);
+	const char *p, *end;
+
+	venc_config_defaults(&cfg);
+	memset(&cb, 0, sizeof(cb));
+
+	if (venc_api_register(&cfg, "maruko", &cb) != 0) {
+		CHECK("cap maruko register", 0);
+		return failures;
+	}
+	if (ensure_api_test_server() != 0) {
+		CHECK("cap maruko server", 0);
+		return failures;
+	}
+	fd = connect_api_test_socket();
+	CHECK("cap maruko connect", fd >= 0);
+	if (fd < 0)
+		return failures;
+	while (sent < req_len) {
+		ssize_t n = write(fd, req + sent, req_len - sent);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0) {
+			close(fd);
+			CHECK("cap maruko write", 0);
+			return failures;
+		}
+		sent += (size_t)n;
+	}
+	shutdown(fd, SHUT_WR);
+	CHECK("cap maruko read",
+		read_http_response(fd, &status, response, sizeof(response)) == 0);
+	close(fd);
+	CHECK("cap maruko status", status == 200);
+
+	p = strstr(response, "\"isp.awb_fps\"");
+	CHECK("cap maruko has awb_fps", p != NULL);
+	if (p) {
+		/* Confine to this field's entry so a neighbour can't satisfy it. */
+		end = strstr(p, "\"isp.keep_aspect\"");
+		CHECK("cap maruko awb_fps unsupported",
+			strstr(p, "\"supported\":false") != NULL &&
+			(!end || strstr(p, "\"supported\":false") < end));
+		CHECK("cap maruko awb_fps still live",
+			strstr(p, "\"mutability\":\"live\"") != NULL &&
+			(!end || strstr(p, "\"mutability\":\"live\"") < end));
+		CHECK("cap maruko awb_fps tooltip explains",
+			strstr(p, "no rate to set") != NULL &&
+			(!end || strstr(p, "no rate to set") < end));
+	}
+
+	/* Same build, Star6E backend: the control is live and adjustable. */
+	if (venc_api_register(&cfg, "star6e", &cb) != 0) {
+		CHECK("cap star6e re-register", 0);
+		return failures;
+	}
+	fd = connect_api_test_socket();
+	CHECK("cap star6e connect", fd >= 0);
+	if (fd < 0)
+		return failures;
+	sent = 0;
+	while (sent < req_len) {
+		ssize_t n = write(fd, req + sent, req_len - sent);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0) {
+			close(fd);
+			CHECK("cap star6e write", 0);
+			return failures;
+		}
+		sent += (size_t)n;
+	}
+	shutdown(fd, SHUT_WR);
+	CHECK("cap star6e read",
+		read_http_response(fd, &status, response, sizeof(response)) == 0);
+	close(fd);
+	p = strstr(response, "\"isp.awb_fps\"");
+	CHECK("cap star6e has awb_fps", p != NULL);
+	if (p) {
+		end = strstr(p, "\"isp.keep_aspect\"");
+		CHECK("cap star6e awb_fps supported",
+			strstr(p, "\"supported\":true") != NULL &&
+			(!end || strstr(p, "\"supported\":true") < end));
+	}
+
+	return failures;
+}
+
+/* The snapshot surface is the single MJPEG route.  The PGM endpoints were
+ * retired in 0.60.0 (the per-request VPE tap could wedge the SoC — see
+ * HISTORY.md), so they must 404 rather than linger half-alive.  No backend is
+ * linked in the host runner, so the live route gets as far as the
+ * disabled-subsystem 503. */
+static int test_snapshot_routes(void)
+{
+	static const struct { const char *path; int want; } cases[] = {
+		{ "snapshot.jpg",        503 },
+		{ "snapshot.pgm",        404 },  /* retired 0.60.0 */
+		{ "snapshot-center.pgm", 404 },  /* never shipped */
+	};
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	size_t i;
+
+	venc_config_defaults(&cfg);
+	memset(&cb, 0, sizeof(cb));
+	if (venc_api_register(&cfg, "star6e", &cb) != 0) {
+		CHECK("snap-route register", 0);
+		return failures;
+	}
+	if (ensure_api_test_server() != 0) {
+		CHECK("snap-route server", 0);
+		return failures;
+	}
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+		char request[256], response[65536];
+		int status = 0, fd;
+		size_t sent = 0, req_len;
+
+		fd = connect_api_test_socket();
+		CHECK("snap-route connect", fd >= 0);
+		if (fd < 0)
+			continue;
+		req_len = (size_t)snprintf(request, sizeof(request),
+			"GET /api/v1/%s HTTP/1.0\r\n"
+			"Host: 127.0.0.1\r\n"
+			"\r\n", cases[i].path);
+		while (sent < req_len) {
+			ssize_t n = write(fd, request + sent, req_len - sent);
+			if (n < 0 && errno == EINTR)
+				continue;
+			if (n <= 0)
+				break;
+			sent += (size_t)n;
+		}
+		shutdown(fd, SHUT_WR);
+		CHECK("snap-route read",
+			read_http_response(fd, &status, response, sizeof(response)) == 0);
+		close(fd);
+		if (status != cases[i].want)
+			fprintf(stderr, "  snap-route '%s': got %d want %d\n",
+				cases[i].path, status, cases[i].want);
+		CHECK("snap-route status", status == cases[i].want);
+	}
 	return failures;
 }
 
@@ -1306,7 +1702,12 @@ int test_venc_api(void)
 	failures += test_register_with_callbacks();
 	failures += test_field_support_by_backend();
 	failures += test_multi_set_live_success();
+	failures += test_detect_model_path_live_reload();
+	failures += test_detect_model_path_no_callback();
+	failures += test_detect_net_width_restart();
+	failures += test_detect_field_validation();
 	failures += test_multi_set_awb_grouped_apply();
+	failures += test_awb_rate_live_apply();
 	failures += test_multi_set_video_timing_grouped_apply();
 	failures += test_multi_set_rejects_restart_fields();
 	failures += test_multi_set_rejects_duplicate_fields();
@@ -1328,6 +1729,8 @@ int test_venc_api(void)
 	failures += test_multi_set_url_decodes_values();
 	failures += test_set_rejects_malformed_percent_escape();
 	failures += test_capabilities_emits_ui();
+	failures += test_capabilities_awb_fps_backend_gate();
+	failures += test_snapshot_routes();
 	stop_api_test_server();
 	return failures;
 }

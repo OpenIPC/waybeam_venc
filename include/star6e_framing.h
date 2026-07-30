@@ -7,12 +7,21 @@
  * drives it through this vtable.  Removing a module = drop its source file
  * from the build (see the STAB flag in the Makefile). */
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "venc_config.h"
 #include "star6e_pipeline.h"
 
 typedef struct FramingModule {
 	const char *preset_name;            /* matched against video0.framing */
+
+	/* True when this preset owns the single VPE0 port1 scaler tap (the
+	 * HW-crop "stab" motion tap).  False for presets that ride port0 only
+	 * ("stab-fill" drains the full port0 frame and composes in SW).  The
+	 * pipeline claims port1 from the arbiter (star6e_vpe_ports) for a module
+	 * that sets this, which is what makes it mutually exclusive with the NPU
+	 * detector on the hardware level. */
+	bool uses_vpe_port1;
 
 	int  (*enabled)(const VencConfig *);
 

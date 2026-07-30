@@ -1280,9 +1280,14 @@ static int pCus_poweron(ms_cus_sensor* handle, u32 idx)
     ISensorIfAPI* sensor_if = handle->sensor_if_api;
     SENSOR_DMSG("[%s] ", __FUNCTION__);
 
-    // Sensor power on sequence
-    sensor_if->PowerOff(idx, !handle->pwdn_POLARITY);
-    sensor_if->Reset(idx, !handle->reset_POLARITY);
+    /* Sensor power on sequence: assert PWDN+RESET through CSI config, then
+     * release with the rail-settle delay below — the canonical SDK pulse
+     * (same as the IMX415 drivers and the Maruko IMX335 driver since
+     * 0.60.1).  Previously these two calls used the release polarity, so
+     * the sensor never saw a clean reset edge on boards that boot with it
+     * live. */
+    sensor_if->PowerOff(idx, handle->pwdn_POLARITY);
+    sensor_if->Reset(idx, handle->reset_POLARITY);
     sensor_if->SetIOPad(idx, handle->sif_bus, handle->interface_attr.attr_mipi.mipi_lane_num);
     sensor_if->SetCSI_Clk(idx, CUS_CSI_CLK_216M);
     sensor_if->SetCSI_Lane(idx, handle->interface_attr.attr_mipi.mipi_lane_num, 1);

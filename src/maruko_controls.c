@@ -7,19 +7,25 @@
 #include "maruko_framing.h"
 #include "maruko_framing_host.h"
 #include "maruko_iq.h"
+#include "maruko_ipu_yolo.h"
 #include "maruko_output.h"
 #include "maruko_pipeline.h"
 #include "output_socket.h"
 #include "pipeline_common.h"
 #include "venc_config.h"
+#include "venc_api.h"
 #include "venc_jpeg.h"
+#include "venc_shm_throttle.h"
 
 #include <dlfcn.h>
+#include <errno.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ── ISP type definitions (match SigmaStar SDK ABI) ──────────────────── */
 
@@ -198,12 +204,25 @@ static int maruko_apply_rc_qp_delta(const i6c_venc_chn *attr, MI_VENC_RcParam_t 
 
 /* ── Basic controls (existing) ───────────────────────────────────────── */
 
-static int maruko_apply_bitrate(uint32_t kbps)
+/* Published clamp factor from the frame-shm ring-fill throttle
+ * (include/venc_shm_throttle.h).  Byte-symmetric with the Star6E side —
+ * same ring geometry, same control law, same authority rules. */
+static uint16_t g_output_throttle_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+
+/* want_idr=0 is the throttle path — see the matching note in
+ * src/star6e_controls.c apply_bitrate_ex(): IDR-ing every 200 ms while the
+ * ring backs up would feed the queue we are draining. */
+static int maruko_apply_bitrate_ex(uint32_t kbps, int want_idr)
 {
 	i6c_venc_chn attr = {0};
 	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
 	    g_ctx.venc_chn, &attr) != 0)
 		return -1;
+	/* Clamp first, absolute rails last — same pinned order as Star6E
+	 * (Maruko has no >120 fps CBR compensation step in between). */
+	kbps = venc_shm_throttle_scale(
+		__atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED),
+		kbps);
 	if (kbps > VENC_BITRATE_MAX_KBPS)
 		kbps = VENC_BITRATE_MAX_KBPS;
 	if (kbps < VENC_BITRATE_MIN_KBPS)
@@ -231,10 +250,36 @@ static int maruko_apply_bitrate(uint32_t kbps)
 	/* Force an IDR after a bitrate change so the decoder resyncs against
 	 * the new rate-control state.  Rate-limit gated to coalesce storms;
 	 * see the matching note in src/star6e_controls.c apply_bitrate(). */
-	if (idr_rate_limit_allow(g_ctx.venc_chn))
+	if (want_idr && idr_rate_limit_allow(g_ctx.venc_chn))
 		maruko_mi_venc_request_idr(g_ctx.venc_dev,
 			g_ctx.venc_chn, 1);
 	return 0;
+}
+
+static int maruko_apply_bitrate(uint32_t kbps)
+{
+	return maruko_apply_bitrate_ex(kbps, 1);
+}
+
+int maruko_controls_set_output_throttle(uint16_t permille)
+{
+	uint32_t cfg_kbps;
+	int rc;
+
+	__atomic_store_n(&g_output_throttle_permille, permille,
+		__ATOMIC_RELAXED);
+
+	if (!venc_api_cfg_trylock())
+		return -1;  /* config transaction in flight; retry next window */
+	cfg_kbps = g_ctx.vcfg ? g_ctx.vcfg->video0.bitrate : 0;
+	rc = cfg_kbps > 0 ? maruko_apply_bitrate_ex(cfg_kbps, 0) : 0;
+	venc_api_cfg_unlock();
+	return rc;
+}
+
+uint16_t maruko_controls_output_throttle(void)
+{
+	return __atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED);
 }
 
 static int maruko_apply_gop(uint32_t gop_size)
@@ -1208,6 +1253,9 @@ static char *maruko_query_transport_status(void)
 	const char *transport;
 	int pos;
 	uint32_t pressure_drops;
+	/* Clamp state — see the star6e_controls equivalent. */
+	uint16_t permille = maruko_controls_output_throttle();
+	uint32_t cfg_kbps = g_ctx.vcfg ? g_ctx.vcfg->video0.bitrate : 0;
 
 	if (!backend)
 		return NULL;
@@ -1265,7 +1313,9 @@ static char *maruko_query_transport_status(void)
 			"\"framesSent\":%llu,"
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
-			"\"usedSlots\":%u}}",
+			"\"usedSlots\":%u,"
+			"\"throttlePermille\":%u,"
+			"\"effectiveBitrateKbps\":%u}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1274,7 +1324,9 @@ static char *maruko_query_transport_status(void)
 			(unsigned long long)fill.writes,
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
-			(unsigned)fill.used_slots);
+			(unsigned)fill.used_slots,
+			(unsigned)permille,
+			(unsigned)venc_shm_throttle_scale(permille, cfg_kbps));
 	} else if ((backend->output.transport == VENC_OUTPUT_URI_UNIX ||
 	            backend->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           backend->output.socket_handle >= 0) {
@@ -1342,6 +1394,79 @@ static int maruko_apply_isp_bin(const char *path)
 	return maruko_pipeline_load_isp_bin_live(g_ctx.backend, path);
 }
 
+/*
+ * Detector graph changes are serialized on the pipeline thread, which is the
+ * only snapshot consumer.  The API thread posts a full config copy and waits
+ * boundedly; model loading remains best-effort and never rolls video config
+ * back after the old graph has been released.
+ */
+static struct {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	int pending;
+	int done;
+	VencConfig cfg;
+} g_detect_reload = {
+	.lock = PTHREAD_MUTEX_INITIALIZER,
+	.cond = PTHREAD_COND_INITIALIZER,
+};
+
+static int maruko_apply_detect_reload(void)
+{
+	struct timespec deadline;
+
+	if (!g_ctx.backend || !g_ctx.vcfg)
+		return 0;
+	pthread_mutex_lock(&g_detect_reload.lock);
+	g_detect_reload.cfg = *g_ctx.vcfg;
+	g_detect_reload.pending = 1;
+	g_detect_reload.done = 0;
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += 5;
+	while (!g_detect_reload.done) {
+		if (pthread_cond_timedwait(&g_detect_reload.cond,
+		    &g_detect_reload.lock, &deadline) == ETIMEDOUT)
+			break;
+	}
+	pthread_mutex_unlock(&g_detect_reload.lock);
+	return 0;
+}
+
+void maruko_controls_service_detect_reload(void)
+{
+	VencConfig cfg;
+	int pending;
+
+	pthread_mutex_lock(&g_detect_reload.lock);
+	pending = g_detect_reload.pending;
+	g_detect_reload.pending = 0;
+	if (pending)
+		cfg = g_detect_reload.cfg;
+	pthread_mutex_unlock(&g_detect_reload.lock);
+	if (!pending)
+		return;
+
+	if (g_ctx.backend) {
+		if (!cfg.detect.enabled) {
+			maruko_ipu_yolo_stop(g_ctx.backend);
+		} else if (strcmp(cfg.video0.framing, "off") != 0 ||
+		    cfg.video0.zoom_pct > 0.0) {
+			fprintf(stderr, "[maruko-ipu] live reload refused while "
+				"framing=%s zoom=%.2f\n", cfg.video0.framing,
+				cfg.video0.zoom_pct);
+		} else if (!g_ctx.backend->detect) {
+			(void)maruko_ipu_yolo_start(g_ctx.backend, &cfg);
+		} else {
+			(void)maruko_ipu_yolo_reload(g_ctx.backend, &cfg);
+		}
+	}
+
+	pthread_mutex_lock(&g_detect_reload.lock);
+	g_detect_reload.done = 1;
+	pthread_cond_broadcast(&g_detect_reload.cond);
+	pthread_mutex_unlock(&g_detect_reload.lock);
+}
+
 static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_bitrate = maruko_apply_bitrate,
 	.apply_fps = maruko_apply_fps,
@@ -1372,6 +1497,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_pause_stab = maruko_apply_pause_stab,
 	.apply_isp_bin = maruko_apply_isp_bin,
 	.apply_snapshot_quality = venc_jpeg_set_quality,
+	.apply_detect_reload = maruko_apply_detect_reload,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)

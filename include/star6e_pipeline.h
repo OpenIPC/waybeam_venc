@@ -126,6 +126,14 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
  *  Also clears pipeline-level persist state so the next start is cold. */
 void star6e_pipeline_stop(Star6ePipelineState *state);
 
+/** Start / stop the IPU detection tap on a running pipeline, under the VPE
+ *  port1 arbiter (start applies the framing-conflict policy and returns 0 only
+ *  if detection is up).  Called by the initial bring-up and by the live
+ *  `detect.enabled` toggle — both on the pipeline thread. */
+int star6e_pipeline_detect_start(Star6ePipelineState *state,
+	const VencConfig *vcfg);
+void star6e_pipeline_detect_stop(Star6ePipelineState *state);
+
 /** Disable VPE prescaler (cleanup during shutdown). */
 void star6e_pipeline_vpe_scl_preset_shutdown(void);
 
@@ -156,6 +164,12 @@ void star6e_pipeline_cold_boot_fps_rekick(const Star6ePipelineState *state,
 
 void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 	struct timespec *ts_last);
+
+/** Choose which algorithm owns AWB: 1 = userspace (the star6e_awb loop),
+ *  0 = ISP-internal (required by isp.awbMode=ct_manual, whose colour-
+ *  temperature apply path targets the internal algorithm).  Applied live when
+ *  the CUS3A handoff has already run. */
+void star6e_pipeline_set_awb_userspace(int on);
 
 /** Reset CUS3A handoff state (call on pipeline reinit). */
 void star6e_pipeline_cus3a_reset(void);

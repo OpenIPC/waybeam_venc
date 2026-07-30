@@ -317,6 +317,8 @@ static int send_frame_impl(RtpSidecarSender *s,
 		memset(&wire, 0, sizeof(wire));
 		wire.fill_pct        = transport_info->fill_pct;
 		wire.in_pressure     = transport_info->in_pressure ? 1 : 0;
+		wire.throttle_permille =
+			htons(transport_info->throttle_permille);
 		wire.transport_drops = htonl(transport_info->transport_drops);
 		wire.pressure_drops  = htonl(transport_info->pressure_drops);
 		wire.packets_sent    = htonl(transport_info->packets_sent);

@@ -32,7 +32,6 @@ static MI_VENC_CHN g_chn = -1;
 static int g_bound = 0;
 static int g_chn_created = 0;
 static uint32_t g_quality = 80;
-
 void venc_jpeg_set_source(const void *vpe_port_opaque)
 {
 	if (!vpe_port_opaque) {

@@ -119,6 +119,37 @@ int venc_api_get_active_precrop(uint16_t *x, uint16_t *y,
 	return valid;
 }
 
+/* VPE tap map published by the Star6E port arbiter (star6e_vpe_ports.c) and
+ * emitted in /api/v1/config runtime.vpe_taps.  Guarded by its own mutex: the
+ * pipeline thread writes it, the httpd thread reads it in handle_config. */
+static pthread_mutex_t g_vpe_taps_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_vpe_taps[192];
+static int g_vpe_taps_valid;
+
+void venc_api_set_vpe_taps(const char *json_obj)
+{
+	pthread_mutex_lock(&g_vpe_taps_mutex);
+	if (json_obj && json_obj[0]) {
+		snprintf(g_vpe_taps, sizeof(g_vpe_taps), "%s", json_obj);
+		g_vpe_taps_valid = 1;
+	} else {
+		g_vpe_taps_valid = 0;
+	}
+	pthread_mutex_unlock(&g_vpe_taps_mutex);
+}
+
+int venc_api_get_vpe_taps(char *buf, size_t buf_size)
+{
+	int valid;
+
+	pthread_mutex_lock(&g_vpe_taps_mutex);
+	valid = g_vpe_taps_valid;
+	if (valid && buf && buf_size > 0)
+		snprintf(buf, buf_size, "%s", g_vpe_taps);
+	pthread_mutex_unlock(&g_vpe_taps_mutex);
+	return valid;
+}
+
 void venc_api_set_config_path(const char *path)
 {
 	pthread_mutex_lock(&g_cfg_mutex);
@@ -129,6 +160,16 @@ void venc_api_set_config_path(const char *path)
 	/* Path change invalidates the last-saved cache so the first save to
 	 * the new path is unconditional. */
 	g_last_saved_valid = 0;
+	pthread_mutex_unlock(&g_cfg_mutex);
+}
+
+int venc_api_cfg_trylock(void)
+{
+	return pthread_mutex_trylock(&g_cfg_mutex) == 0 ? 1 : 0;
+}
+
+void venc_api_cfg_unlock(void)
+{
 	pthread_mutex_unlock(&g_cfg_mutex);
 }
 
@@ -337,6 +378,22 @@ typedef struct {
  * dashboard.html edit / webui-blob rebuild.  Ranges mirror the validators in
  * validate_field(); 0 = "use preset default" where noted.  group = the
  * collapsible section title the renderer buckets them under. */
+static const FieldUi ui_awb_fps = {
+	"ISP", "AWB rate (Hz)", "number", 0, 30, 1, NULL,
+	/* Reads on BOTH backends — this text is served to Maruko too, where the
+	 * control is greyed out, so it must not assert the i6e-only behaviour as
+	 * if it were universal. */
+	"Rate of the Star6E userspace auto-white-balance loop. The i6e "
+	"ISP-internal AWB does not converge, so on that SoC AWB is driven from "
+	"userspace instead. "
+	"Deliberately decoupled from frame rate — the same cost at 120fps as at "
+	"60fps. Default 15. 0 stops the loop and hands AWB back to the ISP, "
+	"which leaves it wherever it last was. "
+	"Ignored while awbMode=ct_manual. Applied live. "
+	"Not on Maruko/I6C, whose AWB is driven by the SDK's own 3A through the "
+	"CUS3A RunOnce pacer (which i6e does not export) — there is no rate to "
+	"set, so the control is disabled."
+};
 static const FieldUi ui_stab_crop_pct = {
 	"Stabilization", "Stab crop %", "number", 60, 100, 1, NULL,
 	"Kept-frame percentage for framing=stab / stab-fill. 0 = preset default "
@@ -383,22 +440,59 @@ static const FieldUi ui_pause_stab = {
 	"framing=off or zoom."
 };
 
+/* UI descriptor for outgoing.shm_throttle — the frame-shm ring-fill bitrate
+ * clamp.  Data-driven so the toggle appears without a SECTIONS edit; it is
+ * inert on every transport except frame-shm://. */
+static const FieldUi ui_shm_throttle = {
+	"Outgoing", "SHM ring throttle", "toggle", 0, 0, 0, NULL,
+	"frame-shm:// only: clamp the encoder bitrate when the ring backs up, so "
+	"a slow consumer never forces a whole-frame drop (which breaks the H.265 "
+	"reference chain). Never changes video0.bitrate — an external rate "
+	"controller keeps ownership of that. Default: on."
+};
+
 /* UI descriptors for the per-frame size caps (0.45.0).  Rendered as a
  * "Frame size caps" group purely from capabilities — the caps were API-only
  * until now (no static SECTIONS rows). */
 static const FieldUi ui_max_i_bytes = {
-	"Frame size caps", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
+	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
 	"When either cap is > 0 the RC priority switches to framebits-first so "
 	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
 	"An IDR is requested after each apply. Applied live."
 };
 static const FieldUi ui_max_p_bytes = {
-	"Frame size caps", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
+	"Video", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded P-frame size in bytes. 0 = unlimited. "
 	"When either cap is > 0 the RC priority switches to framebits-first so "
 	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
 	"An IDR is requested after each apply. Applied live."
+};
+
+/* UI descriptors for the snapshot subsystem.  The whole section was API-only
+ * (no static SECTIONS rows), so /snapshot.jpg could not be enabled or tuned
+ * from the dashboard at all — these give it a "Snapshot" group rendered
+ * purely from capabilities. */
+static const FieldUi ui_snapshot_enabled = {
+	"Snapshot", "Enabled", "toggle", 0, 0, 0, NULL,
+	"Gate for /api/v1/snapshot.jpg (MJPEG pulse-encode; also the QR-scan "
+	"source — qr_decode reads JPEG). Off means no MJPEG channel is "
+	"allocated and the endpoint answers 503."
+};
+static const FieldUi ui_snapshot_quality = {
+	"Snapshot", "JPEG quality", "number", 1, 99, 1, NULL,
+	"MJPEG q-factor for /api/v1/snapshot.jpg. Applied live on the running "
+	"channel."
+};
+static const FieldUi ui_snapshot_width = {
+	"Snapshot", "JPEG width", "number", 0, 8192, 16, NULL,
+	"Width of the MJPEG snapshot channel. 0 = inherit the main stream. This "
+	"is also the QR capture resolution — QR range scales with pixels per "
+	"module."
+};
+static const FieldUi ui_snapshot_height = {
+	"Snapshot", "JPEG height", "number", 0, 8192, 2, NULL,
+	"Height of the MJPEG snapshot channel. 0 = inherit the main stream."
 };
 
 static const FieldDesc g_fields[] = {
@@ -438,6 +532,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, connected_udp,     FT_BOOL,   MUT_RESTART),
 	FIELD(outgoing, audio_port,        FT_INT,    MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
+	FIELD_UI(outgoing, shm_throttle,   FT_BOOL,   MUT_LIVE, &ui_shm_throttle),
 
 	/* mDNS device beacon — read at boot / re-read on SIGHUP-respawn, so
 	 * all restart-required (no live re-announce path). */
@@ -448,6 +543,7 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(isp, ae_engine,         FT_STRING, MUT_RESTART),
 	FIELD(isp, ae_fps,            FT_UINT,   MUT_RESTART),
+	FIELD_UI(isp, awb_fps,        FT_UINT,   MUT_LIVE,    &ui_awb_fps),
 	FIELD(isp, keep_aspect,       FT_BOOL,   MUT_RESTART),
 	FIELD(isp, shutter_rule_180,  FT_BOOL,   MUT_RESTART),
 
@@ -483,11 +579,11 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, gop_size,    FT_DOUBLE, MUT_RESTART),
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
 
-	FIELD(snapshot, enabled,   FT_BOOL,   MUT_RESTART),
-	FIELD(snapshot, quality,   FT_UINT,   MUT_LIVE),
+	FIELD_UI(snapshot, enabled, FT_BOOL, MUT_RESTART, &ui_snapshot_enabled),
+	FIELD_UI(snapshot, quality, FT_UINT, MUT_LIVE,    &ui_snapshot_quality),
 	FIELD(snapshot, channel,   FT_INT,    MUT_RESTART),
-	FIELD(snapshot, width,     FT_UINT,   MUT_RESTART),
-	FIELD(snapshot, height,    FT_UINT,   MUT_RESTART),
+	FIELD_UI(snapshot, width,  FT_UINT, MUT_RESTART, &ui_snapshot_width),
+	FIELD_UI(snapshot, height, FT_UINT, MUT_RESTART, &ui_snapshot_height),
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
@@ -529,9 +625,25 @@ static const FieldDesc g_fields[] = {
 	FIELD(attitude, trim_roll_deg,  FT_FLOAT, MUT_RESTART),
 	FIELD(attitude, trim_pitch_deg, FT_FLOAT, MUT_RESTART),
 
-	FIELD(detect, enabled,        FT_BOOL,   MUT_RESTART),
+	/* Live, NOT MUT_RESTART: a respawn triggered while detection is running
+	 * leaves the successor's pipeline permanently frameless (stuck ISP CMDQ —
+	 * see star6e_controls_service_detect_reload), and toggling the detector
+	 * in place is both safe and what the operator wants anyway (no stream
+	 * outage).  The port1 tap is created/destroyed live by the same code the
+	 * model swap already uses. */
+	FIELD(detect, enabled,        FT_BOOL,   MUT_LIVE),
 	FIELD(detect, plugin,         FT_STRING, MUT_RESTART),
-	FIELD(detect, model_path,     FT_STRING, MUT_RESTART),
+	/* model_path/model_id/conf_thresh/nms_iou apply live: the detector plugin
+	 * + VPE tap are re-created without respawning the pipeline, so the video0
+	 * RTP stream is uninterrupted (see LIVE_GROUP_DETECT / apply_detect_reload).
+	 * net_width/net_height stay MUT_RESTART — a tap-geometry change needs the
+	 * VPE port recreated, which only the full respawn path does. */
+	FIELD(detect, model_path,     FT_STRING, MUT_LIVE),
+	FIELD(detect, model_id,       FT_UINT,   MUT_LIVE),
+	FIELD(detect, conf_thresh,    FT_FLOAT,  MUT_LIVE),
+	FIELD(detect, nms_iou,        FT_FLOAT,  MUT_LIVE),
+	FIELD(detect, net_width,      FT_UINT,   MUT_RESTART),
+	FIELD(detect, net_height,     FT_UINT,   MUT_RESTART),
 	FIELD(detect, firmware_path,  FT_STRING, MUT_RESTART),
 	FIELD(detect, infer_interval, FT_INT,    MUT_RESTART),
 	FIELD(detect, osd,            FT_BOOL,   MUT_RESTART),
@@ -577,6 +689,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "fpv.noiseLevel", "fpv.noise_level" },
 	{ "isp.aeEngine", "isp.ae_engine" },
 	{ "isp.aeFps", "isp.ae_fps" },
+	{ "isp.awbFps", "isp.awb_fps" },
 	{ "isp.keepAspect", "isp.keep_aspect" },
 	{ "isp.shutterRule180", "isp.shutter_rule_180" },
 	{ "audio.sampleRate", "audio.sample_rate" },
@@ -600,6 +713,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.stabAccuracy", "video0.stab_accuracy" },
 	{ "video0.pauseStab", "video0.pause_stab" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
+	{ "outgoing.shmThrottle", "outgoing.shm_throttle" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
 	{ "discovery.serviceType", "discovery.service_type" },
@@ -644,14 +758,15 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	if (!canonical_key)
 		return 0;
 
-	/* isp.keep_aspect is a no-op on Maruko/I6C: the SCL cannot perform a
-	 * single-axis (anamorphic) squeeze, so the pipeline always centre-crops
-	 * to the output aspect ratio regardless of this flag.  Advertise it
-	 * unsupported so the WebUI greys the control and the set-path rejects
-	 * changes.  Kept in the schema (not removed) so a future HW path can
-	 * re-enable it without a config migration. */
+	/* isp.awb_fps paces the Star6E userspace AWB loop (src/star6e_awb.c),
+	 * which exists because the i6e ISP-internal AWB does not converge.
+	 * Maruko has no such loop — its AWB is driven by the SDK's own 3A via
+	 * the CUS3A RunOnce pacer, which i6e does not export — so there is no
+	 * rate to set.  Advertise it unsupported: the WebUI greys the control
+	 * and the set-path rejects writes, rather than accepting a value that
+	 * would silently do nothing. */
 	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
-	    strcmp(canonical_key, "isp.keep_aspect") == 0)
+	    strcmp(canonical_key, "isp.awb_fps") == 0)
 		return 0;
 
 	/* Image stabilization (video0.framing=stab + the stab_* / pause_stab tuning
@@ -905,6 +1020,15 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (!framing_stab_accuracy_valid(cfg->video0.stab_accuracy))
 			return "stab_accuracy must be one of: auto, high, medium, low";
 	}
+	if (strcmp(key, "isp.awb_fps") == 0) {
+		/* Ceiling, not a tuning limit: the loop derives its sleep as
+		 * 1000/hz in integer ms, so anything above 1000 Hz would round
+		 * to a zero sleep and spin a core. 30 is already far past the
+		 * point where AWB tracking improves. */
+		if (cfg->isp.awb_fps > 30)
+			return "awb_fps must be in range [0, 30] "
+				"(0 = stop the userspace AWB loop)";
+	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
 			return "roi_qp must be in range [-30, 30]";
@@ -970,6 +1094,31 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (v < VENC_OUTPUT_PAYLOAD_MIN_BYTES ||
 		    v > VENC_OUTPUT_PAYLOAD_CEILING_BYTES)
 			return "outgoing.max_payload_size must be in range [576, 4000]";
+	}
+	if (strcmp(key, "detect.net_width") == 0 ||
+	    strcmp(key, "detect.net_height") == 0) {
+		/* Tap/model dims must be a multiple of 32 (>=64) — the YOLO head
+		 * strides 8/16/32.  0 opts into the default (640x352).  Mirrors the
+		 * check in star6e_ipu_yolo.c so a bad value is rejected before the
+		 * respawn instead of just disabling detection at bring-up. */
+		uint32_t v = strcmp(key, "detect.net_width") == 0 ?
+			cfg->detect.net_width : cfg->detect.net_height;
+		if (v != 0 && (v % 32 != 0 || v < 64))
+			return "detect.netWidth/netHeight must be 0 (default) or a "
+				"multiple of 32 (>=64)";
+	}
+	if (strcmp(key, "detect.conf_thresh") == 0) {
+		float v = cfg->detect.conf_thresh;
+		/* <=0 means "plugin default"; a positive value is a probability. */
+		if (!isfinite(v) || v < 0.0f || v >= 1.0f)
+			return "detect.confThresh must be in range [0, 1) "
+				"(0 = plugin default)";
+	}
+	if (strcmp(key, "detect.nms_iou") == 0) {
+		float v = cfg->detect.nms_iou;
+		if (!isfinite(v) || v < 0.0f || v >= 1.0f)
+			return "detect.nmsIou must be in range [0, 1) "
+				"(0 = plugin default)";
 	}
 	return NULL;
 }
@@ -1126,6 +1275,8 @@ typedef enum {
 	LIVE_GROUP_SNAPSHOT_QUALITY,
 	LIVE_GROUP_PAUSE_STAB,
 	LIVE_GROUP_MAX_FRAME_SIZE,
+	LIVE_GROUP_DETECT,
+	LIVE_GROUP_SHM_THROTTLE,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1134,6 +1285,7 @@ typedef struct {
 	int video_gop;
 	int awb_mode;
 	int awb_ct;
+	int awb_fps;
 	int outgoing_enabled;
 	int outgoing_server;
 	int isp_sensor_bin;
@@ -1281,7 +1433,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	if (strcmp(canonical_key, "isp.shutter_min_us") == 0)
 		return LIVE_GROUP_SHUTTER_MIN;
 	if (strcmp(canonical_key, "isp.awb_mode") == 0 ||
-	    strcmp(canonical_key, "isp.awb_ct") == 0)
+	    strcmp(canonical_key, "isp.awb_ct") == 0 ||
+	    strcmp(canonical_key, "isp.awb_fps") == 0)
 		return LIVE_GROUP_AWB;
 	if (strcmp(canonical_key, "system.verbose") == 0)
 		return LIVE_GROUP_VERBOSE;
@@ -1304,6 +1457,14 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	if (strcmp(canonical_key, "video0.max_i_bytes") == 0 ||
 	    strcmp(canonical_key, "video0.max_p_bytes") == 0)
 		return LIVE_GROUP_MAX_FRAME_SIZE;
+	if (strcmp(canonical_key, "detect.enabled") == 0 ||
+	    strcmp(canonical_key, "detect.model_path") == 0 ||
+	    strcmp(canonical_key, "detect.model_id") == 0 ||
+	    strcmp(canonical_key, "detect.conf_thresh") == 0 ||
+	    strcmp(canonical_key, "detect.nms_iou") == 0)
+		return LIVE_GROUP_DETECT;
+	if (strcmp(canonical_key, "outgoing.shm_throttle") == 0)
+		return LIVE_GROUP_SHM_THROTTLE;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1347,6 +1508,10 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "video0.pauseStab";
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return "video0.maxIBytes/maxPBytes";
+	case LIVE_GROUP_DETECT:
+		return "detect.enabled/model_path/model_id/conf_thresh/nms_iou";
+	case LIVE_GROUP_SHM_THROTTLE:
+		return "outgoing.shmThrottle";
 	default:
 		return "unknown";
 	}
@@ -1366,6 +1531,8 @@ static void note_live_group_touch(LiveBatchTouched *touched,
 		touched->awb_mode = 1;
 	else if (strcmp(canonical_key, "isp.awb_ct") == 0)
 		touched->awb_ct = 1;
+	else if (strcmp(canonical_key, "isp.awb_fps") == 0)
+		touched->awb_fps = 1;
 	else if (strcmp(canonical_key, "outgoing.enabled") == 0)
 		touched->outgoing_enabled = 1;
 	else if (strcmp(canonical_key, "outgoing.server") == 0)
@@ -1487,6 +1654,16 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_SHUTTER_MIN:
 		return g_cb->apply_shutter_min != NULL;
 	case LIVE_GROUP_AWB:
+		/* Backstop, not the primary gate: awbFps is advertised
+		 * unsupported on backends without the loop (see
+		 * venc_api_field_supported_for_backend), so a write is normally
+		 * rejected before it reaches here.  This keeps the apply below
+		 * from calling through a NULL pointer if a future backend is
+		 * added without its gate entry. */
+		if (touched && touched->awb_fps && !g_cb->apply_awb_rate)
+			return 0;
+		if (touched && !touched->awb_mode && !touched->awb_ct)
+			return 1;
 		return g_cb->apply_awb_mode != NULL;
 	case LIVE_GROUP_VERBOSE:
 		return g_cb->apply_verbose != NULL;
@@ -1511,6 +1688,14 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_pause_stab != NULL;
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return g_cb->apply_max_frame_size != NULL;
+	case LIVE_GROUP_DETECT:
+		return g_cb->apply_detect_reload != NULL;
+	case LIVE_GROUP_SHM_THROTTLE:
+		/* No callback: the clamp loop reads outgoing.shm_throttle from
+		 * the committed config on the pipeline thread every frame, so
+		 * commit_config_locked() *is* the apply.  Supported on every
+		 * backend, and inert on transports other than frame-shm://. */
+		return 1;
 	default:
 		return 0;
 	}
@@ -1560,6 +1745,8 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		}
 		if (touched && touched->awb_ct)
 			dst->isp.awb_ct = src->isp.awb_ct;
+		if (touched && touched->awb_fps)
+			dst->isp.awb_fps = src->isp.awb_fps;
 		break;
 	case LIVE_GROUP_VERBOSE:
 		dst->system.verbose = src->system.verbose;
@@ -1598,6 +1785,23 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		dst->video0.max_i_bytes = src->video0.max_i_bytes;
 		dst->video0.max_p_bytes = src->video0.max_p_bytes;
+		break;
+	case LIVE_GROUP_DETECT:
+		/* Copy the whole live detector group; the backend re-reads all of
+		 * them from the committed config on reload, and unchanged members
+		 * equal the base anyway (new_cfg starts as a copy of old_cfg).
+		 * `enabled` MUST be here — the apply callback decides start vs stop
+		 * vs reload from the committed value, so omitting it silently turns
+		 * a toggle into a same-state reload. */
+		dst->detect.enabled     = src->detect.enabled;
+		snprintf(dst->detect.model_path, sizeof(dst->detect.model_path),
+			"%s", src->detect.model_path);
+		dst->detect.model_id    = src->detect.model_id;
+		dst->detect.conf_thresh = src->detect.conf_thresh;
+		dst->detect.nms_iou     = src->detect.nms_iou;
+		break;
+	case LIVE_GROUP_SHM_THROTTLE:
+		dst->outgoing.shm_throttle = src->outgoing.shm_throttle;
 		break;
 	default:
 		break;
@@ -1680,6 +1884,15 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_SHUTTER_MIN:
 		return g_cb->apply_shutter_min(cfg->isp.shutter_min_us);
 	case LIVE_GROUP_AWB:
+		/* Rate first: it starts/stops the userspace loop, and the mode
+		 * apply below decides ownership from the committed awbFps. */
+		if (touched && touched->awb_fps) {
+			rc = g_cb->apply_awb_rate(cfg->isp.awb_fps);
+			if (rc != 0)
+				return -1;
+			if (!touched->awb_mode && !touched->awb_ct)
+				return 0;
+		}
 		mode = strcmp(cfg->isp.awb_mode, "ct_manual") == 0 ? 1 : 0;
 		return g_cb->apply_awb_mode(mode, cfg->isp.awb_ct);
 	case LIVE_GROUP_VERBOSE:
@@ -1725,6 +1938,15 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return g_cb->apply_max_frame_size(cfg->video0.max_i_bytes,
 			cfg->video0.max_p_bytes);
+	case LIVE_GROUP_DETECT:
+		/* cfg is already committed to g_cfg (commit_config_locked above),
+		 * so the backend reads the new model_path/model_id/conf/iou from the
+		 * live config when it performs the swap on the pipeline thread. */
+		return g_cb->apply_detect_reload();
+	case LIVE_GROUP_SHM_THROTTLE:
+		/* Committed above; the pipeline thread picks the new value up on
+		 * its next frame and releases or re-engages the clamp itself. */
+		return 0;
 	default:
 		return -2;
 	}
@@ -2324,7 +2546,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.13.0\","
+		"\"contract_version\":\"0.16.1\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2335,7 +2557,9 @@ static int handle_config(int fd, const HttpRequest *req, void *ctx)
 {
 	uint16_t px = 0, py = 0, pw = 0, ph = 0;
 	int precrop_valid;
-	char runtime[160];
+	char taps[192];
+	int taps_valid;
+	char runtime[384];
 
 	(void)req; (void)ctx;
 	pthread_mutex_lock(&g_cfg_mutex);
@@ -2345,12 +2569,22 @@ static int handle_config(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 500, "internal_error",
 			"failed to serialize config");
 
+	/* runtime block: active_precrop (VIF capture rect) and vpe_taps (VPE
+	 * scaler-output ownership).  Either may be absent; emit the object only
+	 * when at least one is present, comma-joining what is. */
 	precrop_valid = venc_api_get_active_precrop(&px, &py, &pw, &ph);
-	if (precrop_valid) {
-		snprintf(runtime, sizeof(runtime),
-			",\"runtime\":{\"active_precrop\":"
-			"{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u}}",
-			px, py, pw, ph);
+	taps_valid = venc_api_get_vpe_taps(taps, sizeof(taps));
+	if (precrop_valid || taps_valid) {
+		int n = snprintf(runtime, sizeof(runtime), ",\"runtime\":{");
+		if (precrop_valid)
+			n += snprintf(runtime + n, sizeof(runtime) - n,
+				"\"active_precrop\":{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u}",
+				px, py, pw, ph);
+		if (taps_valid)
+			n += snprintf(runtime + n, sizeof(runtime) - n,
+				"%s\"vpe_taps\":%s",
+				precrop_valid ? "," : "", taps);
+		snprintf(runtime + n, sizeof(runtime) - n, "}");
 	} else {
 		runtime[0] = '\0';
 	}

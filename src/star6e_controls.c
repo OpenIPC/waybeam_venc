@@ -4,17 +4,24 @@
 #include "output_socket.h"
 #include "pipeline_common.h"
 #include "star6e_audio.h"
+#include "star6e_awb.h"
 #include "star6e_cus3a.h"
+#include "star6e_ipu_yolo.h"
 #include "star6e_iq.h"
 #include "star6e_output.h"
 #include "star6e_runtime.h"
+#include "star6e_vpe_ports.h"
 #include "venc_api.h"
 #include "venc_jpeg.h"
+#include "venc_shm_throttle.h"
 
 #include <dlfcn.h>
+#include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct {
 	MI_VENC_CHN venc_chn;
@@ -196,11 +203,31 @@ static uint32_t rc_compensate_kbps(uint32_t kbps, uint32_t delivered_fps)
 	return kbps;
 }
 
-static int apply_bitrate(uint32_t kbps)
+/* Published clamp factor from the frame-shm ring-fill throttle
+ * (include/venc_shm_throttle.h).  Written by the pipeline thread, read on
+ * every bitrate apply including from the httpd thread — RELAXED atomics are
+ * enough, it is a naturally aligned advisory scalar. */
+static uint16_t g_output_throttle_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+
+/* want_idr=0 is the throttle path.  apply_bitrate() normally forces an IDR
+ * so the decoder resyncs against the new RC state, but the clamp re-programs
+ * the encoder as often as every 200 ms while the ring is backed up, and an
+ * IDR is the largest frame the encoder can emit — IDR-ing our way through
+ * congestion would feed the exact queue we are trying to drain.  Small
+ * between-IDR rate changes are absorbed by the rate controller anyway, which
+ * is the same reasoning the rate-limit gate below already relies on. */
+static int apply_bitrate_ex(uint32_t kbps, int want_idr)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bits;
 
+	/* Order is pinned: clamp first so the throttle scales the *requested*
+	 * rate, then the >120 fps exact-CBR compensation, then the absolute
+	 * MIN/MAX rails last so neither correction can push the programmed
+	 * value outside what the encoder accepts. */
+	kbps = venc_shm_throttle_scale(
+		__atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED),
+		kbps);
 	kbps = rc_compensate_kbps(kbps, g_star6e_control_ctx.delivered_fps);
 	if (kbps > VENC_BITRATE_MAX_KBPS)
 		kbps = VENC_BITRATE_MAX_KBPS;
@@ -244,9 +271,40 @@ static int apply_bitrate(uint32_t kbps)
 	 * after the window expires — acceptable because the encoder rate
 	 * controller absorbs small between-IDR changes without decoder
 	 * resync. */
-	if (idr_rate_limit_allow(g_star6e_control_ctx.venc_chn))
+	if (want_idr && idr_rate_limit_allow(g_star6e_control_ctx.venc_chn))
 		(void)MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1);
 	return 0;
+}
+
+static int apply_bitrate(uint32_t kbps)
+{
+	return apply_bitrate_ex(kbps, 1);
+}
+
+int star6e_controls_set_output_throttle(uint16_t permille)
+{
+	uint32_t cfg_kbps;
+	int rc;
+
+	__atomic_store_n(&g_output_throttle_permille, permille,
+		__ATOMIC_RELAXED);
+
+	/* Re-program from the *configured* bitrate so the clamp is a pure
+	 * multiplier on it — video0.bitrate is never written, which is what
+	 * keeps an external rate controller's write-on-change cache coherent
+	 * and the WebUI slider truthful. */
+	if (!venc_api_cfg_trylock())
+		return -1;  /* config transaction in flight; retry next window */
+	cfg_kbps = g_star6e_control_ctx.vcfg
+		? g_star6e_control_ctx.vcfg->video0.bitrate : 0;
+	rc = cfg_kbps > 0 ? apply_bitrate_ex(cfg_kbps, 0) : 0;
+	venc_api_cfg_unlock();
+	return rc;
+}
+
+uint16_t star6e_controls_output_throttle(void)
+{
+	return __atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED);
 }
 
 static int apply_encoder_gop(uint32_t gop_size)
@@ -719,6 +777,124 @@ static uint32_t ae_diag_isp_gain(const AeDiagSnapshot *snapshot)
 	return snapshot->plane.compGain;
 }
 
+typedef struct { uint32_t r, g, b; } AwbCus3aStatus;
+
+/* Applied AWB gains as the ISP reports them (MI_ISP_CUS3A_GetAwbStatus).  This
+ * is the truth under userspace AWB — MI_ISP_AWB_QueryInfo tracks the internal
+ * algorithm, which is not the one driving.  Returns 0 on success. */
+static int awb_cus3a_applied_gains(AwbCus3aStatus *out)
+{
+	typedef MI_S32 (*fn_t)(uint32_t, AwbCus3aInfo_t *);
+	void *handle = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	int rc = -1;
+
+	if (!handle)
+		return -1;
+	{
+		fn_t fn = (fn_t)dlsym(handle, "MI_ISP_CUS3A_GetAwbStatus");
+		AwbCus3aInfo_t info;
+
+		if (fn) {
+			memset(&info, 0, sizeof(info));
+			info.Size = sizeof(info);
+			if (fn(0, &info) == 0) {
+				out->r = info.CurRGain;
+				out->g = info.CurGGain;
+				out->b = info.CurBGain;
+				rc = 0;
+			}
+		}
+	}
+	dlclose(handle);
+	return rc;
+}
+
+void star6e_controls_ae_osd_status(Star6eAeOsdStatus *out)
+{
+	AeDiagSnapshot s;
+
+	memset(out, 0, sizeof(*out));
+	ae_diag_snapshot_collect(&s);
+
+	/* Sensor plane shutter/gain remain valid even if the AE query fails,
+	 * so surface those as long as either source answered. */
+	out->ae_valid = (s.info_ret == 0 || s.plane_ret == 0);
+	out->shutter_us = ae_diag_exposure_us(&s);
+	out->sgain_x1024 = ae_diag_sensor_gain(&s);
+	out->igain_x1024 = ae_diag_isp_gain(&s);
+	if (s.limit_ret == 0) {
+		out->max_shutter_us = s.limit.maxShutterUs;
+		out->max_sgain = s.limit.maxSensorGain;
+	}
+	if (s.info_ret == 0) {
+		out->ae_info_valid = 1;
+		out->luma_y = s.info.stHistWeightY.u32LumY;
+		out->scene_target = s.info.u32SceneTarget;
+		out->stable = s.info.bIsStable ? 1 : 0;
+		out->boundary = s.info.bIsReachBoundary ? 1 : 0;
+	}
+
+	{
+		typedef MI_S32 (*fn_awb_query_t)(uint32_t, AwbQueryInfo_t *);
+		void *handle = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+
+		if (handle) {
+			fn_awb_query_t fn = (fn_awb_query_t)dlsym(handle,
+				"MI_ISP_AWB_QueryInfo");
+			if (fn) {
+				AwbQueryInfo_t qi;
+
+				memset(&qi, 0, sizeof(qi));
+				if (fn(0, &qi) == 0) {
+					out->awb_valid = 1;
+					out->rgain = qi.u16Rgain;
+					out->bgain = qi.u16Bgain;
+					out->color_temp = qi.u16ColorTemp;
+					out->awb_stable = qi.bIsStable ? 1 : 0;
+				}
+			}
+			dlclose(handle);
+		}
+	}
+
+	/* When the userspace loop owns AWB, MI_ISP_AWB_QueryInfo reports the
+	 * ISP-internal algorithm's last state — frozen precisely because that
+	 * algorithm is no longer running.  Show the applied gains instead.
+	 *
+	 * Ownership is decided from config, NOT from whether the loop thread
+	 * happens to be up yet: keying off liveness made the row render the
+	 * stale internal view (with its misleading "adj") for the first refresh
+	 * after a start or reinit, then flip format once the thread ticked. */
+	{
+		const VencConfig *vc = g_star6e_control_ctx.vcfg;
+		int owns = vc && vc->isp.awb_fps > 0 &&
+			strcmp(vc->isp.awb_mode, "auto") == 0;
+
+		if (owns) {
+			uint32_t lr = 0, lg = 0, lb = 0, lticks = 0;
+			int lpaused = 0;
+			AwbCus3aStatus st;
+
+			out->awb_valid = 1;
+			out->awb_userspace = 1;
+			out->color_temp = 0;   /* not estimated by the loop */
+			out->awb_stable = 0;
+			if (star6e_awb_status(&lr, &lg, &lb, &lticks, &lpaused))
+				out->awb_ticks = lticks;
+			/* Applied gains straight from the ISP — correct even
+			 * before the loop's first tick has populated its own
+			 * cache. */
+			if (awb_cus3a_applied_gains(&st) == 0) {
+				out->rgain = st.r;
+				out->bgain = st.b;
+			} else if (lr || lb) {
+				out->rgain = lr;
+				out->bgain = lb;
+			}
+		}
+	}
+}
+
 static uint32_t ae_diag_sensor_fps(void)
 {
 	if (g_star6e_control_ctx.sensor_fps != 0)
@@ -986,6 +1162,29 @@ static int apply_awb_mode(int mode, uint32_t ct)
 	if (!handle)
 		return -1;
 
+	/* Push the colour temperature on EVERY apply, not just under ct_manual.
+	 * Both isp.awbCt and isp.awbMode route here, so writing it only in the
+	 * manual branch meant setting awbCt while in auto was recorded in config
+	 * but never reached the hardware register: /api/v1/awb reported one CT
+	 * while config claimed another, silently, until the next restart.  The
+	 * write does not itself change who drives AWB — the mode attr set below
+	 * does that — so priming it here simply keeps config and ISP in step. */
+	if (ct > 0) {
+		fn_ctmwb_t fn_ctmwb = (fn_ctmwb_t)dlsym(handle,
+			"MI_ISP_AWB_SetCTMwbAttr");
+
+		if (fn_ctmwb) {
+			AwbCtMwb_t mwb = { .u32CT = ct };
+			MI_S32 ct_ret = fn_ctmwb(0, &mwb);
+
+			if (ct_ret != 0) {
+				fprintf(stderr, "WARNING: MI_ISP_AWB_SetCTMwbAttr(%u) "
+					"failed: 0x%08x\n", ct, (unsigned)ct_ret);
+				ret = -1;
+			}
+		}
+	}
+
 	if (mode == 0) {
 		fn_get_t fn_get = (fn_get_t)dlsym(handle,
 			"MI_ISP_AWB_GetAttr");
@@ -1007,7 +1206,23 @@ static int apply_awb_mode(int mode, uint32_t ct)
 						(unsigned)awb_ret);
 					ret = -1;
 				} else {
+					const VencConfig *vc =
+						g_star6e_control_ctx.vcfg;
+
 					printf("> AWB mode: auto\n");
+					/* Userspace loop owns AWB in auto —
+					 * the ISP-internal algorithm does not
+					 * converge on this platform.  Only hand
+					 * it over when that loop is actually
+					 * running: with awbFps=0 nothing would
+					 * drive AWB at all, which is worse than
+					 * the non-converging internal one. */
+					if (vc && vc->isp.awb_fps > 0) {
+						star6e_pipeline_set_awb_userspace(1);
+						star6e_awb_set_paused(0);
+					} else {
+						star6e_pipeline_set_awb_userspace(0);
+					}
 				}
 			} else {
 				ret = -1;
@@ -1016,20 +1231,13 @@ static int apply_awb_mode(int mode, uint32_t ct)
 			ret = -1;
 		}
 	} else {
-		fn_ctmwb_t fn_ctmwb = (fn_ctmwb_t)dlsym(handle,
-			"MI_ISP_AWB_SetCTMwbAttr");
 		fn_get_t fn_get = (fn_get_t)dlsym(handle, "MI_ISP_AWB_GetAttr");
 		fn_set_t fn_set = (fn_set_t)dlsym(handle, "MI_ISP_AWB_SetAttr");
 
-		if (fn_ctmwb && fn_get && fn_set) {
-			AwbCtMwb_t mwb = { .u32CT = ct };
-			MI_S32 awb_ret = fn_ctmwb(0, &mwb);
-
-			if (awb_ret != 0) {
-				fprintf(stderr, "WARNING: MI_ISP_AWB_SetCTMwbAttr(%u) failed: 0x%08x\n",
-					ct, (unsigned)awb_ret);
-				ret = -1;
-			} else {
+		if (fn_get && fn_set) {
+			/* CT was written above — for both modes. */
+			{
+				MI_S32 awb_ret;
 				AwbAttr_t attr;
 
 				memset(&attr, 0, sizeof(attr));
@@ -1043,6 +1251,11 @@ static int apply_awb_mode(int mode, uint32_t ct)
 						ret = -1;
 					} else {
 						printf("> AWB mode: ct_manual (%uK)\n", ct);
+						/* ISP-internal owns AWB again so
+						 * the CT apply above reaches the
+						 * hardware; our loop stands down. */
+						star6e_awb_set_paused(1);
+						star6e_pipeline_set_awb_userspace(0);
 					}
 				} else {
 					ret = -1;
@@ -1055,6 +1268,31 @@ static int apply_awb_mode(int mode, uint32_t ct)
 
 	dlclose(handle);
 	return ret;
+}
+
+/* Live rate change for the userspace AWB loop.  Retuning the rate is just a
+ * volatile store the loop thread picks up on its next wake, but crossing 0 in
+ * either direction also moves ownership of the AWB module, so it has to
+ * follow the same rule the pipeline uses at startup: hand AWB to userspace
+ * only while this loop is running AND the operator asked for auto. */
+static int apply_awb_rate(uint32_t hz)
+{
+	const VencConfig *vc = g_star6e_control_ctx.vcfg;
+	int manual = vc && strcmp(vc->isp.awb_mode, "auto") != 0;
+
+	if (hz == 0) {
+		star6e_pipeline_set_awb_userspace(0);
+		star6e_awb_stop();
+		printf("> AWB: userspace loop stopped (awbFps=0)\n");
+		return 0;
+	}
+
+	/* Already running: this is a no-op start that just retunes the rate. */
+	if (star6e_awb_start(hz) != 0)
+		return -1;
+	star6e_awb_set_paused(manual);
+	star6e_pipeline_set_awb_userspace(!manual);
+	return 0;
 }
 
 static int apply_output_enabled(bool on)
@@ -1186,6 +1424,12 @@ static char *query_transport_status(void)
 	const char *transport;
 	int pos;
 	uint32_t pressure_drops;
+	/* Clamp state, reported alongside the ring so an operator can see the
+	 * gap between the bitrate they set and the one actually programmed.
+	 * video0.bitrate itself is deliberately untouched (D1). */
+	uint16_t permille = star6e_controls_output_throttle();
+	uint32_t cfg_kbps = g_star6e_control_ctx.vcfg
+		? g_star6e_control_ctx.vcfg->video0.bitrate : 0;
 
 	if (!ps)
 		return NULL;
@@ -1249,7 +1493,9 @@ static char *query_transport_status(void)
 			"\"framesSent\":%llu,"
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
-			"\"usedSlots\":%u}}",
+			"\"usedSlots\":%u,"
+			"\"throttlePermille\":%u,"
+			"\"effectiveBitrateKbps\":%u}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1258,7 +1504,9 @@ static char *query_transport_status(void)
 			(unsigned long long)fill.writes,
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
-			(unsigned)fill.used_slots);
+			(unsigned)fill.used_slots,
+			(unsigned)permille,
+			(unsigned)venc_shm_throttle_scale(permille, cfg_kbps));
 	} else if ((ps->output.transport == VENC_OUTPUT_URI_UNIX ||
 	            ps->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           ps->output.socket_handle >= 0) {
@@ -1321,6 +1569,116 @@ static char *query_attitude(void)
 	return star6e_attitude_query();
 }
 
+/* Detector live model swap.  The swap itself (VPE port1 recreate + plugin
+ * dlopen/dlclose) MUST run on the pipeline (encode) thread — the same thread
+ * that queries the detect snapshot every frame — so it is atomic w.r.t. that
+ * consumer and the failure path (which frees the detector context) can never
+ * race a snapshot() read.  The HTTP apply callback therefore only posts the
+ * request here and waits (bounded) for the pipeline thread to service it via
+ * star6e_controls_service_detect_reload(); a single slot coalesces bursts.
+ *
+ * The request carries a full VencConfig SNAPSHOT taken while the caller holds
+ * g_cfg_mutex, and the pipeline thread reloads from a private copy of it — it
+ * never reads the live g_cfg during the (potentially >3s) NPU graph load.  So
+ * the bounded wait is purely a courtesy timeout: even if it expires and the
+ * HTTP path re-commits g_cfg (or a second /set arrives), the in-flight reload
+ * keeps using its stable snapshot — no torn model_path read. */
+static struct {
+	pthread_mutex_t lock;
+	pthread_cond_t  cond;
+	int             pending;   /* request posted, not yet serviced */
+	int             done;      /* pipeline thread finished the swap  */
+	VencConfig      cfg;       /* config snapshot for the pending swap */
+} g_detect_reload = {
+	.lock = PTHREAD_MUTEX_INITIALIZER,
+	.cond = PTHREAD_COND_INITIALIZER,
+};
+
+static int apply_detect_reload(void)
+{
+	struct timespec deadline;
+
+	if (!g_star6e_control_ctx.pipeline || !g_star6e_control_ctx.vcfg)
+		return 0;   /* no pipeline bound — best-effort no-op */
+
+	pthread_mutex_lock(&g_detect_reload.lock);
+	/* Caller holds g_cfg_mutex, so *vcfg (== g_cfg) is a coherent read. */
+	g_detect_reload.cfg = *g_star6e_control_ctx.vcfg;
+	g_detect_reload.pending = 1;
+	g_detect_reload.done = 0;
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += 3;   /* the pipeline thread services within a frame */
+	while (!g_detect_reload.done) {
+		if (pthread_cond_timedwait(&g_detect_reload.cond,
+		    &g_detect_reload.lock, &deadline) == ETIMEDOUT)
+			break;
+	}
+	pthread_mutex_unlock(&g_detect_reload.lock);
+	/* Always report success: the request is committed and the swap is
+	 * best-effort (a failed load leaves detection off but keeps the
+	 * requested config).  Returning an error would trigger a config
+	 * rollback that cannot restore the already-torn-down old graph. */
+	return 0;
+}
+
+void star6e_controls_service_detect_reload(void)
+{
+	VencConfig cfg;
+	int do_it;
+
+	pthread_mutex_lock(&g_detect_reload.lock);
+	do_it = g_detect_reload.pending;
+	g_detect_reload.pending = 0;
+	if (do_it)
+		cfg = g_detect_reload.cfg;   /* private copy, stable across the reload */
+	pthread_mutex_unlock(&g_detect_reload.lock);
+	if (!do_it)
+		return;
+
+	if (g_star6e_control_ctx.pipeline) {
+		Star6ePipelineState *ps = g_star6e_control_ctx.pipeline;
+
+		/* detect.enabled is applied HERE rather than by a MUT_RESTART
+		 * respawn.  A respawn from a detect-active instance leaves the
+		 * successor permanently frameless: the ISP CMDQ stays stuck
+		 * mid-WAIT on ISP_TRIG and storms `ISP_IRQ_WQ_FRAME_START add WQ
+		 * error!` forever.  Device-localized on .232 to the inherited
+		 * /dev/mi_sys fd — the respawn child holds a copy, so that open
+		 * file's driver release never runs.  Closing it in the child is
+		 * this SoC's confirmed deadlock (see venc_respawn.c), and closing
+		 * every OTHER /dev/mi_* plus settling 8 s did not help, so no
+		 * fork+exec respawn can recover.  Toggling the tap in place skips
+		 * the respawn entirely — and costs no stream outage.
+		 *
+		 * Same thread, same atomicity as the model swap below, so the
+		 * per-frame snapshot() consumer never sees a half-built detector. */
+		if (!cfg.detect.enabled) {
+			if (ps->detect) {
+				fprintf(stderr, "[ipu-yolo] detect.enabled=false: "
+					"stopping detector\n");
+				star6e_pipeline_detect_stop(ps);
+			}
+		} else if (!ps->detect) {
+			fprintf(stderr, "[ipu-yolo] detect.enabled=true: "
+				"starting detector\n");
+			(void)star6e_pipeline_detect_start(ps, &cfg);
+		} else {
+			(void)star6e_ipu_yolo_reload(ps, &cfg);
+			/* If the swap left the detector down (bad new model, thread
+			 * create failure), free the port1 claim so runtime.vpe_taps
+			 * reads truthfully.  A no-op when "detect" does not own
+			 * port1. */
+			if (!ps->detect)
+				star6e_vpe_port1_release("detect");
+		}
+	}
+
+	pthread_mutex_lock(&g_detect_reload.lock);
+	g_detect_reload.done = 1;
+	pthread_cond_broadcast(&g_detect_reload.cond);
+	pthread_mutex_unlock(&g_detect_reload.lock);
+}
+
 static int attitude_calibrate_level(float *roll_deg, float *pitch_deg)
 {
 	if (!g_star6e_control_ctx.vcfg)
@@ -1349,6 +1707,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.query_awb_info = query_awb_info,
 	.query_isp_metrics = query_isp_metrics,
 	.apply_awb_mode = apply_awb_mode,
+	.apply_awb_rate = apply_awb_rate,
 	.query_iq_info = star6e_iq_query,
 	.apply_iq_param = star6e_iq_set,
 	.apply_max_payload_size = apply_max_payload_size,
@@ -1361,6 +1720,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_pause_stab = apply_pause_stab,
 	.query_attitude = query_attitude,
 	.attitude_calibrate_level = attitude_calibrate_level,
+	.apply_detect_reload = apply_detect_reload,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

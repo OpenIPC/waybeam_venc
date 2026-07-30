@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.13.0`
+- `contract_version`: `0.16.1`
 - `status`: `active`
 
 ## Governance Rules
@@ -112,7 +112,8 @@ Response `200`:
       "debug": { "showOsd": false }
     },
     "runtime": {
-      "active_precrop": { "x": 0, "y": 240, "w": 2560, "h": 1440 }
+      "active_precrop": { "x": 0, "y": 240, "w": 2560, "h": 1440 },
+      "vpe_taps": { "port0": ["main", "jpeg"], "port1": "detect" }
     }
   }
 }
@@ -125,6 +126,16 @@ part of the editable config:
   any sensor overscan offsets or SCL crop origin). Present whenever a
   Star6E or Maruko pipeline has been started; absent before pipeline start
   or after pipeline stop.
+- `vpe_taps` — VPE scaler-output ownership (Star6E only; absent on Maruko
+  and before pipeline start). `port0` is the main SCL output, a 1:N-shareable
+  buffer listing its consumers (`main` — the H.265 encoder, always present;
+  plus `jpeg` when the snapshot channel is up and `record` when a dual/record
+  channel is bound — these bind alongside on the same buffer, not a second
+  scaler). `port1` is the **single** second scaler output: a string naming its
+  sole owner (`"stab"` or `"detect"`), or `null` when free. The arbiter refuses
+  a second `port1` claim, so `stab` and `detect` are mutually exclusive on the
+  hardware; `stab-fill` rides `port0` only (no `port1` tap) but stays mutually
+  exclusive with `detect` by resource policy.
 
 ### `GET /api/v1/capabilities`
 
@@ -193,7 +204,10 @@ edit or webui-blob rebuild is needed to surface a new module field.  Keys:
 dashboard's static schema.  The entire **Stabilization** section is data-driven:
 the four persisted `video0.stab_*` knobs (`stab_crop_pct`, `stab_kalman_q`,
 `stab_kalman_r`, `stab_recenter_speed`) plus the runtime-only `video0.pause_stab`
-(the live stab pause — not in `/api/v1/config`) are all surfaced this way.
+(the live stab pause — not in `/api/v1/config`) are all surfaced this way.  So
+is the **Snapshot** section (`snapshot.enabled`, `snapshot.quality`,
+`snapshot.width`, `snapshot.height`) — the switch for both snapshot endpoints,
+which was API-only before.
 
 ### `GET /api/v1/config.json`
 
@@ -531,7 +545,7 @@ curl "http://<device-ip>/api/v1/set?outgoing.server=udp://<receiver-ip>:5600"
   - `shm://NAME` — shared-memory RTP-packet ring buffer
   - `frame-shm://NAME` — shared-memory **whole-frame** ring buffer (Annex-B
     frames, no RTP); for a same-host FEC consumer. Wire format:
-    `include/venc_frame_ring.h`.
+    `protocols/frame-shm.md` in the coordination repo.
 - No pipeline restart required.
 - An IDR keyframe is issued after the change for stream continuity.
 - If `connectedUdp` is enabled, the UDP socket is re-connected to the new destination.
@@ -825,6 +839,37 @@ echo '{"lightness":{"value":75},"demosaic":{"fields":{"dir_thrd":30}}}' | \
 Response `200`:
 ```json
 {"ok":true,"data":{"imported":true}}
+```
+
+### `GET /api/v1/snapshot.jpg`
+
+Capture one JPEG frame from the snapshot subsystem and return it as
+`image/jpeg`.  Gated by `snapshot.enabled`; returns `503`
+(`snapshot_disabled`) when the subsystem is off or the pipeline is not
+running, `504` (`snapshot_timeout`) if no frame arrives, `500`
+(`snapshot_failed`) on backend error.  Not a JSON endpoint on success.
+
+This is also the **QR-scanning source**: `tools/qr/qr_decode` reads JPEG
+directly (vendored stb_image, luma-only), so the boot-pairing flow is
+`curl … /snapshot.jpg | qr_decode`.  The MJPEG channel is created once at
+pipeline start and pulse-encoded per capture (`StartRecvPic → GetStream →
+StopRecvPic`) — rapid back-to-back captures are safe.  Frame geometry follows
+`snapshot.width`/`snapshot.height` (0 = inherit the main stream); QR range
+scales with pixels per module, so size the channel up for longer-distance
+markers.  Pairing, commands, boot scheduling, and action dispatch are
+deliberately outside the waybeam binary and this endpoint.
+
+> **Retired:** `GET /api/v1/snapshot.pgm` (grayscale P5 PGM, added 0.59.0)
+> was removed in 0.60.0 and now answers `404`.  It captured through a
+> short-lived per-request VPE/SCL tap, and device stress-testing showed the
+> tap's enable/disable cycle can race an in-flight MHAL buffer and wedge the
+> whole VPE — up to a kernel panic or hard hang.  The MJPEG channel above has
+> no such cycle; consumers that want grayscale decode the JPEG's luma plane
+> (`qr_decode` does this natively).
+
+```bash
+# QR scanning (boot pairing, bench)
+curl -s http://<device-ip>/api/v1/snapshot.jpg | qr_decode
 ```
 
 ### `GET /` (Web Dashboard)
@@ -1273,6 +1318,27 @@ Response `200` (SHM ring transport, common for `outgoing.server=shm://...`):
 }
 ```
 
+Response `200` (frame-shm ring, with the ring-fill bitrate clamp engaged):
+```json
+{
+  "ok": true,
+  "data": {
+    "active": true,
+    "transport": "frame-shm",
+    "fillPct": 25,
+    "inPressure": false,
+    "transportDrops": 0,
+    "pressureDrops": 0,
+    "framesSent": 41207,
+    "oversizeDrops": 0,
+    "slotCount": 8,
+    "usedSlots": 2,
+    "throttlePermille": 640,
+    "effectiveBitrateKbps": 6400
+  }
+}
+```
+
 Response `200` (UDP/Unix kernel-buffer fill_pct):
 ```json
 {
@@ -1304,6 +1370,13 @@ Field reference:
 | `packetsSent` | (SHM only) Lifetime writes accepted by the ring |
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
+| `throttlePermille` | (frame-shm only) Ring-fill bitrate clamp, `1000` = unclamped, `250` = floor.  A **clamp, not a veto** — `video0.bitrate` in `/api/v1/config` is never modified, so an external rate controller's writes all still succeed |
+| `effectiveBitrateKbps` | (frame-shm only) `video0.bitrate` scaled by `throttlePermille`; what the encoder is actually programmed to |
+
+A `throttlePermille` below `1000` means the consumer is not draining the ring
+fast enough for the configured bitrate.  Pinned at `250` the clamp has spent
+all its authority and drops may resume — that case is also logged once on
+entry and once on exit.  Disable with `outgoing.shmThrottle=false` (live).
 
 Error `501` — backend has no transport observability hook.
 
@@ -1412,9 +1485,89 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
+| `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **live** | Both backends hot-swap the NPU detector on the pipeline thread without respawning video. Star6E uses VPE port 1; Maruko uses SCL port 3 and its drain-while-disable teardown. A model whose reported input geometry disagrees with the configured tap is refused and leaves detection off. |
+| `detect.net_width` / `net_height` | restart | restart | Tap geometry is fixed when the VPE/SCL detector port is created. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.16.1` (non-breaking):
+  - `isp.keepAspect` is now **supported on Maruko** — capabilities report
+    `supported:true` and `/api/v1/set` accepts it (previously rejected with
+    `not_implemented`). `false` passes the full sensor frame through and the
+    I6C SCL scales both axes non-uniformly (stretch-to-fill). Exception: a
+    single-axis squeeze (one axis already matching the output) stalls the
+    SCL, so that geometry is centre-cropped regardless, with a startup note.
+- `0.16.0` (breaking — snapshot.pgm retired):
+  - `GET /api/v1/snapshot.pgm` removed; answers `404`. Its per-request VPE/SCL
+    tap could wedge the SoC (device-verified: `DisablePort … mhal not return
+    buffer` → `EnsureInputPortFifoEmpty` storm). QR scanning now consumes
+    `GET /api/v1/snapshot.jpg`; `qr_decode` reads JPEG natively. Error codes
+    `bad_crop`, `bad_max_dim`, `snapshot_gray_busy` and
+    `snapshot_gray_unsupported` are gone with it.
+  - The `snapshot.*` config section is dashboard-visible (FieldUi group
+    "Snapshot", rendered from capabilities).
+- `0.15.0` (additive — Maruko detector parity):
+  - Maruko now implements the ABI-3 detector host on SCL port 3, including
+    live enable/disable and model reload, `detect.osd`, and the unchanged RTP
+    sidecar DETECT trailer. Detect fields no longer return 501 on Maruko.
+  - Detection is refused while Maruko stabilization or zoom is active until
+    the independent SCL-port crop can be mapped to encoded-frame coordinates.
+  - The default Maruko deployment uses an 800x448 I6C model. Small-flash
+    systems may store it as `/root/models/<name>.img.xz`; the init script
+    inflates the configured `/tmp/<name>.img` before startup.
+- `0.14.0` (additive — detector live model swap):
+  - `detect.model_path` changed from `MUT_RESTART` to `MUT_LIVE`, and
+    `detect.model_id` / `detect.conf_thresh` / `detect.nms_iou` are now
+    settable (`MUT_LIVE`).  Changing any of them re-creates only the NPU
+    detector plugin + VPE port1 tap on the pipeline thread — the video0
+    encode/RTP path keeps running, so there is no pipeline respawn, keyframe
+    reset, reconnect, or transport drop.  A **`model_path` change is not free**,
+    though: the NPU graph load runs on the pipeline thread (that is what makes
+    the swap atomic against the per-frame `DETECT` snapshot), so frame output
+    stalls while it runs.  Measured on Star6E .232 at 100 fps: **~100-450 ms**
+    on some runs, **~2.2-2.5 s** on others, with nothing in between and the
+    trigger not isolated (not memory pressure, not file I/O, not accumulation
+    across reloads).  Budget for **~2.5 s**.
+  - `model_id` / `conf_thresh` / `nms_iou` do **not** reload the graph: when the
+    requested `model_path` matches what is loaded, the label and thresholds are
+    applied in place (thresholds via the plugin's optional `set_thresholds()`,
+    falling back to a full reload if the backend lacks it).  Measured cost:
+    ~50 ms for a threshold change, ~0 ms for `model_id`, versus ~2300 ms before.
+    So live threshold tuning is cheap; only swapping the `.img` is expensive.
+    The sidecar `model_id` flips to the new value in lockstep with the first
+    new-model `DETECT` trailer.  Star6E only; Maruko returns `501` (no
+    `apply_detect_reload`).
+  - The host now verifies the loaded model's **real** input geometry (reported
+    by the plugin via the new ABI-2 `model_dims()`) against the VPE port1 tap
+    it created, and refuses a mismatch — `net_width`/`net_height` are config,
+    not evidence of what a `.img` expects.  Because `model_path` is live but
+    the dims are restart-scope, pointing `model_path` at a different-geometry
+    model used to be accepted silently and left an "active" detector that
+    never detected (the backend rejects every frame and `process()` errors are
+    not logged).  A refused swap logs both geometries and the exact
+    `netWidth`/`netHeight` to set, leaves detection off, and releases the
+    port1 claim (`runtime.vpe_taps.port1` reads `null`); the stream is
+    unaffected.  Note `/set` still returns `200` — the reload is serviced
+    asynchronously on the pipeline thread, so the stored value is accepted
+    even when the model is then rejected; check `runtime.vpe_taps` or the log
+    for the outcome.
+  - `detect.net_width` / `detect.net_height` are now settable as
+    `MUT_RESTART` (a tap-geometry change needs the VPE port recreated).
+    Both must be `0` (default) or a multiple of 32 (`>=64`).
+  - `detect.confThresh` / `nmsIou` accept `[0, 1)` (0 = plugin default);
+    `netWidth` / `netHeight` accept `0` or a `>=64` multiple of 32.
+- `0.57.0` (additive — new config field + new response fields):
+  - Added `outgoing.shm_throttle` (boolean, default `true`, `MUT_LIVE`,
+    alias `outgoing.shmThrottle`).  Enables the `frame-shm://` ring-fill
+    bitrate clamp; inert on every other transport.  Both backends.
+  - `GET /api/v1/transport/status` gains `throttlePermille` and
+    `effectiveBitrateKbps` on the `frame-shm` branch only.
+  - The clamp never writes `video0.bitrate`, so `GET /api/v1/config` and
+    every `set` response are unaffected by it.  Read the effective rate
+    from `transport/status`, not from the config.
+  - Sidecar `TRANSPORT_INFO` trailer: `_pad[2]` became
+    `throttle_permille` (u16, network order).  Trailer stays 16 bytes and
+    later trailers keep their offsets; `0` means "not reported".
 - `0.46.0` (additive — new config fields):
   - Added `isp.gain_min` (min sensor gain floor) and `isp.shutter_min_us`
     (min exposure floor, µs) to the config schema.  Both default `0` =

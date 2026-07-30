@@ -1,4 +1,5 @@
 #include "maruko_runtime.h"
+#include "maruko_ipu_yolo.h"
 
 #include "maruko_config.h"
 #include "maruko_controls.h"
@@ -108,6 +109,20 @@ static int maruko_runner_init(void *opaque)
 		fprintf(stderr, "ERROR: [maruko] stab-fill framing bring-up "
 			"failed — aborting init (no VENC producer)\n");
 		return ret;
+	}
+	/*
+	 * Detection owns SCL port 3.  Framing currently moves only port 0's
+	 * crop, so suppress detection when stabilization is active rather than
+	 * publishing boxes in the wrong encoded-frame coordinate space.
+	 */
+	if (ctx->vcfg.detect.enabled &&
+	    (strcmp(ctx->vcfg.video0.framing, "off") != 0 ||
+	     ctx->vcfg.video0.zoom_pct > 0.0)) {
+		fprintf(stderr, "[maruko-ipu] detection disabled while framing=%s "
+			"zoom=%.2f (coordinate mapping is not yet shared)\n",
+			ctx->vcfg.video0.framing, ctx->vcfg.video0.zoom_pct);
+	} else {
+		(void)maruko_ipu_yolo_start(backend, &ctx->vcfg);
 	}
 
 	maruko_iq_init();

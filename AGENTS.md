@@ -442,6 +442,9 @@ Read these before working on related areas:
 | Star6E direct deploy helper | `scripts/star6e_direct_deploy.sh` |
 | Maruko direct deploy helper | `scripts/maruko_direct_deploy.sh` |
 | Maruko artifact pull (libs/.ko/.bin) | `scripts/maruko_pull_artifacts.sh` |
+| Star6E CPU profile / `top` artifact | `documentation/STAR6E_CPU_PROFILE.md` |
+| System CPU profiler (all procs) | `scripts/cpu_profile.sh` |
+| Per-thread CPU watcher (one binary) | `scripts/waybeam_thread_watch.sh` |
 | Remote testing | `documentation/REMOTE_TEST_WORKFLOW.md` |
 | HTTP API contract | `documentation/HTTP_API_CONTRACT.md` |
 | Precrop / aspect ratio | `documentation/PRECROP_ASPECT_RATIO.md` |

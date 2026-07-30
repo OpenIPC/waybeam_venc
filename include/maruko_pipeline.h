@@ -55,6 +55,8 @@ typedef struct {
   ImuState *imu;                    /* NULL if IMU disabled or init failed */
   /* Dual VENC (gemini-style) — heap-allocated, NULL when inactive. */
   struct MarukoDualVenc *dual;
+  /* Maruko IPU detector host (SCL0/0/3), private to maruko_ipu_yolo.c. */
+  void *detect;
   /* TS recorder state.  Active when ts_recorder.fd >= 0; that is the
    * single source of truth (see star6e_ts_recorder_is_active()).  In
    * mirror mode the chn 0 frame loop drives it; in dual mode the chn 1

@@ -1,7 +1,10 @@
 #include "maruko_pipeline.h"
+#include "maruko_ipu_yolo.h"
+#include "maruko_scl_ports.h"
 
 #include "audio_codec.h"
 #include "debug_osd.h"
+#include "detect_wire.h"
 #include "hevc_rtp.h"
 #include "idr_rate_limit.h"
 #include "intra_refresh.h"
@@ -26,6 +29,7 @@
 #include "venc_api.h"
 #include "venc_httpd.h"
 #include "venc_jpeg.h"
+#include "venc_shm_throttle.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -3326,24 +3330,34 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	 * sensor already emits capt == output, so this is a no-op for modes 0-4. */
 	uint32_t scl_in_w = ctx->sensor.plane.capt.width;
 	uint32_t scl_in_h = ctx->sensor.plane.capt.height;
-	/* Always compute an AR-matched centre-crop, *ignoring* keep_aspect.
-	 * The I6C SCL cannot perform a single-axis (anamorphic) squeeze:
-	 * cropping the full width then downscaling only one axis stalls the
-	 * scaler and starves the encoder (device-verified 2026-07-04 on
-	 * ssc378qe — mode 4 1920x1080@100 -> 1440x1080 hung with 0 frames
-	 * until a 20s abort, and left the binned sensor wedged).  So the SCL
-	 * source-crop AR MUST match the output AR.  keep_aspect=false's
-	 * stretch-to-fill only ever "worked" when the ARs already matched
-	 * (where it is identical to keep_aspect=true); for a genuine AR
-	 * mismatch it requested a squeeze the hardware refuses, so we override
-	 * it here and crop instead. */
+	/* Honour keep_aspect: true centre-crops the source to the encode AR,
+	 * false passes the full sensor frame and lets the SCL scale both axes
+	 * non-uniformly (stretch-to-fill).
+	 *
+	 * A blanket override forcing the crop was added 2026-07-04 on the
+	 * strength of one device failure: mode 4 1920x1080@100 -> 1440x1080
+	 * hung with 0 frames.  That case is a *single-axis* squeeze — width
+	 * 1920->1440 with height unchanged at 1080 — which the SCL does refuse.
+	 * It does not generalise to a genuine two-axis non-uniform scale such
+	 * as 2496x1872 -> 1920x1080 (/1.30 wide, /1.73 tall), which the SCL
+	 * handles.  Overriding every AR mismatch broke stretch-to-fill for all
+	 * 4:3-sensor-to-16:9-output setups, so keep_aspect is passed through
+	 * again.
+	 *
+	 * Still true: a request that leaves one axis unscaled while the other
+	 * shrinks stalls the scaler — that one geometry keeps the centre-crop
+	 * override (device-verified fatal: 0 frames, wedged the binned
+	 * sensor), everything else passes through. */
+	bool single_axis_squeeze = !ctx->cfg.keep_aspect &&
+		(scl_in_w == out_w) != (scl_in_h == out_h);
 	PipelinePrecropRect precrop = pipeline_common_compute_precrop(
-		scl_in_w, scl_in_h, out_w, out_h, true);
-	if (!ctx->cfg.keep_aspect &&
-	    (precrop.w != scl_in_w || precrop.h != scl_in_h))
-		printf("> [maruko] note: keepAspect=false requests an anamorphic "
-			"squeeze the I6C SCL cannot do — using a centre-crop "
-			"%ux%u@%u,%u instead\n",
+		scl_in_w, scl_in_h, out_w, out_h,
+		ctx->cfg.keep_aspect || single_axis_squeeze);
+	if (single_axis_squeeze)
+		printf("> [maruko] note: keepAspect=false requests a "
+			"single-axis squeeze (%ux%u -> %ux%u) the I6C SCL "
+			"stalls on — using a centre-crop %ux%u@%u,%u instead\n",
+			scl_in_w, scl_in_h, out_w, out_h,
 			precrop.w, precrop.h, precrop.x, precrop.y);
 	/* configure_maruko_scl applies this AR rect as the SCL source crop
 	 * (real centre-crop), then scales it 1:1/uniformly to the encode
@@ -3889,6 +3903,96 @@ static void maruko_patch_stream_to_trail_n(i6c_venc_strm *s)
 		maruko_patch_pack_to_trail_n(&s->packet[i]);
 }
 
+/* Encoded bytes accumulated since the debug OSD's last 1 Hz refresh.  Summed
+ * from the encoder's own frame sizes rather than the transport's byte count so
+ * the row stays truthful with output disabled and excludes packetization
+ * overhead — it reads the encoder against its RC target, not the wire.  Single
+ * writer (the pipeline thread, which is also the only reader).  Mirrors
+ * g_osd_enc_bytes in star6e_runtime.c. */
+static uint64_t g_osd_enc_bytes;
+
+/* frame-shm ring-fill bitrate clamp state — byte-symmetric with the Star6E
+ * side (src/star6e_runtime.c star6e_service_shm_throttle).  Both backends
+ * share one control law on purpose: a per-backend divergence in shared
+ * behaviour is a standing drift trap in this repo. */
+static VencShmThrottle g_shm_throttle;
+static int g_shm_throttle_ready;
+/* Last factor successfully programmed into the encoder. */
+static uint16_t g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+
+static void maruko_service_shm_throttle(MarukoOutput *output,
+	const VencConfig *vcfg)
+{
+	venc_frame_ring_fill_t fill;
+	uint64_t now_us;
+	uint16_t want;
+	int edge;
+
+	if (!output || !vcfg)
+		return;
+	if (maruko_output_frame_ring_fill(output, &fill) != 0) {
+		/* Release the clamp on a transport switch away from
+		 * frame-shm — see the star6e_runtime equivalent. */
+		g_shm_throttle_ready = 0;
+		output->throttle_permille = 0;  /* 0 = not reported */
+		if (g_applied_permille != VENC_SHM_THROTTLE_FULL_PERMILLE &&
+		    maruko_controls_set_output_throttle(
+			VENC_SHM_THROTTLE_FULL_PERMILLE) == 0)
+			g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+		return;
+	}
+
+	now_us = wb_monotonic_us();
+	if (!g_shm_throttle_ready) {
+		venc_shm_throttle_reset(&g_shm_throttle, now_us);
+		g_shm_throttle_ready = 1;
+	}
+
+	venc_shm_throttle_set_enabled(&g_shm_throttle,
+		vcfg->outgoing.shm_throttle, now_us);
+	venc_shm_throttle_observe(&g_shm_throttle, fill.used_slots,
+		fill.full_drops);
+	(void)venc_shm_throttle_tick(&g_shm_throttle, now_us);
+
+	/* Applied-value comparison, not tick()'s flag — see the
+	 * star6e_runtime equivalent for why the retry matters. */
+	want = venc_shm_throttle_permille(&g_shm_throttle);
+	if (want != g_applied_permille &&
+	    maruko_controls_set_output_throttle(want) == 0)
+		g_applied_permille = want;
+	output->throttle_permille = want;
+	/* Publish into the ring header so the consumer can see that the
+	 * producer has already reduced its own rate -- below 1000 is
+	 * direct evidence that the consumer's rate model is optimistic
+	 * (protocols/frame-shm.md). */
+	venc_frame_ring_set_throttle(output->frame_ring, want);
+
+	edge = venc_shm_throttle_floor_edge(&g_shm_throttle);
+	if (edge > 0)
+		fprintf(stderr,
+			"WARNING: [maruko] shm throttle pinned at floor %u%% "
+			"— the consumer is not draining\n",
+			VENC_SHM_THROTTLE_FLOOR_PERMILLE / 10);
+	else if (edge < 0)
+		/* stderr for the same buffering reason as star6e_runtime. */
+		fprintf(stderr,
+			"> [maruko] shm throttle left the floor, recovering\n");
+}
+
+static uint32_t maruko_osd_box_px(float v, uint32_t canvas, uint32_t net)
+{
+	float r;
+
+	if (canvas == 0 || net == 0)
+		return 0;
+	r = v * (float)canvas / (float)net;
+	if (!(r >= 0.0f))
+		r = 0.0f;
+	if (r > (float)(canvas - 1))
+		r = (float)(canvas - 1);
+	return (uint32_t)r;
+}
+
 static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	MarukoStreamRuntime *rt, const i6c_venc_stat *stat)
 {
@@ -3961,6 +4065,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		static unsigned int osd_prev_frame;
 		static struct timespec osd_prev_ts;
 		static unsigned int osd_fps;
+		static unsigned int osd_kbps;
 		static MarukoAeOsdStatus osd_ae;
 		struct timespec osd_now;
 
@@ -3975,6 +4080,10 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			osd_fps = (unsigned int)(df * 1000 / (unsigned long)osd_ms);
 			osd_prev_frame = rt->frame_counter;
 			osd_prev_ts = osd_now;
+			/* bytes*8/ms is bits/ms, i.e. kbps directly. */
+			osd_kbps = (unsigned int)(g_osd_enc_bytes * 8 /
+				(uint64_t)osd_ms);
+			g_osd_enc_bytes = 0;
 			/* AE/AWB readouts ride the same 1Hz window — each
 			 * refresh round-trips several MI_ISP getters. */
 			maruko_controls_ae_osd_status(&osd_ae);
@@ -3995,8 +4104,26 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			ctx->cfg.image_width, ctx->cfg.image_height,
 			ctx->cfg.rc_codec == PT_H265 ? "h265" : "h264");
 
+		/* Actual encoded rate against the configured RC target — the
+		 * gap between the two is the RC undershoot/overshoot, and it
+		 * separates an encoder problem from a link problem at a
+		 * glance (a healthy encoder tracking target while the picture
+		 * stutters points at the radio, not here). */
 		{
-			int osd_row = 4;
+			/* See the star6e_runtime equivalent. */
+			char osd_thr[16];
+			unsigned int thr = ctx->output.throttle_permille;
+
+			osd_thr[0] = '\0';
+			if (thr > 0 && thr < VENC_SHM_THROTTLE_FULL_PERMILLE)
+				snprintf(osd_thr, sizeof(osd_thr), " thr%u%%",
+					thr / 10);
+			debug_osd_text(ctx->debug_osd, 4, "br", "%u/%uk%s",
+				osd_kbps, ctx->cfg.venc_max_rate, osd_thr);
+		}
+
+		{
+			int osd_row = 5;
 
 			/* AR centre-crop readout: the AR base crop rect (WxH+X+Y),
 			 * i.e. the sub-window of the sensor selected to match the
@@ -4091,6 +4218,51 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 					zoom.crop_w, zoom.crop_h,
 					zoom.crop_x, zoom.crop_y);
 			}
+
+			{
+				const VencConfig *vcfg = maruko_controls_vcfg();
+				MarukoDetectSnapshot snap;
+				static const uint16_t colors[] = {
+					DEBUG_OSD_RED, DEBUG_OSD_GREEN,
+					DEBUG_OSD_YELLOW, DEBUG_OSD_CYAN,
+					DEBUG_OSD_BLUE, DEBUG_OSD_WHITE,
+				};
+				int di;
+
+				if (vcfg && vcfg->detect.enabled &&
+				    vcfg->detect.osd &&
+				    maruko_ipu_yolo_snapshot(ctx, &snap) &&
+				    snap.count > 0 && snap.net_w && snap.net_h &&
+				    wb_monotonic_us() - snap.produced_us < 700000) {
+					for (di = 0; di < snap.count; di++) {
+						const DetectBox *b = &snap.boxes[di];
+						uint32_t x1 = maruko_osd_box_px(b->x1,
+							ctx->cfg.image_width,
+							snap.net_w);
+						uint32_t y1 = maruko_osd_box_px(b->y1,
+							ctx->cfg.image_height,
+							snap.net_h);
+						uint32_t x2 = maruko_osd_box_px(b->x2,
+							ctx->cfg.image_width,
+							snap.net_w);
+						uint32_t y2 = maruko_osd_box_px(b->y2,
+							ctx->cfg.image_height,
+							snap.net_h);
+						if (x1 >= x2 || y1 >= y2)
+							continue;
+						debug_osd_rect(ctx->debug_osd,
+							(uint16_t)x1, (uint16_t)y1,
+							(uint16_t)(x2 - x1),
+							(uint16_t)(y2 - y1),
+							colors[(unsigned)b->cls %
+								(sizeof(colors) /
+								sizeof(colors[0]))],
+							0);
+					}
+					debug_osd_text(ctx->debug_osd, osd_row++,
+						"det", "%d", snap.count);
+				}
+			}
 		}
 
 		debug_osd_end_frame(ctx->debug_osd);
@@ -4107,6 +4279,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	int codec = (ctx->cfg.rc_codec == PT_H265) ? 1 : 0;
 	uint32_t frame_size = maruko_scene_frame_size(&stream);
 	uint8_t is_idr = maruko_scene_is_idr(&stream, codec);
+	g_osd_enc_bytes += frame_size;
 	scene_update(&ctx->scene, frame_size, is_idr,
 		maruko_scene_request_idr, ctx);
 	RtpSidecarEncInfo enc_info = {0};
@@ -4124,6 +4297,11 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		total_bytes = maruko_video_send_frame(&stream, &ctx->output,
 			&rt->rtp_state, &rt->param_sets, &ctx->cfg,
 			MARUKO_PKTZR_VERBOSE_ACTIVE(ctx) ? &frame_pktzr : NULL);
+
+		/* frame-shm ring-fill bitrate clamp — see the matching call
+		 * in star6e_runtime.c.  Unconditional by design. */
+		maruko_service_shm_throttle(&ctx->output,
+			maruko_controls_vcfg());
 	}
 
 	/* Mirror mode: write chn 0 frames to whichever recorder is active
@@ -4205,12 +4383,16 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	if (sidecar_subscribed) {
 		RtpSidecarTransportInfo tinfo;
 		const RtpSidecarTransportInfo *tinfo_ptr = NULL;
+		const VencConfig *vcfg = maruko_controls_vcfg();
+		uint8_t detect_buf[RTP_SIDECAR_DGRAM_MAX];
+		const void *detect_ptr = NULL;
+		uint16_t detect_len = 0;
 
 		/* Producer already cached fill_pct + lifetime stats inside
 		 * maruko_output_observe_pressure() above — read the cache
 		 * instead of re-querying.  One SIOCOUTQ ioctl / ring-fill
 		 * load per frame, not two. */
-		if (ctx->output.ring ||
+		if (ctx->output.ring || ctx->output.frame_ring ||
 		    ((ctx->output.transport == VENC_OUTPUT_URI_UNIX ||
 		      ctx->output.transport == VENC_OUTPUT_URI_UDP) &&
 		     ctx->output.socket_handle >= 0)) {
@@ -4218,14 +4400,36 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			tinfo.fill_pct = ctx->output.last_fill_pct;
 			tinfo.in_pressure = ctx->output.in_pressure ? 1 : 0;
 			tinfo.pressure_drops = ctx->output.pressure_drops;
+			/* frame-shm only; 0 elsewhere = "not reported". */
+			tinfo.throttle_permille = ctx->output.throttle_permille;
 			tinfo.transport_drops = ctx->output.last_full_drops;
 			tinfo.packets_sent = ctx->output.last_writes;
 			tinfo_ptr = &tinfo;
 		}
-		rtp_sidecar_send_frame_transport(&rt->sidecar,
+		if (vcfg && vcfg->detect.enabled) {
+			MarukoDetectSnapshot snap;
+			if (maruko_ipu_yolo_snapshot(ctx, &snap)) {
+				uint64_t now_us = wb_monotonic_us();
+				uint64_t age_ms = now_us > snap.produced_us ?
+					(now_us - snap.produced_us) / 1000 : 0;
+				size_t len = detect_wire_build(detect_buf,
+					sizeof(detect_buf), snap.boxes, snap.count,
+					snap.model_id, snap.seq,
+					age_ms > UINT16_MAX ? UINT16_MAX :
+						(uint16_t)age_ms,
+					snap.net_w, snap.net_h,
+					sizeof(detect_buf));
+				if (len > 0) {
+					detect_ptr = detect_buf;
+					detect_len = (uint16_t)len;
+				}
+			}
+		}
+		rtp_sidecar_send_frame_detect(&rt->sidecar,
 			rt->rtp_state.ssrc, frame_rtp_ts, seq_before,
 			(uint16_t)(rt->rtp_state.seq - seq_before),
-			capture_us, ready_us, &enc_info, tinfo_ptr);
+			capture_us, ready_us, &enc_info, tinfo_ptr, NULL,
+			detect_ptr, detect_len);
 	}
 
 	if (ctx->cfg.verbose)
@@ -4268,6 +4472,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 			result = 1;
 			goto cleanup;
 		}
+		maruko_controls_service_detect_reload();
 
 		rc = maruko_pipeline_await_frame(ctx, &rt, &stat);
 		if (rc < 0)
@@ -4333,6 +4538,9 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 * disables its SCL tap port before we tear down port0 / the SCL channel
 	 * below (R6 — never disable the tapped port with the reader still live). */
 	maruko_pipeline_framing_stop();
+	/* Port 3 follows Maruko's drain-while-disable rule and must be gone
+	 * before SCL channel teardown. */
+	maruko_ipu_yolo_stop(ctx);
 
 	venc_api_clear_active_precrop();
 	maruko_pipeline_clear_zoom_status();
@@ -4393,6 +4601,10 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	/* Tear down JPEG snapshot subsystem first — its MJPG VENC channel
 	 * is bound to the SCL port we're about to disable.  Idempotent. */
 	venc_jpeg_shutdown();
+	/* Both tap claimants are down by now (detector stopped above, snapshot
+	 * subsystem just shut down), so drop any lingering claim — a reinit must
+	 * not inherit a tap owner from the previous graph. */
+	maruko_scl_tap_reset();
 	if (g_mi_scl_port1_enabled) {
 		(void)g_mi_scl.fnDisablePort(0, 0, 1);
 		g_mi_scl_port1_enabled = 0;

@@ -279,6 +279,14 @@ int star6e_output_is_frame_shm(const Star6eOutput *output)
 	return output && output->transport == VENC_OUTPUT_URI_FRAME_SHM;
 }
 
+int star6e_output_frame_ring_fill(
+	const Star6eOutput *output, venc_frame_ring_fill_t *out)
+{
+	if (!output || !output->frame_ring || !out)
+		return -1;
+	return venc_frame_ring_get_fill(output->frame_ring, out);
+}
+
 void star6e_output_observe_pressure(Star6eOutput *output)
 {
 	uint8_t fill_pct = 0;

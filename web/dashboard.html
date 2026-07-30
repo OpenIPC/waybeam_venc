@@ -655,7 +655,7 @@ const TOOLTIPS = {
 'fpv.noiseLevel':'3D noise reduction level (0-7). Higher = more NR. 0 = off. Requires restart',
 'isp.aeEngine':'AE engine: sdk (default) lets ISP firmware run AE. custom runs userspace cus3a — Star6E only; on Maruko custom is retired and ignored (paced native 3A is always used). Requires restart',
 'isp.aeFps':'AE monitoring rate in Hz. Star6E: custom AE calc rate when aeEngine=custom. Maruko: drives the supervisory limits thread (any aeEngine). Default: 15. Requires restart',
-'isp.keepAspect':'Star6E: true = center-crop the sensor to the encode aspect ratio (preserves geometry); false = stretch/fill the full sensor area. Maruko/I6C: always center-crops — this flag is ignored and the control is disabled, because the I6C SCL cannot anamorphically stretch/squeeze a single axis. Requires restart',
+'isp.keepAspect':'true = center-crop the sensor to the encode aspect ratio (preserves geometry); false = stretch/fill the full sensor area. Maruko/I6C exception: a single-axis squeeze (one axis already matching the output) stalls the I6C SCL, so that one geometry is center-cropped regardless. Requires restart',
 'isp.shutterRule180':'180° shutter rule: pin exposure to exactly 1/(2×fps) — auto-exposure shutter is locked, gain still adjusts. At 60 fps the shutter is fixed at 1/120 s (8333 µs) for natural cinema motion blur. Requires restart',
 'audio.enabled':'Enable audio capture and streaming. Requires restart',
 'audio.sampleRate':'Audio sample rate in Hz (8000, 16000, 48000). Default: 48000. Requires restart',
@@ -677,9 +677,14 @@ const TOOLTIPS = {
 'attitude.mountDeg':'Legacy output-side rotation about the camera axis (0/90/180/270). Prefer axisFwd/axisDown; leave 0 after axis calibration. Requires restart',
 'attitude.invertRoll':'Flip roll sign after mount rotation (use if the AHI tilts the wrong way). Requires restart',
 'attitude.invertPitch':'Flip pitch sign after mount rotation. Requires restart',
-'detect.enabled':'Run the NPU object detector (Star6E only). Needs a detector plugin .so deployed on the device. Mutually exclusive with video0.framing=stab (both claim VPE port1). Requires restart',
+'detect.enabled':'Run the NPU object detector (Star6E only). Needs a detector plugin .so deployed on the device. Mutually exclusive with video0.framing=stab (both claim VPE port1). Applied live — the detector starts/stops without interrupting the stream',
 'detect.plugin':'Path to the detector plugin .so. The plugin owns the model runtime and decode; it is deployed separately from waybeam. Requires restart',
-'detect.modelPath':'Compiled model file handed to the plugin. Empty = plugin default. Requires restart',
+'detect.modelPath':'Compiled model .img handed to the plugin. Empty = plugin default. Applied live: the detector swaps to the new model without a pipeline respawn, so the video0 stream is uninterrupted (net geometry must be unchanged). Pre-stage both .img files (e.g. on SD) and switch with no restart.',
+'detect.modelId':'Class-table selector stamped on the RTP sidecar DETECT trailer (0 = VisDrone-10, 1 = SAR person). Set it together with modelPath so consumers label the new model\'s boxes correctly. Applied live.',
+'detect.confThresh':'Detector keep threshold [0,1); 0 = plugin default (0.40). Applied live.',
+'detect.nmsIou':'NMS IoU threshold [0,1); 0 = plugin default (0.45). Applied live.',
+'detect.netWidth':'VPE port1 tap + model input width. 0 = 640. Must match the compiled .img and be a multiple of 32 (>=64). Requires restart (the VPE port is recreated).',
+'detect.netHeight':'VPE port1 tap + model input height. 0 = 352. Must match the compiled .img and be a multiple of 32 (>=64). Requires restart (the VPE port is recreated).',
 'detect.firmwarePath':'NPU firmware handed to the plugin. Empty = plugin/SDK default. Requires restart',
 'detect.inferInterval':'Run inference on 1 of every N captured frames. 1 = every frame. Default: 1. Requires restart',
 'detect.osd':'Draw detection boxes on the debug OSD (needs debug.showOsd). Detections always stream on the RTP sidecar DETECT trailer regardless. Requires restart',
@@ -740,7 +745,7 @@ const SECTIONS = [
 {id:'fpv',title:'FPV',keys:['fpv.roiEnabled','fpv.roiQp','fpv.roiSteps','fpv.roiCenter','fpv.noiseLevel']},
 {id:'imu',title:'IMU',keys:['imu.enabled','imu.i2cDevice','imu.i2cAddr','imu.sampleRateHz','imu.gyroRangeDps','imu.calFile','imu.calSamples']},
 {id:'attitude',title:'Attitude',keys:['attitude.enabled','attitude.axisFwd','attitude.axisDown','attitude.trimRollDeg','attitude.trimPitchDeg','attitude.mountDeg','attitude.invertRoll','attitude.invertPitch']},
-{id:'detect',title:'Detection',keys:['detect.enabled','detect.plugin','detect.modelPath','detect.firmwarePath','detect.inferInterval','detect.osd']},
+{id:'detect',title:'Detection',keys:['detect.enabled','detect.plugin','detect.modelPath','detect.modelId','detect.confThresh','detect.nmsIou','detect.netWidth','detect.netHeight','detect.firmwarePath','detect.inferInterval','detect.osd']},
 {id:'record',title:'Recording',keys:['record.enabled','record.mode','record.format','record.dir','record.maxSeconds','record.maxMB','record.bitrate','record.fps','record.gopSize','record.server']}
 ];
 
@@ -1101,7 +1106,7 @@ function renderSettings(){
       }
 
       // Grey out (do not hide) any field the backend reports unsupported —
-      // e.g. isp.keepAspect on Maruko, which always center-crops. Keeps the
+      // e.g. isp.awbFps on Maruko, which has no userspace AWB loop. Keeps the
       // control visible with an explanatory tooltip in case a HW path later
       // restores the functionality.
       const unsupported = capabilities[key] && capabilities[key].supported === false;
@@ -1144,10 +1149,24 @@ function renderSettings(){
       (groups[g] = groups[g] || []).push([key, cap]);
     }
     for(const [group, entries] of Object.entries(groups)){
-      const div = document.createElement('div');
-      div.className = 'section collapsed';
-      div.innerHTML = `<div class="section-header" onclick="this.parentElement.classList.toggle('collapsed')"><h3>${group}</h3><span class="section-chevron">▼</span></div><div class="section-body"></div>`;
-      const body = div.querySelector('.section-body');
+      // If ui.group names an existing section (e.g. "ISP", "Video"), append
+      // into that dropdown instead of spawning a near-duplicate one beside it.
+      // Lets a module field land in its natural home while still keeping its
+      // range/tooltip in capabilities rather than the hardcoded tables above.
+      let div = null, body = null;
+      for(const h of form.querySelectorAll('.section > .section-header > h3')){
+        if(h.textContent === group){
+          div = h.closest('.section');
+          body = div.querySelector('.section-body');
+          break;
+        }
+      }
+      if(!body){
+        div = document.createElement('div');
+        div.className = 'section collapsed';
+        div.innerHTML = `<div class="section-header" onclick="this.parentElement.classList.toggle('collapsed')"><h3>${group}</h3><span class="section-chevron">▼</span></div><div class="section-body"></div>`;
+        body = div.querySelector('.section-body');
+      }
       for(const [key, cap] of entries){
         const ui = cap.ui;
         const ctrl = ui.control || 'text';
@@ -1185,7 +1204,9 @@ function renderSettings(){
         row.innerHTML = `<div class="field-label" title="${tip}">${label} <span class="badge ${badgeClass}">${badgeText}</span>${unsupported?' <span class="badge badge-na">N/A</span>':''}</div><div>${input}</div>`;
         body.appendChild(row);
       }
-      form.appendChild(div);
+      /* Only append when this pass created the section; re-appending an
+       * existing one would yank it to the bottom of the form. */
+      if(div.parentElement !== form) form.appendChild(div);
     }
   }
 

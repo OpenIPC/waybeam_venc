@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Waybeam bounded QR camera test</title>
+  <style>
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      overflow: hidden;
+      background: #fff;
+      color: #fff;
+      font: 16px system-ui, sans-serif;
+    }
+    main {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      place-items: center;
+      background: #fff;
+    }
+    img {
+      width: min(96vw, 96vh);
+      height: min(96vw, 96vh);
+      image-rendering: pixelated;
+      transform: rotate(0deg);
+      transition: width .15s, height .15s, transform .15s;
+    }
+    nav {
+      position: fixed;
+      left: 50%;
+      bottom: max(10px, env(safe-area-inset-bottom));
+      transform: translateX(-50%);
+      display: flex;
+      gap: 6px;
+      padding: 7px;
+      border-radius: 12px;
+      background: rgba(0, 0, 0, .72);
+      white-space: nowrap;
+    }
+    button {
+      min-height: 40px;
+      padding: 0 12px;
+      border: 0;
+      border-radius: 8px;
+      background: #eee;
+      color: #111;
+      font: inherit;
+    }
+    #label {
+      position: fixed;
+      top: max(8px, env(safe-area-inset-top));
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 5px 9px;
+      border-radius: 7px;
+      background: rgba(0, 0, 0, .72);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <img id="qr" src="bounded-P23456789ABCDEFG.svg"
+         alt="Bounded QR carrying P23456789ABCDEFG">
+  </main>
+  <div id="label">P23456789ABCDEFG · large</div>
+  <nav aria-label="QR display variants">
+    <button data-size="96" data-angle="0" data-name="large">Large</button>
+    <button data-size="72" data-angle="0" data-name="medium">Medium</button>
+    <button data-size="52" data-angle="0" data-name="small">Small</button>
+    <button data-size="68" data-angle="35" data-name="rotated 35°">Rotate</button>
+    <button id="hide">Hide UI</button>
+  </nav>
+  <script>
+    const qr = document.querySelector('#qr');
+    const label = document.querySelector('#label');
+    const nav = document.querySelector('nav');
+    document.querySelectorAll('[data-size]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const size = button.dataset.size;
+        qr.style.width = `min(${size}vw, ${size}vh)`;
+        qr.style.height = `min(${size}vw, ${size}vh)`;
+        qr.style.transform = `rotate(${button.dataset.angle}deg)`;
+        label.textContent = `P23456789ABCDEFG · ${button.dataset.name}`;
+      });
+    });
+    document.querySelector('#hide').addEventListener('click', () => {
+      nav.hidden = true;
+      label.hidden = true;
+    });
+    document.body.addEventListener('dblclick', () => {
+      nav.hidden = false;
+      label.hidden = false;
+    });
+  </script>
+</body>
+</html>

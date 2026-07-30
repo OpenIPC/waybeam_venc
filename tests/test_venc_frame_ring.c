@@ -853,6 +853,111 @@ static int test_fr_double_begin(void)
 	return failures;
 }
 
+
+/* ── Producer health fields (0.57.0) ───────────────────────────────── */
+
+/* These three live at fixed byte offsets that radeon-vrx and waybeam-link
+ * address directly, not through this struct.  A reorder would move them out
+ * from under both consumers with nothing failing to compile, so assert the
+ * offsets from the test as well as from the header's static asserts, and
+ * read them back through a raw byte pointer the way a real consumer does. */
+static int test_fr_producer_health(void)
+{
+	int failures = 0;
+	VencFrameMeta meta = {0};
+	const unsigned char *raw;
+	uint32_t hm;
+	uint64_t fd_drops;
+	uint16_t thr;
+	int i;
+
+	venc_frame_ring_t *r = venc_frame_ring_create("test_fr_health", 2, 64);
+	CHECK("fr_health_create", r != NULL);
+	if (!r)
+		return failures;
+
+	raw = (const unsigned char *)r->hdr;
+	memcpy(&hm, raw + 76, sizeof(hm));
+	memcpy(&fd_drops, raw + 80, sizeof(fd_drops));
+	memcpy(&thr, raw + 88, sizeof(thr));
+	CHECK("fr_health_magic_at_76", hm == VENC_FRAME_RING_HEALTH_MAGIC);
+	CHECK("fr_health_drops_at_80_zero", fd_drops == 0);
+	CHECK("fr_health_throttle_at_88_unclamped", thr == 1000);
+
+	/* Marker must be published before init_complete, so a consumer that
+	 * has attached at all always sees a coherent group. */
+	CHECK("fr_health_init_complete", r->hdr->init_complete == 1);
+
+	/* Fill the ring, then overflow it: the header counter must track the
+	 * process-local one the consumer cannot see. */
+	meta.codec = VENC_FRAME_CODEC_H265;
+	for (i = 0; i < 2; ++i)
+		CHECK("fr_health_write_ok",
+			venc_frame_ring_write(r, &meta, "xy", 2) == 0);
+	CHECK("fr_health_overflow_rejected",
+		venc_frame_ring_write(r, &meta, "xy", 2) == -1);
+
+	memcpy(&fd_drops, raw + 80, sizeof(fd_drops));
+	CHECK("fr_health_drops_published", fd_drops == 1);
+	CHECK("fr_health_drops_match_local",
+		fd_drops == r->stats.full_drops);
+
+	CHECK("fr_health_overflow_rejected2",
+		venc_frame_ring_write(r, &meta, "xy", 2) == -1);
+	memcpy(&fd_drops, raw + 80, sizeof(fd_drops));
+	CHECK("fr_health_drops_accumulate", fd_drops == 2);
+
+	/* Clamp publication. */
+	venc_frame_ring_set_throttle(r, 640);
+	memcpy(&thr, raw + 88, sizeof(thr));
+	CHECK("fr_health_throttle_published", thr == 640);
+	venc_frame_ring_set_throttle(r, 1000);
+	memcpy(&thr, raw + 88, sizeof(thr));
+	CHECK("fr_health_throttle_released", thr == 1000);
+
+	/* Nothing before the new fields moved, and the header is still the
+	 * size every consumer maps. */
+	CHECK("fr_health_hdr_still_192",
+		sizeof(venc_frame_ring_hdr_t) == 192);
+	CHECK("fr_health_version_unbumped",
+		r->hdr->version == VENC_FRAME_RING_VERSION &&
+		r->hdr->version == 1);
+
+	venc_frame_ring_destroy(r);
+	return failures;
+}
+
+/* An attached (consumer) ring must never write the producer's fields. */
+static int test_fr_health_consumer_readonly(void)
+{
+	int failures = 0;
+	venc_frame_ring_t *w, *rd;
+
+	w = venc_frame_ring_create("test_fr_health_ro", 2, 64);
+	CHECK("fr_health_ro_create", w != NULL);
+	if (!w)
+		return failures;
+	rd = venc_frame_ring_attach("test_fr_health_ro");
+	CHECK("fr_health_ro_attach", rd != NULL);
+	if (!rd) {
+		venc_frame_ring_destroy(w);
+		return failures;
+	}
+
+	venc_frame_ring_set_throttle(w, 500);
+	venc_frame_ring_set_throttle(rd, 250);   /* must be ignored */
+	CHECK("fr_health_ro_consumer_ignored",
+		w->hdr->throttle_permille == 500);
+	CHECK("fr_health_ro_consumer_reads",
+		rd->hdr->throttle_permille == 500);
+	CHECK("fr_health_ro_consumer_sees_magic",
+		rd->hdr->health_magic == VENC_FRAME_RING_HEALTH_MAGIC);
+
+	venc_frame_ring_destroy(rd);
+	venc_frame_ring_destroy(w);
+	return failures;
+}
+
 /* ── Entry point ───────────────────────────────────────────────────── */
 
 int test_venc_frame_ring(void)
@@ -882,6 +987,8 @@ int test_venc_frame_ring(void)
 	failures += test_fr_read_wait_wakeup();
 	failures += test_fr_slot_data_size_limit();
 	failures += test_fr_double_begin();
+	failures += test_fr_producer_health();
+	failures += test_fr_health_consumer_readonly();
 
 	return failures;
 }

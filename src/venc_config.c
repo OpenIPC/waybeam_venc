@@ -94,6 +94,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->isp.sensor_bin[0] = '\0';
 	safe_strcpy(cfg->isp.ae_engine, sizeof(cfg->isp.ae_engine), "sdk");
 	cfg->isp.ae_fps = 15;
+	cfg->isp.awb_fps = 15;
 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
 	cfg->isp.awb_ct = 5500;
 	cfg->isp.keep_aspect = true;
@@ -119,6 +120,7 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->outgoing.stream_mode, sizeof(cfg->outgoing.stream_mode), "rtp");
 	cfg->outgoing.max_payload_size = 1400;
 	cfg->outgoing.connected_udp = true;
+	cfg->outgoing.shm_throttle = true;
 
 	/* fpv */
 	cfg->fpv.roi_enabled = true;
@@ -226,7 +228,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->attitude.trim_roll_deg  = 0.0f;
 	cfg->attitude.trim_pitch_deg = 0.0f;
 
-	/* detect (IPU NPU object detection; Star6E only) */
+	/* detect (IPU NPU object detection; Star6E + Maruko) */
 	cfg->detect.enabled = false;
 	safe_strcpy(cfg->detect.plugin, sizeof(cfg->detect.plugin),
 		"/root/libwaybeam_detect.so");
@@ -329,6 +331,7 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 		}
 	}
 	s->ae_fps = (uint32_t)json_get_int(obj, "aeFps", (int)s->ae_fps);
+	s->awb_fps = (uint32_t)json_get_int(obj, "awbFps", (int)s->awb_fps);
 	s->gain_max = (uint32_t)json_get_int(obj, "gainMax", (int)s->gain_max);
 	s->shutter_max_us = (uint32_t)json_get_int(obj, "shutterMaxUs",
 		(int)s->shutter_max_us);
@@ -678,6 +681,7 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 	s->audio_port = json_get_int(obj, "audioPort", s->audio_port);
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
 		(int)s->sidecar_port);
+	s->shm_throttle = json_get_bool(obj, "shmThrottle", s->shm_throttle);
 }
 
 static void load_discovery(const cJSON *root, VencConfigDiscovery *s)
@@ -1258,6 +1262,7 @@ static void render_isp(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "sensorBin",  cfg->isp.sensor_bin,  0);
 	pp_field_string(p, 2, "aeEngine",   cfg->isp.ae_engine,   0);
 	pp_field_uint(p,   2, "aeFps",      cfg->isp.ae_fps,      0);
+	pp_field_uint(p,   2, "awbFps",     cfg->isp.awb_fps,     0);
 	pp_field_uint(p,   2, "gainMax",    cfg->isp.gain_max,    0);
 	pp_field_uint(p,   2, "shutterMaxUs", cfg->isp.shutter_max_us, 0);
 	pp_field_uint(p,   2, "gainMin",    cfg->isp.gain_min,    0);
@@ -1318,7 +1323,8 @@ static void render_outgoing(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "maxPayloadSize",  cfg->outgoing.max_payload_size,  0);
 	pp_field_bool(p,   2, "connectedUdp",    cfg->outgoing.connected_udp,     0);
 	pp_field_int(p,    2, "audioPort",       cfg->outgoing.audio_port,        0);
-	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,    1);
+	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,    0);
+	pp_field_bool(p,   2, "shmThrottle",     cfg->outgoing.shm_throttle,      1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1499,6 +1505,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(isp, "sensorBin", cfg->isp.sensor_bin);
 		cJSON_AddStringToObject(isp, "aeEngine", cfg->isp.ae_engine);
 		cJSON_AddNumberToObject(isp, "aeFps", cfg->isp.ae_fps);
+		cJSON_AddNumberToObject(isp, "awbFps", cfg->isp.awb_fps);
 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);
 		cJSON_AddNumberToObject(isp, "shutterMaxUs", cfg->isp.shutter_max_us);
 		cJSON_AddNumberToObject(isp, "gainMin", cfg->isp.gain_min);
@@ -1563,6 +1570,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(out, "connectedUdp", cfg->outgoing.connected_udp);
 		cJSON_AddNumberToObject(out, "audioPort", cfg->outgoing.audio_port);
 		cJSON_AddNumberToObject(out, "sidecarPort", cfg->outgoing.sidecar_port);
+		cJSON_AddBoolToObject(out, "shmThrottle", cfg->outgoing.shm_throttle);
 	}
 
 	/* discovery */

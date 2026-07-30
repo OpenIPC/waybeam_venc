@@ -17,6 +17,11 @@ tools/ive_i6c_hwop
 
 tests/test_runner
 tests/test_imu_ring
+tests/test_qr_marker
+tests/qr_decode_host
+
+__pycache__/
+*.py[cod]
 
 enc-ctrl/tests/test_runner
 

@@ -1,5 +1,672 @@
 # History
 
+## [0.60.2] - 2026-07-30
+
+Star6E IMX335 driver gets the same power-on fix as Maruko's in 0.60.1.
+
+- **`pCus_poweron()` asserts before releasing**
+  (`drivers/sensor_imx335_star6e.c`) — the first PWDN/RESET pair used the
+  release polarity, so the sequence was release → CSI config → release
+  again: no clean reset edge, the same flaw shape the 0.60.1 Maruko fix
+  amended.  Now the canonical SDK pulse used by both IMX415 drivers and the
+  0.60.1 Maruko IMX335 driver: assert PWDN+RESET through CSI config, release
+  PWDN, 31 ms rail settle, release RESET, start MCLK.  The IMX415 Star6E
+  driver already had the correct sequence — unchanged.
+  `sensors/star6e/sensor_imx335_star6e.ko` rebuilt (vermagic unchanged).
+
+## [0.60.1] - 2026-07-30
+
+Two Maruko fixes contributed by @tipoman9 (upstream PRs #103/#104, verified on
+SSC378QE + IMX335), inlined onto the fork with review amendments.
+
+- **IMX335 driver: full power-up pulse in `pCus_poweron()`**
+  (`drivers/sensor_imx335_maruko.c`) — the function only configured CSI and
+  MCLK and never touched PWDN/RESET (the toggle lived in
+  `pCus_HardwareReset()`, which nothing calls).  Boards that hold the sensor
+  in reset until the driver releases it therefore never answered i2c: every
+  mode's init table NAK'd and `MI_SNR_Enable` failed with `0xA01B201F`,
+  regardless of mode.  Amended from the contribution to the canonical SDK
+  sequence already used by the IMX415 Maruko driver: assert PWDN+RESET through
+  CSI config, release PWDN, 31 ms rail settle, release RESET, start MCLK — a
+  clean reset edge on every board, not just a pin release.
+
+- **`isp.keepAspect=false` honours stretch-to-fill again**
+  (`src/maruko_pipeline.c`) — v0.24.1 hardcoded the precrop to `keep_aspect=
+  true`, silently centre-cropping every AR-mismatched Maruko pipeline and
+  reducing `keepAspect=false` to a printed note, contradicting the documented
+  contract.  The override was justified by a *single-axis* squeeze failure
+  (1920x1080 -> 1440x1080, height unscaled — the I6C SCL genuinely refuses
+  that), but a two-axis non-uniform scale is fine (contributor-verified:
+  2496x1872 -> 1920x1080 at steady 50 fps, zero drops).  `keep_aspect` is
+  passed through again; amended from the contribution to **keep the
+  centre-crop override for the single-axis geometry** (device-verified fatal:
+  0 frames, wedged the binned sensor) instead of warn-and-proceed.
+
+- **`isp.keepAspect` un-gated on Maruko** (`src/venc_api.c`, contract
+  `0.16.1`, non-breaking) — found during device verification of the above:
+  the field was advertised `supported:false` on Maruko (added when the
+  blanket override made it a no-op), so `/api/v1/set` rejected it with
+  `not_implemented` and the WebUI greyed the control — the pipeline fix alone
+  was unreachable through the API.  Capabilities now report it supported;
+  dashboard tooltip rewritten for the single-axis-exception behaviour.
+
+## [0.60.0] - 2026-07-30
+
+QR scanning moves to `GET /api/v1/snapshot.jpg`; `GET /api/v1/snapshot.pgm`
+(added 0.59.0) is **retired** and answers 404.  Contract 0.16.0.
+
+- **Why: the PGM path could kill the SoC.**  It captured through a
+  short-lived VPE port1 / SCL port3 tap programmed and torn down per request.
+  Device stress-testing on the Star6E bench showed the teardown can race an
+  in-flight MHAL buffer — `MI_VPE_IMPL_DisablePort ... mhal not return
+  buffer` — after which the whole VPE input FIFO jams
+  (`MI_SYS_IMPL_EnsureInputPortFifoEmpty ... no response in 1000ms!`
+  repeating) and the box ends in a kernel panic-reboot or a hard hang
+  needing a power cycle.  Two wedges in ~560 stressed captures; the race
+  window scales with frame size.  The race is kernel-side — userspace can
+  only stop rolling the dice.
+- **The MJPEG channel has no such cycle.**  It is created once at pipeline
+  start, stays bound, and pulse-encodes per capture (StartRecvPic →
+  GetStream → StopRecvPic) — the same path `snapshot.jpg` has always used.
+  Rapid back-to-back captures are safe, verified by re-running the same
+  kill suite against it.
+- **`qr_decode` now reads JPEG natively** (and still reads P5 PGM, sniffed
+  from the first two bytes; both work from a file or stdin).  Decode is the
+  vendored public-domain `stb_image` (`tools/qr/stb/`, JPEG-only build,
+  luma extracted directly).  The loader slurps bounded input to memory
+  first, so stdin JPEG works without seeking.
+- **`qr_decode` is built -O3 instead of -Os** — 1.66x faster end-to-end on
+  the Star6E bench (1265 ms vs 2206 ms on a 3.6 MB frame, best of 3) for
+  +24 KB of binary.  Decode latency is what the tool is judged on.
+- **VPE port1 / SCL port3 go back to stab framing and NPU detection
+  exclusively.**  The snapshot arbiter claim, the sticky `SetPortCrop`
+  restore discipline, the BSP-refusal fallback and the tap geometry helpers
+  are all deleted (~600 lines across both backends).  The 409
+  `snapshot_gray_busy` and 400 `bad_crop`/`bad_max_dim` error codes are gone.
+- **QR capture resolution now follows `snapshot.width`/`snapshot.height`**
+  (0 = inherit the main stream).  Size the MJPEG channel up when markers
+  must decode from further away — QR range scales with pixels per module.
+- **WebUI: new "Snapshot" card.**  `snapshot.enabled`, `quality`, `width`
+  and `height` carry `FIELD_UI` metadata, so the group renders from
+  `/api/v1/capabilities` with no dashboard edit; the section was API-only
+  before.
+- `qr_watch.sh` polls `snapshot.jpg`; `QR_TMP_PGM` env override renamed
+  `QR_TMP_IMG`.
+
+## [0.59.0] - 2026-07-26
+
+New `GET /api/v1/snapshot.pgm` endpoint returns a grayscale frame as a binary
+P5 PGM — the luma plane of an uncompressed NV12 frame, with no JPEG
+encode/decode step. It rides the existing `snapshot.enabled` gate and the
+snapshot subsystem mutex, so `.jpg` and `.pgm` share one switch and never run
+concurrently. Implemented on both backends: Star6E taps VPE port1, Maruko taps
+SCL port3.
+
+On Star6E the grab programs a short-lived VPE **port1** tap, drains exactly one
+frame (`MI_SYS_ChnOutputPortGetBuf`, mirroring the detector tap in
+`star6e_ipu_yolo.c`), and tears the tap back down — resetting the user output
+depth before `MI_VPE_DisablePort` on every exit path. It deliberately does not
+touch port0: a user frame queue may only be registered on a port with no
+downstream hardware bind, and port0 is bound to the H.265 encoder (1:N with the
+MJPEG channel), where registering one makes the kernel SCL run user output
+tasks alongside the bind and trips a hard `BUG` in
+`_MI_SYS_IMPL_AllocBufDefaultPolicy` on the `vpe0_P0_MAIN` worker — stalling
+the live encode path and, on some runs, resetting the board.
+
+Because port1 is the single second scaler output, the capture takes it through
+the `star6e_vpe_ports` arbiter: stab framing and NPU detection own that tap for
+a whole run, so a capture attempted while either is active returns `409`
+(`snapshot_gray_busy`) instead of reprogramming the tap underneath them. Tap
+geometry starts from the configured snapshot size and caps the long side at
+1280 px (aspect-preserved, width 16-aligned); PGM is self-describing, so
+consumers read the real dimensions from the header. Capture failure is
+non-fatal — the endpoint serves an error and the encode path is unaffected.
+
+Maruko follows the same shape on i6c primitives. Every SCL output already has
+an owner — port0 is the main H.265 output (RING, 1:1), port1 carries the bound
+MJPEG channel, port2 is the stab tap — so the grayscale tap uses **port3**, the
+NPU detector's, arbitrated by the new `maruko_scl_ports` module so a capture
+loses to a running detector instead of reprogramming its tap mid-inference. The
+i6c MI_SYS entry points take a leading `u16 soc_id` and the port is configured
+through `SetPortConfig` with an explicit crop window, which the pipeline now
+publishes via `venc_jpeg_set_gray_crop()`.
+
+Ships a freestanding scanning backend under `tools/qr/`: `qr_decode.c`
+(vendored quirc, ISC) decodes P5 PGM captures with mirror, overlapping-tile,
+half-scale, light-denoise, and inverted passes. A required continuous black
+outer frame now supplies direct four-corner projective geometry for a
+Version-1 QR while keeping extraction in the original image; framed grids use
+3×3 majority sampling. The default output is limited to the minimal
+Version-1/Q alphanumeric envelope — exactly 16 characters, leading type `P` or
+`C` — while `--raw` keeps arbitrary-symbol bench diagnostics available.
+
+`qr_watch.sh` remains a standalone polling helper with no action dispatch. It
+reports `409`/`503` distinctly and can stream decodes with `-c`. Pairing,
+commands, boot scheduling, persistence, packaging, and service integration are
+deferred to a separate consumer work package. A deterministic host corpus
+compares stock and frame-assisted recognition across front, rotated, mirrored,
+small, and projectively compressed renders. Build with `make qr-decode`; run
+the core corpus with `make qr-test-host`. An extended 768-image Version-1/Q
+series sweeps marker width, four perspective ratios down to 0.35, rotation,
+perspective direction, and four defocus levels. The outer frame was identified
+in 768/768 cases; exact payload decode reached 709/768 (92.3%) versus stock
+quirc's 506/768 (65.9%). The SSC338Q Star6E bench reproduced those exact
+counts natively. The production decoder now strictly requires the bounded
+outer frame and never performs global finder discovery. It tries the frame's
+direct transform first, then—only after ECC failure—runs finder refinement in
+a tight ROI derived from the accepted frame. This preserves rejection of bare
+QRs while absorbing fisheye curvature that a four-corner homography cannot
+model. Opt-in `--stats` diagnostics report each applied pass, per-stage
+monotonic timings, frame/refinement/finder candidate counts, QR and envelope
+outcomes, and a final summary on stderr without contaminating payload-only
+stdout. `qr_watch.sh -v` exposes the same trace during polling.
+Continuous polling is completion-aware: the next snapshot starts immediately
+after the previous capture/decode returns unless that would place capture
+starts less than 0.5 seconds apart. This removes the former fixed post-decode
+sleep for direct on-camera stress testing; `-i` may still request a slower
+minimum start cadence.
+
+Live phone-display validation on the SSC338Q Star6E confirmed the combined
+path on real optical captures: the exact `P23456789ABCDEFG` envelope decoded
+through both `sharp/tile/refine` and `sharp/half/refine`. The initial
+five-frame run succeeded 2/5 times. Failed large presentations remain
+dominated by the bench camera's strong fisheye curvature; offline radial
+correction made those same frames decodable. The decoder now includes that
+compensation as a late, single-coefficient (`k1=-0.30`) nearest-neighbour
+fallback. It retries only corrected full-frame sharp and light-denoised images,
+and both remain subject to the mandatory frame gate; no unbounded finder path
+is introduced. A fresh live five-frame Star6E burst improved from 2/5 to 4/5
+exact decodes: one normal bounded refinement and three lens-corrected bounded
+refinements. The remaining miss found no acceptable frame even after
+correction.
+
+The bounded scan path retains its behavior-preserving reductions: symmetric
+frame geometry is scored once per candidate, nine-tile scans are deferred,
+blur-half no longer delays the fisheye fallback, radial correction precomputes
+invariant column terms, repeated cell coordinates are cached, and quirc
+retains high-water work buffers. The final standalone build prioritizes flash
+size with `-Os`, per-function/data sections, linker garbage collection, the
+existing Star6E NEON/VFPv4 flags, and quirc's single-precision perspective
+math. The stripped decoder is 30,288 bytes on Star6E and 30,136 bytes on
+Maruko, down from 63,052 bytes for the previous Star6E `-O3`/loop-unrolled
+build. On the saved hard 1280x720 fisheye capture, the size build decoded the
+same `lens-blur/full/refine` stage and exact payload in a 425 ms mean over 20
+runs (404–472 ms), versus 257 ms for the prior speed build. Sampling,
+thresholds, candidates, scan coverage, payloads, and the full 768-case counts
+remain unchanged.
+
+Merge-gate hardening caps PGM dimensions, detects decimal overflow, requires
+the endpoint's 255 maxval, handles allocation failures as fatal input errors,
+and accepts `--` before filenames beginning with a dash. New CLI regressions
+cover valid fixture decode, option ordering, malformed headers, duplicate
+inputs, and dimension limits. `qr_watch.sh` now uses a unique `mktemp` file
+per process with signal/exit cleanup rather than a shared symlink-prone path,
+and decoder execution failures no longer look like ordinary empty frames.
+The included Python generator forces Version 1/Q/alphanumeric metadata,
+validates the minimal envelope, and emits the exact bounded profile as SVG,
+binary-clean PNG, or decoder-ready PGM. The checked-in phone and CLI fixtures
+are generated by that tool.
+
+## [0.58.0] - 2026-07-26
+
+Maruko gains IPU object-detection parity with Star6E: a raw 800x448 NV12 tap
+on SCL port 3 feeds the shared ABI-3 plugin, publishes the unchanged DETECT
+sidecar trailer, draws optional debug-OSD boxes, and supports pipeline-thread
+enable/disable and model reload without restarting video. Teardown follows the
+i6c drain-while-disable rule so an IPU reader cannot pin ISP-to-SCL shutdown.
+
+The I6C model is platform-specific; an I6E `.img` is rejected. On the
+SSC378QE bench, `inferInterval=1` held the SCL buffer through every IPU invoke
+and reduced video from 59.7 to 38.0 fps while producing only 6.9 inferences/s.
+At the new Maruko default `inferInterval=2`, the alternate-frame drain breaks
+that backpressure loop: video stays at 59.7 fps and detection reaches 8.5-10.1
+Hz. The final 15-second sample measured 9.46 Hz with 51 ms median / 94 ms p95
+snapshot age and no new VENC ring-drop lines. Star6E's existing 800x448 bench
+is 9-10 Hz, 52/96 ms age, and 90 FRAME/s. Detector throughput and freshness
+are therefore at parity; encode rate remains the configured sensor/backend
+difference.
+
+Small-flash Maruko deployments can keep the model as an xz archive under
+`/root/models`; `S95waybeam` stages the exact configured `/tmp/*.img` before
+startup. Contract 0.15.0 records Maruko support for the existing detect fields.
+
+## [0.57.0] - 2026-07-26
+
+`frame-shm://` egress no longer answers a full ring by throwing away an
+encoded frame. When the ring backs up, the encoder now lowers its own
+bitrate until the consumer keeps up.
+
+**The bug this closes.** `venc_frame_ring_begin_write()` returns -1 on a full
+ring and `star6e_output_send_frame_ring()` discards the whole frame. That drop
+lands *after* encode, so the H.265 reference chain breaks and the receiver
+decodes garbage until the next IDR or the end of the GDR cycle. Post-encode
+frame skipping is the same mistake v0.9.2 shipped and reverted; dropping
+frames was never backpressure, it was the damage.
+
+Ring geometry is 8 slots x 384 KB — 80 ms of queue at 100 fps. By the time it
+is *full* the latency budget is already gone, so the control variable is
+occupancy, not the drop counter.
+
+**What shipped** — `src/venc_shm_throttle.c`, a pure AIMD controller evaluated
+every 200 ms on the window's **low-water** occupancy:
+
+    low_water >= 2       permille = max(250, permille * 4/5)
+    full_drops increased permille = max(250, permille * 3/5), once per window
+    low_water <= 1       permille = min(1000, permille + 50)
+
+Low-water, not high-water, and the bench is what settled it. On `.232` at
+100 fps a *healthy* consumer still lets the ring spike to 2-3 slots inside a
+200 ms window and drains it again — it reads one frame per event-loop
+iteration, so short bursts are normal. High-water read those as congestion
+and clamped 15-25 % at random, oscillating 740-1000 with nothing wrong.
+Low-water asks whether the ring failed to drain *at any point* in the window;
+if it touched bottom, the consumer is keeping up. After the change, 30 s of
+healthy operation holds at exactly 1000 with zero drops.
+
+The drop charge is capped at once per window for a related reason: a full
+ring increments `full_drops` on *every* frame, so an uncapped per-frame x3/5
+is `0.6^20` inside one window — an instant slam to the floor on the first
+congested window, with no chance to settle at an intermediate rate. That is
+what the bench showed before the cap: 781 -> 250 in well under a second.
+
+Retreat to the floor takes ~1.4 s, recovery to unclamped ~3.0 s. The 250 floor
+means a wedged consumer cannot drive the encoder to nothing; entering and
+leaving the floor is logged exactly once each, because a clamp silently pinned
+at its floor has spent all its authority and reads as "working" when it is not.
+
+**It is a clamp, never a veto.** The factor multiplies the bitrate programmed
+into the SDK and `video0.bitrate` is never written. That is what keeps an
+external rate controller's write-on-change cache coherent — every write still
+succeeds and lands in config — and keeps the WebUI slider, `mod_venc` and curl
+truthful. Returning an error from the setter was considered and rejected: a
+write-on-change controller treats non-2xx as a failure, never commits, and
+re-pushes the identical value forever.
+
+Steady-state rate stays owned by the external controller. The split is by
+timescale: this loop is ~200 ms, the link's actuators are 1.5-8 s. Keep that
+>=5x separation if you retune either side, or the two couple into oscillation.
+
+**The IDR trap.** `apply_bitrate()` forces an IDR so the decoder resyncs
+against the new RC state. The clamp re-programs as often as every 200 ms while
+the ring is backed up, and an IDR is the largest frame the encoder emits —
+IDR-ing through congestion would feed the queue being drained. The throttle
+path goes through `apply_bitrate_ex(kbps, want_idr=0)`; small between-IDR rate
+changes are absorbed by the rate controller, which the existing rate-limit
+gate already relies on.
+
+Pipeline-thread applies take `venc_api_cfg_trylock()` rather than blocking:
+a restart-class HTTP set holds that mutex across a full pipeline reinit, and
+stalling the encode loop behind it is worse than skipping one advisory update.
+A missed window is retried 200 ms later.
+
+**Config** — `outgoing.shmThrottle` (bool, live, **default on**). Everything
+else is compile-time, following `include/idr_rate_limit.h`; exposing water
+marks as config was tried in v0.9.2 and removed as more noise than useful.
+Default-on because a clamp that only ever reduces below what was already
+requested is hard to make worse than an uncorrected whole-frame drop, and the
+wfb rigs, bench harnesses and `radeon-vrx` / hub consumers have no rate
+controller at all.
+
+**Observability** — `throttlePermille` and `effectiveBitrateKbps` in
+`/api/v1/transport/status`; a `thrNN%` suffix on the debug-OSD `br` row when
+engaged (absent when unclamped, so the common case stays uncluttered); and
+`throttle_permille` in the sidecar TRANSPORT_INFO trailer, carved from the old
+`_pad[2]` so the trailer stays 16 bytes and every later trailer keeps its
+offset. A pre-0.57 producer sends 0 there, which consumers must read as "not
+reported", not "clamped to nothing". `_Static_assert`s now pin all three
+trailer sizes. frame-shm also emits a TRANSPORT_INFO trailer at all now — the
+flag condition had only ever covered `shm://` and the socket transports.
+
+Both backends, one control law — Star6E and Maruko are byte-symmetric here
+(same 8 x 384 KB ring), and a per-backend divergence in shared behaviour is a
+standing drift trap in this repo.
+
+**Measured on Star6E `.232`**, IMX335 100 fps, `frame-shm://venc_frame`
+consumed by `waybeam-link tx`, encoder asked for 60000 kbps on a link that
+cannot carry it, 40 s each:
+
+| | frames dropped | frames delivered | loss |
+|---|---|---|---|
+| 0.56.0 | 1949 | 2069 | **48.5 %** |
+| 0.57.0 | 110 | 3892 | **2.7 %** |
+
+Half the encoded stream was being discarded post-encode, every drop breaking
+the reference chain. Also device-confirmed: `video0.bitrate` reads 25000 (then
+60000) in `/api/v1/config` throughout, unchanged by the clamp; recovery from
+the floor is 250 -> 500 -> 750 -> 1000 in exactly 3 s with no overshoot, then
+pinned; and the floor warning fires exactly once on entry and once on exit.
+**Producer health in the ring header.** `health_magic` (`"VHLT"`) at offset
+76, `full_drops` u64 at 80, `throttle_permille` u16 at 88 — carved from the
+producer-owned pad on cache line 1. `sizeof` stays 192, `version` stays 1,
+nothing before them moves, and both external consumers
+(`radeon-vrx`, `waybeam-link`) address this header by *byte offset*, so the
+change is invisible to them. `_Static_assert`s now pin every header offset,
+because a reorder would move these out from under both consumers with
+nothing failing to compile.
+
+`full_drops` closes a structural blind spot: the counter is otherwise
+process-local to venc, so an ingress node cannot see the drops it is
+causing. `health_magic` is what stops a new consumer reading an old
+producer's zeroed pad as "no drops" — it is published last, after the
+counters and before `init_complete`. Consumers must treat a mismatched
+marker as "does not report health", and must never reject a ring because
+these bytes are non-zero; that check, applied to the per-frame meta, is what
+made `radeon-vrx` drop every delta frame against a #179 producer.
+Canonical spec: `protocols/frame-shm.md`.
+
+Not included: the bounded `outgoing.shm_block_us` net. It only engages after
+this clamp has already failed, and it blocks the encode thread — the
+SigmaStar D-state / MI_SYS wedge path. It waits until the clamp has device
+numbers.
+
+## [0.56.0] - 2026-07-25
+
+Star6E AWB actually adapts now. `isp.awbMode=auto` was not adaptive: AWB latched
+whatever it estimated in the first second and never moved again, leaving a
+standing cast (a visible yellow on IMX335) that no scene change corrected.
+
+**Cause.** Two things in `star6e_pipeline.c` left AWB with nothing driving it.
+`MI_ISP_DisableUserspace3A` at ISP bin load kills the SDK 3A_Proc thread, and
+`MI_ISP_CUS3A_Enable(0, {0,0,0})` ~1 s after start returns every module to the
+ISP-internal algorithms. AE survives that (it is driven separately, which is
+why only colour looked wrong), but the internal AWB does not converge here.
+
+**Why not simply keep the SDK's 3A stack.** Because it runs per frame. Measured
+on .232: correct colour and genuine convergence at 60 fps for +6pp venc CPU, but
+at 120 fps it pins the CPU at 100% and the box is unusable. Maruko solves this
+with a `CUS3A_RunOnce` pacer — not portable, i6e `libmi_isp.so` exports no
+`RunOnce`/`RunOnceEn`/`SetRunMode` (i6c only).
+
+**What shipped instead** — a userspace AWB loop (`src/star6e_awb.c`) that runs at
+a rate we choose rather than per frame:
+
+    MI_ISP_AWB_GetAwbHwAvgStats   128x90 block R/G/B averages, computed by
+                                  hardware, free to read
+    grey-world + block rejection  a few hundred microseconds
+    MI_ISP_CUS3A_SetAwbParam      apply
+
+AWB is handed to userspace (`Cus3AEnable_t.bAWB = 1`) so this loop owns it.
+Because nothing is per frame, **cost is independent of frame rate** — that is the
+entire point, and it is what the SDK stack could not offer. Rate is
+`isp.awbFps` (default 15 Hz, 0 disables). Gains are damped (1/4 per tick) and
+gated by a 3% deadband so a settled scene stops rewriting them; degenerate
+scenes are handled by rejecting saturated/black blocks, requiring ≥5% of the
+frame usable, and clamping the result.
+
+`isp.awbMode=ct_manual` is unchanged for the operator and still hard-locks the
+colour temperature: it hands AWB back to the ISP-internal algorithm, which is
+what the existing `MI_ISP_AWB_SetCTMwbAttr` path applies through, and stands the
+loop down. `awbFps=0`, a failed loop start, or manual mode all leave AWB exactly
+where it is today.
+
+`isp.awbFps` applies **live** — retuning the rate, stopping the loop and
+restarting it all happen without a restart, because the rate is a plain store
+the loop thread reads on its next wake and ownership of the AWB module can be
+moved at any time. Crossing 0 in either direction moves that ownership: 0 hands
+AWB back to the ISP before standing the thread down, and a non-zero rate starts
+the loop and takes ownership only if the mode is `auto`. Range is clamped to
+[0, 30] — the loop sleeps `1000/hz` integer milliseconds, so a large enough rate
+would round to a zero sleep and spin a core. Backends without the loop (Maruko,
+whose AWB is driven by the SDK's own 3A) answer `501` rather than accept the
+write and silently do nothing with it.
+
+Related fix in the same area: `isp.awbMode=auto` handed AWB to the userspace
+loop unconditionally, including when `awbFps=0` meant no loop was running. That
+left the module owned by an algorithm that does not exist — strictly worse than
+the non-converging internal one it replaced. Ownership now follows the loop.
+
+The debug OSD `awb` row now reads the applied gains from the loop rather than
+`MI_ISP_AWB_QueryInfo` — that reports the ISP-internal algorithm's last state,
+which is frozen precisely because it is no longer running. In userspace mode the
+row reads `r<R> b<B> usr#<n>`, where `n` counts applied corrections and is the
+liveness signal (moving = tracking, steady = converged).
+
+**Device-verified on .232** (SSC338Q / IMX335): from the frozen 2111/2250 the
+loop converges to ~1128/3496 — within a few percent of both what the SDK's own
+AWB reached (1165/3254) and what grey-world predicts from the hardware stats
+(1104/3498). At **100 fps with NPU detection also running: 51% venc CPU**,
+0 CMDQ/ISP-WQ errors. A forced `ct_manual` excursion to 2800 K and back is
+recovered smoothly.
+
+**Do not "fix" the `int[]`-vs-struct call.** `Cus3AEnable_t` is
+`{MI_BOOL bAE, bAWB, bAF}` with `MI_BOOL = unsigned char`, so
+`int p110[13] = {1,1,0}` reads as `bAE=1, bAWB=0, bAF=0` — the AWB flag lands in
+padding. That is true but the accidental behaviour was benign, because
+`CUS3A_Enable` means "hand this module to *custom* code", not "run this algo".
+The struct is now passed correctly and `bAWB` is set deliberately.
+
+## [0.55.0] - 2026-07-25
+
+Debug OSD: an actual-bitrate row on both backends, and the Maruko-only
+diagnostic rows brought across to Star6E.
+
+**New `br` row (both backends).** Shows the encoder's real output rate against
+its configured RC target, e.g. `br: 8123/10000k`. The rate is summed from the
+encoder's own per-frame sizes (`star6e_scene_frame_size` /
+`maruko_scene_frame_size`) over the OSD's existing 1 Hz window, **not** from
+bytes handed to the transport — so it stays truthful when `output_enabled` is 0
+and excludes packetization overhead. The gap between actual and target is the RC
+undershoot/overshoot, which is also the fastest way to tell an encoder problem
+from a link problem: an encoder tracking target while the picture stutters points
+at the radio. Previously this number was only reachable via `[verbose]` log
+lines (gated on `system.verbose`) or a subscribed sidecar probe.
+
+**Star6E gains four rows Maruko already had.** Both backends share the
+`src/debug_osd.c` renderer, but row *content* is written at each backend's own
+call site, and Star6E's had fallen behind:
+
+- `exp` — shutter µs, sensor/ISP gain, gain ceiling.
+- `ae` — scene luma, AE target, and stable/adjusting/at-limit state.
+- `awb` — R/B gains, colour temperature, stable state.
+- `stab` / `sfil` — Kalman correction (`a`) and raw detector measurement (`m`)
+  in stab pixels, plus pause state. Hidden when no stab thread runs.
+
+New `star6e_controls_ae_osd_status()` reuses the AE/AWB query machinery already
+in `star6e_controls.c` (`ae_diag_snapshot_collect`, the `AeExpoInfo_t` /
+`IspExposureLimit` / `AwbQueryInfo_t` typedefs, the `MI_ISP_AWB_QueryInfo`
+dlopen pattern) — no new SDK bindings. Shutter/gain fall back to
+`MI_SNR_GetPlaneInfo` when the ISP AE query does not answer, which is what keeps
+the row populated under CUS3A/userspace-3A. `star6e_framing_stab_osd_status()`
+mirrors its Maruko counterpart. All of it refreshes at 1 Hz on the existing OSD
+tick, never per frame — each AE/AWB refresh dlopens libmi_isp and round-trips
+several MI_ISP getters.
+
+**Two rows deliberately not ported.** Maruko's AR centre-crop `crop` row reads
+`ctx->scl_crop_*`, an i6c-only feature with no Star6E counterpart (Star6E's
+`crop` row remains the zoom-derived one). Star6E's `det` detection-box overlay
+stays Star6E-only — it is fed by the i6e IPU.
+
+No renderer changes were needed: `debug_osd_text()` self-clips against the canvas
+height and paints its own per-row background, so extra rows need no panel resize
+or row-count constant. The added rows are conditional on their data being valid,
+so an idle box does not pay for all of them.
+
+## [0.54.0] - 2026-07-25
+
+Startup NPU scrub: every Star6E start runs a bare `MI_IPU_CreateDevice` +
+`MI_IPU_DestroyDevice` cycle before pipeline bring-up (`star6e_ipu_scrub`,
+measured 0.1–2.2 s depending on how cold the IPU firmware is, no-op when
+`/dev/mi_ipu` is absent). This closes the residual ISP-CMDQ
+wedge left open by 0.53.0, and fresh bench work on a healthy box narrowed that
+wedge considerably:
+
+- **The actual wedge condition** (reproduced 2/2, all other paths clean): the
+  detector was started **at pipeline bring-up** (from config at init), later
+  stopped **live**, and then a fork+exec respawn fired — the successor, which
+  never touches the IPU, wedges at ISP init. A detector started *live* on a
+  running pipeline does not poison the same sequence (1/2 sessions' worth of
+  contrary lore came from a degraded box).
+- **Not actually broken on a healthy box**: external stop/start with *any* gap
+  (the "wait ~20 s" rule measured earlier was an artifact of accumulated wedge
+  damage — kernel-side MMA chunks and the per-device proc entries drain within
+  ~1-2 s of teardown); and a `MUT_RESTART` respawn while detection is *running*
+  (the successor re-creates the IPU device from the carried config and
+  reconciles the state).
+- **Maruko/i6c**: setting `detect.enabled` now returns HTTP 501 (the live-apply
+  group requires the backend's `apply_detect_reload` callback, which only
+  Star6E registers). Intentional — previously the set was accepted and burned a
+  full respawn on a backend that has no detector at all; an explicit refusal is
+  more honest than a pointless restart.
+- **Why the scrub works**: whatever state a predecessor's IPU teardown leaves
+  behind is reset by the next IPU device create — from any process. Running the
+  cycle before VIF/VPE/ISP bring-up makes every successor a reconciler
+  regardless of its detect config. Verified 2/2 on the previously-wedging
+  sequence, plus clean cold starts and live toggles. A scrub *after* the ISP
+  has wedged does not recover it, hence startup placement, and unconditional —
+  the poison survives process exit, so no flag from the previous instance can
+  know whether it is needed.
+
+## [0.53.0] - 2026-07-25
+
+`detect.enabled` is applied live instead of by a `MUT_RESTART` respawn. The
+respawn was leaving the successor pipeline permanently frameless on Star6E, and
+no respawn-side fix is possible — the state is pinned by an fd the child cannot
+close.
+
+- **The wedge** — after `/api/v1/set?detect.enabled=false`, the fresh process
+  never emitted a frame: `fps/live` 0, `framesSent` stuck, `waiting for encoder
+  data...`. Its ISP CMDQ sits mid-`WAIT` on the `ISP_TRIG` event with a corrupt
+  ring read pointer (`r=0x03000026` where a healthy ring reads `0x30000260`), so
+  `FrameStartProc` can never claim buffer space — `MDrvCmdqWriteCommandMask cmdq
+  buffer isn't available(0)` and then an endless `ISP_IRQ_WQ_FRAME_START add WQ
+  error!` storm. VPE's input FIFO never drains (`EnsureInputPortFifoEmpty ... no
+  response in 1000ms`, `mod7 dev0 pass0 infer timeout`), and the storm floods the
+  console hard enough to make the box unresponsive. `S95waybeam restart` often
+  did not clear it. Reproduced 3/3 on .232 (SSC338Q / IMX335).
+- **Root cause: the inherited `/dev/mi_sys` fd**, not time and not port state.
+  Eliminated on device, in order: a stale-enabled port1 or stale user depth (the
+  dying process's `SetChnOutputPortDepth(0,0)` and `DisablePort(0,1)` both
+  returned 0, and the successor found port1 already disabled); a 3 s settle
+  inside the parent's teardown; post-exit settles of 4.5 s and 15 s in the
+  respawn child; `cold_vif` plus 4 s; closing every inherited `/dev/mi_*` except
+  `mi_sys` plus 8 s. An external stop/start — every fd closed at exit — is clean
+  with a 20 s gap and wedges with 1 s. Closing `mi_sys` in the child is this
+  SoC's confirmed deadlock, so **no fork+exec respawn can recover from a
+  detect-active parent**. A successor that re-creates an IPU device reconciles
+  the state, which is why detect on->on restarts and live model swaps never
+  showed it.
+- **Fix: `detect.enabled` is `MUT_LIVE`** (`venc_api.c`), routed through the
+  existing `LIVE_GROUP_DETECT` / `apply_detect_reload` service, which now
+  dispatches start / stop / reload from the committed value. No respawn happens
+  on the transition at all, so the wedge cannot be reached — and toggling the
+  detector no longer costs a ~25 s stream outage.
+- **Start/stop policy factored out** (`star6e_pipeline_detect_start/_stop`) so
+  the port1 arbiter claim and the framing-conflict refusal cannot drift between
+  the initial bring-up and the live toggle. Both run on the pipeline thread, the
+  same thread that reads the detect snapshot.
+- **`copy_live_group_fields()` now copies `detect.enabled`** — omitting it
+  silently turned the toggle into a same-state reload (the value never reached
+  the committed config).
+- **Teardown hygiene** — `iy_unload_graph()` releases the port1 user output
+  depth it registered before disabling the port, and the pre-init teardown
+  disables VPE port1 as well as port0. Neither caused the wedge; both are state
+  this code registers and should release.
+
+Known limitation: any *other* `MUT_RESTART` change made while detection is
+running (e.g. `video0.size`) still respawns and still hits the wedge above.
+Disable detection first, or restart the process externally. A general fix needs
+the respawn to exec from a process forked before any `/dev/mi_*` is opened.
+
+## [0.52.0] - 2026-07-25
+
+Hot-swap the offline NPU detector `.img` without respawning the pipeline, so
+the main video0 RTP stream is uninterrupted (no gap, no keyframe reset, no
+reconnect) when only the model changes. Detection runs off the VPE0 port1 tap,
+independent of the video0 encode path, so a detector-only reload is clean.
+
+- **Detector-only reload entrypoint** (`star6e_ipu_yolo.c`) — the init is
+  factored into `iy_load_graph()` / `iy_unload_graph()` halves (plugin dlopen,
+  VPE port1 tap create, backend init) plus an `iy_stop_reader()` reader-join
+  helper. New `star6e_ipu_yolo_reload(state, vcfg)` tears down and re-creates
+  only the detector plugin + tap channel while the encoder keeps running.
+- **Geometry guard** — the live path is taken only when `net_width`/`net_height`
+  are unchanged; a dims change needs the VPE port recreated, so it falls back to
+  the full `MUT_RESTART` respawn. The multiple-of-32 / min-64 checks are shared
+  by start and reload via `iy_resolve_net_dims()`.
+- **Model geometry is now verified against the tap** — plugin ABI bumped to `2`,
+  adding a required `model_dims()` that reports the loaded `.img`'s REAL input
+  geometry, plus `net_width`/`net_height` in `DetectBackendConfig`. The host
+  compares the two and refuses a mismatch (`iy_check_model_dims()`), because
+  config is not evidence of what a model expects. Since `model_path` is live but
+  the dims are restart-scope, pointing `model_path` at a different-geometry
+  model was previously accepted silently and left an "active" detector that
+  never detected — the backend rejects every frame and `process()` errors are
+  not logged. A refusal names both geometries and the exact `netWidth`/
+  `netHeight` to set, leaves detection off, releases the port1 claim, and does
+  not disturb the stream. ABI is an exact match (no compatibility window during
+  beta), so an ABI-1 plugin is rejected at load with a clear diagnostic.
+- **Swap cost, measured** — a model change does not respawn the pipeline, drop
+  frames at the transport, force a keyframe, or reconnect, but it is not free:
+  the NPU graph load runs on the pipeline thread (which is what makes it atomic
+  against the per-frame snapshot), so frame output stalls for its duration. On
+  Star6E .232 at 100 fps the stall was **~100-450 ms** on some runs and
+  **~2.2-2.5 s** on others, with no in-between. The fast runs correlate with a
+  freshly booted or freshly restarted process and the slow ones with a pipeline
+  respawn having happened, but that did not hold in every trial (one
+  init-script restart stayed slow, another came back fast), so the trigger is
+  **not isolated** — it is not memory pressure, not file I/O (a pre-warmed
+  `.img` reads in 0.01 s with the stall unchanged), and not accumulation across
+  reloads (flat within a process). Treat **~2.5 s** as the planning number.
+  Only a `model_path` change pays this; see the in-place path below.
+- **Only a model change reloads the graph** — `model_id` is a label stamped into
+  the snapshot and `conf_thresh` / `nms_iou` are decode-time knobs, yet all
+  three shared `LIVE_GROUP_DETECT` and so rebuilt the NPU graph, paying the full
+  stall to change a number. `star6e_ipu_yolo_reload()` now compares the
+  requested `model_path` against what is loaded and, when it is unchanged,
+  applies the label and thresholds in place — the graph and the tap are never
+  torn down. Thresholds go through the new optional ABI-3 `set_thresholds()`
+  with the reader briefly parked (it parks between frames) so the decode is not
+  reading them as they are written; a backend without it falls back to the full
+  reload. Measured on .232 in the slow regime: threshold-only **50 ms** and
+  `model_id`-only **0 ms**, against ~2300 ms before.
+- **Mutability wiring** (`venc_api.c`) — `detect.model_path` is now `MUT_LIVE`,
+  and `detect.model_id` / `conf_thresh` / `nms_iou` are newly settable
+  (`MUT_LIVE`); a new `LIVE_GROUP_DETECT` applies them via `apply_detect_reload`
+  instead of setting `g_reinit`. `detect.net_width` / `net_height` are settable
+  as `MUT_RESTART`. Added range validators for the four new fields.
+- **Atomicity + concurrency** — the swap runs on the pipeline (encode) thread
+  via a request posted by the HTTP apply hook and serviced between frames
+  (`star6e_controls_service_detect_reload`), so it is atomic w.r.t. the
+  per-frame `DETECT` snapshot query and the failure path (which frees the
+  detector context) can never race a `snapshot()` read. The request carries a
+  full `VencConfig` snapshot taken under `g_cfg_mutex`, and the pipeline thread
+  reloads from a private copy of it — so the (potentially slow) NPU graph load
+  never reads the live config lock-free, even if the HTTP wait times out or a
+  second `/set` arrives. A `paused` flag quiesces the consumer across the swap;
+  the `DETECT` sidecar trailer is simply absent for the duration of the swap
+  (consumers already tolerate "no DETECT"). The wire `model_id` is latched into
+  the detector snapshot alongside the boxes, so it flips in lockstep with the
+  first new-model `DETECT` (never tagging the last old-model boxes with the new
+  id), and the `describe()` class-count cross-check re-runs after each reload.
+- Both `.img` files can be pre-staged (e.g. on SD); switching needs no
+  `/api/v1/restart`. Changing `netWidth`/`netHeight` still takes the full
+  respawn path (unchanged). No change to the RTP-sidecar wire ABI.
+- Contract `0.14.0`; `test_venc_api` gains four detect live/restart/validation
+  cases (2089/0); both backends build clean.
+
+### VPE port-ownership arbiter + `vpe_taps` observability
+
+Cross-feature alignment for the VPE0 scaler outputs, so the detector and the
+stab framing tap cannot both program the single second scaler, and an operator
+can see the allocation.
+
+- **Arbiter** (`star6e_vpe_ports.{c,h}`) — a single owner for VPE0 **port1**
+  (the lone second scaler output): stab XOR detect. `star6e_vpe_port1_claim()`
+  refuses a second claim while it is held; the pipeline claims it for the stab
+  motion tap and for the detector, so their mutual exclusion is now enforced by
+  the arbiter instead of an ad-hoc `if (g_framing)`. `FramingModule` gains a
+  `uses_vpe_port1` flag (stab=true; stab-fill=false — it drains port0 and
+  composes in SW, so it takes no port1 tap but stays detect-exclusive by an
+  explicit resource policy).
+- **Observability** — the arbiter publishes a `runtime.vpe_taps` block to
+  `/api/v1/config` via `venc_api_set_vpe_taps()`: `port0` lists the 1:N
+  consumers of the shared main output (`main` always; `jpeg`/`record` when
+  those channels are up — the JPEG snapshot is a port0 consumer, not a second
+  tap), and `port1` names its sole owner or `null`. Star6E only; absent on
+  Maruko.
+- `test_star6e_vpe_ports` covers claim/refuse/release/idempotence and the
+  published JSON (2103/0).
+
 ## [0.51.1] - 2026-07-24
 
 Detector hardening follow-ups from the v0.51.0 upstream review — four

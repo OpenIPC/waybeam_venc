@@ -12,6 +12,7 @@
     "sensorBin": "",
     "aeEngine": "sdk",
     "aeFps": 15,
+    "awbFps": 15,
     "gainMax": 0,
     "shutterMaxUs": 0,
     "gainMin": 0,
@@ -53,7 +54,8 @@
     "maxPayloadSize": 1400,
     "connectedUdp": true,
     "audioPort": 5601,
-    "sidecarPort": 5602
+    "sidecarPort": 5602,
+    "shmThrottle": true
   },
   "discovery": {
     "enabled": true,

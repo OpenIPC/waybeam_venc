@@ -64,6 +64,9 @@ typedef struct {
 	 * warns and falls back to "sdk". */
 	char ae_engine[8];     /* "sdk" (only valid value) */
 	uint32_t ae_fps;       /* custom AE rate in Hz (default 15) */
+	uint32_t awb_fps;      /* userspace AWB loop rate in Hz (default 15, 0=off).
+	                        * Decoupled from frame rate by design — this is
+	                        * what keeps AWB affordable at 120fps. */
 	uint32_t gain_max;     /* max sensor gain (0 = use ISP bin default) */
 	char awb_mode[16];     /* "auto" or "ct_manual" */
 	uint32_t awb_ct;       /* color temperature in Kelvin (for ct_manual) */
@@ -222,6 +225,9 @@ typedef struct {
 	                                     *       video decoder instability at the receiver
 	                                     * >0   = dedicated UDP audio port */
 	uint16_t sidecar_port;              /* 0 = disabled */
+	bool shm_throttle;                  /* frame-shm:// ring-fill bitrate
+	                                     * clamp (include/venc_shm_throttle.h).
+	                                     * Inert on every other transport. */
 } VencConfigOutgoing;
 
 typedef struct {
@@ -314,8 +320,8 @@ typedef struct {
 	                          built to confirm weak detections over time
 	                          rather than trust any single frame.        */
 	float    nms_iou;      /* NMS IoU; <=0 -> plugin default (0.45)      */
-	uint32_t net_width;    /* VPE port1 tap + model input; 0 -> 640.     */
-	uint32_t net_height;   /* 0 -> 352.  MUST match the compiled .img —
+	uint32_t net_width;    /* Detector tap + model input width.          */
+	uint32_t net_height;   /* MUST match the compiled .img —
 	                          the backend rejects a mismatched frame.    */
 	uint32_t model_id;     /* class-table selector put on the wire (see
 	                          RTP_SIDECAR_DETECT_MODEL_* and the registry
