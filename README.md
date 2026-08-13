@@ -54,6 +54,9 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
   disabled by default, ready for telemetry/sidecar consumers
 - Intra-refresh (GDR-style rolling stripe) for fast loss recovery on FPV links
 - Scene-change-triggered IDR (Star6E) for clean stream join under packet loss
+- Inline QR scanning (Star6E): overlay-free VPE port1 luma tap + isolated
+  `/usr/bin/qr_decode` helper, so a craft reads a pairing marker itself
+  without a workstation in the loop
 
 ## Build
 
@@ -81,7 +84,8 @@ Stage a deployable bundle with vendored libraries:
 
 ```sh
 make stage SOC_BUILD=star6e
-# Output: out/star6e/waybeam + out/star6e/lib/*.so (Maruko also stages drivers/ + isp-bins/)
+# Output: out/star6e/{waybeam,qr_decode} + out/star6e/lib/*.so
+# (Maruko also stages drivers/ + isp-bins/)
 ```
 
 Run host tests:
@@ -94,10 +98,11 @@ make test-ci
 
 ### Star6E (Infinity6E)
 
-Copy the binary to the target device:
+Copy the daemon and its isolated QR helper to the target device:
 
 ```sh
 scp out/star6e/waybeam root@<device-ip>:/usr/bin/waybeam
+scp out/star6e/qr_decode root@<device-ip>:/usr/bin/qr_decode
 ```
 
 For the current Star6E bench workflow, prefer the helper — it stops
@@ -250,7 +255,8 @@ omitted fields keep their compiled-in defaults.
   "outgoing": {
     "enabled": false, "server": "", "streamMode": "rtp",
     "maxPayloadSize": 1400,
-    "connectedUdp": true, "audioPort": 5601, "sidecarPort": 5602
+    "connectedUdp": true, "allowUnixEncoderStall": false,
+    "audioPort": 5601, "sidecarPort": 5602
   },
   "fpv":      {
     "roiEnabled": true, "roiQp": 0, "roiSteps": 2,
@@ -868,10 +874,64 @@ length are all derived from the preset — no per-feature knobs.
 | **Long stable flight**     | `patrol` — balanced + 4 s GOP                | `fpv` — drone FPV (heaviest refPred)          |
 | **Slow recovery OK**       | `quality` — plane / cruiser (IDR-based)      | —                                             |
 
+##### `ltr` — maximum non-reference density with a long GOP
+
+`ltr` trades differently from the other presets: instead of shortening the
+GOP so damage is repaired sooner, it makes **half the stream disposable**
+and lets you keep a long GOP.
+
+**What `u32Enhance` actually means** (device-measured on Star6E,
+2026-08-06, by NAL census of the raw elementary stream — the SDK documents
+nothing): it is a *period*, not a count.  The encoder emits exactly one
+non-referenced frame in every `enhance + 1`:
+
+| `enhance` | frame pattern | non-referenced (steady state) | measured |
+|-----------|---------------|-------------------------------|----------|
+| 1         | `InRnRnRn…`   | **50 %** (max)                | 50.0 %   |
+| 4         | `IRRRnRRRRn…` | 20 %                          | 17.6 %   |
+| 299       | `IRRRR…`      | 0.33 %                        | 0.3 %    |
+
+A capture reads slightly under the steady-state figure because the census
+includes the IDR and the partial groups at each end; the shorter the group,
+the more that dilutes.  The rule itself is exact.
+
+So **smaller is more resilient**, and `enhance=1` is the ceiling this SoC
+can express.  Bare `ltr` selects it; `ltr:<N>` pins the period for sweeps
+and is strictly less resilient as N grows.
+
+A lost non-referenced frame costs exactly one frame — the next frame is
+already clean.  The other half of the stream is an ordinary P-chain, so
+losing one of *those* still cascades to the next IDR.  There is no way to
+do better here: the full SigmaStar SDK's `MI_VENC_Set*` surface has **no
+long-term-reference, SmartP, or GOP-mode API** — `MI_VENC_SetRefParam` is
+the only reference-structure control, and P-frames always predict from the
+previous frame, never from the IDR.
+
+Unlike `rally` (the same 1:1 ratio) `ltr` preserves your `gopSize` and
+forces intra-refresh off, so it can be paired with a long GOP and
+**asymmetric FEC** on the transport: heavy protection on the IDR, light on
+the rest.  In waybeam-link that is `fec.i_rate_permille` high with
+`fec.p_rate_permille` low.
+
+**Measured cost: essentially none.**  At pinned QP 30 on a moving scene,
+`ltr:1` and `off` differ by under 1 % in bitrate (5.62/5.64 vs 5.65/5.68
+Mbps over alternating runs).  P-frame size is flat across the GOP, since
+prediction is from the previous frame either way.
+
+> ⚠️  **`ltr` is OSD-unsafe.**  It maximises the `ref_enhance > 0`
+> condition described above, so expect persistent chroma "green smear"
+> over static OSD text, clearing only on the IDR — and with a long GOP it
+> persists correspondingly longer.  Verify what the encoder applied with
+> `GET /api/v1/resilience/status`.
+>
+> `bEnablePred` is a **no-op** for this marking on Star6E: `rally`
+> (`pred=true`) and `ltr:1` (`pred=false`) produce byte-identical
+> `InRnRn…` patterns.
+
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.resilience` | string | **reboot** | `off` \| `rescue` \| `quality` \| `sprint` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` (default `off`) |
-| `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience: "off"`; named presets override it.  Live-reinit applies (no reboot). |
+| `video0.resilience` | string | **reboot** | `off` \| `rescue` \| `quality` \| `sprint` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` \| `ltr` \| `ltr:<N>` (default `off`) |
+| `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience` is `"off"` or an `ltr` form; the other named presets override it.  Live-reinit applies (no reboot). |
 
 > ⚠️  **Resilience changes require a reboot on both Star6E and Maruko.**
 > Setting `video0.resilience` (or any of the derived fields
@@ -940,6 +1000,17 @@ curl "http://<device>/api/v1/set?video0.resilience=patrol"
 
 # OSD off, heavy refPred for long-range lossy link
 curl "http://<device>/api/v1/set?video0.resilience=fpv"
+
+# Max non-reference density (50 % droppable) with a long GOP; OSD-unsafe.
+# Pair with asymmetric FEC (protect the IDR, barely protect the rest).
+curl "http://<device>/api/v1/set?video0.gopSize=5.0"
+curl "http://<device>/api/v1/set?video0.resilience=ltr"
+
+# Sweep the period — larger N is LESS resilient (1 droppable frame per N+1)
+curl "http://<device>/api/v1/set?video0.resilience=ltr:4"
+
+# Confirm what the encoder actually applied (resolved ratio, not AUTO)
+curl "http://<device>/api/v1/resilience/status"
 ```
 
 Notes:
@@ -952,7 +1023,8 @@ Notes:
   (`intra_refresh_*`, `ref_base`, `ref_enhance`, `ref_pred`) are
   intentionally not part of the JSON schema or HTTP API — the preset
   table fully drives them.  Use a named preset; if none fits, file an
-  issue and we'll add one.
+  issue and we'll add one.  `ltr:<N>` is the one parameterised form,
+  and it exists so the reference ratio can be swept without a rebuild.
 - Applied to ch0 only.  The dual-VENC recorder (ch1) is intentionally
   skipped — TS containers expect IDRs at GOP boundaries.
 - Budget +20–30 % bitrate when picking a preset that enables
@@ -986,6 +1058,7 @@ Notes:
 | `outgoing.stream_mode` | string | restart | `"rtp"` or `"compact"` |
 | `outgoing.max_payload_size` | uint16 | restart | Max UDP payload bytes |
 | `outgoing.connected_udp` | bool | restart | Connect UDP socket (applies only to `udp://`) |
+| `outgoing.allow_unix_encoder_stall` | bool | restart | Preserve blocking `unix://` behavior when the consumer queue fills. Default `false`: bounded wait then drop the rest of the frame |
 | `outgoing.audio_port` | int32 | restart | `>0` = dedicated audio port; `0` = shared video destination; `<0` (e.g. `-1`) = record-only (audio captured + recorded but never streamed). With `unix://`, dedicated audio is sent to `127.0.0.1:<audioPort>` |
 | `outgoing.sidecar_port` | uint16 | restart | RTP timing sidecar port (0 = disabled) |
 
@@ -994,6 +1067,28 @@ both `rtp` and `compact` mode. On Star6E, `audioPort=0` piggybacks on the
 same active video destination for both `udp://` and `unix://`. `shm://`
 remains RTP-only; it cannot share audio, but a nonzero `audioPort` still
 uses a dedicated local UDP audio destination.
+
+> **`unix://` requires a deep datagram queue.** Unlike UDP, an AF_UNIX
+> datagram sender blocks on the *receiver's* queue depth. The kernel
+> snapshots that depth from `net.unix.max_dgram_qlen` when the receiving
+> socket is created, and the default of **10 datagrams** is only ~7 ms of
+> buffer at 15 Mbps with 1400-byte RTP payloads — less than one 60 fps
+> frame (~23 packets). Every frame then overruns the queue and stalls the
+> encode thread waiting on consumer scheduling, which shows up as timing
+> jitter and dropped capture frames rather than as packet loss.
+>
+> Raise it **before the consumer starts** — raising it afterwards does
+> nothing for a socket that already exists:
+>
+> ```sh
+> echo 256 > /proc/sys/net/unix/max_dgram_qlen
+> ```
+>
+> `init.d/S95waybeam` does this at boot. venc warns on stderr at startup
+> when it finds a shallower value. Sends are additionally bounded by
+> `SO_SNDTIMEO` and a 4 ms per-frame flush deadline, so a wedged consumer
+> costs bounded packet drops (counted as `transportDrops` in
+> `GET /api/v1/transport/status`) instead of stalling the encoder.
 
 <a id="frame-shm-output"></a>
 `frame-shm://` publishes **whole encoded frames** (Annex-B, start codes
@@ -1254,6 +1349,161 @@ ffplay recording.ts                 # play directly
 
 See `documentation/SD_CARD_RECORDING.md` for the full guide including
 performance benchmarks, limitations, and architecture details.
+
+## QR Scanning (Star6E)
+
+A craft can read a QR marker itself. A scan window opens an **overlay-free**
+capture tap on VPE port1, decodes each frame in the isolated `qr_decode`
+helper, and closes when it finds a code or its budget runs out. `make stage`
+and `scripts/star6e_direct_deploy.sh` install both executables.
+
+Overlay-free is the point. MI_RGN composites **per scaler output port**, and
+every overlay producer targets port0 — `debug_osd` here, `osd_render` in
+waybeam-hub. The MJPEG snapshot channel is a port0 1:N consumer, so
+`/api/v1/snapshot.jpg` carries whatever HUD is running, right over the middle of
+the frame where a marker sits. port1 is a separate scaler output and is clean.
+
+### Enable it
+
+```bash
+# Off by default. Restart-required (the geometry is captured at graph build).
+curl "http://<device-ip>/api/v1/set?qr.tapEnabled=true"
+```
+
+| Field | Default | Mut. | Meaning |
+|---|---|---|---|
+| `qr.tapEnabled` | `false` | restart | arm the tap |
+| `qr.tapWidth` / `qr.tapHeight` | `0` | restart | tap geometry; `0` inherits the main stream |
+| `qr.windowMs` | `15000` | live | default scan budget, clamped 1000–60000 |
+
+The capture is the **centre square** of the tap output — 1920×1080 gives a
+1080×1080 scan area. Cropping in software rather than asking the port for a
+square is deliberate: the SCL scales but does not crop, so a square port would
+squash the aspect, and `MI_VPE_SetPortCrop` is sticky on i6e and would poison a
+later detect run.
+
+### A marker to test with
+
+<img src="tools/qr/test-images/bounded-P23456789ABCDEFG.png" alt="Waybeam test marker, payload P23456789ABCDEFG" width="260">
+
+Point the camera at this and a scan returns `P23456789ABCDEFG`. The file is
+`tools/qr/test-images/bounded-P23456789ABCDEFG.png` (1230×1230, binary-clean);
+an SVG vector master and a compact `.pgm` regression fixture sit beside it.
+
+**This is not a plain QR code, and a plain QR code will not decode.** The
+scanner requires a continuous **33×33 Waybeam outer-frame profile** wrapped
+around a Version-1/Q symbol, and it uses that frame's geometry to derive the
+projective transform directly — which is what lets it find a small marker in a
+large frame without an unbounded finder scan. Standards-only finder discovery is
+never entered without an accepted outer frame. Payloads are further restricted
+to exactly 16 characters from the QR alphanumeric alphabet, starting `P` or `C`.
+
+For a hand-held optical test, open **`tools/qr/test-images/phone.html`** on a
+phone. It is self-contained — no network, no sibling assets — and **generates
+markers itself**: type a payload and it renders live, or hit **Random**. Presets
+cover large / medium / small / tiny and 35 degrees, with an **Invert** toggle for
+the light-on-dark case. Physically tilting the phone is a better test than a
+pre-warped image, because it exercises the real camera projective transform.
+
+Or generate a file:
+
+```bash
+python3 -m pip install -r tools/qr/requirements-generator.txt
+python3 tools/qr/generate_qr.py C0FFEE1234567890 mymarker.png --scale 30
+```
+
+The page's encoder is checked against that generator and against the real decode
+cascade by `make qr-test-phone`, so what a phone shows is what the craft reads.
+
+### Scan
+
+```bash
+# Open a window (or extend the one already running)
+curl "http://<device-ip>/api/v1/qr/scan?ms=10000"
+
+# Poll it
+curl "http://<device-ip>/api/v1/qr/status"
+
+# End it early
+curl "http://<device-ip>/api/v1/qr/stop"
+```
+
+`/qr/status` carries the result:
+
+```json
+{"armed": true, "scanning": false, "window_ms": 10000, "remaining_ms": 0,
+ "capture": "1080x1080", "frames": 3, "grabs": 1, "port1_owner": "",
+ "decode": {"attempts": 1, "decoded": true, "payload": "P23456789ABCDEFG",
+            "stage": "qr_decode", "decode_ms": 84, "last_ms": 84}}
+```
+
+The `decode` block survives the window closing and is cleared only by the next
+`/qr/scan`, so a client polling at 1 Hz still sees a payload from a window that
+found its code and shut down between two polls.
+
+`decode.stage` is `qr_decode`; detailed cascade-stage diagnostics remain
+available from the standalone helper's `--stats` mode.
+
+### What it costs
+
+Measured on a Star6E bench (imx335, 1080×1080 scan area) before the decoder was
+moved behind the helper process boundary. These figures validate the tap and
+cascade; end-to-end helper overhead still needs device revalidation:
+
+| | |
+|---|---|
+| marker in view | decodes on the **first frame of the first attempt, 73–88 ms** |
+| nothing to find | full cascade 431 ms @1080², 238 ms @720², 117 ms @540² |
+| encoder impact during a full-budget window | **none — 60 fps held**, CPU 25% → 55% |
+
+Scanning runs at `nice 10` and holds a duty cycle: after each attempt it idles
+for as long as that attempt took. Without that, back-to-back cascades pegged
+both cores and dragged the encoder from 60 fps to 23 — only the encoder thread
+is `SCHED_FIFO`, so the ISP, AWB and frame-shm threads lose to a decoder that
+never yields.
+
+### Port contention
+
+port1 is single-owner and shared with framing-stab and NPU detect, so a scan is
+**mutually exclusive** with both:
+
+```bash
+curl "http://<device-ip>/api/v1/qr/scan"
+# {"ok":false,"error":{"code":"port1_busy","message":"VPE port1 is held by stab or detect"}}
+```
+
+QR is the lowest-priority claimant and never evicts them — turn `framing` or
+`detect.enabled` off to free the port. `port1_owner` in `/qr/status` tells you
+who holds it.
+
+### Debug capture
+
+```bash
+# One frame of the tap as a P5 PGM — geometry, exposure, OSD-freedom checks
+curl "http://<device-ip>/api/v1/qr/tap.pgm" -o tap.pgm
+
+# Decode it on a workstation with the same cascade the daemon runs
+make qr-decode SOC_BUILD=star6e     # or build for host: tests/qr_decode_host
+./out/star6e/qr_decode --stats tap.pgm
+```
+
+Only valid while a window is open (`503` otherwise), and `409` while the helper
+owns the latch.
+
+### Notes for integrators
+
+- **Scan rate is floored by the daemon, not the client.** Cycling VPE port1 too
+  fast wedges the kernel — `MI_VPE_DisablePort` racing an in-flight mhal buffer
+  jams the VPE input FIFO. So there is a 500 ms minimum between opens and a
+  750 ms minimum time the port stays up. A window that decodes in 85 ms still
+  holds port1 for 750 ms before handing it back. Do not try to beat this with a
+  tighter poll loop; you will just block.
+- **A window self-closes.** A client that dies mid-scan cannot strand port1.
+- **Re-scanning while a window is open only extends the deadline** and never
+  touches port state.
+- Payloads are Waybeam transport envelopes: exactly 16 characters from the QR
+  alphanumeric alphabet. `--raw` on the CLI relaxes that for bench work; the
+  daemon always enforces it.
 
 ## RTP Timing Sidecar
 

@@ -1,4 +1,5 @@
 #include "quirc.h"
+#include "qr_marker_render.h"
 #include "waybeam_qr_format.h"
 
 #include <math.h>
@@ -12,36 +13,7 @@
 #define QUICK_IMAGE_H 480
 #define EXTENDED_IMAGE_W 1280
 #define EXTENDED_IMAGE_H 720
-#define FRAME_UNITS 33
-#define QR_OFFSET 6
-#define QR_SIZE 21
-
-static const char expected_payload[] = "P23456789ABCDEFG";
-
-/* Version 1, ECC Q, alphanumeric mode, no quiet-zone modules. */
-static const char *const qr_modules[QR_SIZE] = {
-	"#######...###.#######",
-	"#.....#..##...#.....#",
-	"#.###.#.#..#..#.###.#",
-	"#.###.#..#..#.#.###.#",
-	"#.###.#.##.#..#.###.#",
-	"#.....#.###...#.....#",
-	"#######.#.#.#.#######",
-	"...........##........",
-	".#..#.#.#..###.##.#..",
-	"######.##.##...##.#..",
-	"..######...#.####..#.",
-	"#.#..#.####.##...#..#",
-	"#...######..##.####.#",
-	"........#.#..#.#.####",
-	"#######...####.#.###.",
-	"#.....#......#..##...",
-	"#.###.#.##.##.#.##.#.",
-	"#.###.#..#..#..#...##",
-	"#.###.#..#.###.##....",
-	"#.....#.#....#.#..#.#",
-	"#######...#...#.#.###"
-};
+static const char expected_payload[] = QR_EXPECTED_PAYLOAD;
 
 struct benchmark_case {
 	const char *name;
@@ -128,26 +100,6 @@ static void perspective_unmap(const double *c, double x, double y,
 	       (c[5] * c[7] - c[4]) * x + c[2] * c[4]) * den;
 	*v = (c[0] * (y - c[5]) - c[2] * c[6] * y +
 	      (c[5] * c[6] - c[3]) * x + c[2] * c[3]) * den;
-}
-
-static int marker_black(double u, double v, int framed)
-{
-	int module_x;
-	int module_y;
-
-	if (u < 0.0 || v < 0.0 ||
-	    u >= FRAME_UNITS || v >= FRAME_UNITS)
-		return 0;
-	if (framed && (u < 2.0 || v < 2.0 ||
-	    u >= FRAME_UNITS - 2 || v >= FRAME_UNITS - 2))
-		return 1;
-	if (u < QR_OFFSET || v < QR_OFFSET ||
-	    u >= QR_OFFSET + QR_SIZE || v >= QR_OFFSET + QR_SIZE)
-		return 0;
-
-	module_x = (int)floor(u - QR_OFFSET);
-	module_y = (int)floor(v - QR_OFFSET);
-	return qr_modules[module_y][module_x] == '#';
 }
 
 static int defocus_blur(uint8_t *image, int width, int height, int passes)

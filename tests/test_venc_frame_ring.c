@@ -928,6 +928,59 @@ static int test_fr_producer_health(void)
 }
 
 /* An attached (consumer) ring must never write the producer's fields. */
+/* The ring-full drop policy: only a REFERENCED frame breaks the decoder's
+ * reference chain, so only that case may provoke a recovery IDR.  Firing one
+ * for a droppable SVC-T frame would push the largest frame in the stream into
+ * a ring that is already full, to repair damage that never happened. */
+static int test_fr_drop_breaks_chain(void)
+{
+	int failures = 0;
+
+	CHECK("fr_chain_plain_p_breaks",
+		venc_frame_drop_breaks_chain(0) == 1);
+	CHECK("fr_chain_idr_breaks",
+		venc_frame_drop_breaks_chain(VENC_FRAME_FLAG_IDR) == 1);
+	CHECK("fr_chain_gdr_breaks",
+		venc_frame_drop_breaks_chain(VENC_FRAME_FLAG_GDR) == 1);
+	CHECK("fr_chain_enhance_safe",
+		venc_frame_drop_breaks_chain(VENC_FRAME_FLAG_ENHANCE) == 0);
+	/* Flag combinations must key off ENHANCE alone, not equality. */
+	CHECK("fr_chain_enhance_with_gdr_safe",
+		venc_frame_drop_breaks_chain(
+			VENC_FRAME_FLAG_ENHANCE | VENC_FRAME_FLAG_GDR) == 0);
+	CHECK("fr_chain_unknown_bits_break",
+		venc_frame_drop_breaks_chain(0x80) == 1);
+
+	/* End-to-end: a full ring must actually reject, which is the event
+	 * the policy hangs off.  8 slots, 9th write fails. */
+	{
+		venc_frame_ring_t *r = venc_frame_ring_create("test_fr_dropc",
+			8, 4096);
+		VencFrameMeta meta;
+		int i;
+		int rejected = 0;
+
+		CHECK("fr_chain_ring_created", r != NULL);
+		if (r) {
+			memset(&meta, 0, sizeof(meta));
+			meta.codec = VENC_FRAME_CODEC_H265;
+			for (i = 0; i < 8; ++i) {
+				if (venc_frame_ring_begin_write(r, &meta) != 0)
+					break;
+				venc_frame_ring_commit_write(r);
+			}
+			CHECK("fr_chain_filled_8", i == 8);
+			rejected = venc_frame_ring_begin_write(r, &meta) != 0;
+			CHECK("fr_chain_9th_rejected", rejected);
+			CHECK("fr_chain_full_drop_counted",
+				r->stats.full_drops == 1);
+			venc_frame_ring_destroy(r);
+		}
+	}
+
+	return failures;
+}
+
 static int test_fr_health_consumer_readonly(void)
 {
 	int failures = 0;
@@ -989,6 +1042,7 @@ int test_venc_frame_ring(void)
 	failures += test_fr_double_begin();
 	failures += test_fr_producer_health();
 	failures += test_fr_health_consumer_readonly();
+	failures += test_fr_drop_breaks_chain();
 
 	return failures;
 }

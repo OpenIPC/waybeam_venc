@@ -21,10 +21,11 @@
       place-items: center;
       background: #fff;
     }
-    img {
+    canvas {
       width: min(96vw, 96vh);
       height: min(96vw, 96vh);
       image-rendering: pixelated;
+      image-rendering: crisp-edges;
       transform: rotate(0deg);
       transition: width .15s, height .15s, transform .15s;
     }
@@ -34,11 +35,13 @@
       bottom: max(10px, env(safe-area-inset-bottom));
       transform: translateX(-50%);
       display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
       gap: 6px;
       padding: 7px;
       border-radius: 12px;
       background: rgba(0, 0, 0, .72);
-      white-space: nowrap;
+      max-width: 96vw;
     }
     button {
       min-height: 40px;
@@ -49,6 +52,7 @@
       color: #111;
       font: inherit;
     }
+    button:disabled { opacity: .45; }
     #label {
       position: fixed;
       top: max(8px, env(safe-area-inset-top));
@@ -60,42 +64,389 @@
       font-size: 13px;
       white-space: nowrap;
     }
+    #editor {
+      position: fixed;
+      top: max(44px, calc(env(safe-area-inset-top) + 36px));
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+      gap: 6px;
+      padding: 8px;
+      border-radius: 12px;
+      background: rgba(0, 0, 0, .72);
+      max-width: 96vw;
+    }
+    #payload {
+      min-height: 40px;
+      width: 19ch;
+      padding: 0 10px;
+      border: 2px solid transparent;
+      border-radius: 8px;
+      background: #fff;
+      color: #111;
+      font: 16px ui-monospace, Menlo, Consolas, monospace;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+    }
+    #payload.bad { border-color: #e5484d; }
+    #hint { font-size: 12px; opacity: .85; width: 100%; text-align: center; }
   </style>
 </head>
 <body>
   <main>
-    <img id="qr" src="bounded-P23456789ABCDEFG.svg"
-         alt="Bounded QR carrying P23456789ABCDEFG">
+    <canvas id="qr" aria-label="Waybeam bounded QR marker"></canvas>
   </main>
   <div id="label">P23456789ABCDEFG · large</div>
+
+  <div id="editor">
+    <input id="payload" value="P23456789ABCDEFG" maxlength="16"
+           spellcheck="false" autocapitalize="characters" autocomplete="off"
+           aria-label="Marker payload">
+    <button id="random" type="button">Random</button>
+    <div id="hint">16 chars, starts P or C, from <code>0-9 A-Z</code> and <code>space $%*+-./:</code></div>
+  </div>
+
   <nav aria-label="QR display variants">
     <button data-size="96" data-angle="0" data-name="large">Large</button>
     <button data-size="72" data-angle="0" data-name="medium">Medium</button>
     <button data-size="52" data-angle="0" data-name="small">Small</button>
+    <button data-size="34" data-angle="0" data-name="tiny">Tiny</button>
     <button data-size="68" data-angle="35" data-name="rotated 35°">Rotate</button>
-    <button id="hide">Hide UI</button>
+    <button id="invert" type="button">Invert</button>
+    <button id="hide" type="button">Hide UI</button>
   </nav>
+
+<!-- WAYBEAM-QR-ENCODER-BEGIN
+     Single source of truth for the JS encoder.  tests/test_qr_phone.js extracts
+     the block between these sentinels and checks every generated marker against
+     tools/qr/generate_qr.py AND against the shipped decode cascade, so this
+     cannot drift from the encoder the craft actually reads.  Keep it framework
+     free and inline: the whole point is that a phone can open this file from a
+     memory card with no network. -->
+<script>
+"use strict";
+var WaybeamQR = (function () {
+  /* Version-1 / ECC-Q / alphanumeric QR wrapped in the Waybeam 33x33 continuous
+   * outer-frame profile.  Deliberately hard-coded to Version 1: the envelope is
+   * exactly 16 alphanumeric characters, which fills a 1-Q symbol precisely
+   * (4 mode + 9 count + 8*11 data = 101 bits, 3 bits of terminator, 13 data
+   * codewords), so there is no version selection or padding to get wrong. */
+  var ALPHANUM   = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+  var SIZE       = 21;   /* Version 1                          */
+  var MARKER     = 33;   /* Waybeam outer-frame profile        */
+  var QR_OFFSET  = 6;    /* frame(2) + quiet(4)                */
+  var MARGIN     = 4;    /* white canvas margin around marker  */
+  var DATA_CW    = 13;   /* Version 1-Q                        */
+  var EC_CW      = 13;
+  var ECL_Q      = 3;    /* format-info bits for level Q       */
+
+  /* ---- GF(256), primitive polynomial 0x11D ------------------------------ */
+  var EXP = new Uint8Array(512), LOG = new Uint8Array(256);
+  (function () {
+    var x = 1, i;
+    for (i = 0; i < 255; i++) { EXP[i] = x; LOG[x] = i; x <<= 1; if (x & 0x100) x ^= 0x11d; }
+    for (i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
+  })();
+  function gmul(a, b) { return (a === 0 || b === 0) ? 0 : EXP[LOG[a] + LOG[b]]; }
+
+  function rsGenerator(n) {
+    var g = [1], i, j, ng;
+    for (i = 0; i < n; i++) {
+      ng = new Array(g.length + 1);
+      for (j = 0; j < ng.length; j++) ng[j] = 0;
+      for (j = 0; j < g.length; j++) {
+        ng[j]     ^= g[j];                 /* * x     */
+        ng[j + 1] ^= gmul(g[j], EXP[i]);   /* * a^i   */
+      }
+      g = ng;
+    }
+    return g;
+  }
+
+  function rsRemainder(data, ecLen) {
+    var g = rsGenerator(ecLen);
+    var res = new Array(data.length + ecLen), i, j, coef;
+    for (i = 0; i < res.length; i++) res[i] = i < data.length ? data[i] : 0;
+    for (i = 0; i < data.length; i++) {
+      coef = res[i];
+      if (coef === 0) continue;
+      for (j = 0; j < g.length; j++) res[i + j] ^= gmul(g[j], coef);
+    }
+    return res.slice(data.length);
+  }
+
+  /* ---- payload ---------------------------------------------------------- */
+  function validate(payload) {
+    if (typeof payload !== "string" || payload.length !== 16) return false;
+    if (payload[0] !== "P" && payload[0] !== "C") return false;
+    for (var i = 0; i < 16; i++) if (ALPHANUM.indexOf(payload[i]) < 0) return false;
+    return true;
+  }
+
+  function codewords(payload) {
+    var bits = [], i, v;
+    function push(value, n) { for (var k = n - 1; k >= 0; k--) bits.push((value >> k) & 1); }
+
+    push(0x2, 4);                 /* alphanumeric mode            */
+    push(payload.length, 9);      /* char count, 9 bits at V1-9   */
+    for (i = 0; i + 1 < payload.length; i += 2) {
+      v = ALPHANUM.indexOf(payload[i]) * 45 + ALPHANUM.indexOf(payload[i + 1]);
+      push(v, 11);
+    }
+    if (i < payload.length) push(ALPHANUM.indexOf(payload[i]), 6);
+
+    var capacity = DATA_CW * 8;
+    var term = Math.min(4, capacity - bits.length);
+    for (i = 0; i < term; i++) bits.push(0);
+    while (bits.length % 8 !== 0) bits.push(0);
+
+    var cw = [];
+    for (i = 0; i < bits.length; i += 8) {
+      v = 0;
+      for (var k = 0; k < 8; k++) v = (v << 1) | bits[i + k];
+      cw.push(v);
+    }
+    var pad = [0xEC, 0x11], p = 0;
+    while (cw.length < DATA_CW) cw.push(pad[p++ % 2]);
+    return cw.concat(rsRemainder(cw, EC_CW));
+  }
+
+  /* ---- module matrix ---------------------------------------------------- */
+  function blank() {
+    var m = [], y, x;
+    for (y = 0; y < SIZE; y++) { m.push([]); for (x = 0; x < SIZE; x++) m[y].push(false); }
+    return m;
+  }
+
+  function drawFunction(m, fn) {
+    var y, x, i, j;
+    /* finder patterns + separators */
+    var corners = [[0, 0], [0, SIZE - 7], [SIZE - 7, 0]];
+    for (i = 0; i < corners.length; i++) {
+      for (y = -1; y <= 7; y++) for (x = -1; x <= 7; x++) {
+        var yy = corners[i][0] + y, xx = corners[i][1] + x;
+        if (yy < 0 || yy >= SIZE || xx < 0 || xx >= SIZE) continue;
+        var d = Math.max(Math.abs(x - 3), Math.abs(y - 3));
+        m[yy][xx] = (d !== 2 && d !== 4);
+        fn[yy][xx] = true;
+      }
+    }
+    /* timing patterns */
+    for (i = 8; i < SIZE - 8; i++) {
+      m[6][i] = (i % 2 === 0); fn[6][i] = true;
+      m[i][6] = (i % 2 === 0); fn[i][6] = true;
+    }
+    /* format-info reservation + dark module */
+    for (i = 0; i <= 8; i++) {
+      if (!fn[8][i]) { fn[8][i] = true; }
+      if (!fn[i][8]) { fn[i][8] = true; }
+    }
+    for (i = SIZE - 8; i < SIZE; i++) { fn[8][i] = true; fn[i][8] = true; }
+    m[SIZE - 8][8] = true; fn[SIZE - 8][8] = true;
+  }
+
+  function placeData(m, fn, cw) {
+    var bits = [], i, k;
+    for (i = 0; i < cw.length; i++) for (k = 7; k >= 0; k--) bits.push((cw[i] >> k) & 1);
+    var idx = 0, upward = true, right, vert, y, x;
+    for (right = SIZE - 1; right >= 1; right -= 2) {
+      if (right === 6) right = 5;
+      for (vert = 0; vert < SIZE; vert++) {
+        y = upward ? SIZE - 1 - vert : vert;
+        for (k = 0; k < 2; k++) {
+          x = right - k;
+          if (fn[y][x]) continue;
+          m[y][x] = idx < bits.length ? bits[idx++] === 1 : false;
+        }
+      }
+      upward = !upward;
+    }
+  }
+
+  function maskBit(mask, y, x) {
+    switch (mask) {
+      case 0: return (y + x) % 2 === 0;
+      case 1: return y % 2 === 0;
+      case 2: return x % 3 === 0;
+      case 3: return (y + x) % 3 === 0;
+      case 4: return (Math.floor(y / 2) + Math.floor(x / 3)) % 2 === 0;
+      case 5: return ((y * x) % 2) + ((y * x) % 3) === 0;
+      case 6: return ((((y * x) % 2) + ((y * x) % 3)) % 2) === 0;
+      default: return (((((y + x) % 2) + ((y * x) % 3))) % 2) === 0;
+    }
+  }
+
+  function penalty(m) {
+    var score = 0, y, x, i, run, dark = 0;
+    /* N1: runs of 5+ */
+    for (y = 0; y < SIZE; y++) {
+      run = 1;
+      for (x = 1; x < SIZE; x++) {
+        if (m[y][x] === m[y][x - 1]) { run++; if (run === 5) score += 3; else if (run > 5) score++; }
+        else run = 1;
+      }
+    }
+    for (x = 0; x < SIZE; x++) {
+      run = 1;
+      for (y = 1; y < SIZE; y++) {
+        if (m[y][x] === m[y - 1][x]) { run++; if (run === 5) score += 3; else if (run > 5) score++; }
+        else run = 1;
+      }
+    }
+    /* N2: 2x2 blocks */
+    for (y = 0; y < SIZE - 1; y++) for (x = 0; x < SIZE - 1; x++)
+      if (m[y][x] === m[y][x + 1] && m[y][x] === m[y + 1][x] && m[y][x] === m[y + 1][x + 1]) score += 3;
+    /* N3: finder-like 1:1:3:1:1 with 4 light */
+    var pats = [[true,false,true,true,true,false,true,false,false,false,false],
+                [false,false,false,false,true,false,true,true,true,false,true]];
+    for (y = 0; y < SIZE; y++) for (x = 0; x + 11 <= SIZE; x++)
+      for (i = 0; i < 2; i++) {
+        var hit = true;
+        for (var k = 0; k < 11; k++) if (m[y][x + k] !== pats[i][k]) { hit = false; break; }
+        if (hit) score += 40;
+      }
+    for (x = 0; x < SIZE; x++) for (y = 0; y + 11 <= SIZE; y++)
+      for (i = 0; i < 2; i++) {
+        var vhit = true;
+        for (var kk = 0; kk < 11; kk++) if (m[y + kk][x] !== pats[i][kk]) { vhit = false; break; }
+        if (vhit) score += 40;
+      }
+    /* N4: dark-module proportion */
+    for (y = 0; y < SIZE; y++) for (x = 0; x < SIZE; x++) if (m[y][x]) dark++;
+    var pct = dark * 100 / (SIZE * SIZE);
+    score += Math.floor(Math.abs(pct - 50) / 5) * 10;
+    return score;
+  }
+
+  function drawFormat(m, fn, mask) {
+    var data = (ECL_Q << 3) | mask, rem = data, i, bits;
+    for (i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+    bits = ((data << 10) | rem) ^ 0x5412;
+    function bit(n) { return ((bits >>> n) & 1) === 1; }
+    function set(y, x, v) { m[y][x] = v; fn[y][x] = true; }
+    for (i = 0; i <= 5; i++) set(i, 8, bit(i));
+    set(7, 8, bit(6));
+    set(8, 8, bit(7));
+    set(8, 7, bit(8));
+    for (i = 9; i < 15; i++) set(8, 14 - i, bit(i));
+    for (i = 0; i < 8; i++) set(8, SIZE - 1 - i, bit(i));
+    for (i = 8; i < 15; i++) set(SIZE - 15 + i, 8, bit(i));
+    set(SIZE - 8, 8, true);
+  }
+
+  function qrMatrix(payload) {
+    var cw = codewords(payload), best = null, bestScore = Infinity, mask;
+    for (mask = 0; mask < 8; mask++) {
+      var m = blank(), fn = blank();
+      drawFunction(m, fn);
+      placeData(m, fn, cw);
+      for (var y = 0; y < SIZE; y++) for (var x = 0; x < SIZE; x++)
+        if (!fn[y][x] && maskBit(mask, y, x)) m[y][x] = !m[y][x];
+      drawFormat(m, fn, mask);
+      var s = penalty(m);
+      if (s < bestScore) { bestScore = s; best = m; }
+    }
+    return best;
+  }
+
+  /* 33x33: solid 2-module frame, 4-module quiet zone, Version-1 symbol. */
+  function markerMatrix(payload) {
+    if (!validate(payload)) throw new Error("invalid Waybeam payload");
+    var qr = qrMatrix(payload), m = [], y, x;
+    for (y = 0; y < MARKER; y++) {
+      m.push([]);
+      for (x = 0; x < MARKER; x++)
+        m[y].push(x < 2 || y < 2 || x >= MARKER - 2 || y >= MARKER - 2);
+    }
+    for (y = 0; y < SIZE; y++) for (x = 0; x < SIZE; x++)
+      m[y + QR_OFFSET][x + QR_OFFSET] = qr[y][x];
+    return m;
+  }
+
+  function randomPayload() {
+    var body = "", i, n;
+    for (i = 0; i < 15; i++) {
+      n = (typeof crypto !== "undefined" && crypto.getRandomValues)
+        ? crypto.getRandomValues(new Uint32Array(1))[0] % 36
+        : Math.floor(Math.random() * 36);
+      body += ALPHANUM[n];   /* 0-9 A-Z only: safest across fonts and shells */
+    }
+    return "P" + body;
+  }
+
+  return {
+    ALPHANUM: ALPHANUM, MARKER: MARKER, MARGIN: MARGIN,
+    validate: validate, markerMatrix: markerMatrix, randomPayload: randomPayload
+  };
+})();
+if (typeof module !== "undefined" && module.exports) module.exports = WaybeamQR;
+</script>
+<!-- WAYBEAM-QR-ENCODER-END -->
+
   <script>
-    const qr = document.querySelector('#qr');
-    const label = document.querySelector('#label');
-    const nav = document.querySelector('nav');
-    document.querySelectorAll('[data-size]').forEach((button) => {
-      button.addEventListener('click', () => {
-        const size = button.dataset.size;
-        qr.style.width = `min(${size}vw, ${size}vh)`;
-        qr.style.height = `min(${size}vw, ${size}vh)`;
-        qr.style.transform = `rotate(${button.dataset.angle}deg)`;
-        label.textContent = `P23456789ABCDEFG · ${button.dataset.name}`;
+    var canvas  = document.querySelector('#qr');
+    var ctx     = canvas.getContext('2d');
+    var label   = document.querySelector('#label');
+    var nav     = document.querySelector('nav');
+    var editor  = document.querySelector('#editor');
+    var input   = document.querySelector('#payload');
+    var sizeName = 'large';
+    var inverted = false;
+
+    function render(payload) {
+      var m, side, scale, y, x;
+      try { m = WaybeamQR.markerMatrix(payload); }
+      catch (e) { input.classList.add('bad'); return false; }
+      input.classList.remove('bad');
+
+      side  = WaybeamQR.MARKER + 2 * WaybeamQR.MARGIN;
+      scale = 12;                       /* crisp source; CSS scales it up */
+      canvas.width = canvas.height = side * scale;
+      ctx.imageSmoothingEnabled = false;
+      ctx.fillStyle = inverted ? '#000' : '#fff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = inverted ? '#fff' : '#000';
+      for (y = 0; y < m.length; y++) for (x = 0; x < m.length; x++)
+        if (m[y][x]) ctx.fillRect((x + WaybeamQR.MARGIN) * scale,
+                                  (y + WaybeamQR.MARGIN) * scale, scale, scale);
+      label.textContent = payload + ' · ' + sizeName + (inverted ? ' · inverted' : '');
+      return true;
+    }
+
+    input.addEventListener('input', function () {
+      var v = input.value.toUpperCase();
+      if (v !== input.value) input.value = v;
+      render(v);
+    });
+    document.querySelector('#random').addEventListener('click', function () {
+      input.value = WaybeamQR.randomPayload();
+      render(input.value);
+    });
+    document.querySelector('#invert').addEventListener('click', function () {
+      inverted = !inverted;
+      render(input.value);
+    });
+    document.querySelectorAll('[data-size]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var s = button.dataset.size;
+        canvas.style.width  = 'min(' + s + 'vw, ' + s + 'vh)';
+        canvas.style.height = 'min(' + s + 'vw, ' + s + 'vh)';
+        canvas.style.transform = 'rotate(' + button.dataset.angle + 'deg)';
+        sizeName = button.dataset.name;
+        render(input.value);
       });
     });
-    document.querySelector('#hide').addEventListener('click', () => {
-      nav.hidden = true;
-      label.hidden = true;
+    document.querySelector('#hide').addEventListener('click', function () {
+      nav.hidden = true; label.hidden = true; editor.hidden = true;
     });
-    document.body.addEventListener('dblclick', () => {
-      nav.hidden = false;
-      label.hidden = false;
+    document.body.addEventListener('dblclick', function () {
+      nav.hidden = false; label.hidden = false; editor.hidden = false;
     });
+
+    render(input.value);
   </script>
 </body>
 </html>

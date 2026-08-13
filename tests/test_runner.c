@@ -46,6 +46,7 @@ extern int test_detect_dequant(void);
 extern int test_detect_wire(void);
 extern int test_star6e_vpe_ports(void);
 extern int test_maruko_scl_ports(void);
+extern int test_qr_scan(void);
 
 int main(void)
 {
@@ -172,6 +173,7 @@ int main(void)
 
 	printf("\n--- test_maruko_scl_ports ---\n");
 	failures += test_maruko_scl_ports();
+	failures += test_qr_scan();
 
 	printf("\n=== Results: %d passed, %d failed ===\n",
 		g_test_pass_count, g_test_fail_count);

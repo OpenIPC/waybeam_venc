@@ -111,6 +111,8 @@ typedef struct {
 	int qp_delta;              /* relative I/P QP delta, -12..12 */
 	uint32_t max_i_bytes;      /* per-frame I-frame size cap (bytes); 0=unlimited */
 	uint32_t max_p_bytes;      /* per-frame P-frame size cap (bytes); 0=unlimited */
+	uint32_t min_qp;           /* RC QP floor; 0 = leave the driver default */
+	uint32_t max_qp;           /* RC QP ceiling; 0 = leave the driver default */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
 	/* Derived from `resilience` preset only.  Not part of the JSON
@@ -122,17 +124,23 @@ typedef struct {
 	uint16_t intra_refresh_lines; /* CTU rows refreshed per P-frame */
 	uint8_t intra_refresh_qp;  /* I-CTU QP override for stripe */
 	uint8_t ref_base;          /* SVC-T base-layer period; 0 = off */
-	uint8_t ref_enhance;       /* SVC-T enhance-layer ratio */
+	/* SVC-T reference PERIOD, not a count of non-reference frames:
+	 * measured on Star6E (2026-08-06), exactly one frame in every
+	 * (ref_enhance + 1) is emitted non-referenced.  So 1 is the most
+	 * resilient value (50 % of frames droppable) and larger values are
+	 * progressively less so — 4 gives 20 %, 299 gives 0.3 %. */
+	uint8_t ref_enhance;
 	bool ref_pred;             /* SVC-T enhance→base prediction */
 	/* Resilience preset — sole user-facing knob for intra-refresh +
 	 * SVC-T refPred + GOP.  Recognised values: "off", "quality",
-	 * "racing", "range", "fpv".  Every recognised value (including
-	 * "off") overwrites the granular intra_refresh_* and ref_*
-	 * fields with the preset's expansion; named presets additionally
-	 * override gop_size, while "off" preserves the user's gopSize
-	 * and disables both intra-refresh and refPred.  Unknown values
-	 * fall back to "off".  See apply_resilience_preset() in
-	 * src/venc_config.c for the canonical table. */
+	 * "racing", "range", "fpv", "ltr" / "ltr:<N>".  Every recognised
+	 * value (including "off") overwrites the granular intra_refresh_*
+	 * and ref_* fields with the preset's expansion; named presets
+	 * additionally override gop_size, while "off" and the "ltr" family
+	 * preserve the user's gopSize and (for "off") disable both
+	 * intra-refresh and refPred.  Unknown values fall back to "off".
+	 * See apply_resilience_preset() in src/venc_config.c for the
+	 * canonical table. */
 	char resilience[16];
 	/* Framing mode — the single user-facing knob for what the crop path does
 	 * (replaces the old standalone stab/zoom fields).  Recognised values:
@@ -218,6 +226,7 @@ typedef struct {
 	char stream_mode[16];               /* "rtp" or "compact" */
 	uint16_t max_payload_size;
 	bool connected_udp;             /* connect() socket (skip per-packet routing) */
+	bool allow_unix_encoder_stall;   /* preserve blocking unix:// send semantics */
 	int32_t audio_port;                 /* <0  = record-only: audio is captured and
 	                                     *       recorded but NEVER streamed (no UDP send)
 	                                     *  0   = same as video port — AVOID: mixing
@@ -332,6 +341,25 @@ typedef struct {
 	                          0 = VisDrone-10, 1 = SAR person.           */
 } VencConfigDetect;
 
+/* QR-oriented luma tap (Star6E only).  A read-only NV12 tap on VPE port1,
+ * enabled once per pipeline run, whose luma plane is free of the MI_RGN
+ * overlays that debug_osd and waybeam-hub's osd_render composite onto port0.
+ * Mutually exclusive with video0.framing=stab and detect.enabled, which claim
+ * the same single second-scaler output; this tap is the lowest-priority
+ * claimant and is skipped when either holds port1.  Lives in its own TRAILING
+ * VencConfig member — the config ABI is append-only. */
+typedef struct {
+	bool     tap_enabled;  /* program + enable the port1 luma tap        */
+	uint32_t tap_width;    /* 0 → inherit the main stream                */
+	uint32_t tap_height;   /* 0 → inherit the main stream.  Independent
+	                          of port0: unlike the MJPEG snapshot
+	                          channel, a VPE port really does scale.    */
+	uint32_t window_ms;    /* scan-window budget; clamped 1000..60000.
+	                          The port is held only this long, then the
+	                          supervisor closes it and port1 goes back
+	                          to stab/detect.                           */
+} VencConfigQr;
+
 /* ── Top-level config ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -350,6 +378,7 @@ typedef struct {
 	VencConfigDebug debug;
 	VencConfigAttitude attitude;  /* trailing — ABI append-only */
 	VencConfigDetect detect;      /* trailing — ABI append-only */
+	VencConfigQr qr;              /* trailing — ABI append-only */
 } VencConfig;
 
 typedef enum {

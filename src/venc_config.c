@@ -120,6 +120,7 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->outgoing.stream_mode, sizeof(cfg->outgoing.stream_mode), "rtp");
 	cfg->outgoing.max_payload_size = 1400;
 	cfg->outgoing.connected_udp = true;
+	cfg->outgoing.allow_unix_encoder_stall = false;
 	cfg->outgoing.shm_throttle = true;
 
 	/* fpv */
@@ -241,6 +242,12 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->detect.net_width        = 640;
 	cfg->detect.net_height       = 352;
 	cfg->detect.model_id         = 0;      /* VisDrone-10 */
+
+	/* qr (overlay-free luma tap on VPE port1; Star6E) */
+	cfg->qr.tap_enabled = false;
+	cfg->qr.tap_width   = 0;   /* 0 -> inherit main stream */
+	cfg->qr.tap_height  = 0;
+	cfg->qr.window_ms   = 15000;
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -436,6 +443,10 @@ int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v)
 	 *   rally       150ms     1    2.0s   300ms     no  (light refPred)
 	 *   range       500ms     4    2.0s   2500ms    no  (heavy refPred)
 	 *   fpv        1000ms     4    2.0s   5000ms    no  (heaviest refPred)
+	 *
+	 * The "ltr" family is handled below the table, not in it: its
+	 * enhance ratio is derived from the GOP (which the user owns) and
+	 * so cannot be a static column.  See the block above the loop.
 	 */
 	static const struct preset table[] = {
 		{ "off",        "off",      0, 0, 0.0 },   /* gopSize honoured */
@@ -451,6 +462,52 @@ int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v)
 	};
 
 	const char *want = (!name || !*name) ? "off" : name;
+
+	/* "ltr" / "ltr:<N>" — maximum non-reference density, long GOP.
+	 *
+	 * Device-measured on Star6E 2026-08-06 (raw-ES NAL census, see
+	 * HISTORY 0.63.0).  MI_VENC_ParamRef_t.u32Enhance is a PERIOD: the
+	 * encoder emits exactly one non-referenced frame in every
+	 * (u32Enhance + 1).  enhance=4 yields `IRRRnRRRRn…` (20 % droppable),
+	 * enhance=299 yields 0.3 %.  So enhance=1 — `InRnRnRn…`, 50 %
+	 * droppable — is the most resilient structure this SoC can express,
+	 * and it is what bare "ltr" selects.  "ltr:<N>" pins the period for
+	 * sweeps; larger N is strictly LESS resilient.
+	 *
+	 * A lost non-referenced frame costs exactly one frame.  The other
+	 * half of the stream is an ordinary P-chain, so losing one of those
+	 * still cascades to the next IDR — there is no long-term-reference
+	 * API on Infinity6E to do better (the full SDK's MI_VENC_Set*
+	 * surface has no LTR/SmartP/GOP-mode entry point).
+	 *
+	 * Unlike "rally" (the same 1:1 ratio) this preserves the caller's
+	 * gop_size and forces intra-refresh off, so it can be paired with a
+	 * long GOP and asymmetric transport FEC.  Stripes landing in
+	 * non-referenced frames never enter the DPB, so with half the stream
+	 * non-referenced they cost bitrate and repair nothing.
+	 */
+	if (strncmp(want, "ltr", 3) == 0 && (want[3] == '\0' || want[3] == ':')) {
+		unsigned long enh = 1ul;
+
+		if (want[3] == ':') {
+			char *end = NULL;
+
+			errno = 0;
+			enh = strtoul(want + 4, &end, 10);
+			if (errno != 0 || end == want + 4 || *end != '\0' ||
+			    enh < 1ul || enh > 255ul)
+				return -1;
+		}
+		safe_strcpy(v->intra_refresh_mode,
+			sizeof(v->intra_refresh_mode), "off");
+		v->intra_refresh_lines = 0;
+		v->intra_refresh_qp = 0;
+		v->ref_base = 1;
+		v->ref_enhance = (uint8_t)enh;
+		v->ref_pred = false;
+		return 0;
+	}
+
 	for (size_t i = 0; i < sizeof(table)/sizeof(table[0]); ++i) {
 		if (strcmp(want, table[i].name) != 0)
 			continue;
@@ -570,6 +627,8 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	if (v->qp_delta > 12) v->qp_delta = 12;
 	v->max_i_bytes = (uint32_t)json_get_int(obj, "maxIBytes", (int)v->max_i_bytes);
 	v->max_p_bytes = (uint32_t)json_get_int(obj, "maxPBytes", (int)v->max_p_bytes);
+	v->min_qp = (uint32_t)json_get_int(obj, "minQp", (int)v->min_qp);
+	v->max_qp = (uint32_t)json_get_int(obj, "maxQp", (int)v->max_qp);
 	v->scene_threshold = (uint16_t)json_get_int(obj, "sceneThreshold",
 		(int)v->scene_threshold);
 	v->scene_holdoff = (uint8_t)json_get_int(obj, "sceneHoldoff",
@@ -586,7 +645,7 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		safe_strcpy(v->resilience, sizeof(v->resilience), rname);
 		if (venc_config_apply_resilience_preset(v->resilience, v) != 0) {
 			fprintf(stderr, "[config] WARNING: unknown video0.resilience "
-				"'%s' (use off|quality|racing|range|fpv) — falling "
+				"'%s' (use off|quality|racing|range|fpv|ltr[:N]) — falling "
 				"back to off\n", v->resilience);
 			safe_strcpy(v->resilience, sizeof(v->resilience), "off");
 			(void)venc_config_apply_resilience_preset("off", v);
@@ -678,6 +737,8 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 	s->max_payload_size = (uint16_t)json_get_int(obj, "maxPayloadSize",
 		(int)s->max_payload_size);
 	s->connected_udp = json_get_bool(obj, "connectedUdp", s->connected_udp);
+	s->allow_unix_encoder_stall = json_get_bool(obj, "allowUnixEncoderStall",
+		s->allow_unix_encoder_stall);
 	s->audio_port = json_get_int(obj, "audioPort", s->audio_port);
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
 		(int)s->sidecar_port);
@@ -895,6 +956,19 @@ int venc_config_load(const char *path, VencConfig *cfg)
 				"netHeight", (int)cfg->detect.net_height);
 			cfg->detect.model_id = (uint32_t)json_get_int(obj,
 				"modelId", (int)cfg->detect.model_id);
+		}
+	}
+	{
+		const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "qr");
+		if (obj) {
+			cfg->qr.tap_enabled = json_get_bool(obj, "tapEnabled",
+				cfg->qr.tap_enabled);
+			cfg->qr.tap_width = (uint32_t)json_get_int(obj,
+				"tapWidth", (int)cfg->qr.tap_width);
+			cfg->qr.tap_height = (uint32_t)json_get_int(obj,
+				"tapHeight", (int)cfg->qr.tap_height);
+			cfg->qr.window_ms = (uint32_t)json_get_int(obj,
+				"windowMs", (int)cfg->qr.window_ms);
 		}
 	}
 
@@ -1301,6 +1375,8 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_int(p,    2, "qpDelta",        cfg->video0.qp_delta,        0);
 	pp_field_uint(p,   2, "maxIBytes",      cfg->video0.max_i_bytes,     0);
 	pp_field_uint(p,   2, "maxPBytes",      cfg->video0.max_p_bytes,     0);
+	pp_field_uint(p,   2, "minQp",          cfg->video0.min_qp,          0);
+	pp_field_uint(p,   2, "maxQp",          cfg->video0.max_qp,          0);
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
@@ -1322,6 +1398,8 @@ static void render_outgoing(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "streamMode",      cfg->outgoing.stream_mode,       0);
 	pp_field_uint(p,   2, "maxPayloadSize",  cfg->outgoing.max_payload_size,  0);
 	pp_field_bool(p,   2, "connectedUdp",    cfg->outgoing.connected_udp,     0);
+	pp_field_bool(p,   2, "allowUnixEncoderStall",
+		cfg->outgoing.allow_unix_encoder_stall, 0);
 	pp_field_int(p,    2, "audioPort",       cfg->outgoing.audio_port,        0);
 	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,    0);
 	pp_field_bool(p,   2, "shmThrottle",     cfg->outgoing.shm_throttle,      1);
@@ -1444,6 +1522,16 @@ static void render_detect(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_section_close(p, 1, is_last);
 }
 
+static void render_qr(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "qr");
+	pp_field_bool(p, 2, "tapEnabled", cfg->qr.tap_enabled,       0);
+	pp_field_int(p,  2, "tapWidth",   (int)cfg->qr.tap_width,    0);
+	pp_field_int(p,  2, "tapHeight",  (int)cfg->qr.tap_height,   0);
+	pp_field_int(p,  2, "windowMs",   (int)cfg->qr.window_ms,    1);
+	pp_section_close(p, 1, is_last);
+}
+
 /* Top-level: build the canonical pretty layout into a malloc'd string.
  * Caller must free.  Returns NULL on allocation failure. */
 static char *config_render_pretty(const VencConfig *cfg)
@@ -1466,7 +1554,8 @@ static char *config_render_pretty(const VencConfig *cfg)
 	render_snapshot(&p, cfg, 0);
 	render_debug(&p,    cfg, 0);
 	render_attitude(&p, cfg, 0);
-	render_detect(&p,   cfg, 1);
+	render_detect(&p,   cfg, 0);
+	render_qr(&p,       cfg, 1);
 	pp_str(&p, "}");
 
 	if (p.oom) {
@@ -1543,6 +1632,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "qpDelta", cfg->video0.qp_delta);
 		cJSON_AddNumberToObject(vid, "maxIBytes", cfg->video0.max_i_bytes);
 		cJSON_AddNumberToObject(vid, "maxPBytes", cfg->video0.max_p_bytes);
+		cJSON_AddNumberToObject(vid, "minQp", cfg->video0.min_qp);
+		cJSON_AddNumberToObject(vid, "maxQp", cfg->video0.max_qp);
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
 		cJSON_AddStringToObject(vid, "resilience", cfg->video0.resilience);
@@ -1568,6 +1659,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(out, "streamMode", cfg->outgoing.stream_mode);
 		cJSON_AddNumberToObject(out, "maxPayloadSize", cfg->outgoing.max_payload_size);
 		cJSON_AddBoolToObject(out, "connectedUdp", cfg->outgoing.connected_udp);
+		cJSON_AddBoolToObject(out, "allowUnixEncoderStall",
+			cfg->outgoing.allow_unix_encoder_stall);
 		cJSON_AddNumberToObject(out, "audioPort", cfg->outgoing.audio_port);
 		cJSON_AddNumberToObject(out, "sidecarPort", cfg->outgoing.sidecar_port);
 		cJSON_AddBoolToObject(out, "shmThrottle", cfg->outgoing.shm_throttle);
@@ -1685,6 +1778,14 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(det, "netHeight",
 			cfg->detect.net_height);
 		cJSON_AddNumberToObject(det, "modelId", cfg->detect.model_id);
+	}
+
+	cJSON *qr = cJSON_AddObjectToObject(root, "qr");
+	if (qr) {
+		cJSON_AddBoolToObject(qr, "tapEnabled", cfg->qr.tap_enabled);
+		cJSON_AddNumberToObject(qr, "tapWidth", cfg->qr.tap_width);
+		cJSON_AddNumberToObject(qr, "tapHeight", cfg->qr.tap_height);
+		cJSON_AddNumberToObject(qr, "windowMs", cfg->qr.window_ms);
 	}
 
 	return root;

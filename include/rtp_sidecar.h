@@ -159,11 +159,14 @@ typedef struct {
  *   shm://   fill_pct = (write-read)/slot_count*100
  *            transport_drops = ring full → packet dropped
  *            packets_sent    = ring writes
- *   unix://  fill_pct = SIOCOUTQ / SO_SNDBUF * 100
- *            transport_drops = sendmsg(EAGAIN) | ENOBUFS count
+ *   unix://  fill_pct = SIOCOUTQ / learned peer-queue capacity * 100;
+ *            capacity is calibrated at the first saturated send and is
+ *            estimated from net.unix.max_dgram_qlen before that
+ *            transport_drops = unsent datagrams after EAGAIN/ENOBUFS or
+ *                              frame-budget exhaustion
  *            packets_sent    = successful sendmsg count
- *   udp://   same as unix:// but UDP send queues drain quickly so the
- *            signal is noisy; backpressure typically belongs at the
+ *   udp://   fill_pct = SIOCOUTQ / SO_SNDBUF * 100; UDP send queues drain
+ *            quickly so the signal is noisy; backpressure belongs at the
  *            radio link layer (link_controller) rather than the socket.
  *
  * Forward-compat: probes that don't recognise the flag simply read

@@ -1970,6 +1970,21 @@ void maruko_pipeline_ref_pred_status(MarukoRefPredStatus *out)
 	pthread_mutex_unlock(&g_ref_pred_status_mutex);
 }
 
+/* frame-shm:// ring-full recovery: re-establish the reference chain the drop
+ * just broke.  Gated by the shared per-channel IDR rate limiter so a
+ * persistently full ring coalesces instead of firing keyframes into the ring
+ * that is already congested.  Mirrors star6e_scene_request_idr(). */
+static void maruko_ring_request_idr(void *vctx)
+{
+	MarukoBackendContext *ctx = (MarukoBackendContext *)vctx;
+
+	if (!ctx)
+		return;
+	if (idr_rate_limit_allow(ctx->venc_channel))
+		maruko_mi_venc_request_idr(ctx->venc_device,
+			ctx->venc_channel, 1);
+}
+
 static int maruko_apply_ref_pred(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	const MarukoBackendConfig *cfg)
 {
@@ -2437,6 +2452,8 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		(ctx->cfg.intra_refresh_mode[0] != '\0' &&
 		 strcmp(ctx->cfg.intra_refresh_mode, "off") != 0) ? 1 : 0;
 	ctx->output.svct_active = ctx->cfg.ref_base > 0 ? 1 : 0;
+	ctx->output.request_idr = maruko_ring_request_idr;
+	ctx->output.idr_ctx = ctx;
 	{
 		IntraRefreshDerived gdr_ir;
 		(void)maruko_intra_refresh_derive(&ctx->cfg,
@@ -2756,7 +2773,8 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			return -1;
 	} else {
 		if (maruko_output_init(&ctx->output, &ctx->cfg.output_uri,
-		    ctx->cfg.connected_udp) != 0)
+		    ctx->cfg.connected_udp,
+		    ctx->cfg.allow_unix_encoder_stall) != 0)
 			return -1;
 	}
 
@@ -3218,7 +3236,8 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 		VencOutputUri uri;
 		if (venc_config_parse_output_uri(d->server, &uri) == 0) {
 			if (maruko_output_init(&d->output, &uri,
-				ctx->cfg.connected_udp) == 0) {
+				ctx->cfg.connected_udp,
+				ctx->cfg.allow_unix_encoder_stall) == 0) {
 				maruko_video_init_rtp_state(&d->rtp_state,
 					ctx->cfg.rc_codec, sensor_fps);
 				printf("> [maruko][dual] dual-stream chn=%d ->"

@@ -46,6 +46,23 @@
 #define VENC_FRAME_FLAG_GDR     0x02  /* GDR rolling intra stripe active */
 #define VENC_FRAME_FLAG_ENHANCE 0x04  /* SVC-T enhance layer (droppable) */
 
+/* Would discarding a frame with these meta flags break the decoder's
+ * reference chain?
+ *
+ * A ring-full drop lands AFTER encode, so unless the frame was
+ * non-referenced the decoder renders garbage until the next IDR — with a
+ * long GOP, seconds.  An SVC-T enhance frame is droppable by construction
+ * (nothing predicts from it), so discarding one costs exactly one frame and
+ * must NOT provoke a recovery IDR: that would spend the largest frame in the
+ * stream to repair damage that never happened, into a ring already full.
+ *
+ * Shared by both backends so the policy has one definition rather than two
+ * copies that can drift. */
+static inline int venc_frame_drop_breaks_chain(uint8_t flags)
+{
+	return (flags & VENC_FRAME_FLAG_ENHANCE) ? 0 : 1;
+}
+
 typedef struct {
 	uint32_t pts;        /* capture timestamp (µs, truncated to 32 bits) */
 	uint8_t  codec;      /* VENC_FRAME_CODEC_H265 */

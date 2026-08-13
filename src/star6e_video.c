@@ -150,10 +150,10 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 				 * doc defines as "not reported". */
 				tinfo.throttle_permille =
 					output->throttle_permille;
-				/* Socket transports leave transport_drops /
-				 * packets_sent at 0 — future work will count
-				 * sendmsg(EAGAIN/ENOBUFS) inside
-				 * output_socket_send_parts. */
+				/* For socket transports these carry the
+				 * congestion drops / successful sends counted
+				 * in the batch flush; for the SHM rings they
+				 * carry the ring's lifetime counters. */
 				tinfo.transport_drops = output->last_full_drops;
 				tinfo.packets_sent = output->last_writes;
 				tinfo_ptr = &tinfo;

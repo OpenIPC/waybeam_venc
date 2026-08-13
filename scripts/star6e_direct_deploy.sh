@@ -4,6 +4,8 @@ set -euo pipefail
 HOST="${HOST:-root@192.168.1.13}"
 LOCAL_BIN="out/star6e/waybeam"
 REMOTE_BIN="/usr/bin/waybeam"
+LOCAL_QR_BIN="out/star6e/qr_decode"
+REMOTE_QR_BIN="/usr/bin/qr_decode"
 CONFIG_PATH="/etc/waybeam.json"
 LOG_PATH="/tmp/waybeam.log"
 LATEST_BACKUP_PATH="/tmp/waybeam.json.bak.latest"
@@ -103,7 +105,7 @@ remote_capture() {
 }
 
 require_local_bin() {
-	local path
+	local path qr_path
 
 	path="${LOCAL_BIN}"
 	if [[ "${path}" != /* ]]; then
@@ -113,6 +115,14 @@ require_local_bin() {
 		die "local binary not found: ${path}"
 	fi
 	LOCAL_BIN="${path}"
+	qr_path="${LOCAL_QR_BIN}"
+	if [[ "${qr_path}" != /* ]]; then
+		qr_path="${ROOT_DIR}/${qr_path}"
+	fi
+	if [[ ! -f "${qr_path}" ]]; then
+		die "local QR helper not found: ${qr_path}"
+	fi
+	LOCAL_QR_BIN="${qr_path}"
 }
 
 require_remote_tools() {
@@ -152,7 +162,7 @@ config_value() {
 
 build_star6e() {
 	log "Building Star6E binary..."
-	make -C "${ROOT_DIR}" build SOC_BUILD=star6e
+	make -C "${ROOT_DIR}" build qr-decode SOC_BUILD=star6e
 }
 
 create_backup() {
@@ -207,13 +217,17 @@ deploy_init_script() {
 }
 
 deploy_binary() {
-	local remote_tmp
+	local remote_tmp qr_tmp
 
 	require_local_bin
 	remote_tmp="${REMOTE_BIN}.codex.new"
 	log "Deploying ${LOCAL_BIN} -> ${HOST}:${REMOTE_BIN}"
 	ssh -o BatchMode=yes -o ConnectTimeout=5 "${HOST}" "cat > $(printf '%q' "${remote_tmp}")" < "${LOCAL_BIN}"
 	remote_sh "chmod 0755 $(printf '%q' "${remote_tmp}") && mv $(printf '%q' "${remote_tmp}") $(printf '%q' "${REMOTE_BIN}")"
+	qr_tmp="${REMOTE_QR_BIN}.codex.new"
+	log "Deploying ${LOCAL_QR_BIN} -> ${HOST}:${REMOTE_QR_BIN}"
+	ssh -o BatchMode=yes -o ConnectTimeout=5 "${HOST}" "cat > $(printf '%q' "${qr_tmp}")" < "${LOCAL_QR_BIN}"
+	remote_sh "chmod 0755 $(printf '%q' "${qr_tmp}") && mv $(printf '%q' "${qr_tmp}") $(printf '%q' "${REMOTE_QR_BIN}")"
 }
 
 push_libs() {
@@ -237,7 +251,13 @@ push_libs() {
 }
 
 start_venc() {
-	log "Starting waybeam with log ${LOG_PATH}"
+	if [[ "${REMOTE_BIN}" == "/usr/bin/waybeam" && "${LOG_PATH}" == "/tmp/waybeam.log" ]]; then
+		log "Starting waybeam through ${INIT_SCRIPT_REMOTE}"
+		remote_sh "$(printf '%q' "${INIT_SCRIPT_REMOTE}") start"
+		return
+	fi
+
+	log "Starting custom waybeam binary with log ${LOG_PATH}"
 	remote_sh "
 		if command -v setsid >/dev/null 2>&1; then
 			setsid $(printf '%q' "${REMOTE_BIN}") >$(printf '%q' "${LOG_PATH}") 2>&1 </dev/null &

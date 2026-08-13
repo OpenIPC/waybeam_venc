@@ -2,6 +2,72 @@
 
 Per-incident notes on hangs, D-state, and recovery actions on the bench.
 
+## 2026-08-01 — Craft unreachable during PR #214 unix:// 25 Mbps gate
+
+**Bench:** `root@192.168.2.232` — SSC338Q + IMX335, kernel 4.9.84.
+
+**Build:** PR #214 plus the local cumulative-frame-budget/consumer follow-up,
+`/usr/bin/waybeam` SHA-256
+`71d8b272a9ed7a9a0e62a9bc909c8596e461e6564f48372991bb755ba3b359ad`,
+version 0.63.0 / HTTP contract 0.17.0.
+
+**Known-good lead-up:** target-local abstract AF_UNIX consumer tests at
+60 fps passed at 10, 15, and 20 Mbps with zero RTP sequence gaps, zero
+`transportDrops`, and no cadence gaps over 17.5 ms. The device queue sysctl
+was 1024. `waybeam-link` was gracefully stopped so its rate controller could
+not overwrite the test bitrate.
+
+**Trigger:** set `video0.bitrate=25000`, with
+`outgoing.server=unix://pr214_venc` and `maxPayloadSize=1400`, then run:
+
+    /tmp/unix_dgram_consumer_pr214 --name pr214_venc --duration 8
+
+The first 25 Mbps measurement ended after its `READY` line without a final
+JSON summary, but a bounded liveness check immediately afterward succeeded:
+venc was still encoding at 59–60 fps / 23.6–25.5 Mbps and HTTP reported
+`transportDrops=0`. A standalone retry printed `READY`, then its SSH session
+failed with `Timeout, server 192.168.2.232 not responding.` before the
+eight-second result. No further device commands were attempted, per the
+device-unresponsive recovery rule.
+
+**State at stop:** `/etc/waybeam.json` still selected `unix://pr214_venc`,
+25 Mbps, 60 fps; `waybeam-link` was stopped. The exact pre-test configuration
+was backed up at `/root/waybeam.json.pr214-live-start`; pre-deploy
+binary/init/config backups are under `/root/*pr214-pretest`. No dmesg could be
+collected immediately after the timeout without violating the no-retry rule.
+
+**Recovery:** wait for human confirmation that the craft has recovered or
+power-cycle it. Then restore the latest pre-test state without SIGKILL:
+
+    cp /root/waybeam.json.pr214-live-start /etc/waybeam.json
+    /etc/init.d/S95waybeam restart
+    /etc/init.d/S96waybeam-link start
+
+Confirm `outgoing.server=frame-shm://venc_frame`, HTTP health, and dmesg before
+resuming. Root cause is unresolved: this observation alone cannot distinguish
+a craft/SSH outage from an encoder or kernel stall.
+
+**Recovery completed:** after a human power cycle, the saved live-start JSON
+was restored and both `S95waybeam` and `S96waybeam-link` were started
+gracefully. HTTP reported 100 fps and `frame-shm://venc_frame`; the frame
+counter advanced from 1 to 774 with zero transport drops, and waybeam-link
+attached to `venc_frame`. Post-boot dmesg did contain MI/CMDQ trigger-timeout
+warnings, so no further PR #214 device gates were attempted. The user then
+rebooted the craft and removed it from this validation session.
+
+**Follow-up — 2026-08-02:** after another user-confirmed reboot, the remaining
+Star6E V2 and V4–V9 gates completed without the connectivity failure
+recurring. The craft sustained 25 Mbps at both 60 and 120 fps, including an
+authoritative 0.888 ms maximum sender-side Unix frame spread at 120 fps. A
+five-second wedged-consumer test reached 100% queue fill and recovered without
+encoder or watchdog errors. Repeated live redirect and UDP/SHM/audio tests
+also passed. The incident's root cause remains unknown; the successful rerun
+shows it is not a reproducible consequence of the 25 Mbps Unix workload.
+Production was restored byte-for-byte afterward, both services were started
+normally, and the frame-SHM counter advanced from 2,275 to 2,576 with no new
+drops. Current dmesg had MI teardown warnings from the repeated controlled
+restart cycles but no timeout, hung-task, oops, panic, or call-trace entry.
+
 ## 2026-05-21 — Teardown fd-cleanup cherry-pick from PR #122/#123
 
 **Scope:** the SoC/MI-independent teardown fixes extracted from the DIS

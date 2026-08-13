@@ -102,6 +102,26 @@ wait_exit() {
     sleep 1
 }
 
+# unix:// video output rides an AF_UNIX datagram socket, which blocks the
+# sender on the *receiver's* queue depth.  The kernel snapshots that depth
+# from net.unix.max_dgram_qlen when the receiving socket is created, so this
+# must be raised before any consumer starts — raising it later does nothing
+# for sockets that already exist.
+#
+# The default of 10 datagrams is ~7 ms of buffer at 15 Mbps with 1400-byte
+# RTP payloads.  A single 60 fps frame is ~23 packets, so every frame
+# overruns the queue and stalls venc's encode thread waiting on consumer
+# scheduling.  256 gives ~180 ms, which absorbs ordinary jitter.
+raise_unix_dgram_qlen() {
+    qlen_path=/proc/sys/net/unix/max_dgram_qlen
+    [ -w "$qlen_path" ] || return 0
+    cur=$(cat "$qlen_path" 2>/dev/null) || return 0
+    [ "$cur" -ge 256 ] 2>/dev/null && return 0
+    if echo 256 > "$qlen_path" 2>/dev/null; then
+        echo "venc: net.unix.max_dgram_qlen $cur -> 256 (unix:// output buffer)"
+    fi
+}
+
 start() {
     if still_running; then
         echo "$DAEMON already running"
@@ -110,6 +130,7 @@ start() {
     echo -n "Starting $DAEMON: "
     # apfpv boxes must come up in udp output mode (see helper above).
     ensure_apfpv_udp_output
+    raise_unix_dgram_qlen
     stage_detect_model
     # waybeam reads /etc/waybeam.json from a fixed path; it has no -c flag.
     "$DAEMON_PATH" > "$LOG_PATH" 2>&1 &

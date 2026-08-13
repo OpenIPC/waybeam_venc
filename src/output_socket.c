@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -38,10 +39,31 @@ static int fill_unix_destination(const char *name,
 /* Size the kernel send buffer for one IDR burst at stress-level bitrates
  * (25+ Mbps at 120 fps). Embedded defaults can be well under 64 KiB and
  * would cause head-of-line blocking on IDR frames. Raising here is
- * advisory — setsockopt failure is non-fatal. */
+ * advisory — setsockopt failure is non-fatal.
+ *
+ * This is the binding limit for udp:// only.  On unix:// the receiver's
+ * max_dgram_qlen runs out first (see OUTPUT_SOCKET_UNIX_QLEN_RECOMMENDED),
+ * so the raise is harmless but does nothing there. */
 #define OUTPUT_SOCKET_SNDBUF_BYTES (512 * 1024)
 
-static int open_socket(int *socket_handle, VencOutputUriType type)
+/* Ceiling on how long any single unix:// send may block.
+ *
+ * AF_UNIX SOCK_DGRAM has no equivalent of UDP's fire-and-forget: when the
+ * peer's receive queue is full the sender sleeps until the consumer drains
+ * it.  The encode thread issues these sends between MI_VENC_GetStream and
+ * MI_VENC_ReleaseStream, so an unbounded sleep holds a VENC output slot and
+ * stalls capture — measured at up to 74 ms against a wedged consumer, which
+ * cascades into dropped capture frames.  2 ms rides out ordinary consumer
+ * scheduling gaps while keeping a single send well inside a 120 fps frame
+ * period (8.3 ms).
+ *
+ * This bounds one sendmsg.  sendmmsg() applies the timeout per message, so
+ * the per-frame bound is enforced separately by the batch flush deadline in
+ * the backend output modules. */
+#define OUTPUT_SOCKET_UNIX_SNDTIMEO_MS 2
+
+static int open_socket(int *socket_handle, VencOutputUriType type,
+	int allow_unix_encoder_stall)
 {
 	int domain;
 	int sndbuf;
@@ -74,6 +96,24 @@ static int open_socket(int *socket_handle, VencOutputUriType type)
 		fprintf(stderr, "[output_socket] SO_SNDBUF(%d) failed: %s "
 			"(keeping kernel default)\n", sndbuf, strerror(errno));
 	}
+
+	if (domain == AF_UNIX && allow_unix_encoder_stall) {
+		fprintf(stderr, "[output_socket] WARNING: unix:// encoder-stall "
+			"compatibility enabled; a blocked consumer can stall capture\n");
+	} else if (domain == AF_UNIX) {
+		struct timeval tv;
+
+		tv.tv_sec = 0;
+		tv.tv_usec = OUTPUT_SOCKET_UNIX_SNDTIMEO_MS * 1000;
+		if (setsockopt(*socket_handle, SOL_SOCKET, SO_SNDTIMEO,
+			&tv, sizeof(tv)) != 0) {
+			fprintf(stderr, "[output_socket] SO_SNDTIMEO failed: %s "
+				"(sends may block the encode loop)\n",
+				strerror(errno));
+		}
+	}
+	if (domain == AF_UNIX)
+		(void)output_socket_warn_dgram_qlen();
 
 	return 0;
 }
@@ -140,7 +180,7 @@ int output_socket_fill_destination(const VencOutputUri *uri,
 int output_socket_configure(int *socket_handle, struct sockaddr_storage *dst,
 	socklen_t *dst_len, VencOutputUriType *transport,
 	const VencOutputUri *uri, int requested_connected_udp,
-	int *connected_udp)
+	int allow_unix_encoder_stall, int *connected_udp)
 {
 	int want_connected;
 
@@ -153,7 +193,8 @@ int output_socket_configure(int *socket_handle, struct sockaddr_storage *dst,
 
 	if (*socket_handle < 0 || *transport != uri->type) {
 		close_socket_if_open(socket_handle);
-		if (open_socket(socket_handle, uri->type) != 0)
+		if (open_socket(socket_handle, uri->type,
+		    allow_unix_encoder_stall) != 0)
 			return -1;
 		*transport = uri->type;
 	}
@@ -196,12 +237,18 @@ int output_socket_send_parts(int socket_handle,
 	int iovcnt;
 	ssize_t sent;
 
+	/* Set errno explicitly: callers classify the -1 by errno to separate
+	 * congestion (EAGAIN) from real failures, and a stale EAGAIN left by
+	 * an earlier call would otherwise be misread as a transport drop. */
 	if (socket_handle < 0 || !header || !payload1 ||
 	    header_len == 0 || payload1_len == 0) {
+		errno = EINVAL;
 		return -1;
 	}
-	if (!connected_udp && (!dst || dst_len == 0))
+	if (!connected_udp && (!dst || dst_len == 0)) {
+		errno = EINVAL;
 		return -1;
+	}
 
 	vec[0].iov_base = (void *)header;
 	vec[0].iov_len = header_len;
@@ -228,32 +275,49 @@ int output_socket_send_parts(int socket_handle,
 	return sent < 0 ? -1 : 0;
 }
 
-int output_socket_capture_capacity(int socket_handle, int *out_capacity)
+int output_socket_capture_capacity(int socket_handle, OutputSocketQueue *queue)
 {
 	int sndbuf = 0;
 	socklen_t sndbuf_len = sizeof(sndbuf);
 
-	if (socket_handle < 0 || !out_capacity)
+	if (!queue)
+		return -1;
+	/* Reset field-by-field rather than memset: on a live redirect this
+	 * runs on the control thread while the producer may still be inside a
+	 * flush calling output_socket_note_saturation() on the same struct, and
+	 * a bulk plain write there would race the atomic accesses. */
+	__atomic_store_n(&queue->sndbuf_capacity, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&queue->unix_capacity, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&queue->logged_capacity, 0, __ATOMIC_RELAXED);
+	if (socket_handle < 0)
 		return -1;
 	if (getsockopt(socket_handle, SOL_SOCKET, SO_SNDBUF, &sndbuf,
 	    &sndbuf_len) != 0)
 		return -1;
 	if (sndbuf <= 0)
 		return -1;
-	*out_capacity = sndbuf;
+	__atomic_store_n(&queue->sndbuf_capacity, sndbuf, __ATOMIC_RELAXED);
 	return 0;
 }
 
 /* AF_UNIX SOCK_DGRAM blocks on the peer's receive queue length (capped by
- * /proc/sys/net/unix/max_dgram_qlen, default 10), not on the sender's
- * SO_SNDBUF.  SIOCOUTQ on the sender returns sk_wmem_alloc — the sum of
- * per-skb truesize for in-flight datagrams — which saturates at roughly
- * (qlen × per_skb_truesize) when the receiver hangs.  AVG_SKB_TRUESIZE_BYTES
- * is the per-datagram kernel-overhead estimate (skb header + slab padding +
- * a typical RTP/audio payload between 256 B and 2.5 KiB).  Larger payloads
- * just saturate fill_pct earlier, which is the safe side for a backpressure
- * trigger. */
-#define UNIX_DGRAM_AVG_SKB_TRUESIZE_BYTES 4096
+ * /proc/sys/net/unix/max_dgram_qlen), not on the sender's SO_SNDBUF.
+ * SIOCOUTQ on the sender returns sk_wmem_alloc — the sum of per-skb
+ * truesize for in-flight datagrams — which saturates at roughly
+ * (qlen × per_skb_truesize) when the receiver stops reading.
+ *
+ * AVG_SKB_TRUESIZE_BYTES is only a bootstrap estimate for that product,
+ * used until a real saturation event calibrates the capacity exactly (see
+ * output_socket_note_saturation).  A 1400-byte RTP payload measures 2304
+ * bytes of truesize on Linux (SKB_DATA_ALIGN of payload + headroom, from
+ * the 2 KiB slab bucket, plus sizeof(struct sk_buff)); the exact figure
+ * varies with architecture and kernel version, which is precisely why it
+ * must not be the permanent denominator.
+ *
+ * The previous 4096 estimate over-counted by ~1.8× for MTU-sized RTP, which
+ * capped the reportable fill at 61 % — under the 75 % high-water mark — so
+ * a fully blocked unix:// socket never raised in_pressure at all. */
+#define UNIX_DGRAM_AVG_SKB_TRUESIZE_BYTES 2304
 
 static int read_unix_max_dgram_qlen(void)
 {
@@ -273,6 +337,37 @@ static int read_unix_max_dgram_qlen(void)
 	return cached;
 }
 
+int output_socket_warn_dgram_qlen(void)
+{
+	static int warned;
+	int qlen;
+	FILE *f = fopen("/proc/sys/net/unix/max_dgram_qlen", "re");
+
+	if (!f)
+		return -1;
+	if (fscanf(f, "%d", &qlen) != 1)
+		qlen = -1;
+	fclose(f);
+
+	if (qlen > 0 && qlen < OUTPUT_SOCKET_UNIX_QLEN_RECOMMENDED && !warned) {
+		warned = 1;
+		fprintf(stderr,
+			"[output_socket] WARNING: net.unix.max_dgram_qlen=%d is too "
+			"shallow for unix:// video output\n"
+			"[output_socket]   (~%d ms of buffer at 15 Mbps with 1400-byte "
+			"RTP payloads; one 60 fps frame is ~23 packets)\n"
+			"[output_socket]   Fix at boot, BEFORE consumers start: "
+			"echo %d > /proc/sys/net/unix/max_dgram_qlen\n"
+			"[output_socket]   The kernel snapshots this into each receiving "
+			"socket at creation, so raising it now\n"
+			"[output_socket]   will not help a consumer that is already "
+			"running.\n",
+			qlen, (qlen * 1400 * 8) / 15000,
+			OUTPUT_SOCKET_UNIX_QLEN_RECOMMENDED);
+	}
+	return qlen;
+}
+
 static int socket_is_unix_dgram(int socket_handle)
 {
 	struct sockaddr_storage ss;
@@ -284,44 +379,93 @@ static int socket_is_unix_dgram(int socket_handle)
 	return ss.ss_family == AF_UNIX;
 }
 
-int output_socket_get_fill_pct(int socket_handle, int sndbuf_capacity,
-	uint8_t *out_pct)
+/* Bootstrap estimate of the unix:// queue capacity in SIOCOUTQ bytes, used
+ * until a real saturation event supplies the exact figure. */
+static int unix_estimated_capacity(int sndbuf_capacity)
+{
+	uint64_t denom64 = (uint64_t)read_unix_max_dgram_qlen() *
+		UNIX_DGRAM_AVG_SKB_TRUESIZE_BYTES;
+	int denom = denom64 > (uint64_t)INT_MAX ? INT_MAX : (int)denom64;
+
+	/* Whichever of the peer queue and our own send buffer runs out first
+	 * dictates when a send blocks. */
+	if (sndbuf_capacity > 0 && sndbuf_capacity < denom)
+		denom = sndbuf_capacity;
+	return denom;
+}
+
+void output_socket_note_saturation(int socket_handle, OutputSocketQueue *queue)
 {
 	int queued = 0;
+
+	if (socket_handle < 0 || !queue)
+		return;
+	if (!socket_is_unix_dgram(socket_handle))
+		return;
+	if (ioctl(socket_handle, SIOCOUTQ, &queued) != 0)
+		return;
+	if (queued <= __atomic_load_n(&queue->unix_capacity, __ATOMIC_RELAXED))
+		return;
+	__atomic_store_n(&queue->unix_capacity, queued, __ATOMIC_RELAXED);
+
+	/* First calibration reveals the peer's real queue depth, which is the
+	 * only way to catch a consumer that was started before max_dgram_qlen
+	 * was raised: the sysctl reads healthy, but that consumer's socket
+	 * kept the shallow depth it was created with, so the startup warning
+	 * stays silent.  Log once, on the cold path. */
+	if (!__atomic_load_n(&queue->logged_capacity, __ATOMIC_RELAXED)) {
+		int dgrams = queued / UNIX_DGRAM_AVG_SKB_TRUESIZE_BYTES;
+
+		__atomic_store_n(&queue->logged_capacity, 1, __ATOMIC_RELAXED);
+		if (dgrams < OUTPUT_SOCKET_UNIX_QLEN_RECOMMENDED / 2) {
+			fprintf(stderr,
+				"[output_socket] WARNING: unix:// peer queue holds only "
+				"~%d datagrams (%d B) — the consumer was started before "
+				"net.unix.max_dgram_qlen was raised (it now reads %d). "
+				"Restart the consumer to pick up the deeper queue.\n",
+				dgrams, queued, read_unix_max_dgram_qlen());
+		}
+	}
+}
+
+int output_socket_get_fill_pct(int socket_handle,
+	const OutputSocketQueue *queue, uint8_t *out_pct)
+{
+	OutputSocketQueue local;
+	int queued = 0;
 	int denom;
+	int cap_unix;
+	int cap_sndbuf;
 	uint64_t pct;
 
 	if (socket_handle < 0 || !out_pct)
 		return -1;
+	if (!queue ||
+	    __atomic_load_n(&queue->sndbuf_capacity, __ATOMIC_RELAXED) <= 0) {
+		if (output_socket_capture_capacity(socket_handle, &local) != 0)
+			return -1;
+		if (queue)
+			local.unix_capacity = __atomic_load_n(
+				&queue->unix_capacity, __ATOMIC_RELAXED);
+		queue = &local;
+	}
+	/* Snapshot both capacities once.  The producer can raise
+	 * unix_capacity at any point (first saturation calibrates it), and
+	 * re-reading it per use could mix an old and a new value into one
+	 * result — publishing a percentage that never existed. */
+	cap_unix = __atomic_load_n(&queue->unix_capacity, __ATOMIC_RELAXED);
+	cap_sndbuf = __atomic_load_n(&queue->sndbuf_capacity, __ATOMIC_RELAXED);
+
 	if (ioctl(socket_handle, SIOCOUTQ, &queued) != 0)
 		return -1;
 	if (queued < 0)
 		queued = 0;
 
 	if (socket_is_unix_dgram(socket_handle)) {
-		/* For UNIX datagram, the actual binding limit is
-		 * min(qlen × avg_skb_truesize, sender SO_SNDBUF).  Whichever
-		 * is smaller dictates when sendto() returns EAGAIN.  Without
-		 * this clamp, fill_pct floors at a few percent and the
-		 * 75 %-high-water backpressure trigger never fires on
-		 * unix:// transports.  Compute the qlen × truesize product in
-		 * 64-bit and saturate to INT_MAX so a tuned-up qlen sysctl
-		 * (some hosts run ≥ 100k) cannot wrap the int denominator. */
-		uint64_t denom64 = (uint64_t)read_unix_max_dgram_qlen() *
-			UNIX_DGRAM_AVG_SKB_TRUESIZE_BYTES;
-		int sndbuf;
-		denom = denom64 > (uint64_t)INT_MAX ? INT_MAX : (int)denom64;
-		if (sndbuf_capacity > 0)
-			sndbuf = sndbuf_capacity;
-		else if (output_socket_capture_capacity(socket_handle,
-		         &sndbuf) != 0)
-			sndbuf = 0;
-		if (sndbuf > 0 && sndbuf < denom)
-			denom = sndbuf;
-	} else if (sndbuf_capacity > 0) {
-		denom = sndbuf_capacity;
-	} else if (output_socket_capture_capacity(socket_handle, &denom) != 0) {
-		return -1;
+		denom = cap_unix > 0 ? cap_unix :
+			unix_estimated_capacity(cap_sndbuf);
+	} else {
+		denom = cap_sndbuf;
 	}
 
 	if (denom <= 0)

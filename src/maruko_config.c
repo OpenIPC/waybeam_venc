@@ -36,6 +36,7 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	cfg->vpe_level_3dnr = 1;
 	cfg->verbose = 0;
 	cfg->connected_udp = 1;  /* match VencConfig default */
+	cfg->allow_unix_encoder_stall = 0;
 	cfg->keep_aspect = 1;    /* match VencConfig default (true) */
 	cfg->show_osd = 0;
 	cfg->ae_fps = 15;
@@ -135,6 +136,8 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->image_flip   = vcfg->image.flip   ? 1 : 0;
 	cfg->verbose = vcfg->system.verbose ? 1 : 0;
 	cfg->connected_udp = vcfg->outgoing.connected_udp ? 1 : 0;
+	cfg->allow_unix_encoder_stall =
+		vcfg->outgoing.allow_unix_encoder_stall ? 1 : 0;
 	cfg->keep_aspect = vcfg->isp.keep_aspect ? 1 : 0;
 	cfg->show_osd = vcfg->debug.show_osd ? 1 : 0;
 	cfg->ae_fps = vcfg->isp.ae_fps;

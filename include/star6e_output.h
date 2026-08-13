@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 
+#include "output_socket.h"
 #include "rtp_packetizer.h"
 #include "star6e.h"
 #include "venc_config.h"
@@ -24,6 +25,19 @@
  * alignment. Sized for jumbo-frame links such as the Realtek 3993 MTU. */
 #define STAR6E_OUTPUT_BATCH_SLOT_SCRATCH 4096
 
+/* Wall-clock ceiling on flushing one frame's batch.
+ *
+ * SO_SNDTIMEO bounds a single unix:// sendmsg, but sendmmsg() applies that
+ * timeout per message, so a 64-packet batch against a stalled consumer can
+ * still accumulate far past a frame period.  This deadline bounds the whole
+ * frame: once it passes, the remaining packets are dropped and counted as
+ * transport drops rather than stalling the encode thread further.
+ *
+ * 4 ms sits under a 120 fps frame period (8.3 ms).  With an adequately
+ * sized max_dgram_qlen it is never reached — a healthy 15 Mbps frame
+ * flushes in ~150 us. */
+#define STAR6E_OUTPUT_FLUSH_BUDGET_US 4000
+
 typedef enum {
 	STAR6E_STREAM_MODE_COMPACT = 0,
 	STAR6E_STREAM_MODE_RTP = 1,
@@ -33,6 +47,7 @@ typedef struct {
 	Star6eStreamMode stream_mode;
 	VencOutputUri uri;
 	int requested_connected_udp;
+	int allow_unix_encoder_stall;
 	int has_server;
 } Star6eOutputSetup;
 
@@ -66,6 +81,10 @@ typedef struct {
 	struct sockaddr_storage dst;
 	socklen_t dst_len;
 	int connected_udp;
+	int allow_unix_encoder_stall;
+	uint32_t flush_budget_us;
+	int discard_remaining;
+	int discard_as_error;
 } Star6eOutputBatch;
 
 typedef struct {
@@ -76,11 +95,19 @@ typedef struct {
 	socklen_t dst_len;
 	int connected_udp;
 	int requested_connected_udp;
+	int allow_unix_encoder_stall;
 	venc_ring_t *ring;
 	venc_frame_ring_t *frame_ring;
 	uint32_t send_errors;
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
-	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
+	OutputSocketQueue send_queue; /* SO_SNDBUF + learned unix:// capacity */
+	/* Lifetime socket-transport counters, producer-thread only.  Mirrored
+	 * into last_full_drops / last_writes at observation time so the sidecar
+	 * trailer reports transport_drops / packets_sent for udp:// and unix://
+	 * the same way it already does for the SHM rings. */
+	/* Producer/status shared: access both with __atomic_* relaxed ops. */
+	uint32_t socket_drops;
+	uint32_t socket_writes;
 	Star6eOutputBatch batch;
 	/* Last clamp factor published by the frame-shm ring-fill throttle
 	 * (include/venc_shm_throttle.h), 1000 = unclamped.  Cached here so
@@ -101,11 +128,12 @@ typedef struct {
 	 * RELAXED off-thread; naturally aligned on ARMv7 so single-load
 	 * atomic in practice.
 	 *
-	 * SHM-only fields (last_full_drops / last_writes / last_oversize_drops)
-	 * carry the lifetime ring counters cached at observation time so the
-	 * sidecar trailer can report transport_drops / packets_sent without a
-	 * second venc_ring_get_fill().  For socket transports those counters
-	 * are not yet tracked (left 0). */
+	 * last_full_drops / last_writes / last_oversize_drops carry the
+	 * lifetime counters cached at observation time so the sidecar trailer
+	 * can report transport_drops / packets_sent without a second
+	 * venc_ring_get_fill().  Sourced from the ring for shm:// and
+	 * frame-shm://, and from socket_drops / socket_writes for udp:// and
+	 * unix:// (which have no oversize concept, so that one stays 0). */
 	int in_pressure;
 	uint32_t pressure_drops;
 	uint8_t last_fill_pct;
@@ -116,6 +144,26 @@ typedef struct {
 	int svct_active;
 	uint8_t gdr_cycle_len;
 	uint8_t gdr_counter;
+	/* Recovery hook for a frame-shm:// ring-full drop.
+	 *
+	 * A full ring discards a frame that is ALREADY ENCODED, so the
+	 * decoder's reference chain breaks and it renders garbage until the
+	 * next IDR — with a long GOP, that is seconds.  The producer is the
+	 * one party that knows instantly it just broke the chain, so it
+	 * re-establishes it locally instead of waiting for the ground to
+	 * notice and ask: waybeam-link only requests an IDR on a
+	 * RecoveryRequest arriving over RF, which is a full round trip and is
+	 * off by default (venc.recovery_enabled).
+	 *
+	 * Wired to star6e_scene_request_idr(), so it inherits the shared
+	 * per-channel IDR rate limiter (100 ms) — a persistently full ring
+	 * coalesces into at most ~10 IDRs/s instead of a keyframe storm into
+	 * the very ring that is already congested. */
+	void (*request_idr)(void *ctx);
+	void *idr_ctx;
+	/* Ring-full drops split by whether they actually broke the chain.
+	 * A non-referenced (SVC-T) frame is droppable by construction, so
+	 * those cost exactly one frame and must NOT trigger an IDR. */
 } Star6eOutput;
 
 typedef struct {

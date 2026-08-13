@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.16.1`
+- `contract_version`: `0.18.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -106,7 +106,7 @@ Response `200`:
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
       "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
-      "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
+      "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "allowUnixEncoderStall": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
       "debug": { "showOsd": false }
@@ -167,6 +167,7 @@ Response `200`:
       "outgoing.server": { "mutability": "live", "supported": true },
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
       "outgoing.connected_udp": { "mutability": "restart_required", "supported": true },
+      "outgoing.allow_unix_encoder_stall": { "mutability": "restart_required", "supported": true },
       "discovery.enabled": { "mutability": "restart_required", "supported": true },
       "discovery.service_type": { "mutability": "restart_required", "supported": true },
       "discovery.name": { "mutability": "restart_required", "supported": true },
@@ -565,6 +566,7 @@ curl "http://<device-ip>/api/v1/set?outgoing.maxPayloadSize=4000"
 # Restart-only
 curl "http://<device-ip>/api/v1/set?outgoing.stream_mode=compact"
 curl "http://<device-ip>/api/v1/set?outgoing.connected_udp=true"
+curl "http://<device-ip>/api/v1/set?outgoing.allowUnixEncoderStall=true"
 ```
 
 - `outgoing.stream_mode`: `"rtp"` (default) or `"compact"`. Determines packetization format.
@@ -581,6 +583,14 @@ curl "http://<device-ip>/api/v1/set?outgoing.connected_udp=true"
 - `outgoing.connected_udp`: When `true`, calls `connect()` on the UDP socket so the kernel
   returns ICMP port-unreachable errors via `sendmsg()`. Useful for detecting that a receiver
   is down. Default `false` (fire-and-forget).
+- `outgoing.allow_unix_encoder_stall`: Restart-required boolean, default `false`.
+  When `false`, `unix://` sends use the 2 ms socket timeout and cumulative
+  approximately 4 ms RTP frame budget; sustained pressure drops the unsent
+  remainder of the frame so the encoder stays live. When `true`, those two
+  bounds are disabled for `unix://` only: a full consumer queue blocks the
+  encoder output thread until the consumer resumes, preserving the legacy
+  behavior. UDP, `shm://`, and `frame-shm://` are unaffected. The 256-datagram
+  queue recommendation remains active in both modes.
 
 ### Live FPS Control — Behavior Details
 
@@ -1097,14 +1107,16 @@ Response `200`:
     "path": "/media/rec_01h23m45s_abcd.ts",
     "frames": 1500,
     "bytes": 12345678,
+	"elapsed_ms": 25000,
     "segments": 1,
     "stop_reason": "none"
   }
 }
 ```
 
-`stop_reason` values: `"none"` (currently recording), `"manual"`, `"disk_full"`,
-`"write_error"`.
+`elapsed_ms` is the elapsed duration of the active or most recently stopped
+recording. `stop_reason` values: `"none"` (currently recording), `"manual"`,
+`"disk_full"`, `"write_error"`.
 
 ### `GET /api/v1/recordings`
 
@@ -1348,7 +1360,9 @@ Response `200` (UDP/Unix kernel-buffer fill_pct):
     "transport": "udp",
     "fillPct": 4,
     "inPressure": false,
-    "pressureDrops": 0
+    "pressureDrops": 0,
+    "transportDrops": 0,
+    "packetsSent": 184523
   }
 }
 ```
@@ -1362,16 +1376,32 @@ Field reference:
 
 | Field | Meaning |
 |---|---|
-| `transport` | `"shm"`, `"udp"`, `"unix"`, or `"none"` |
-| `fillPct` | Current fill ratio `0..100`.  For SHM, ring fill; for UDP/Unix, kernel send-buffer fill |
-| `inPressure` | True when `fillPct >= 70` (high-water threshold) |
-| `transportDrops` | (SHM only) Lifetime ring-full drops |
+| `transport` | `"shm"`, `"frame-shm"`, `"udp"`, `"unix"`, or `"none"` |
+| `fillPct` | Current fill ratio `0..100`.  For SHM, ring fill.  For UDP, kernel send-buffer fill.  For Unix, fill against the peer's datagram queue — see the note below |
+| `inPressure` | Point-in-time HTTP snapshot: true when the current `fillPct >= 75`, false otherwise. The RTP sidecar field uses 75/50 hysteresis |
+| `transportDrops` | Lifetime drops: ring-full for SHM; unsent datagrams after `EAGAIN`/`ENOBUFS` or frame-budget exhaustion for UDP/Unix |
 | `pressureDrops` | Frames dropped by the in-process backpressure path while a sidecar probe was subscribed |
-| `packetsSent` | (SHM only) Lifetime writes accepted by the ring |
+| `packetsSent` | Lifetime sends accepted: ring writes for SHM, datagrams for UDP/Unix |
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
 | `throttlePermille` | (frame-shm only) Ring-fill bitrate clamp, `1000` = unclamped, `250` = floor.  A **clamp, not a veto** — `video0.bitrate` in `/api/v1/config` is never modified, so an external rate controller's writes all still succeed |
 | `effectiveBitrateKbps` | (frame-shm only) `video0.bitrate` scaled by `throttlePermille`; what the encoder is actually programmed to |
+
+On `unix://`, `fillPct` is measured against the *peer's* datagram queue,
+which is the limit that actually blocks a sender — not the local
+`SO_SNDBUF`.  The producer cannot read the peer's queue depth, so the
+denominator is calibrated from the first send that saturates the queue and
+is an estimate from `net.unix.max_dgram_qlen` before that.  `fillPct` may
+therefore read low until the transport has been pushed once.
+
+With `outgoing.allowUnixEncoderStall=false`, `transportDrops` rising on
+`unix://` means the consumer is not keeping up: a frame's packets exhausted
+the cumulative flush budget and the remainder was dropped rather than
+stalling the encoder. With the compatibility option enabled, ordinary queue
+pressure blocks instead and does not increment `transportDrops`; status reads
+may show a full queue while the consumer is paused. The usual cause of
+unexpected pressure is a shallow `net.unix.max_dgram_qlen` — see the
+`unix://` notes in the README.
 
 A `throttlePermille` below `1000` means the consumer is not draining the ring
 fast enough for the configured bitrate.  Pinned at `250` the clamp has spent
@@ -1418,6 +1448,118 @@ driver enumerates so callers can show an "available modes" UI.
 Error `500 modes_failed` — `MI_SNR_QueryResCount` failed (e.g. sensor
 driver not loaded yet during a brief startup window).
 
+## QR Scanning (Star6E only)
+
+An overlay-free NV12 luma tap on VPE **port1** feeds the isolated
+`/usr/bin/qr_decode` helper. port1 exists because MI_RGN composites **per scaler output port** and
+every overlay producer targets port0 — `debug_osd` here, `osd_render` in
+waybeam-hub — so the MJPEG snapshot channel (a port0 1:N consumer) carries
+whatever HUD is running over anything a marker might occupy.
+
+Gated on `qr.tapEnabled`.  port1 is single-owner and shared with framing-stab
+and NPU detect, so a scan is **mutually exclusive** with both: whoever holds it
+wins, and QR is the lowest-priority claimant.
+
+### `GET /api/v1/qr/scan[?ms=N]`
+
+Open a scan window, or **extend** the one already running.  `ms` defaults to
+`qr.windowMs`, clamped to 1000–60000.
+
+A supervisor thread owns the window: it opens port1, sends each fresh frame to
+the helper until the deadline, and closes the port on the way out — so a client that dies
+mid-scan cannot strand port1.  **A successful decode ends the window early**;
+the point of a window is to find one code.
+
+Extending never touches port state.  That matters: re-opening port1 per request
+is what wedged the retired `/api/v1/snapshot.pgm`.
+
+```bash
+curl "http://<device-ip>/api/v1/qr/scan?ms=10000"
+```
+
+Response `200`:
+```json
+{"ok": true, "data": {"scanning": true, "window_ms": 10000,
+                      "remaining_ms": 9999, "capture": "1080x1080"}}
+```
+
+- `409 port1_busy` — framing-stab or NPU detect holds port1.  Reported
+  immediately, never queued.
+- `503 tap_disabled` — `qr.tapEnabled` is off, or the pipeline is not running.
+- `500 scan_failed` — the SCL would not drive the configured geometry.  The
+  port is enabled and then verified to deliver a frame within 1 s; if it does
+  not, port1 is released rather than held for a window that can never capture.
+
+### `GET /api/v1/qr/stop`
+
+End the current window and hand port1 back.  Blocks until the port is actually
+released, so port1 is free on return.  Idempotent.
+
+This *requests* a close rather than forcing one.  The port is held for a minimum
+of 750 ms after it comes up, because disabling one that only just opened —
+while the SCL still has buffers in flight — panics the kernel (the same failure
+that retired `/api/v1/snapshot.pgm`).  A stop issued against a window older than
+that returns immediately; against a brand-new one it waits out the remainder.
+A further 500 ms floor applies between two opens.  Together these cap the
+port-cycle rate no matter how fast a client loops.
+
+Note the path: **not** `/api/v1/qr/scan/stop`.  The router matches on prefix and
+accepts a `/` continuation, so a nested path would be swallowed by the
+`/qr/scan` route.
+
+### `GET /api/v1/qr/status`
+
+Poll a window without disturbing it.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "armed": true,
+    "scanning": false,
+    "window_ms": 15000,
+    "remaining_ms": 0,
+    "capture": "1080x1080",
+    "frames": 3,
+    "grabs": 1,
+    "port1_owner": "",
+    "decode": {
+      "attempts": 1,
+      "decoded": true,
+      "payload": "P23456789ABCDEFG",
+      "stage": "qr_decode",
+      "decode_ms": 84,
+      "last_ms": 84
+    }
+  }
+}
+```
+
+- `frames` / `grabs` — buffers drained, and buffers actually copied out, this
+  window.  Reset when a window opens, not when one is extended.
+- `port1_owner` — `""`, `"qr"`, `"stab"` or `"detect"`.
+- `decode.stage` — `qr_decode` when the isolated decoder helper succeeds.
+  Detailed cascade-stage diagnostics are available from `qr_decode --stats`.
+- The `decode` block **survives the window closing** and is cleared only by the
+  next `/qr/scan`, so a client polling at 1 Hz still sees the payload from a
+  window that found its code and shut down between two polls.
+
+`payload` is a Waybeam transport envelope: exactly 16 characters from the QR
+alphanumeric alphabet (`0-9 A-Z` and `` $%*+-./:``).  Nothing in that set needs
+JSON escaping; anything outside it is scrubbed to `?` before serialization.
+
+### `GET /api/v1/qr/tap.pgm`
+
+One frame of the tap as a binary P5 PGM (self-describing dimensions, stride
+removed).  Debug instrumentation for validating capture — geometry,
+OSD-freedom, exposure — not part of the scanning flow.
+
+- `503 tap_disabled` — no window is open.
+- `504 tap_timeout` — no frame arrived.
+- `409 scan_decoding` — a cascade currently owns the latch.  The latch is
+  single-buffered; refusing beats blocking an httpd worker or returning a frame
+  that is being overwritten.
+
 ## SIGHUP Pipeline Reinit
 
 In addition to the `/api/v1/restart` endpoint, the pipeline can be reinited by sending
@@ -1462,7 +1604,8 @@ Behavior:
 ## Backend Compatibility Notes
 - Star6E is the reference behavior for API-touching features.
 - Maruko may return `not_implemented` for specific apply paths until parity work is complete.
-- `GET` endpoints must remain consistent across backends.
+- Shared `GET` endpoints remain consistent across backends. Platform-specific
+  routes are listed explicitly in the matrix below.
 
 ### Backend Support Matrix
 
@@ -1473,6 +1616,7 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 |---|---|---|---|
 | `/api/v1/record/{start,stop}` | yes | **501** | Maruko has no runtime poll loop yet (Phase 6.5).  Config-driven recording (`record.enabled=true` + `record.mode="mirror"\|"dual"`) works. |
 | `/api/v1/record/status` | live counters | live counters | Both backends register a status callback against the live `Star6eTsRecorderState`; Maruko reflects daemon-config-driven recording (mirror/dual). |
+| `/api/v1/qr/*` | yes | **404** | Star6E-only VPE port1 luma tap. QR capability fields remain in the shared schema but report `supported:false` on Maruko. |
 | `/api/v1/recordings*` | yes | yes | File listing/download/delete works against `record.dir` regardless of which backend wrote the file. |
 | `/api/v1/audio/status` | yes | yes | Both backends register `query_audio_status`. |
 | `/api/v1/dual/status`, `/dual/idr` | yes | yes | `/dual/status` always 200 (`active:false` when off, `active:true,channel,bitrate,fps,gop` when on).  `/dual/idr` returns 200 when active, 404 when not. Maruko HTTP registration landed in 0.10.4 — earlier Maruko builds returned 404 from these even when `record.mode=dual` was running. |
@@ -1487,9 +1631,25 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
 | `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **live** | Both backends hot-swap the NPU detector on the pipeline thread without respawning video. Star6E uses VPE port 1; Maruko uses SCL port 3 and its drain-while-disable teardown. A model whose reported input geometry disagrees with the configured tap is refused and leaves detection off. |
 | `detect.net_width` / `net_height` | restart | restart | Tap geometry is fixed when the VPE/SCL detector port is created. |
+| `video0.min_qp` / `max_qp` | live | **501** | Star6E-only RC QP bounds; Maruko capabilities report these fields unsupported. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.0` (additive — Unix encoder-stall compatibility):
+  - Added restart-required `outgoing.allow_unix_encoder_stall` with camelCase
+    alias `outgoing.allowUnixEncoderStall`. Default `false` retains bounded
+    send/drop behavior; `true` restores blocking `unix://` sends.
+  - Added Star6E-only inline QR scan routes and the `qr.*` configuration
+    surface. `qr.window_ms` applies live to the next scan; Maruko advertises
+    all QR fields unsupported and does not register the routes.
+  - Added live Star6E `video0.min_qp` / `video0.max_qp` RC bounds. Maruko
+    advertises these fields unsupported.
+  - `/api/v1/record/status` now includes `elapsed_ms` on both backends.
+- `0.17.0` (additive — socket transport telemetry):
+  - The UDP/Unix response from `/api/v1/transport/status` now reports
+    `transportDrops` and `packetsSent`, matching the existing SHM field names.
+  - Unix `fillPct` is calibrated against the peer's observed full datagram
+    queue rather than the sender's `SO_SNDBUF`.
 - `0.16.1` (non-breaking):
   - `isp.keepAspect` is now **supported on Maruko** — capabilities report
     `supported:true` and `/api/v1/set` accepts it (previously rejected with
