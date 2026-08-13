@@ -5,7 +5,7 @@
 <h1 align="center">Waybeam — Vehicle Video Encoder</h1>
 
 <p align="center">
-  <em>Standalone H.265 (HEVC) encoder &amp; RTP streamer for SigmaStar Infinity6E and Infinity6C camera SoCs.</em>
+  <em>Standalone H.265 (HEVC) encoder &amp; RTP streamer for embedded camera SoCs.</em>
 </p>
 
 ---
@@ -16,13 +16,15 @@ RTP / compact UDP / Unix / SHM video to a ground station, optionally
 records to SD card, and exposes the whole pipeline through a single
 zero-restart HTTP API and a built-in web dashboard.
 
-Two SoC backends share one source tree:
+Three build-time SoC backends share one source tree:
 
 - **Star6E** — SigmaStar Infinity6E (SSC30KQ, SSC338Q).
 - **Maruko** — SigmaStar Infinity6C (SSC378QE).
+- **CV610** — HiSilicon Hi3516CV610 with Sony IMX662 (initial streaming
+  backend; advanced controls are being added in phases under #220).
 
-Both binaries are produced from the same `make build` invocation with
-different `SOC_BUILD=` flags. All MI vendor libraries are loaded via
+Each binary is produced from the same `make build` invocation with
+different `SOC_BUILD=` flags. SigmaStar MI vendor libraries are loaded via
 `dlopen` so the binary stays small and the Maruko bundle can ship its
 own copies of libs that stock OpenIPC Infinity6C firmware does not.
 
@@ -37,20 +39,21 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
 - RTP packetization (single-NAL + FU-A, fixed `maxPayloadSize`); compact UDP raw-NAL mode
 - Built-in web dashboard at `/` for configuration, API docs, and IQ tuning
 - HTTP API for live parameter tuning without pipeline restart
-- ISP IQ parameter system: 60+ params, multi-field structs, JSON export/import (both backends)
+- ISP IQ parameter system: 60+ params, multi-field structs, JSON export/import
+  (Star6E and Maruko)
 - Custom 3A: built-in AE and AWB with configurable gain limits and convergence
 - ROI-based QP gradient for FPV center-priority encoding
 - Sensor FPS unlock for IMX415 / IMX335 (in-tree drivers; up to 144 fps
   on Star6E IMX335, 100 fps on IMX415)
-- Optional audio capture (Opus / G.711a / G.711µ / raw PCM) on both
-  backends, RTP or compact UDP output, mute via live API
+- Optional audio capture (Opus / G.711a / G.711µ / raw PCM) on Star6E and
+  Maruko, RTP or compact UDP output, mute via live API
 - SD card recording: MPEG-TS mux (HEVC + audio in TS, PCM / A-law / µ-law / Opus
   alongside video), power-loss safe; raw `.hevc` available on Star6E
-- Gemini / dual-VENC: concurrent stream + high-quality record (both backends)
+- Gemini / dual-VENC: concurrent stream + high-quality record (Star6E and Maruko)
 - Adaptive recording bitrate: auto-reduces if SD card can't keep up
 - Maruko-specific opt-in 3A throttle (`isp.aeEngine="custom"`) — saves
   ~24 % sys CPU at 120 fps with no visible AE quality loss
-- BMI270 IMU driver with frame-synced FIFO (both backends) — compiled in,
+- BMI270 IMU driver with frame-synced FIFO (Star6E and Maruko) — compiled in,
   disabled by default, ready for telemetry/sidecar consumers
 - Intra-refresh (GDR-style rolling stripe) for fast loss recovery on FPV links
 - Scene-change-triggered IDR (Star6E) for clean stream join under packet loss
@@ -68,6 +71,12 @@ make build SOC_BUILD=star6e
 
 # Maruko (Infinity6C)
 make build SOC_BUILD=maruko
+
+# HiSilicon CV610 (external public headers + OpenIPC sysroot required)
+make build SOC_BUILD=cv610 \
+  CV610_CC=/path/to/arm-openipc-linux-musleabi-gcc \
+  CV610_SDK_INC=/path/to/openhisilicon \
+  CV610_SDK_LIB=/path/to/cv610/rootfs/usr/lib
 ```
 
 The toolchain is auto-downloaded on first build. Each backend builds to
@@ -76,9 +85,10 @@ its own output directory:
 ```
 out/star6e/waybeam   # Star6E binary
 out/maruko/waybeam   # Maruko binary
+out/cv610/waybeam    # CV610 binary
 ```
 
-Both backends can coexist; no clean is needed when switching.
+All backend outputs can coexist; no clean is needed when switching.
 
 Stage a deployable bundle with vendored libraries:
 
@@ -86,6 +96,7 @@ Stage a deployable bundle with vendored libraries:
 make stage SOC_BUILD=star6e
 # Output: out/star6e/{waybeam,qr_decode} + out/star6e/lib/*.so
 # (Maruko also stages drivers/ + isp-bins/)
+# (CV610 also stages sensors/, S95waybeam, waybeam-cv610.conf, and waybeam.json)
 ```
 
 Run host tests:
@@ -298,8 +309,8 @@ omitted fields keep their compiled-in defaults.
 - **`video0`** — rate control, fps, resolution, bitrate, GOP,
   per-section QP delta. Video codec is hardcoded H.265 (HEVC).
   Scene-change-triggered IDR (`sceneThreshold`,
-  `sceneHoldoff`) is Star6E-only. Intra-refresh is both backends. The
-  `framing` knob expands to either digital zoom (both backends) or image
+  `sceneHoldoff`) is Star6E-only. Intra-refresh is on Star6E and Maruko. The
+  `framing` knob expands to either digital zoom (Star6E and Maruko) or image
   stabilization (`stab` HW-crop / `stab-fill` floating-image, Star6E only;
   live `pauseStab`).
 - **`outgoing`** — destination URI (`udp://`, `unix://`, `shm://`,
@@ -358,7 +369,7 @@ Response is `Content-Type: image/jpeg`. Failure modes:
 
 Defaults live in `waybeam.json` under `snapshot` (`enabled`, `quality`,
 `channel`, `width`, `height`). `snapshot.quality` is **live-mutable**
-on both backends — `curl "http://<dev>/api/v1/set?snapshot.quality=40"`
+on both SigmaStar backends — `curl "http://<dev>/api/v1/set?snapshot.quality=40"`
 applies instantly with no pipeline reinit. The remaining snapshot
 fields are restart-required (channel-attribute baked at
 `MI_VENC_CreateChn` time).
@@ -536,7 +547,7 @@ curl "http://<device-ip>:<port>/api/v1/dual/idr"
 #### GET /api/v1/audio/status
 
 Live snapshot of the audio capture/encode pipeline (lib loaded, capture
-running, codec, rate, channels, Opus initialization). Both backends.
+running, codec, rate, channels, Opus initialization). Both SigmaStar backends.
 See [HTTP_API_CONTRACT.md](documentation/HTTP_API_CONTRACT.md) for full
 field reference.
 
@@ -605,7 +616,7 @@ load cleanly; the keys are silently ignored.
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `isp.sensor_bin` | string | live | ISP tuning binary path (empty = auto-detect /etc/sensors/&lt;sensor&gt;.bin) |
-| `isp.ae_engine` | string | restart | `"sdk"` (default) lets the SDK firmware run AE on both backends.  `"custom"` runs userspace cus3a — on Star6E it spins the supervisory AE thread; on Maruko it installs the no-op adaptor + 15 Hz `SetAeParam` thread (~24% sys CPU saving at 120 fps).  Alias: `isp.aeEngine`. |
+| `isp.ae_engine` | string | restart | `"sdk"` (default) lets the SDK firmware run AE on Star6E and Maruko.  `"custom"` runs userspace cus3a — on Star6E it spins the supervisory AE thread; on Maruko it installs the no-op adaptor + 15 Hz `SetAeParam` thread (~24% sys CPU saving at 120 fps).  Alias: `isp.aeEngine`. |
 | `isp.ae_fps` | uint | restart | Custom 3A processing rate in Hz (default 15) |
 | `isp.gain_max` | uint | live | AE max ISP gain ceiling (0 = use ISP bin default) |
 | `isp.awb_mode` | string | live | `"auto"` or `"ct_manual"` |
@@ -954,7 +965,7 @@ prediction is from the previous frame either way.
 >   and does not respawn — reboot is required to restart it.
 >
 > Different failure modes, same root cause.  Cold-boot into any
-> preset is 100 % reliable on both backends, so the reboot model is
+> preset is 100 % reliable on both SigmaStar backends, so the reboot model is
 > what we ship.
 
 Expansion table:
@@ -1239,7 +1250,7 @@ Recording can also be controlled at runtime via the HTTP API. In
 dual/dual-stream modes, the secondary channel parameters can be
 adjusted live via `/api/v1/dual/set`.
 
-#### IMU (both backends, POC consumer)
+#### IMU (Star6E and Maruko, POC consumer)
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
@@ -1564,7 +1575,7 @@ probe.
 ## Sensor Driver Sources
 
 This repo ships **in-tree, mode-unlocked** IMX335 / IMX415 driver sources
-for both backends under `drivers/` — `sensor_imx{335,415}_star6e.c` and
+for Star6E and Maruko under `drivers/` — `sensor_imx{335,415}_star6e.c` and
 `sensor_imx{335,415}_maruko.c` — with the mode lineups documented in
 `drivers/SENSOR_MODE_GUIDE.md` and the per-SoC deep-dives in
 `documentation/STAR6E_IMX335_MODES.md`, `STAR6E_IMX415_MODES.md`, and
@@ -1673,7 +1684,7 @@ Config button to download the full configuration as JSON.
 
 ## IMU (BMI270 gyro module)
 
-The BMI270 driver is compiled into the binary on both backends but
+The BMI270 driver is compiled into the Star6E and Maruko binaries but
 disabled by default (`imu.enabled = false`). When enabled, it samples
 gyro+accel via the hardware FIFO at 200 Hz, drains per video frame, and
 hands samples to a caller-supplied push callback.

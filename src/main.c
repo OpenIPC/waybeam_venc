@@ -131,7 +131,7 @@ int main(int argc, char* argv[])
 
 	/* SIGHUP / /api/v1/restart / resilience ref_* delta exits cleanly
 	 * here and forks a successor process for a true cold restart.
-	 * Shared between both backends — both BSPs have the same
+	 * Used by Star6E and Maruko — both SigmaStar BSPs have the same
 	 * limitation: in-process MI_SYS_Exit + MI_SYS_Init does not yield
 	 * a clean kernel state.  See include/venc_respawn.h. */
 	if (venc_respawn_pending())

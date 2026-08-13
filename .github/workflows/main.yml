@@ -50,6 +50,39 @@ jobs:
       - name: Lint Maruko backend
         run: make lint SOC_BUILD=maruko
 
+  lint-build-cv610:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned public OpenHisilicon headers
+        uses: actions/checkout@v4
+        with:
+          repository: OpenIPC/openhisilicon
+          ref: ff20187b3d8d6187be16550220eda580444fd43b
+          path: .deps/openhisilicon
+      - name: Fetch pinned CV610 runtime libraries
+        uses: actions/checkout@v4
+        with:
+          repository: OpenIPC/firmware
+          ref: d8fbff3e2187ab0d042c84373766682a821294f7
+          path: .deps/firmware
+          sparse-checkout: general/package/hisilicon-osdrv-hi3516cv6xx/files/lib
+      - name: Fetch CV610 toolchain
+        run: make toolchain-cv610
+      - name: Lint and build CV610 daemon and IMX662 plugin
+        run: |
+          make lint SOC_BUILD=cv610 \
+            CV610_SDK_INC=.deps/openhisilicon \
+            CV610_SDK_LIB=.deps/firmware/general/package/hisilicon-osdrv-hi3516cv6xx/files/lib
+          make build SOC_BUILD=cv610 \
+            CV610_SDK_INC=.deps/openhisilicon \
+            CV610_SDK_LIB=.deps/firmware/general/package/hisilicon-osdrv-hi3516cv6xx/files/lib
+          make sensor-cv610 SOC_BUILD=cv610 \
+            CV610_SDK_INC=.deps/openhisilicon \
+            CV610_SDK_LIB=.deps/firmware/general/package/hisilicon-osdrv-hi3516cv6xx/files/lib
+          test -x out/cv610/waybeam
+          test -f sensors/cv610/imx662/libsns_imx662.so
+
   # ── Full build + artifact upload ────────────────────────────────────
 
   build:

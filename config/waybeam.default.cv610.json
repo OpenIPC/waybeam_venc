@@ -1,0 +1,30 @@
+{
+  "system": {
+    "webPort": 80,
+    "verbose": false
+  },
+  "video0": {
+    "rcMode": "cbr",
+    "fps": 60,
+    "size": "1920x1080",
+    "bitrate": 8192,
+    "gopSize": 1.0,
+    "qpDelta": -4,
+    "resilience": "off",
+    "framing": "off"
+  },
+  "outgoing": {
+    "enabled": true,
+    "server": "frame-shm://venc_wfb",
+    "streamMode": "rtp",
+    "maxPayloadSize": 1400,
+    "connectedUdp": true,
+    "allowUnixEncoderStall": false
+  },
+  "discovery": {
+    "enabled": true,
+    "serviceType": "_waybeam-venc._tcp",
+    "name": "",
+    "bareAlias": true
+  }
+}

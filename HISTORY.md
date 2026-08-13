@@ -1,5 +1,35 @@
 # History
 
+## [0.65.0] - 2026-08-13
+
+Initial HiSilicon CV610 + Sony IMX662 backend slice (#220).
+
+- Added `SOC_BUILD=cv610` and a third `BackendOps` implementation using the
+  OpenIPC ARMv7 musl toolchain, public OpenHisilicon headers, and external
+  CV610 runtime libraries. SigmaStar's forced compatibility header is now
+  scoped to the Star6E and Maruko builds.
+- Ported the hardware-verified IMX662 MIPI -> VI -> ISP -> H.265 VENC graph
+  into the common daemon lifecycle. The first slice accepts full-frame
+  1080p30/60 RAW12 and 1080p90/100 RAW10, with bitrate, GOP, and I/P QP delta
+  taken from the existing config ABI.
+- Added shared HEVC RTP output over UDP/abstract UNIX sockets and VFRM v1
+  whole-frame SHM output. Packet-SHM, live output switching, sidecar, and
+  pressure throttling remain follow-up work.
+- Added the source-built IMX662 sensor plugin and CV610 staging/build docs.
+  The staged bundle includes the device-verified CV610 init script and sensor
+  clock profile. No proprietary SDK sources or runtime binaries are committed.
+- Guarded the SigmaStar RIU die-ID reader from CV610 builds, added reusable
+  Annex-B iteration with host tests, and added a CV610-specific config
+  validation test.
+
+The integrated binary is confirmed on CV610 hardware at 1080p100: Waybeam Hub
+decoded the stream, an independent 15-second FFmpeg pass sustained about 99
+fps, SIGTERM teardown completed in about 200 ms, and the installed init service
+completed a cold module restart in eight seconds. Frame-SHM, repeated restart
+cycles, and soak validation remain before the backend is production-ready.
+HTTP/WebUI controls are intentionally not linked until a truthful CV610
+capability mask and native callbacks land.
+
 ## [0.64.0] - 2026-08-06
 
 `ltr` resilience preset — maximum non-reference density with a long GOP.

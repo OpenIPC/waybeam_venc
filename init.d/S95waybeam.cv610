@@ -1,0 +1,74 @@
+#!/bin/sh
+
+DAEMON=/usr/bin/waybeam
+LOADER=/usr/bin/load-cv610-online
+NAME=waybeam
+PIDFILE=/var/run/$NAME.pid
+LOGFILE=/tmp/$NAME.log
+PLATFORM_CONFIG=/etc/waybeam-cv610.conf
+
+WAYBEAM_ENABLED=1
+CV610_SENSOR_PROFILE=sc4336p
+# The platform override is target-local by design.
+# shellcheck disable=SC1090
+[ -r "$PLATFORM_CONFIG" ] && . "$PLATFORM_CONFIG"
+
+start()
+{
+	if [ "$WAYBEAM_ENABLED" != "1" ]; then
+		echo "$NAME disabled by configuration"
+		return 0
+	fi
+	if [ -r "$PIDFILE" ]; then
+		read -r old_pid <"$PIDFILE"
+		if kill -0 "$old_pid" 2>/dev/null; then
+			echo "$NAME already running (pid $old_pid)"
+			return 0
+		fi
+		rm -f "$PIDFILE"
+	fi
+	CV610_SENSOR_PROFILE="$CV610_SENSOR_PROFILE" "$LOADER" start || return 1
+	: >"$LOGFILE"
+	start-stop-daemon -S -m -q -p "$PIDFILE" -x "$DAEMON" -- \
+		>>"$LOGFILE" 2>&1 &
+	sleep 2
+	if [ ! -r "$PIDFILE" ]; then
+		echo "$NAME failed to create pidfile" >&2
+		"$LOADER" stop
+		return 1
+	fi
+	read -r pid <"$PIDFILE"
+	if ! kill -0 "$pid" 2>/dev/null; then
+		echo "$NAME failed to start" >&2
+		cat "$LOGFILE" >&2
+		rm -f "$PIDFILE"
+		"$LOADER" stop
+		return 1
+	fi
+	echo "Started $NAME (pid $pid, sensor profile $CV610_SENSOR_PROFILE)"
+}
+
+stop()
+{
+	pid=""
+	[ -r "$PIDFILE" ] && read -r pid <"$PIDFILE"
+	start-stop-daemon -K -q -p "$PIDFILE" 2>/dev/null || true
+	i=0
+	while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+		sleep 0.1
+		i=$((i + 1))
+	done
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		echo "$NAME did not stop within 10 seconds" >&2
+		return 1
+	fi
+	rm -f "$PIDFILE"
+	"$LOADER" stop
+	echo "Stopped $NAME"
+}
+
+case "${1:-}" in
+	start|stop) "$1" ;;
+	restart) stop && start ;;
+	*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac
