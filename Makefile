@@ -34,6 +34,8 @@ JSON_CLI_TARGET := $(OUT_DIR)/json_cli
 REGSCAN_TARGET := $(OUT_DIR)/regscan
 TIMING_PROBE_TARGET := rtp_timing_probe
 TIMING_PROBE_SRC := tools/rtp_timing_probe.c
+UNIX_CONSUMER_TARGET := $(OUT_DIR)/unix_dgram_consumer
+UNIX_CONSUMER_SRC := tools/unix_dgram_consumer.c
 
 VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
 # -MMD -MP emits per-object .d files so a one-line change rebuilds just
@@ -43,7 +45,7 @@ COMMON_CFLAGS := -Os -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VE
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c lib/cJSON.c
 HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_respawn.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_wire.c
 MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c src/maruko_stabfill_probe.c src/maruko_ipu_yolo.c src/maruko_scl_ports.c
-STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c src/star6e_ipu.c src/star6e_ipu_yolo.c src/star6e_vpe_ports.c src/star6e_awb.c
+STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c src/star6e_ipu.c src/star6e_ipu_yolo.c src/star6e_vpe_ports.c src/star6e_luma_tap.c src/star6e_awb.c
 # Image-stabilization framing module (Star6E).  STAB=1 (default) compiles it
 # in; STAB=0 drops the source + the -DHAVE_FRAMING_STAB define, so the binary
 # carries no stabilization code and framing="stab" validate-rejects to off.
@@ -111,7 +113,7 @@ LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
         drivers-maruko ksrc-star6e drivers-star6e maruko-pull maruko-deploy maruko-full json_cli regscan \
         remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
-        qr-decode qr-test-host qr-test-cli qr-test-extended webui webui-check
+        qr-decode unix-dgram-consumer qr-test-host qr-test-cli qr-test-extended qr-test-phone webui webui-check
 
 help:
 	@echo "Targets:"
@@ -119,9 +121,11 @@ help:
 	@echo "  make build SOC_BUILD=maruko"
 	@echo "  make lint        Fast warning check (-Wall -Werror, compile only)"
 	@echo "  make qr-decode   Build the freestanding QR decoder for SOC_BUILD"
+	@echo "  make unix-dgram-consumer Build the target-local unix:// RTP test consumer"
 	@echo "  make qr-test-host Run the deterministic QR perspective corpus"
 	@echo "  make qr-test-cli Run decoder CLI and image loader regressions"
 	@echo "  make qr-test-extended Run the extended QR skew/defocus series"
+	@echo "  make qr-test-phone Validate the phone.html marker generator"
 	@echo "  make lint SOC_BUILD=maruko"
 	@echo "  make stage       Build and stage runtime bundle in out/"
 	@echo "  make test        Run host-native unit tests"
@@ -171,6 +175,8 @@ check:
 		test -d "$(DRV_EXTRA)" || { echo "Extra library dir missing: $(DRV_EXTRA)"; exit 1; }; \
 	fi
 
+# Syntax-check daemon sources only. The isolated QR helper has its own
+# warning-clean compile in qr-decode/verify.
 lint: $(TOOLCHAIN_TARGET) check
 	$(CC) $(CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -Wno-old-style-declaration -fsyntax-only $(SRC)
 
@@ -178,10 +184,25 @@ lint: $(TOOLCHAIN_TARGET) check
 # the mirrored layout under $(OBJ_DIR)/.  Header dependencies are
 # captured by -MMD -MP in COMMON_CFLAGS; the resulting .d files are
 # -include'd below.
-$(OBJ_DIR)/%.o: %.c
+#
+# VERSION is a prerequisite because COMMON_CFLAGS bakes its contents in as
+# -DVENC_VERSION, and no .d file can track that — VERSION is not a header, so
+# the compiler never sees it.  Without this a version bump rebuilds nothing and
+# the binary keeps reporting the previous release over /api/v1/version and the
+# mDNS beacon.  Listing it here rather than on just the two current consumers
+# costs a full rebuild once per release and cannot go stale when a third one
+# appears.
+$(OBJ_DIR)/%.o: %.c VERSION
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# The QR cascade is the one place in the daemon where -Os is the wrong call.
+# Decode latency decides whether a scan window lands a code inside the
+# operator's patience; the identify/transform stages are float-heavy inner
+# loops that -O3 unrolls and vectorizes well on Cortex-A7 + NEON.  Measured on
+# the Star6E bench: -O3 is 1.66x faster than -Os (1265 ms vs 2206 ms on a
+# 3.6 MB frame) for a couple of tens of KB.  Trailing -O wins over the -Os in
+# COMMON_CFLAGS.
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) $(OBJS) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(if $(DRV),-Ltools,) $(BASE_LIBS) $(SOC_LIBS) -o $@
 
@@ -190,6 +211,15 @@ $(TARGET): $(OBJS)
 # Host-native timing probe (no cross-compiler or SDK libs needed)
 $(TIMING_PROBE_TARGET): $(TIMING_PROBE_SRC) include/rtp_sidecar.h
 	$(HOST_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE -Iinclude $(TIMING_PROBE_SRC) -lm -o $@
+
+# Target-local abstract AF_UNIX datagram sink used for unix:// throughput and
+# controlled-stall validation. It is a test tool, not part of the runtime image.
+unix-dgram-consumer: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
+unix-dgram-consumer: $(UNIX_CONSUMER_TARGET)
+
+$(UNIX_CONSUMER_TARGET): $(UNIX_CONSUMER_SRC)
+	@mkdir -p $(@D)
+	$(CC) -Os -s -Wall -Wextra -Werror -std=c99 -D_GNU_SOURCE -o $@ $<
 
 # json_cli — vendored from waybeam-hub (tools/json_cli/{json_cli.c,jsmn.h}).
 # Cross-compiled with the SOC's toolchain so the same binary that runs venc
@@ -226,13 +256,13 @@ $(IPU_PROBE_TARGET): $(IPU_PROBE_SRC) include/star6e_ipu.h include/detect_dequan
 	@mkdir -p $(@D)
 	$(CC) -Os -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Iinclude $(IPU_PROBE_SRC) -ldl -o $@
 
-# qr_decode — decode a QR code from a JPEG or P5 PGM grayscale image. It is a
-# freestanding backend for scripts which fetch GET /api/v1/snapshot.jpg;
+# qr_decode — isolated QR decoder for the Star6E scan-window worker and for
+# scripts which fetch GET /api/v1/snapshot.jpg. It accepts JPEG or P5 PGM;
 # command/pairing semantics intentionally live outside this repository.
 # quirc (ISC) is vendored under tools/qr/quirc/; stb_image (public domain,
 # JPEG-only build) under tools/qr/stb/. Cross-compiled for the target.
 QR_DECODE_TARGET := $(OUT_DIR)/qr_decode
-QR_DECODE_SRC    := tools/qr/qr_decode.c tools/qr/waybeam_qr_format.c \
+QR_DECODE_SRC    := tools/qr/qr_decode.c src/qr_scan.c tools/qr/waybeam_qr_format.c \
                     tools/qr/quirc/quirc.c \
                     tools/qr/quirc/decode.c tools/qr/quirc/identify.c \
                     tools/qr/quirc/version_db.c
@@ -254,11 +284,11 @@ QR_GC_LDFLAGS    := -Wl,--gc-sections
 qr-decode: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
 qr-decode: $(QR_DECODE_TARGET)
 
-$(QR_DECODE_TARGET): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h tools/qr/stb/stb_image.h
+$(QR_DECODE_TARGET): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h tools/qr/stb/stb_image.h include/qr_scan.h
 	@mkdir -p $(@D)
-	$(CC) $(QR_OPT_CFLAGS) $(SOC_CFLAGS) $(QR_MATH_CFLAGS) -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Itools/qr/quirc -Itools/qr/stb $(QR_DECODE_SRC) $(QR_GC_LDFLAGS) -lm -lrt -o $@
+	$(CC) $(QR_OPT_CFLAGS) $(SOC_CFLAGS) $(QR_MATH_CFLAGS) -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Iinclude -Itools/qr -Itools/qr/quirc -Itools/qr/stb $(QR_DECODE_SRC) $(QR_GC_LDFLAGS) -lm -lrt -o $@
 
-stage: build
+stage: build qr-decode
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
 	@if [ -n "$(DRV)" ]; then cp -f $(DRV)/*.so $(OUT_DIR)/lib/; fi
 	@if [ -n "$(DRV_EXTRA)" ]; then cp -f "$(DRV_EXTRA)"/*.so $(OUT_DIR)/lib/; fi
@@ -288,7 +318,8 @@ print-config:
 
 HOST_CC      := cc
 HOST_CFLAGS  := -std=c99 -Wall -Wextra -g -O0 -D_GNU_SOURCE \
-                -Iinclude -Ilib -Itests
+                -Iinclude -Ilib -Itests -Itools/qr -Itools/qr/quirc \
+                $(QR_MATH_CFLAGS)
 TEST_RUNNER  := tests/test_runner
 TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_venc_api.c tests/test_venc_httpd.c \
@@ -321,10 +352,14 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_detect_dequant.c \
                 tests/test_detect_wire.c \
                 tests/test_star6e_vpe_ports.c \
-                tests/test_maruko_scl_ports.c
+                tests/test_maruko_scl_ports.c \
+                tests/test_qr_scan.c
 # Production sources compiled into the test binary (pure-logic modules only).
 # sensor_select.c is included here; its MI_SNR_* deps are stubbed in test_sensor_select.c.
-TEST_LIB_SRCS := src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c src/maruko_scl_ports.c lib/cJSON.c
+TEST_LIB_SRCS := src/qr_scan.c tools/qr/waybeam_qr_format.c \
+	tools/qr/quirc/quirc.c tools/qr/quirc/decode.c \
+	tools/qr/quirc/identify.c tools/qr/quirc/version_db.c \
+	src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c src/maruko_scl_ports.c lib/cJSON.c
 
 $(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/h26x_param_sets.h include/hevc_rtp.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h include/venc_frame_ring.h include/venc_shm_throttle.h
 	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $@
@@ -363,9 +398,9 @@ qr-test-host: $(QR_TEST_RUNNER)
 
 $(QR_HOST_DECODE): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h \
 		   tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h \
-		   tools/qr/stb/stb_image.h
+		   tools/qr/stb/stb_image.h include/qr_scan.h
 	$(HOST_CC) $(QR_OPT_CFLAGS) -Wall -Wextra -std=c99 -D_GNU_SOURCE \
-		$(QR_MATH_CFLAGS) -Itools/qr/quirc -Itools/qr/stb $(QR_DECODE_SRC) \
+		$(QR_MATH_CFLAGS) -Iinclude -Itools/qr -Itools/qr/quirc -Itools/qr/stb $(QR_DECODE_SRC) \
 		$(QR_GC_LDFLAGS) -lm -lrt -o $@
 
 qr-test-cli: $(QR_HOST_DECODE)
@@ -373,6 +408,25 @@ qr-test-cli: $(QR_HOST_DECODE)
 
 qr-test-extended: $(QR_TEST_RUNNER)
 	./$(QR_TEST_RUNNER) --extended
+
+# Validate the marker encoder embedded in tools/qr/test-images/phone.html.
+# Not part of `verify`: it needs node plus the generator's Python deps, which
+# a build host is not required to have.  It SKIPS loudly rather than passing
+# quietly when they are missing.  PYTHON=/path/to/venv/bin/python if the
+# distro python refuses to install qrcode (PEP 668).
+PYTHON ?= python3
+# One shell: each recipe line gets its own, so an early `exit 0` in a guard
+# line would only end that line and make would run the test anyway.
+qr-test-phone: $(QR_HOST_DECODE)
+	@if ! command -v node >/dev/null 2>&1; then \
+		echo "SKIP qr-test-phone: node not installed"; \
+	elif ! $(PYTHON) -c "import qrcode" >/dev/null 2>&1; then \
+		echo "SKIP qr-test-phone: $(PYTHON) lacks 'qrcode'"; \
+		echo "  python3 -m venv .venv && .venv/bin/pip install -r tools/qr/requirements-generator.txt"; \
+		echo "  make qr-test-phone PYTHON=.venv/bin/python"; \
+	else \
+		PYTHON=$(PYTHON) node tests/test_qr_phone.js; \
+	fi
 
 toolchain:
 	@if [ ! -x "$(CC_BIN)" ]; then \
@@ -481,8 +535,8 @@ remote-test:
 
 # ── Verification targets ──────────────────────────────────────────────
 
-STAR6E_BINS := out/star6e/waybeam out/star6e/qr_decode
-MARUKO_BINS := out/maruko/waybeam out/maruko/qr_decode
+STAR6E_BINS := out/star6e/waybeam out/star6e/qr_decode out/star6e/unix_dgram_consumer
+MARUKO_BINS := out/maruko/waybeam out/maruko/qr_decode out/maruko/unix_dgram_consumer
 
 webui:
 	python3 tools/build_webui.py
@@ -494,6 +548,7 @@ verify: webui-check qr-test-host qr-test-cli
 	@echo "=== Building Maruko backend ==="
 	$(MAKE) build SOC_BUILD=maruko
 	$(MAKE) qr-decode SOC_BUILD=maruko
+	$(MAKE) unix-dgram-consumer SOC_BUILD=maruko
 	@echo ""
 	@echo "=== Verifying Maruko binaries ==="
 	@for f in $(MARUKO_BINS); do \
@@ -504,6 +559,7 @@ verify: webui-check qr-test-host qr-test-cli
 	@echo "=== Building Star6E backend ==="
 	$(MAKE) build SOC_BUILD=star6e
 	$(MAKE) qr-decode SOC_BUILD=star6e
+	$(MAKE) unix-dgram-consumer SOC_BUILD=star6e
 	@echo ""
 	@echo "=== Verifying Star6E binaries ==="
 	@for f in $(STAR6E_BINS); do \

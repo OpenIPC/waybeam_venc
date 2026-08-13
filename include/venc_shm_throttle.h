@@ -29,10 +29,16 @@
  * coupling into oscillation.  Preserve it if you retune either side.
  *
  * Control law (AIMD, evaluated on each window's LOW-water mark):
- *   low_water >= ENGAGE_SLOTS   -> permille = max(FLOOR, permille * 4/5)
- *   full_drops increased        -> permille = max(FLOOR, permille * 3/5),
+ *   low_water >= ENGAGE_SLOTS   -> permille = max(MIN, permille * 4/5)
+ *   full_drops increased        -> permille = max(MIN, permille * 3/5),
  *                                  immediately, but at most ONCE per window
  *   low_water <= RECOVER_SLOTS  -> permille = min(1000, permille + 50)
+ *
+ * MIN here is the integrator's control-range bound
+ * (VENC_SHM_THROTTLE_MIN_PERMILLE).  The floor that actually limits the
+ * emitted bitrate is the DUAL floor applied in venc_shm_throttle_scale(),
+ * which is the only place the real kbps is in scope -- see
+ * VENC_SHM_THROTTLE_FLOOR_PERMILLE / _FLOOR_ABS_KBPS below.
  *
  * Low-water, not high-water, and that distinction is the whole difference
  * between this working and not.  Measured on a Star6E at 100 fps into an
@@ -53,9 +59,13 @@
  * chance for the multiplicative decrease to find an intermediate rate.
  *
  * Multiplicative-decrease / additive-increase, so recovery is deliberately
- * slower than the retreat: 1000 -> floor takes 7 windows (~1.4 s), floor ->
- * 1000 takes 15 windows (~3.0 s).  The 250 floor means a wedged consumer
- * cannot drive the encoder to nothing.
+ * slower than the retreat: 1000 -> bottom takes 14 windows (~2.8 s) on the
+ * x4/5 engage path or 6 (~1.2 s) on the x3/5 drop path, and bottom -> 1000
+ * takes 19 windows (~3.8 s).  (Counts are asserted in
+ * tests/test_venc_shm_throttle.c so they cannot silently drift if the
+ * multipliers or the bound are retuned.)  The dual floor below means a wedged
+ * consumer cannot drive the encoder to nothing, while still permitting a
+ * rate MCS0 can actually carry.
  *
  * Policy is compile-time, following include/idr_rate_limit.h.  The single
  * runtime knob is outgoing.shm_throttle (bool).  Exposing high/low water
@@ -81,7 +91,38 @@ extern "C" {
 #define VENC_SHM_THROTTLE_WINDOW_US   200000u  /* control period */
 #define VENC_SHM_THROTTLE_ENGAGE_SLOTS     2u  /* >= this -> decrease */
 #define VENC_SHM_THROTTLE_RECOVER_SLOTS    1u  /* <= this -> increase */
-#define VENC_SHM_THROTTLE_FLOOR_PERMILLE 250u
+/* Clamp floor — DUAL, and both halves are load-bearing.
+ *
+ * The percentage alone was wrong in shape: it ties how hard the clamp may
+ * squeeze to the bitrate the OPERATOR configured, which has nothing to do
+ * with what the radio can carry.  At the measured 21839 kbps the old 250
+ * permille floor bottomed out at 5459 kbps.  If the link has dropped to MCS0
+ * but waybeam-link's §9.6 bitrate demotion (1.5-8 s outer loop) has not
+ * actuated yet, this clamp is the ONLY thing defending the ring, and 5.5 Mbps
+ * is several times what MCS0 can deliver — so the ring stays full and every
+ * referenced frame is a chain-breaking drop for the whole window.
+ *
+ * Hence a second, ABSOLUTE cap on the floor.  Derivation: MCS0/HT20 is
+ * 6.5 Mbps PHY, roughly 4-5 Mbps goodput after 802.11 overhead, and a craft
+ * running 300/200 permille FEC leaves ~3.2-4 Mbps for video.  2500 kbps of
+ * video (~3.1 Mbps of airtime at that FEC) is comfortably deliverable there
+ * and sits clear of VENC_BITRATE_MIN_KBPS (1000), which is the real encoder
+ * collapse rail and still backstops everything downstream.
+ *
+ * Note the two coincide at 25000 kbps, today's configured ceiling on the
+ * reference craft; the absolute term only starts binding above that.  It is
+ * here so the floor keeps meaning "never clamp above what the radio can
+ * plausibly carry" when a higher-bitrate mode is configured, instead of
+ * silently mis-scaling again. */
+#define VENC_SHM_THROTTLE_FLOOR_PERMILLE 100u
+#define VENC_SHM_THROTTLE_FLOOR_ABS_KBPS 2500u
+/* Control-range bound for the AIMD state only — NOT the policy floor.  The
+ * policy floor is applied in venc_shm_throttle_scale(), which is the only
+ * place the actual kbps is known, and the absolute cap can require an
+ * effective ratio below FLOOR_PERMILLE (2500/40000 = 62 permille at 40 Mbps).
+ * This exists purely so the integrator cannot run away toward zero and take
+ * an unbounded number of AIMD windows to climb back. */
+#define VENC_SHM_THROTTLE_MIN_PERMILLE    50u
 #define VENC_SHM_THROTTLE_FULL_PERMILLE 1000u
 #define VENC_SHM_THROTTLE_AI_STEP         50u  /* additive increase */
 

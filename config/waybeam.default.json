@@ -36,6 +36,8 @@
     "qpDelta": -4,
     "maxIBytes": 0,
     "maxPBytes": 0,
+    "minQp": 0,
+    "maxQp": 0,
     "sceneThreshold": 0,
     "sceneHoldoff": 2,
     "resilience": "off",
@@ -53,6 +55,7 @@
     "streamMode": "rtp",
     "maxPayloadSize": 1400,
     "connectedUdp": true,
+    "allowUnixEncoderStall": false,
     "audioPort": 5601,
     "sidecarPort": 5602,
     "shmThrottle": true
@@ -131,5 +134,11 @@
     "netHeight": 352,
     "modelId": 0,
     "osd": true
+  },
+  "qr": {
+    "tapEnabled": false,
+    "tapWidth": 0,
+    "tapHeight": 0,
+    "windowMs": 15000
   }
 }

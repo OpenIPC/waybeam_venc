@@ -65,6 +65,8 @@ static int test_defaults(void)
 	CHECK("defaults_stream_mode", strcmp(cfg.outgoing.stream_mode, "rtp") == 0);
 	CHECK("defaults_payload", cfg.outgoing.max_payload_size == 1400);
 	CHECK("defaults_connected_udp", cfg.outgoing.connected_udp == true);
+	CHECK("defaults_allow_unix_encoder_stall",
+		cfg.outgoing.allow_unix_encoder_stall == false);
 
 	CHECK("defaults_roi_on", cfg.fpv.roi_enabled == true);
 	CHECK("defaults_roi_qp", cfg.fpv.roi_qp == 0);
@@ -183,6 +185,85 @@ static int test_resilience_preset_expansion(void)
 			cfg.video0.gop_size == 2.0);
 	}
 
+	/* "ltr" family: base=1, pred off, intra-refresh off, user's gopSize
+	 * preserved (a long GOP is the point of the scheme).  Bare "ltr" must
+	 * be enhance=1 — device-measured as the MAXIMUM non-reference density
+	 * (one droppable frame in every enhance+1), so any larger default
+	 * would silently be less resilient. */
+	{
+		struct {
+			const char *preset;
+			uint8_t     enhance;
+		} ltr_cases[] = {
+			{ "ltr",     1 },
+			{ "ltr:1",   1 },
+			{ "ltr:4",   4 },
+			{ "ltr:255", 255 },
+		};
+		for (size_t i = 0; i < sizeof(ltr_cases)/sizeof(ltr_cases[0]); ++i) {
+			char json[160];
+			snprintf(json, sizeof(json),
+				"{\"video0\":{\"resilience\":\"%s\",\"gopSize\":5.0}}",
+				ltr_cases[i].preset);
+			FILE *f = fopen(path, "w");
+			if (!f) { close(fd); unlink(path); return failures; }
+			fputs(json, f);
+			fclose(f);
+
+			venc_config_defaults(&cfg);
+			int rc = venc_config_load(path, &cfg);
+			CHECK("ltr_load_ok", rc == 0);
+			CHECK("ltr_preset_stored",
+				strcmp(cfg.video0.resilience, ltr_cases[i].preset) == 0);
+			CHECK("ltr_ref_base_one", cfg.video0.ref_base == 1);
+			CHECK("ltr_ref_pred_off", cfg.video0.ref_pred == false);
+			CHECK("ltr_intra_off",
+				strcmp(cfg.video0.intra_refresh_mode, "off") == 0);
+			CHECK("ltr_ref_enhance",
+				cfg.video0.ref_enhance == ltr_cases[i].enhance);
+			CHECK("ltr_keeps_user_gop", cfg.video0.gop_size == 5.0);
+		}
+	}
+
+	/* Malformed "ltr:" forms are rejected outright (fall back to off) —
+	 * a silently-clamped ratio would make a sweep measure the wrong thing. */
+	{
+		const char *bad[] = { "ltr:", "ltr:0", "ltr:abc", "ltr:12x",
+				      "ltr:256", "ltr:99999", "ltrx" };
+		for (size_t i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i) {
+			VencConfigVideo v;
+			venc_config_defaults(&cfg);
+			v = cfg.video0;
+			CHECK("ltr_bad_rejected",
+				venc_config_apply_resilience_preset(bad[i], &v) != 0);
+		}
+	}
+
+	/* "ltr" differs from "rally" (same 1:1 ratio) exactly in that it keeps
+	 * the caller's GOP and forces intra-refresh off.  Guard both, since
+	 * that difference is the whole reason the preset exists. */
+	{
+		VencConfigVideo v;
+		venc_config_defaults(&cfg);
+		v = cfg.video0;
+		v.gop_size = 5.0;
+		CHECK("ltr_vs_rally_apply_ok",
+			venc_config_apply_resilience_preset("ltr", &v) == 0);
+		CHECK("ltr_vs_rally_keeps_gop", v.gop_size == 5.0);
+		CHECK("ltr_vs_rally_intra_off",
+			strcmp(v.intra_refresh_mode, "off") == 0);
+
+		venc_config_defaults(&cfg);
+		v = cfg.video0;
+		v.gop_size = 5.0;
+		CHECK("rally_apply_ok",
+			venc_config_apply_resilience_preset("rally", &v) == 0);
+		CHECK("rally_same_ratio", v.ref_enhance == 1 && v.ref_base == 1);
+		CHECK("rally_overrides_gop", v.gop_size == 2.0);
+		CHECK("rally_enables_intra",
+			strcmp(v.intra_refresh_mode, "off") != 0);
+	}
+
 	close(fd);
 	unlink(path);
 	return failures;
@@ -210,7 +291,7 @@ static int test_load_full_json(void)
 		/* "codec" above is intentionally legacy — parser must silently drop it. */
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
 		"    \"framing\": \"zoom-2x\", \"zoomX\": 0.25, \"zoomY\": 0.75 },"
-		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false },"
+		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false, \"allowUnixEncoderStall\": true },"
 		"  \"fpv\": { \"roiEnabled\": true, \"roiQp\": -18, \"roiSteps\": 2, \"noiseLevel\": 5 }"
 		"}";
 
@@ -257,6 +338,8 @@ static int test_load_full_json(void)
 	CHECK("load_stream_mode", strcmp(cfg.outgoing.stream_mode, "compact") == 0);
 	CHECK("load_payload", cfg.outgoing.max_payload_size == 1200);
 	CHECK("load_connected_udp", cfg.outgoing.connected_udp == false);
+	CHECK("load_allow_unix_encoder_stall",
+		cfg.outgoing.allow_unix_encoder_stall == true);
 	CHECK("load_roi_on", cfg.fpv.roi_enabled == true);
 	CHECK("load_roi_qp", cfg.fpv.roi_qp == -18);
 	CHECK("load_roi_steps", cfg.fpv.roi_steps == 2);
@@ -317,6 +400,42 @@ static int test_load_bad_json(void)
 	free(path);
 
 	CHECK("bad_json_fails", ret == -1);
+	return failures;
+}
+
+static int test_load_qp_bounds_validation(void)
+{
+	static const struct {
+		const char *json;
+		int expected;
+	} cases[] = {
+		{ "{\"video0\":{\"minQp\":10,\"maxQp\":40}}", 0 },
+		{ "{\"video0\":{\"minQp\":52}}", -1 },
+		{ "{\"video0\":{\"maxQp\":52}}", -1 },
+		{ "{\"video0\":{\"minQp\":40,\"maxQp\":10}}", -1 },
+		/* The loader reads JSON integers before assigning the unsigned
+		 * config fields, so a negative value wraps large and must still be
+		 * rejected by the common startup validator. */
+		{ "{\"video0\":{\"minQp\":-1}}", -1 },
+	};
+	int failures = 0;
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+		char *path = write_temp_json(cases[i].json);
+		VencConfig cfg;
+		int ret;
+
+		CHECK("qp bounds temp file", path != NULL);
+		if (!path)
+			continue;
+		venc_config_defaults(&cfg);
+		ret = venc_config_load(path, &cfg);
+		unlink(path);
+		free(path);
+		CHECK("qp bounds startup validation", ret == cases[i].expected);
+	}
+
 	return failures;
 }
 
@@ -1154,6 +1273,7 @@ int test_venc_config(void)
 	failures += test_load_partial_json();
 	failures += test_load_missing_file();
 	failures += test_load_bad_json();
+	failures += test_load_qp_bounds_validation();
 	failures += test_uri_parsing();
 	failures += test_roundtrip();
 	failures += test_overclock_clamping();
@@ -1173,4 +1293,3 @@ int test_venc_config(void)
 	failures += test_detect_export_roundtrip();
 	return failures;
 }
-

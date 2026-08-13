@@ -101,14 +101,14 @@ int test_venc_shm_throttle(void)
 			(void)step_window(&t, &now, 8, 0);
 	}
 	CHECK("thr_floor_exact",
-		venc_shm_throttle_permille(&t) == VENC_SHM_THROTTLE_FLOOR_PERMILLE);
+		venc_shm_throttle_permille(&t) == VENC_SHM_THROTTLE_MIN_PERMILLE);
 	CHECK("thr_floor_no_further_change",
 		step_window(&t, &now, 8, 0) == 0);
 	/* A drop at the floor cannot push below it either. */
 	venc_shm_throttle_observe(&t, 8, 999999);
 	venc_shm_throttle_observe(&t, 8, 1000000);
 	CHECK("thr_floor_holds_under_drops",
-		venc_shm_throttle_permille(&t) == VENC_SHM_THROTTLE_FLOOR_PERMILLE);
+		venc_shm_throttle_permille(&t) == VENC_SHM_THROTTLE_MIN_PERMILLE);
 
 	/* Floor edge fires exactly once on entry, once on exit. */
 	venc_shm_throttle_reset(&t, now);
@@ -144,7 +144,7 @@ int test_venc_shm_throttle(void)
 			(void)step_window(&t, &now, 8, 0);
 		CHECK("thr_ramp_starts_at_floor",
 			venc_shm_throttle_permille(&t) ==
-			VENC_SHM_THROTTLE_FLOOR_PERMILLE);
+			VENC_SHM_THROTTLE_MIN_PERMILLE);
 
 		prev = venc_shm_throttle_permille(&t);
 		while (venc_shm_throttle_permille(&t) < 1000 && windows < 100) {
@@ -155,8 +155,30 @@ int test_venc_shm_throttle(void)
 			windows++;
 		}
 		CHECK("thr_ramp_monotonic", monotonic == 1);
-		/* (1000-250)/50 = 15 windows = 3.0 s at a 200 ms window. */
-		CHECK("thr_ramp_15_windows", windows == 15);
+		/* (1000-50)/50 = 19 windows = 3.8 s at a 200 ms window.  The
+		 * deeper integrator bound costs 4 extra windows of recovery
+		 * versus the old 250 permille floor; that is the price of
+		 * being able to reach MCS0-carryable rates at all. */
+		CHECK("thr_ramp_19_windows", windows == 19);
+		/* Descent is documented in the header; assert it so the two
+		 * cannot drift. x4/5 from 1000 reaches the integrator bound in
+		 * 14 windows. */
+		{
+			VencShmThrottle d;
+			uint64_t dnow = 0;
+			int dw = 0;
+
+			venc_shm_throttle_reset(&d, dnow);
+			while (venc_shm_throttle_permille(&d) >
+			       VENC_SHM_THROTTLE_MIN_PERMILLE && dw < 100) {
+				(void)step_window(&d, &dnow, 8, 0);
+				dw++;
+			}
+			CHECK("thr_descent_14_windows", dw == 14);
+			CHECK("thr_descent_reaches_bound",
+				venc_shm_throttle_permille(&d) ==
+				VENC_SHM_THROTTLE_MIN_PERMILLE);
+		}
 		CHECK("thr_ramp_no_overshoot",
 			venc_shm_throttle_permille(&t) == 1000);
 		CHECK("thr_ramp_pins_at_ceiling",
@@ -290,8 +312,32 @@ int test_venc_shm_throttle(void)
 		venc_shm_throttle_scale(1000, 12345) == 12345);
 	CHECK("thr_scale_800", venc_shm_throttle_scale(800, 10000) == 8000);
 	CHECK("thr_scale_floor", venc_shm_throttle_scale(250, 10000) == 2500);
+	/* Below the floor the result is pinned to the dual floor in KBPS:
+	 * min(10 % of 10000, 2500) = 1000. */
 	CHECK("thr_scale_below_floor_clamped",
-		venc_shm_throttle_scale(10, 10000) == 2500);
+		venc_shm_throttle_scale(10, 10000) == 1000);
+
+	/* Dual floor — the whole point of the absolute cap.  A craft that has
+	 * dropped to MCS0 before waybeam-link's 1.5-8 s bitrate demotion
+	 * actuates must not be stranded above what MCS0 can carry. */
+	/* Percentage binds below the cap (10 % of 20000 = 2000 < 2500). */
+	CHECK("thr_scale_dual_pct_binds",
+		venc_shm_throttle_scale(50, 20000) == 2000);
+	/* Absolute cap binds above it (10 % of 40000 = 4000 > 2500). */
+	CHECK("thr_scale_dual_abs_binds",
+		venc_shm_throttle_scale(50, 40000) ==
+		VENC_SHM_THROTTLE_FLOOR_ABS_KBPS);
+	/* They coincide at 25000, today's reference-craft ceiling. */
+	CHECK("thr_scale_dual_crossover",
+		venc_shm_throttle_scale(10, 25000) ==
+		VENC_SHM_THROTTLE_FLOOR_ABS_KBPS);
+	/* The measured live rate: was 5459 under the old 250 permille floor. */
+	CHECK("thr_scale_dual_measured_rate",
+		venc_shm_throttle_scale(10, 21839) == 2183);
+	/* Low configured bitrates keep proportional behaviour; the absolute
+	 * VENC_BITRATE_MIN_KBPS rail downstream is what catches the rest. */
+	CHECK("thr_scale_dual_low_bitrate",
+		venc_shm_throttle_scale(10, 8000) == 800);
 	CHECK("thr_scale_zero_kbps", venc_shm_throttle_scale(800, 0) == 0);
 	/* No overflow on a bitrate far above anything the encoder accepts. */
 	CHECK("thr_scale_no_overflow",

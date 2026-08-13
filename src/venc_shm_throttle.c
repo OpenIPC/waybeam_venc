@@ -4,8 +4,8 @@
 
 static uint16_t clamp_permille(uint32_t v)
 {
-	if (v < VENC_SHM_THROTTLE_FLOOR_PERMILLE)
-		return (uint16_t)VENC_SHM_THROTTLE_FLOOR_PERMILLE;
+	if (v < VENC_SHM_THROTTLE_MIN_PERMILLE)
+		return (uint16_t)VENC_SHM_THROTTLE_MIN_PERMILLE;
 	if (v > VENC_SHM_THROTTLE_FULL_PERMILLE)
 		return (uint16_t)VENC_SHM_THROTTLE_FULL_PERMILLE;
 	return (uint16_t)v;
@@ -14,6 +14,10 @@ static uint16_t clamp_permille(uint32_t v)
 /* Record a floor entry/exit edge for the caller's log-once reporting. */
 static void note_floor_edge(VencShmThrottle *t)
 {
+	/* "At floor" still reports the POLICY floor, not the integrator bound:
+	 * it is an operator-facing signal meaning "the clamp has no authority
+	 * left", and the extra AIMD headroom below it is an implementation
+	 * detail that only matters above 25 Mbps. */
 	uint8_t now_at_floor =
 		(t->permille <= VENC_SHM_THROTTLE_FLOOR_PERMILLE) ? 1u : 0u;
 
@@ -152,10 +156,23 @@ uint32_t venc_shm_throttle_scale(uint16_t permille, uint32_t kbps)
 {
 	if (permille >= VENC_SHM_THROTTLE_FULL_PERMILLE)
 		return kbps;
-	if (permille < VENC_SHM_THROTTLE_FLOOR_PERMILLE)
-		permille = (uint16_t)VENC_SHM_THROTTLE_FLOOR_PERMILLE;
-	return (uint32_t)(((uint64_t)kbps * permille) /
-		VENC_SHM_THROTTLE_FULL_PERMILLE);
+	{
+		/* Dual floor, applied here because this is the only place the
+		 * actual kbps is known.  Percentage keeps the clamp
+		 * proportionate at ordinary bitrates; the absolute cap stops a
+		 * high configured bitrate from stranding the floor above what
+		 * the radio can carry (see the header for the MCS0 derivation).
+		 * Whichever permits the LOWER rate wins. */
+		uint32_t scaled = (uint32_t)(((uint64_t)kbps * permille) /
+			VENC_SHM_THROTTLE_FULL_PERMILLE);
+		uint32_t floor_kbps = (uint32_t)(((uint64_t)kbps *
+			VENC_SHM_THROTTLE_FLOOR_PERMILLE) /
+			VENC_SHM_THROTTLE_FULL_PERMILLE);
+
+		if (floor_kbps > VENC_SHM_THROTTLE_FLOOR_ABS_KBPS)
+			floor_kbps = VENC_SHM_THROTTLE_FLOOR_ABS_KBPS;
+		return scaled < floor_kbps ? floor_kbps : scaled;
+	}
 }
 
 uint32_t venc_shm_throttle_apply(const VencShmThrottle *t, uint32_t kbps)

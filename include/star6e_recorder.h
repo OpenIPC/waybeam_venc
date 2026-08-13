@@ -34,6 +34,21 @@ typedef struct {
 	char path[RECORDER_PATH_MAX];
 } Star6eRecorderState;
 
+/** Milliseconds since a recorder's start_time on CLOCK_MONOTONIC.
+ *  Both recorders stamp start_time at start and neither exposes elapsed
+ *  through its status accessor; this keeps the two runtime backends from
+ *  each rolling their own subtraction. Meaningless unless the recorder is
+ *  active — callers check that first. */
+static inline uint64_t star6e_recorder_elapsed_ms(const struct timespec *start)
+{
+	struct timespec now;
+	if (!start || (start->tv_sec == 0 && start->tv_nsec == 0)) return 0;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	int64_t ms = (int64_t)(now.tv_sec - start->tv_sec) * 1000 +
+	             (now.tv_nsec - start->tv_nsec) / 1000000;
+	return ms > 0 ? (uint64_t)ms : 0;
+}
+
 /** Zero-initialize recorder state (no file open). */
 void star6e_recorder_init(Star6eRecorderState *state);
 

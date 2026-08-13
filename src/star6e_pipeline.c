@@ -2,6 +2,7 @@
 #include "star6e_framing.h"
 #include "star6e_ipu_yolo.h"
 #include "star6e_vpe_ports.h"
+#include "star6e_luma_tap.h"
 #include "star6e_awb.h"
 #include "star6e_framing_host.h"
 #if HAVE_FRAMING_STAB
@@ -145,11 +146,15 @@ void star6e_pipeline_detect_stop(Star6ePipelineState *state)
 
 static void star6e_pipeline_reset(Star6ePipelineState *state)
 {
+	struct Star6eLumaTap *luma_tap;
+
 	if (!state)
 		return;
 
+	luma_tap = state->luma_tap;
 	star6e_video_reset(&state->video);
 	memset(state, 0, sizeof(*state));
+	state->luma_tap = luma_tap;
 	star6e_output_reset(&state->output);
 }
 
@@ -1749,6 +1754,8 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	    vcfg->outgoing.stream_mode,
 	    vcfg->outgoing.connected_udp) != 0)
 		return -1;
+	pconf->output_setup.allow_unix_encoder_stall =
+		vcfg->outgoing.allow_unix_encoder_stall ? 1 : 0;
 
 	/* Auto-cap exposure to frame period so the AE shutter never exceeds
 	 * the frame period.  Without this, the AE converges on a long
@@ -2140,6 +2147,20 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	if (vcfg->detect.enabled)
 		(void)star6e_pipeline_detect_start(state, vcfg);
 
+	/* Arm the overlay-free luma tap on VPE port1.  This does NOT open the
+	 * port: an always-on tap costs ~186 MB/s of SCL write bandwidth at
+	 * 1080p60 and holds port1 against stab/detect for the whole run, all for
+	 * nothing when no scan is in progress.  The port is claimed and enabled
+	 * only for the duration of a scan window, and never per request. */
+	if (!state->luma_tap)
+		state->luma_tap = star6e_luma_tap_create();
+	if (!state->luma_tap) {
+		fprintf(stderr, "[luma-tap] context allocation failed\n");
+	} else {
+		star6e_luma_tap_configure(state->luma_tap, vcfg,
+			state->image_width, state->image_height);
+	}
+
 	/* Bring up the JPEG snapshot subsystem on the same VPE source port the
 	 * main channel just bound to.  Failure is non-fatal — /api/v1/snapshot.jpg
 	 * just serves 503 if init fails.  Config from venc.json snapshot.*
@@ -2432,6 +2453,10 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	 * Detect and framing are mutually exclusive, so at most one of these
 	 * two blocks does work. */
 	star6e_ipu_yolo_stop(state);
+
+	/* Stop the port1 luma tap: parks + joins its reader before DisablePort,
+	 * same MMU-safety rule as the detect tap.  Idempotent. */
+	star6e_luma_tap_stop(state->luma_tap);
 
 	/* Stop the stabilization detector thread: park the detector, disable the
 	 * tiny port1 tap, and join the thread; port0 stays a normal VPE→VENC bind

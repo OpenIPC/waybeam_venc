@@ -343,7 +343,13 @@ push_isp_bin() {
 }
 
 start_venc() {
-	log "Starting waybeam with log ${LOG_PATH}"
+	if [[ "${REMOTE_BIN}" == "/usr/bin/waybeam" && "${LOG_PATH}" == "/tmp/waybeam.log" ]]; then
+		log "Starting waybeam through ${INIT_SCRIPT_REMOTE}"
+		remote_sh "$(printf '%q' "${INIT_SCRIPT_REMOTE}") start"
+		return
+	fi
+
+	log "Starting custom waybeam binary with log ${LOG_PATH}"
 	remote_sh "
 		if command -v setsid >/dev/null 2>&1; then
 			setsid $(printf '%q' "${REMOTE_BIN}") >$(printf '%q' "${LOG_PATH}") 2>&1 </dev/null &

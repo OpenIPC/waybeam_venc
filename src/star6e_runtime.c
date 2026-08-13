@@ -1,4 +1,5 @@
 #include "star6e_runtime.h"
+#include "star6e_luma_tap.h"
 
 #include "attitude_est.h"
 #include "audio_codec.h"
@@ -505,6 +506,7 @@ static void record_status_callback(VencRecordStatus *out)
 			&out->bytes_written, &out->frames_written,
 			&out->segments, NULL, NULL);
 		snprintf(out->path, sizeof(out->path), "%s", ps->ts_recorder.path);
+		out->elapsed_ms = star6e_recorder_elapsed_ms(&ps->ts_recorder.start_time);
 		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
 	} else if (star6e_recorder_is_active(&ps->recorder)) {
 		out->active = 1;
@@ -513,6 +515,7 @@ static void record_status_callback(VencRecordStatus *out)
 			&out->bytes_written, &out->frames_written,
 			NULL, NULL);
 		snprintf(out->path, sizeof(out->path), "%s", ps->recorder.path);
+		out->elapsed_ms = star6e_recorder_elapsed_ms(&ps->recorder.start_time);
 		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
 	} else {
 		/* Check both recorders for last stop reason */
@@ -817,7 +820,8 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	g_runner_ctx = ctx;
 	star6e_controls_bind(ps, vcfg);
 	star6e_iq_init();
-	venc_api_register(vcfg, "star6e", star6e_controls_callbacks());
+	venc_api_register(vcfg, "star6e", star6e_controls_callbacks(),
+		ps->luma_tap);
 	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
 	venc_api_set_record_status_fn(record_status_callback);
 	venc_api_set_record_http_control_supported(true);
@@ -837,6 +841,12 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	if (vcfg->video0.qp_delta != 0) {
 		star6e_controls_apply_qp_delta(vcfg->video0.qp_delta);
 	}
+	if (vcfg->video0.min_qp > 0 || vcfg->video0.max_qp > 0) {
+		const VencApplyCallbacks *cb = star6e_controls_callbacks();
+		if (cb->apply_qp_bounds)
+			cb->apply_qp_bounds(vcfg->video0.min_qp,
+				vcfg->video0.max_qp);
+	}
 	if (vcfg->video0.max_i_bytes > 0 || vcfg->video0.max_p_bytes > 0) {
 		const VencApplyCallbacks *cb = star6e_controls_callbacks();
 		if (cb->apply_max_frame_size)
@@ -850,6 +860,14 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		printf("> Output disabled at startup, idling at %u fps\n",
 			STAR6E_CONTROLS_IDLE_FPS);
 	}
+
+	/* Let a frame-shm:// ring-full drop re-establish the reference chain
+	 * locally.  Same rate-limited primitive the scene detector uses, so
+	 * both producers of forced IDRs coalesce through one 100 ms window.
+	 * Set here rather than in the pipeline because the callback is
+	 * runtime-local; safe against pipeline restarts, which re-run this. */
+	ps->output.request_idr = star6e_scene_request_idr;
+	ps->output.idr_ctx = &ps->venc_channel;
 
 	star6e_recorder_init(&ps->recorder);
 	audio_ring_init(&ps->audio_ring);
@@ -901,13 +919,17 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			Star6eOutputSetup ds_setup;
 			if (star6e_output_prepare(&ds_setup, ps->dual->server,
 			    vcfg->outgoing.stream_mode,
-			    vcfg->outgoing.connected_udp) == 0 &&
-			    star6e_output_init(&ps->dual->output, &ds_setup) == 0) {
-				star6e_video_init(&ps->dual->video, vcfg,
-					ps->sensor.mode.maxFps,
-					&ps->dual->output);
-				printf("> Dual-stream: ch1 → %s\n",
-					ps->dual->server);
+			    vcfg->outgoing.connected_udp) == 0) {
+				ds_setup.allow_unix_encoder_stall =
+					vcfg->outgoing.allow_unix_encoder_stall ? 1 : 0;
+				if (star6e_output_init(&ps->dual->output,
+				    &ds_setup) == 0) {
+					star6e_video_init(&ps->dual->video, vcfg,
+						ps->sensor.mode.maxFps,
+						&ps->dual->output);
+					printf("> Dual-stream: ch1 → %s\n",
+						ps->dual->server);
+				}
 			}
 		}
 
@@ -1844,6 +1866,8 @@ static void star6e_runner_teardown(void *opaque)
 		venc_httpd_stop();
 		ctx->httpd_started = 0;
 	}
+	star6e_luma_tap_destroy(ctx->ps.luma_tap);
+	ctx->ps.luma_tap = NULL;
 	if (ctx->system_initialized) {
 		MI_SYS_Exit();
 		ctx->system_initialized = 0;

@@ -1,15 +1,31 @@
 #include "maruko_output.h"
 
 #include "output_socket.h"
+#include "timing.h"
 
 #include <errno.h>
+#include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+void maruko_output_account_send_failure(MarukoOutput *output, int socket_handle,
+	uint32_t packets)
+{
+	if (!output)
+		return;
+	if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
+		output_socket_note_saturation(socket_handle, &output->send_queue);
+		__atomic_fetch_add(&output->socket_drops, packets,
+			__ATOMIC_RELAXED);
+	} else {
+		output->send_errors += packets;
+	}
+}
+
 int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
-	int requested_connected_udp)
+	int requested_connected_udp, int allow_unix_encoder_stall)
 {
 	if (!output)
 		return -1;
@@ -23,18 +39,21 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	memset(&output->dst, 0, sizeof(output->dst));
 	output->requested_connected_udp = requested_connected_udp ? 1 : 0;
 	output->connected_udp = 0;
+	output->allow_unix_encoder_stall = allow_unix_encoder_stall ? 1 : 0;
 	output->send_errors = 0;
-	output->send_buf_capacity = 0;
+	memset(&output->send_queue, 0, sizeof(output->send_queue));
+	__atomic_store_n(&output->socket_drops, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->socket_writes, 0, __ATOMIC_RELAXED);
 	memset(&output->batch, 0, sizeof(output->batch));
 	output->batch.socket_handle = -1;
 
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, uri,
-	    output->requested_connected_udp, &output->connected_udp) != 0)
+	    output->requested_connected_udp, output->allow_unix_encoder_stall,
+	    &output->connected_udp) != 0)
 		return -1;
-	if (output_socket_capture_capacity(output->socket_handle,
-	    &output->send_buf_capacity) != 0)
-		output->send_buf_capacity = 0;
+	(void)output_socket_capture_capacity(output->socket_handle,
+		&output->send_queue);
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
 }
@@ -53,8 +72,11 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 	memset(&output->dst, 0, sizeof(output->dst));
 	output->requested_connected_udp = 0;
 	output->connected_udp = 0;
+	output->allow_unix_encoder_stall = 0;
 	output->send_errors = 0;
-	output->send_buf_capacity = 0;
+	memset(&output->send_queue, 0, sizeof(output->send_queue));
+	__atomic_store_n(&output->socket_drops, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->socket_writes, 0, __ATOMIC_RELAXED);
 	memset(&output->batch, 0, sizeof(output->batch));
 	output->batch.socket_handle = -1;
 
@@ -88,8 +110,11 @@ int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name)
 	memset(&output->dst, 0, sizeof(output->dst));
 	output->requested_connected_udp = 0;
 	output->connected_udp = 0;
+	output->allow_unix_encoder_stall = 0;
 	output->send_errors = 0;
-	output->send_buf_capacity = 0;
+	memset(&output->send_queue, 0, sizeof(output->send_queue));
+	__atomic_store_n(&output->socket_drops, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&output->socket_writes, 0, __ATOMIC_RELAXED);
 	memset(&output->batch, 0, sizeof(output->batch));
 	output->batch.socket_handle = -1;
 
@@ -146,8 +171,13 @@ void maruko_output_observe_pressure(MarukoOutput *output)
 	            output->transport == VENC_OUTPUT_URI_UDP) &&
 	           output->socket_handle >= 0) {
 		if (output_socket_get_fill_pct(output->socket_handle,
-		    output->send_buf_capacity, &fill_pct) == 0)
+		    &output->send_queue, &fill_pct) == 0) {
+			full_drops = __atomic_load_n(&output->socket_drops,
+				__ATOMIC_RELAXED);
+			writes = __atomic_load_n(&output->socket_writes,
+				__ATOMIC_RELAXED);
 			have_fill = 1;
+		}
 	}
 
 	if (!have_fill) {
@@ -195,13 +225,13 @@ int maruko_output_apply_server(MarukoOutput *output, const char *uri)
 	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* odd = writing */
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, &parsed,
-	    output->requested_connected_udp, &output->connected_udp) != 0) {
+	    output->requested_connected_udp, output->allow_unix_encoder_stall,
+	    &output->connected_udp) != 0) {
 		__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* restore even */
 		return -1;
 	}
-	if (output_socket_capture_capacity(output->socket_handle,
-	    &output->send_buf_capacity) != 0)
-		output->send_buf_capacity = 0;
+	(void)output_socket_capture_capacity(output->socket_handle,
+		&output->send_queue);
 	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* even = stable */
 	return 0;
 }
@@ -219,10 +249,10 @@ uint32_t maruko_output_drain_send_errors(MarukoOutput *output)
 /* Flush the accumulated batch via sendmmsg().
  *
  * On partial success (sendmmsg returns 0 < n < count) or EINTR, retry
- * from the first unsent message. Only a persistent error (non-EINTR
- * failure on the next unsent message) ends the loop; the remaining
- * unsent packets are counted into output->send_errors so the caller can
- * observe silent drops via maruko_output_drain_send_errors().
+ * from the first unsent message.  Congestion (EAGAIN / short write) is
+ * accounted into output->socket_drops and bounded by a per-frame deadline;
+ * real errors go to output->send_errors.  Mirror of star6e_batch_flush —
+ * see the rationale there.
  *
  * Returns number of messages successfully sent. Always resets
  * batch->count to 0. */
@@ -230,10 +260,22 @@ static int maruko_batch_flush(MarukoOutput *output)
 {
 	MarukoOutputBatch *b = &output->batch;
 	size_t sent_total = 0;
+	uint64_t started;
+	uint64_t deadline;
+	uint64_t elapsed;
 	int fd;
 
 	if (b->count == 0)
 		return 0;
+	if (b->discard_remaining) {
+		if (b->discard_as_error)
+			output->send_errors += (uint32_t)b->count;
+		else
+			__atomic_fetch_add(&output->socket_drops,
+				(uint32_t)b->count, __ATOMIC_RELAXED);
+		b->count = 0;
+		return 0;
+	}
 
 	/* Use the batch-snapshotted socket — output->socket_handle can be
 	 * mutated by a concurrent apply_server() on the HTTP thread between
@@ -241,8 +283,17 @@ static int maruko_batch_flush(MarukoOutput *output)
 	fd = b->socket_handle;
 	if (fd < 0) {
 		output->send_errors += (uint32_t)b->count;
+		b->discard_remaining = 1;
+		b->discard_as_error = 1;
 		b->count = 0;
 		return 0;
+	}
+
+	started = 0;
+	deadline = 0;
+	if (!b->allow_unix_encoder_stall) {
+		started = wb_monotonic_us();
+		deadline = started + b->flush_budget_us;
 	}
 
 	while (sent_total < b->count) {
@@ -251,18 +302,75 @@ static int maruko_batch_flush(MarukoOutput *output)
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/* unix:// only — udp:// carries no send
+				 * timeout and so never reports EAGAIN.  Each
+				 * retry has already cost a SO_SNDTIMEO sleep
+				 * in the kernel, so looping to the deadline
+				 * costs ~2 iterations, not a busy-spin. */
+				output_socket_note_saturation(fd,
+					&output->send_queue);
+				if (b->allow_unix_encoder_stall)
+					continue;
+				if (wb_monotonic_us() < deadline)
+					continue;
+				__atomic_fetch_add(&output->socket_drops,
+					(uint32_t)(b->count - sent_total),
+					__ATOMIC_RELAXED);
+				b->discard_remaining = 1;
+				break;
+			}
+			if (errno == ENOBUFS) {
+				/* Device/qdisc queue full, typically udp:// on
+				 * a congested link.  Returned immediately with
+				 * no sleep, so retrying here would spin the
+				 * encode thread for the whole budget.  Count
+				 * as congestion and move on. */
+				__atomic_fetch_add(&output->socket_drops,
+					(uint32_t)(b->count - sent_total),
+					__ATOMIC_RELAXED);
+				b->discard_remaining = 1;
+				break;
+			}
 			output->send_errors +=
 				(uint32_t)(b->count - sent_total);
+			b->discard_remaining = 1;
+			b->discard_as_error = 1;
 			break;
 		}
 		if (n == 0) {
 			output->send_errors +=
 				(uint32_t)(b->count - sent_total);
+			b->discard_remaining = 1;
+			b->discard_as_error = 1;
 			break;
 		}
 		sent_total += (size_t)n;
+		if (sent_total < b->count) {
+			output_socket_note_saturation(fd, &output->send_queue);
+			if (b->allow_unix_encoder_stall)
+				continue;
+			if (wb_monotonic_us() >= deadline) {
+				__atomic_fetch_add(&output->socket_drops,
+					(uint32_t)(b->count - sent_total),
+					__ATOMIC_RELAXED);
+				b->discard_remaining = 1;
+				break;
+			}
+		}
 	}
 
+	__atomic_fetch_add(&output->socket_writes, (uint32_t)sent_total,
+		__ATOMIC_RELAXED);
+	if (!b->allow_unix_encoder_stall) {
+		elapsed = wb_monotonic_us() - started;
+		if (elapsed >= b->flush_budget_us) {
+			b->flush_budget_us = 0;
+			b->discard_remaining = 1;
+		} else {
+			b->flush_budget_us -= (uint32_t)elapsed;
+		}
+	}
 	b->count = 0;
 	return (int)sent_total;
 }
@@ -277,6 +385,9 @@ void maruko_output_begin_frame(MarukoOutput *output)
 	b = &output->batch;
 	b->count = 0;
 	b->active = 0;
+	b->flush_budget_us = MARUKO_OUTPUT_FLUSH_BUDGET_US;
+	b->discard_remaining = 0;
+	b->discard_as_error = 0;
 
 	/* SHM output is not batched — skip the snapshot entirely. */
 	if (output->ring)
@@ -289,12 +400,18 @@ void maruko_output_begin_frame(MarukoOutput *output)
 		gen_before = __atomic_load_n(&output->transport_gen,
 			__ATOMIC_ACQUIRE);
 		if (gen_before & 1u) {
+			/* Writer in progress — yield rather than spin; see
+			 * star6e_output_begin_frame for the rationale. */
+			sched_yield();
 			continue;
 		}
 		b->socket_handle = output->socket_handle;
 		b->dst = output->dst;
 		b->dst_len = output->dst_len;
 		b->connected_udp = output->connected_udp;
+		b->allow_unix_encoder_stall =
+			(output->transport == VENC_OUTPUT_URI_UNIX) &&
+			output->allow_unix_encoder_stall;
 		gen_after = __atomic_load_n(&output->transport_gen,
 			__ATOMIC_ACQUIRE);
 		if (gen_before == gen_after)
@@ -335,9 +452,26 @@ int maruko_output_batch_enqueue(MarukoOutput *output,
 	scratch_len = header_len + payload1_len;
 	if (scratch_len > MARUKO_OUTPUT_BATCH_SLOT_SCRATCH)
 		return -1;
+	if (b->discard_remaining) {
+		if (b->discard_as_error)
+			output->send_errors++;
+		else
+			__atomic_fetch_add(&output->socket_drops, 1,
+				__ATOMIC_RELAXED);
+		return 0;
+	}
 
-	if (b->count >= MARUKO_OUTPUT_BATCH_MAX)
+	if (b->count >= MARUKO_OUTPUT_BATCH_MAX) {
 		maruko_batch_flush(output);
+		if (b->discard_remaining) {
+			if (b->discard_as_error)
+				output->send_errors++;
+			else
+				__atomic_fetch_add(&output->socket_drops, 1,
+					__ATOMIC_RELAXED);
+			return 0;
+		}
+	}
 
 	slot = b->count;
 	iov = &b->iov[slot * 2];
@@ -391,6 +525,7 @@ void maruko_output_teardown(MarukoOutput *output)
 	memset(&output->dst, 0, sizeof(output->dst));
 	output->dst_len = 0;
 	output->transport = VENC_OUTPUT_URI_UDP;
+	output->allow_unix_encoder_stall = 0;
 	output->batch.active = 0;
 	output->batch.count = 0;
 	output->batch.socket_handle = -1;

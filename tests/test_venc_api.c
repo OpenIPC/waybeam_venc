@@ -209,7 +209,7 @@ static int apply_query_http_path(VencConfig *cfg, const char *backend_name,
 	size_t sent = 0;
 	size_t req_len;
 
-	if (venc_api_register(cfg, backend_name, cb) != 0)
+	if (venc_api_register(cfg, backend_name, cb, NULL) != 0)
 		return -1;
 	if (ensure_api_test_server() != 0)
 		return -1;
@@ -366,7 +366,7 @@ static int test_register(void)
 	venc_config_defaults(&cfg);
 
 	/* Registration with NULL callbacks should succeed */
-	int ret = venc_api_register(&cfg, "test", NULL);
+	int ret = venc_api_register(&cfg, "test", NULL, NULL);
 	CHECK("register_ok", ret == 0);
 
 	return failures;
@@ -426,7 +426,7 @@ static int test_register_with_callbacks(void)
 	VencApplyCallbacks cb;
 	memset(&cb, 0, sizeof(cb));
 
-	int ret = venc_api_register(&cfg, "star6e", &cb);
+	int ret = venc_api_register(&cfg, "star6e", &cb, NULL);
 	CHECK("register_cb_ok", ret == 0);
 
 	return failures;
@@ -461,6 +461,44 @@ static int test_field_support_by_backend(void)
 	CHECK("awb_fps alias unsupported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"isp.awbFps") == 0);
+	CHECK("qr unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"qr.tap_enabled") == 0);
+	CHECK("qr alias unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"qr.windowMs") == 0);
+	CHECK("min qp supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"video0.minQp") == 1);
+	CHECK("min qp unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"video0.minQp") == 0);
+	CHECK("max qp unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"video0.max_qp") == 0);
+
+	return failures;
+}
+
+static int test_qr_window_live_config_only(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	memset(&cb, 0, sizeof(cb));
+
+	CHECK("qr window live apply ok",
+		apply_query_http_path(&cfg, "star6e", &cb, "/api/v1/live/set",
+			"qr.windowMs=12500", &status, response,
+			sizeof(response)) == 0);
+	CHECK("qr window live status 200", status == 200);
+	CHECK("qr window live cfg", cfg.qr.window_ms == 12500);
+	CHECK("qr window live no reinit",
+		strstr(response, "\"reinit_pending\":true") == NULL);
 
 	return failures;
 }
@@ -1332,6 +1370,68 @@ static int test_framing_preset_restart(void)
 	CHECK("stab_accuracy reject unchanged",
 		strcmp(cfg.video0.stab_accuracy, "medium") == 0);
 
+	/* A valid resilience preset applies; an unknown one must be REJECTED,
+	 * not committed.  Committing it would persist the bad name to disk with
+	 * the previous preset's derived ref_ and intra_ fields still in place,
+	 * and the next start would silently fall back to "off". */
+	CHECK("resilience ltr rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.resilience=ltr", &status, response,
+			sizeof(response)) == 0);
+	CHECK("resilience ltr status", status == 200);
+	CHECK("resilience ltr expands",
+		cfg.video0.ref_base == 1 && cfg.video0.ref_enhance == 1 &&
+		cfg.video0.ref_pred == false);
+	venc_api_clear_reinit();
+
+	{
+		/* Every malformed parameterised form the "ltr:<N>" syntax
+		 * newly makes reachable. */
+		const char *bad[] = { "ltr:0", "ltr:256", "ltr:abc", "ltr:",
+				      "bogus" };
+		size_t i;
+		for (i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i) {
+			char q[64];
+			snprintf(q, sizeof(q), "video0.resilience=%s", bad[i]);
+			CHECK("resilience reject rc",
+				apply_set_query_http(&cfg, "star6e", &cb, q,
+					&status, response,
+					sizeof(response)) == 0);
+			CHECK("resilience reject status", status == 409);
+			CHECK("resilience reject error",
+				strstr(response, "resilience must be one of")
+					!= NULL);
+			CHECK("resilience reject unchanged",
+				strcmp(cfg.video0.resilience, "ltr") == 0);
+			CHECK("resilience reject derived intact",
+				cfg.video0.ref_enhance == 1);
+		}
+	}
+
+	return failures;
+}
+
+static int test_allow_unix_encoder_stall_restart(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	CHECK("unix stall default false",
+		cfg.outgoing.allow_unix_encoder_stall == false);
+	CHECK("unix stall restart rc",
+		apply_set_query_http(&cfg, "maruko", NULL,
+			"outgoing.allowUnixEncoderStall=true", &status, response,
+			sizeof(response)) == 0);
+	CHECK("unix stall restart status", status == 200);
+	CHECK("unix stall restart cfg",
+		cfg.outgoing.allow_unix_encoder_stall == true);
+	CHECK("unix stall restart response",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+	venc_api_clear_reinit();
+
 	return failures;
 }
 
@@ -1440,7 +1540,7 @@ static int test_capabilities_emits_ui(void)
 	venc_config_defaults(&cfg);
 	memset(&cb, 0, sizeof(cb));
 
-	if (venc_api_register(&cfg, "star6e", &cb) != 0) {
+	if (venc_api_register(&cfg, "star6e", &cb, NULL) != 0) {
 		CHECK("cap register", 0);
 		return failures;
 	}
@@ -1549,7 +1649,7 @@ static int test_capabilities_awb_fps_backend_gate(void)
 	venc_config_defaults(&cfg);
 	memset(&cb, 0, sizeof(cb));
 
-	if (venc_api_register(&cfg, "maruko", &cb) != 0) {
+	if (venc_api_register(&cfg, "maruko", &cb, NULL) != 0) {
 		CHECK("cap maruko register", 0);
 		return failures;
 	}
@@ -1595,7 +1695,7 @@ static int test_capabilities_awb_fps_backend_gate(void)
 	}
 
 	/* Same build, Star6E backend: the control is live and adjustable. */
-	if (venc_api_register(&cfg, "star6e", &cb) != 0) {
+	if (venc_api_register(&cfg, "star6e", &cb, NULL) != 0) {
 		CHECK("cap star6e re-register", 0);
 		return failures;
 	}
@@ -1650,7 +1750,7 @@ static int test_snapshot_routes(void)
 
 	venc_config_defaults(&cfg);
 	memset(&cb, 0, sizeof(cb));
-	if (venc_api_register(&cfg, "star6e", &cb) != 0) {
+	if (venc_api_register(&cfg, "star6e", &cb, NULL) != 0) {
 		CHECK("snap-route register", 0);
 		return failures;
 	}
@@ -1701,6 +1801,7 @@ int test_venc_api(void)
 	failures += test_active_precrop_setter();
 	failures += test_register_with_callbacks();
 	failures += test_field_support_by_backend();
+	failures += test_qr_window_live_config_only();
 	failures += test_multi_set_live_success();
 	failures += test_detect_model_path_live_reload();
 	failures += test_detect_model_path_no_callback();
@@ -1720,6 +1821,7 @@ int test_venc_api(void)
 	failures += test_live_zoom_pan_applies();
 	failures += test_zoom_validation_rejects_invalid();
 	failures += test_framing_preset_restart();
+	failures += test_allow_unix_encoder_stall_restart();
 	failures += test_live_set_isp_bin_dispatches_callback();
 	failures += test_live_set_isp_bin_rejects_unreadable_path();
 	failures += test_live_set_isp_bin_no_callback_returns_501();

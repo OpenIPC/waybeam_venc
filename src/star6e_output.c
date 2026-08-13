@@ -1,10 +1,12 @@
 #include "star6e_output.h"
 
 #include "output_socket.h"
+#include "timing.h"
 #include "venc_config.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -37,6 +39,23 @@ static void star6e_write_be32(uint8_t *data, uint32_t value)
 	data[1] = (uint8_t)((value >> 16) & 0xff);
 	data[2] = (uint8_t)((value >> 8) & 0xff);
 	data[3] = (uint8_t)(value & 0xff);
+}
+
+/* Classify a failed send.  Congestion — the peer's datagram queue stayed
+ * full for the whole SO_SNDTIMEO window, or the device queue is full — is a
+ * transport drop, not a fault, and the EAGAIN case also calibrates the
+ * unix:// fill denominator.  Everything else is a real error.  Reads the
+ * errno set by the failed send, so call it immediately after. */
+static void star6e_account_send_failure(Star6eOutput *output, int fd,
+	uint32_t packets)
+{
+	if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
+		output_socket_note_saturation(fd, &output->send_queue);
+		__atomic_fetch_add(&output->socket_drops, packets,
+			__ATOMIC_RELAXED);
+	} else {
+		output->send_errors += packets;
+	}
 }
 
 static int resolve_shared_audio_target(const Star6eAudioOutput *audio_output,
@@ -212,6 +231,7 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 
 	output->stream_mode = setup->stream_mode;
 	output->requested_connected_udp = setup->requested_connected_udp;
+	output->allow_unix_encoder_stall = setup->allow_unix_encoder_stall;
 	if (!setup->has_server)
 		return 0;
 
@@ -255,11 +275,11 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, &setup->uri,
-	    output->requested_connected_udp, &output->connected_udp) != 0)
+	    output->requested_connected_udp, output->allow_unix_encoder_stall,
+	    &output->connected_udp) != 0)
 		return -1;
-	if (output_socket_capture_capacity(output->socket_handle,
-	    &output->send_buf_capacity) != 0)
-		output->send_buf_capacity = 0;
+	(void)output_socket_capture_capacity(output->socket_handle,
+		&output->send_queue);
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
 }
@@ -326,8 +346,13 @@ void star6e_output_observe_pressure(Star6eOutput *output)
 	            output->transport == VENC_OUTPUT_URI_UDP) &&
 	           output->socket_handle >= 0) {
 		if (output_socket_get_fill_pct(output->socket_handle,
-		    output->send_buf_capacity, &fill_pct) == 0)
+		    &output->send_queue, &fill_pct) == 0) {
+			full_drops = __atomic_load_n(&output->socket_drops,
+				__ATOMIC_RELAXED);
+			writes = __atomic_load_n(&output->socket_writes,
+				__ATOMIC_RELAXED);
 			have_fill = 1;
+		}
 	}
 
 	if (!have_fill) {
@@ -362,10 +387,23 @@ uint32_t star6e_output_drain_send_errors(Star6eOutput *output)
 /* Flush the accumulated batch via sendmmsg().
  *
  * On partial success (sendmmsg returns 0 < n < count) or EINTR, retry
- * from the first unsent message. Only a persistent error (non-EINTR
- * failure on the next unsent message) ends the loop; the remaining
- * unsent packets are counted into output->send_errors so the caller can
- * observe silent drops via star6e_output_drain_send_errors().
+ * from the first unsent message.
+ *
+ * Two distinct failure modes are accounted separately:
+ *
+ *   EAGAIN / a short write  — the peer's queue is full.  On unix:// this
+ *     is the SO_SNDTIMEO window expiring; it is congestion, not a fault,
+ *     and it calibrates the fill_pct denominator (output_socket_note_
+ *     saturation).  Counted into output->socket_drops, which reaches the
+ *     sidecar trailer as transport_drops.
+ *
+ *   anything else — a real error (peer gone, bad address).  Counted into
+ *     output->send_errors as before.
+ *
+ * Either way the remaining packets are abandoned rather than retried
+ * indefinitely: an over-budget frame is already undecodable at the
+ * receiver (the H.265 reference chain is broken by the first lost packet),
+ * so continuing to block only propagates the stall into capture.
  *
  * Returns number of messages successfully sent. Always resets
  * batch->count to 0. */
@@ -373,10 +411,22 @@ static int star6e_batch_flush(Star6eOutput *output)
 {
 	Star6eOutputBatch *b = &output->batch;
 	size_t sent_total = 0;
+	uint64_t started;
+	uint64_t deadline;
+	uint64_t elapsed;
 	int fd;
 
 	if (b->count == 0)
 		return 0;
+	if (b->discard_remaining) {
+		if (b->discard_as_error)
+			output->send_errors += (uint32_t)b->count;
+		else
+			__atomic_fetch_add(&output->socket_drops,
+				(uint32_t)b->count, __ATOMIC_RELAXED);
+		b->count = 0;
+		return 0;
+	}
 
 	/* Use the batch-snapshotted socket — output->socket_handle can be
 	 * mutated by a concurrent apply_server() on the HTTP thread between
@@ -384,8 +434,17 @@ static int star6e_batch_flush(Star6eOutput *output)
 	fd = b->socket_handle;
 	if (fd < 0) {
 		output->send_errors += (uint32_t)b->count;
+		b->discard_remaining = 1;
+		b->discard_as_error = 1;
 		b->count = 0;
 		return 0;
+	}
+
+	started = 0;
+	deadline = 0;
+	if (!b->allow_unix_encoder_stall) {
+		started = wb_monotonic_us();
+		deadline = started + b->flush_budget_us;
 	}
 
 	while (sent_total < b->count) {
@@ -394,10 +453,42 @@ static int star6e_batch_flush(Star6eOutput *output)
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/* unix:// only — udp:// carries no send
+				 * timeout and so never reports EAGAIN.  Each
+				 * retry has already cost a SO_SNDTIMEO sleep
+				 * in the kernel, so looping to the deadline
+				 * costs ~2 iterations, not a busy-spin. */
+				output_socket_note_saturation(fd,
+					&output->send_queue);
+				if (b->allow_unix_encoder_stall)
+					continue;
+				if (wb_monotonic_us() < deadline)
+					continue;
+				__atomic_fetch_add(&output->socket_drops,
+					(uint32_t)(b->count - sent_total),
+					__ATOMIC_RELAXED);
+				b->discard_remaining = 1;
+				break;
+			}
+			if (errno == ENOBUFS) {
+				/* Device/qdisc queue full, typically udp:// on
+				 * a congested link.  Returned immediately with
+				 * no sleep, so retrying here would spin the
+				 * encode thread for the whole budget.  Count
+				 * as congestion and move on. */
+				__atomic_fetch_add(&output->socket_drops,
+					(uint32_t)(b->count - sent_total),
+					__ATOMIC_RELAXED);
+				b->discard_remaining = 1;
+				break;
+			}
 			/* Permanent error on the next unsent message:
 			 * account remaining as drops and bail. */
 			output->send_errors +=
 				(uint32_t)(b->count - sent_total);
+			b->discard_remaining = 1;
+			b->discard_as_error = 1;
 			break;
 		}
 		if (n == 0) {
@@ -405,11 +496,38 @@ static int star6e_batch_flush(Star6eOutput *output)
 			 * but treat as permanent to avoid a spin. */
 			output->send_errors +=
 				(uint32_t)(b->count - sent_total);
+			b->discard_remaining = 1;
+			b->discard_as_error = 1;
 			break;
 		}
 		sent_total += (size_t)n;
+		/* A short write means the queue filled mid-batch: an exact
+		 * capacity reading for the unix:// fill denominator. */
+		if (sent_total < b->count) {
+			output_socket_note_saturation(fd, &output->send_queue);
+			if (b->allow_unix_encoder_stall)
+				continue;
+			if (wb_monotonic_us() >= deadline) {
+				__atomic_fetch_add(&output->socket_drops,
+					(uint32_t)(b->count - sent_total),
+					__ATOMIC_RELAXED);
+				b->discard_remaining = 1;
+				break;
+			}
+		}
 	}
 
+	__atomic_fetch_add(&output->socket_writes, (uint32_t)sent_total,
+		__ATOMIC_RELAXED);
+	if (!b->allow_unix_encoder_stall) {
+		elapsed = wb_monotonic_us() - started;
+		if (elapsed >= b->flush_budget_us) {
+			b->flush_budget_us = 0;
+			b->discard_remaining = 1;
+		} else {
+			b->flush_budget_us -= (uint32_t)elapsed;
+		}
+	}
 	b->count = 0;
 	return (int)sent_total;
 }
@@ -424,6 +542,9 @@ void star6e_output_begin_frame(Star6eOutput *output)
 	b = &output->batch;
 	b->count = 0;
 	b->active = 0;
+	b->flush_budget_us = STAR6E_OUTPUT_FLUSH_BUDGET_US;
+	b->discard_remaining = 0;
+	b->discard_as_error = 0;
 
 	/* SHM output is not batched — skip the snapshot entirely. */
 	if (output->ring)
@@ -436,13 +557,22 @@ void star6e_output_begin_frame(Star6eOutput *output)
 		gen_before = __atomic_load_n(&output->transport_gen,
 			__ATOMIC_ACQUIRE);
 		if (gen_before & 1u) {
-			/* Writer in progress — spin briefly. */
+			/* Writer in progress.  apply_server() holds the odd
+			 * generation across socket()/setsockopt()/connect(),
+			 * so yield rather than burning the encode thread's
+			 * slice against the HTTP thread — this thread is
+			 * pinned to CPU 0 and can otherwise starve the writer
+			 * it is waiting on. */
+			sched_yield();
 			continue;
 		}
 		b->socket_handle = output->socket_handle;
 		b->dst = output->dst;
 		b->dst_len = output->dst_len;
 		b->connected_udp = output->connected_udp;
+		b->allow_unix_encoder_stall =
+			(output->transport == VENC_OUTPUT_URI_UNIX) &&
+			output->allow_unix_encoder_stall;
 		gen_after = __atomic_load_n(&output->transport_gen,
 			__ATOMIC_ACQUIRE);
 		if (gen_before == gen_after)
@@ -487,9 +617,26 @@ static int star6e_batch_enqueue(Star6eOutput *output,
 
 	if (scratch_len > STAR6E_OUTPUT_BATCH_SLOT_SCRATCH)
 		return -1;
+	if (b->discard_remaining) {
+		if (b->discard_as_error)
+			output->send_errors++;
+		else
+			__atomic_fetch_add(&output->socket_drops, 1,
+				__ATOMIC_RELAXED);
+		return 0;
+	}
 
-	if (b->count >= STAR6E_OUTPUT_BATCH_MAX)
+	if (b->count >= STAR6E_OUTPUT_BATCH_MAX) {
 		star6e_batch_flush(output);
+		if (b->discard_remaining) {
+			if (b->discard_as_error)
+				output->send_errors++;
+			else
+				__atomic_fetch_add(&output->socket_drops, 1,
+					__ATOMIC_RELAXED);
+			return 0;
+		}
+	}
 
 	slot = b->count;
 	iov = &b->iov[slot * 2];
@@ -560,9 +707,10 @@ int star6e_output_send_rtp_parts(Star6eOutput *output,
 	    output->dst_len, output->connected_udp,
 	    header, header_len, payload1, payload1_len,
 	    payload2, payload2_len) != 0) {
-		output->send_errors++;
+		star6e_account_send_failure(output, output->socket_handle, 1);
 		return -1;
 	}
+	__atomic_fetch_add(&output->socket_writes, 1, __ATOMIC_RELAXED);
 	return 0;
 }
 
@@ -590,9 +738,12 @@ int star6e_output_send_compact_packet(Star6eOutput *output,
 			(const struct sockaddr *)&output->dst, output->dst_len);
 
 		if (sent < 0) {
-			output->send_errors++;
+			star6e_account_send_failure(output,
+				output->socket_handle, 1);
 			return -1;
 		}
+		__atomic_fetch_add(&output->socket_writes, 1,
+			__ATOMIC_RELAXED);
 		return 0;
 	}
 
@@ -634,9 +785,12 @@ int star6e_output_send_compact_packet(Star6eOutput *output,
 		msg.msg_iov = vec;
 		msg.msg_iovlen = 2;
 		if (sendmsg(output->socket_handle, &msg, 0) < 0) {
-			output->send_errors++;
+			star6e_account_send_failure(output,
+				output->socket_handle, 1);
 			return -1;
 		}
+		__atomic_fetch_add(&output->socket_writes, 1,
+			__ATOMIC_RELAXED);
 		offset += fragment_size;
 	}
 
@@ -747,8 +901,12 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 	    stream->h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF)
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
-	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0)
+	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0) {
+		if (venc_frame_drop_breaks_chain(meta.flags) &&
+		    output->request_idr)
+			output->request_idr(output->idr_ctx);
 		return 0;
+	}
 
 	for (i = 0; i < stream->count; ++i) {
 		const MI_VENC_Pack_t *pack = &stream->packet[i];
@@ -853,13 +1011,13 @@ int star6e_output_apply_server(Star6eOutput *output, const char *uri)
 	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* odd = writing */
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, &parsed,
-	    output->requested_connected_udp, &output->connected_udp) != 0) {
+	    output->requested_connected_udp, output->allow_unix_encoder_stall,
+	    &output->connected_udp) != 0) {
 		__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* restore even */
 		return -1;
 	}
-	if (output_socket_capture_capacity(output->socket_handle,
-	    &output->send_buf_capacity) != 0)
-		output->send_buf_capacity = 0;
+	(void)output_socket_capture_capacity(output->socket_handle,
+		&output->send_queue);
 	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* even = stable */
 	return 0;
 }
@@ -886,6 +1044,7 @@ void star6e_output_teardown(Star6eOutput *output)
 	output->dst_len = 0;
 	output->connected_udp = 0;
 	output->requested_connected_udp = 0;
+	output->allow_unix_encoder_stall = 0;
 	output->transport = VENC_OUTPUT_URI_UDP;
 }
 

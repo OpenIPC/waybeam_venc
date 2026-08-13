@@ -7,6 +7,7 @@
 #include "pipeline_common.h"
 #if HAVE_BACKEND_STAR6E
 #include "star6e_pipeline.h"
+#include "star6e_luma_tap.h"
 #endif
 #if HAVE_BACKEND_MARUKO
 #include "maruko_pipeline.h"
@@ -24,6 +25,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -454,6 +456,14 @@ static const FieldUi ui_shm_throttle = {
 /* UI descriptors for the per-frame size caps (0.45.0).  Rendered as a
  * "Frame size caps" group purely from capabilities — the caps were API-only
  * until now (no static SECTIONS rows). */
+static const FieldUi ui_min_qp = {
+	"Video", "Min QP", "number", 0, 51, 1, NULL,
+	"RC QP floor. 0 = leave the SDK default. Raising the floor caps quality and saves bitrate; LOWERING it lets CBR actually spend its budget on a simple scene instead of undershooting the target. Applied live."
+};
+static const FieldUi ui_max_qp = {
+	"Video", "Max QP", "number", 0, 51, 1, NULL,
+	"RC QP ceiling. 0 = leave the SDK default. Raising the ceiling lets the encoder compress a scene change hard enough to stay inside the frame budget instead of emitting a burst frame. Applied live."
+};
 static const FieldUi ui_max_i_bytes = {
 	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
@@ -486,13 +496,36 @@ static const FieldUi ui_snapshot_quality = {
 };
 static const FieldUi ui_snapshot_width = {
 	"Snapshot", "JPEG width", "number", 0, 8192, 16, NULL,
-	"Width of the MJPEG snapshot channel. 0 = inherit the main stream. This "
-	"is also the QR capture resolution — QR range scales with pixels per "
-	"module."
+	"Max encodable width of the MJPEG snapshot channel — NOT a scaler. "
+	"0 = inherit the main stream, which is the only safe value: VENC has no "
+	"scaler, so a value below the main stream makes every frame fail "
+	"validation and the endpoint answers 504 forever."
 };
 static const FieldUi ui_snapshot_height = {
 	"Snapshot", "JPEG height", "number", 0, 8192, 2, NULL,
-	"Height of the MJPEG snapshot channel. 0 = inherit the main stream."
+	"Max encodable height of the MJPEG snapshot channel. 0 = inherit the "
+	"main stream; see the width field."
+};
+static const FieldUi ui_qr_tap_enabled = {
+	"QR", "Luma tap", "toggle", 0, 0, 0, NULL,
+	"Enable the overlay-free NV12 luma tap on VPE port1 (Star6E). Unlike the "
+	"MJPEG snapshot, this carries no OSD pixels. Requires port1 to be free: "
+	"turn off video0.framing=stab and detect.enabled first."
+};
+static const FieldUi ui_qr_tap_width = {
+	"QR", "Tap width", "number", 0, 4096, 16, NULL,
+	"Width of the port1 luma tap. 0 = inherit the main stream. A VPE port is "
+	"a real scaler, so this genuinely changes capture resolution."
+};
+static const FieldUi ui_qr_window_ms = {
+	"QR", "Scan window (ms)", "number", 1000, 60000, 500, NULL,
+	"How long a /api/v1/qr/scan holds VPE port1 before the supervisor closes "
+	"it and hands the port back to stab/detect. Re-scanning while a window is "
+	"open only extends the deadline; it never re-opens the port."
+};
+static const FieldUi ui_qr_tap_height = {
+	"QR", "Tap height", "number", 0, 4096, 2, NULL,
+	"Height of the port1 luma tap. 0 = inherit the main stream."
 };
 
 static const FieldDesc g_fields[] = {
@@ -525,11 +558,14 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
 	FIELD_UI(video0, max_i_bytes,  FT_UINT,   MUT_LIVE, &ui_max_i_bytes),
 	FIELD_UI(video0, max_p_bytes,  FT_UINT,   MUT_LIVE, &ui_max_p_bytes),
+	FIELD_UI(video0, min_qp,       FT_UINT,   MUT_LIVE, &ui_min_qp),
+	FIELD_UI(video0, max_qp,       FT_UINT,   MUT_LIVE, &ui_max_qp),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
 	FIELD(outgoing, server,            FT_STRING, MUT_LIVE),
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
 	FIELD(outgoing, max_payload_size,  FT_UINT16, MUT_LIVE),
 	FIELD(outgoing, connected_udp,     FT_BOOL,   MUT_RESTART),
+	FIELD(outgoing, allow_unix_encoder_stall, FT_BOOL, MUT_RESTART),
 	FIELD(outgoing, audio_port,        FT_INT,    MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
 	FIELD_UI(outgoing, shm_throttle,   FT_BOOL,   MUT_LIVE, &ui_shm_throttle),
@@ -647,6 +683,14 @@ static const FieldDesc g_fields[] = {
 	FIELD(detect, firmware_path,  FT_STRING, MUT_RESTART),
 	FIELD(detect, infer_interval, FT_INT,    MUT_RESTART),
 	FIELD(detect, osd,            FT_BOOL,   MUT_RESTART),
+	/* MUT_RESTART throughout: the tap port is programmed at graph configure
+	 * time, and reprogramming a live port is exactly what this design exists
+	 * to avoid (see documentation/QR_LUMA_TAP_PLAN.md). */
+	FIELD_UI(qr, tap_enabled, FT_BOOL, MUT_RESTART, &ui_qr_tap_enabled),
+	FIELD_UI(qr, tap_width,   FT_UINT, MUT_RESTART, &ui_qr_tap_width),
+	FIELD_UI(qr, tap_height,  FT_UINT, MUT_RESTART, &ui_qr_tap_height),
+	/* Live: read when a window opens, so a change takes effect next scan. */
+	FIELD_UI(qr, window_ms,   FT_UINT, MUT_LIVE,    &ui_qr_window_ms),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -679,6 +723,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.gopSize", "video0.gop_size" },
 	{ "video0.qpDelta", "video0.qp_delta" },
 	{ "video0.maxIBytes", "video0.max_i_bytes" },
+	{ "video0.minQp", "video0.min_qp" },
+	{ "video0.maxQp", "video0.max_qp" },
 	{ "video0.maxPBytes", "video0.max_p_bytes" },
 	{ "outgoing.maxPayloadSize", "outgoing.max_payload_size" },
 	{ "outgoing.audioPort", "outgoing.audio_port" },
@@ -715,6 +761,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.shmThrottle", "outgoing.shm_throttle" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
+	{ "outgoing.allowUnixEncoderStall", "outgoing.allow_unix_encoder_stall" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
 	{ "discovery.serviceType", "discovery.service_type" },
 	{ "discovery.bareAlias", "discovery.bare_alias" },
@@ -734,6 +781,10 @@ static const FieldAlias g_field_aliases[] = {
 	{ "detect.netWidth", "detect.net_width" },
 	{ "detect.netHeight", "detect.net_height" },
 	{ "detect.modelId", "detect.model_id" },
+	{ "qr.tapEnabled", "qr.tap_enabled" },
+	{ "qr.tapWidth", "qr.tap_width" },
+	{ "qr.tapHeight", "qr.tap_height" },
+	{ "qr.windowMs", "qr.window_ms" },
 };
 
 static const char *canonicalize_field_key(const char *key)
@@ -756,6 +807,15 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 
 	canonical_key = canonicalize_field_key(field_key);
 	if (!canonical_key)
+		return 0;
+
+	/* These controls have no Maruko implementation.  Keep them in the shared
+	 * schema so clients can render one dashboard, but advertise them honestly
+	 * and reject writes before they reach a missing callback or route. */
+	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
+	    (strncmp(canonical_key, "qr.", 3) == 0 ||
+	     strcmp(canonical_key, "video0.min_qp") == 0 ||
+	     strcmp(canonical_key, "video0.max_qp") == 0))
 		return 0;
 
 	/* isp.awb_fps paces the Star6E userspace AWB loop (src/star6e_awb.c),
@@ -966,6 +1026,22 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 				"zoom-1.25x, zoom-1.50x, zoom-1.75x, zoom-2x, "
 				"zoom-3x, zoom-4x";
 	}
+	/* Without this an unknown preset is committed: the SET returns 200,
+	 * persists the bad name to /etc/waybeam.json, and leaves the derived
+	 * intra_refresh_* / ref_* fields holding the PREVIOUS preset's
+	 * expansion — so /api/v1/config disagrees with the encoder until the
+	 * next start, where the disk loader silently falls back to "off" and
+	 * the operator lands on a preset they never asked for.  The
+	 * parameterised "ltr:<N>" form makes the invalid space wide and
+	 * plausible ("ltr:0", "ltr:256"), so this must reject, not clamp. */
+	if (strcmp(key, "video0.resilience") == 0) {
+		VencConfigVideo probe = cfg->video0;
+		if (venc_config_apply_resilience_preset(cfg->video0.resilience,
+				&probe) != 0)
+			return "resilience must be one of: off, rescue, quality, "
+				"sprint, racing, endurance, patrol, rally, range, "
+				"fpv, ltr, ltr:<1-255>";
+	}
 	if (strcmp(key, "attitude.mount_deg") == 0) {
 		int v = cfg->attitude.mount_deg;
 		if (v != 0 && v != 90 && v != 180 && v != 270)
@@ -1075,6 +1151,18 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	    cfg->video0.scene_holdoff == 0 &&
 	    cfg->video0.scene_threshold > 0)
 		return "video0.scene_holdoff must be >= 1 when scene_threshold > 0";
+	if (strcmp(key, "video0.min_qp") == 0 || strcmp(key, "video0.max_qp") == 0) {
+		/* H.264/H.265 QP range; the SDK accepts min > max without
+		 * complaint and then behaves erratically (device-observed),
+		 * so reject the combination here. 0 = driver default. */
+		if (cfg->video0.min_qp > 51)
+			return "video0.min_qp must be 0..51";
+		if (cfg->video0.max_qp > 51)
+			return "video0.max_qp must be 0..51";
+		if (cfg->video0.min_qp > 0 && cfg->video0.max_qp > 0 &&
+		    cfg->video0.min_qp > cfg->video0.max_qp)
+			return "video0.min_qp must not exceed max_qp";
+	}
 	if (strcmp(key, "snapshot.quality") == 0) {
 		/* JPEG q-factor range.  Backend clamps internally too, but
 		 * the validator gives a clean error response instead of a
@@ -1132,11 +1220,14 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"isp.awb_mode",
 		"video0.bitrate",
 		"video0.qp_delta",
+		"video0.min_qp",
+		"video0.max_qp",
 		"video0.size",
 		"video0.scene_holdoff",
 		"video0.zoom_x",
 		"video0.zoom_y",
 		"video0.framing",
+		"video0.resilience",
 		"fpv.roi_qp",
 		"fpv.roi_steps",
 		"fpv.roi_center",
@@ -1275,8 +1366,10 @@ typedef enum {
 	LIVE_GROUP_SNAPSHOT_QUALITY,
 	LIVE_GROUP_PAUSE_STAB,
 	LIVE_GROUP_MAX_FRAME_SIZE,
+	LIVE_GROUP_QP_BOUNDS,
 	LIVE_GROUP_DETECT,
 	LIVE_GROUP_SHM_THROTTLE,
+	LIVE_GROUP_QR_WINDOW,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1457,6 +1550,9 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	if (strcmp(canonical_key, "video0.max_i_bytes") == 0 ||
 	    strcmp(canonical_key, "video0.max_p_bytes") == 0)
 		return LIVE_GROUP_MAX_FRAME_SIZE;
+	if (strcmp(canonical_key, "video0.min_qp") == 0 ||
+	    strcmp(canonical_key, "video0.max_qp") == 0)
+		return LIVE_GROUP_QP_BOUNDS;
 	if (strcmp(canonical_key, "detect.enabled") == 0 ||
 	    strcmp(canonical_key, "detect.model_path") == 0 ||
 	    strcmp(canonical_key, "detect.model_id") == 0 ||
@@ -1465,6 +1561,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_DETECT;
 	if (strcmp(canonical_key, "outgoing.shm_throttle") == 0)
 		return LIVE_GROUP_SHM_THROTTLE;
+	if (strcmp(canonical_key, "qr.window_ms") == 0)
+		return LIVE_GROUP_QR_WINDOW;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1508,10 +1606,14 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "video0.pauseStab";
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return "video0.maxIBytes/maxPBytes";
+	case LIVE_GROUP_QP_BOUNDS:
+		return "video0.minQp/maxQp";
 	case LIVE_GROUP_DETECT:
 		return "detect.enabled/model_path/model_id/conf_thresh/nms_iou";
 	case LIVE_GROUP_SHM_THROTTLE:
 		return "outgoing.shmThrottle";
+	case LIVE_GROUP_QR_WINDOW:
+		return "qr.windowMs";
 	default:
 		return "unknown";
 	}
@@ -1688,6 +1790,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_pause_stab != NULL;
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return g_cb->apply_max_frame_size != NULL;
+	case LIVE_GROUP_QP_BOUNDS:
+		return g_cb->apply_qp_bounds != NULL;
 	case LIVE_GROUP_DETECT:
 		return g_cb->apply_detect_reload != NULL;
 	case LIVE_GROUP_SHM_THROTTLE:
@@ -1695,6 +1799,9 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		 * the committed config on the pipeline thread every frame, so
 		 * commit_config_locked() *is* the apply.  Supported on every
 		 * backend, and inert on transports other than frame-shm://. */
+		return 1;
+	case LIVE_GROUP_QR_WINDOW:
+		/* No callback: a new scan snapshots qr.window_ms when it opens. */
 		return 1;
 	default:
 		return 0;
@@ -1786,6 +1893,10 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		dst->video0.max_i_bytes = src->video0.max_i_bytes;
 		dst->video0.max_p_bytes = src->video0.max_p_bytes;
 		break;
+	case LIVE_GROUP_QP_BOUNDS:
+		dst->video0.min_qp = src->video0.min_qp;
+		dst->video0.max_qp = src->video0.max_qp;
+		break;
 	case LIVE_GROUP_DETECT:
 		/* Copy the whole live detector group; the backend re-reads all of
 		 * them from the committed config on reload, and unchanged members
@@ -1802,6 +1913,9 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_SHM_THROTTLE:
 		dst->outgoing.shm_throttle = src->outgoing.shm_throttle;
+		break;
+	case LIVE_GROUP_QR_WINDOW:
+		dst->qr.window_ms = src->qr.window_ms;
 		break;
 	default:
 		break;
@@ -1938,6 +2052,12 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return g_cb->apply_max_frame_size(cfg->video0.max_i_bytes,
 			cfg->video0.max_p_bytes);
+	case LIVE_GROUP_QP_BOUNDS:
+		/* Backends without RC QP bounds leave the hook NULL. */
+		if (!g_cb->apply_qp_bounds)
+			return -2;
+		return g_cb->apply_qp_bounds(cfg->video0.min_qp,
+			cfg->video0.max_qp);
 	case LIVE_GROUP_DETECT:
 		/* cfg is already committed to g_cfg (commit_config_locked above),
 		 * so the backend reads the new model_path/model_id/conf/iou from the
@@ -1946,6 +2066,9 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_SHM_THROTTLE:
 		/* Committed above; the pipeline thread picks the new value up on
 		 * its next frame and releases or re-engages the clamp itself. */
+		return 0;
+	case LIVE_GROUP_QR_WINDOW:
+		/* Committed above; the next scan snapshots the new duration. */
 		return 0;
 	default:
 		return -2;
@@ -2536,6 +2659,121 @@ static int process_set_query(const char *query, int persist, int *status_code,
 
 /* ── Route handlers ──────────────────────────────────────────────────── */
 
+#if HAVE_BACKEND_STAR6E
+/* GET /api/v1/qr/tap.pgm — one frame of the overlay-free VPE port1 luma tap as
+ * a P5 PGM.  Debug-grade instrumentation for validating the tap (OSD-freedom,
+ * geometry, stability); the port itself is enabled at pipeline bring-up and is
+ * NOT touched here — this only asks the reader thread to copy a frame out. */
+static int handle_qr_tap_pgm(int fd, const HttpRequest *req, void *ctx)
+{
+	uint8_t *buf = NULL;
+	size_t   len = 0;
+	int rc;
+
+	(void)req; (void)ctx;
+
+	rc = star6e_luma_tap_grab_pgm(ctx, &buf, &len, 1000);
+	if (rc == -ENODEV)
+		return httpd_send_error(fd, 503, "tap_disabled",
+			"luma tap not running (qr.tap_enabled off, VPE port1 "
+			"held by stab/detect, or pipeline not running)");
+	if (rc == -EBUSY)
+		return httpd_send_error(fd, 409, "scan_decoding",
+			"a QR cascade is reading the latch; retry shortly");
+	if (rc == -ETIMEDOUT)
+		return httpd_send_error(fd, 504, "tap_timeout",
+			"timed out waiting for a frame from the VPE port1 tap");
+	if (rc != 0 || !buf || len == 0) {
+		star6e_luma_tap_free(buf);
+		return httpd_send_error(fd, 500, "tap_failed",
+			"luma tap capture failed");
+	}
+
+	rc = httpd_send_binary(fd, 200, "image/x-portable-graymap", buf,
+		(int)len);
+	star6e_luma_tap_free(buf);
+	return rc;
+}
+#endif
+
+#if HAVE_BACKEND_STAR6E
+/* GET /api/v1/qr/scan[?ms=N] — open a scan window on VPE port1, or extend the
+ * one already running.  The port is closed automatically by the supervisor when
+ * the window expires, so a client that dies mid-scan cannot strand it. */
+static int handle_qr_scan(int fd, const HttpRequest *req, void *ctx)
+{
+	char buf[192];
+	Star6eLumaTapStatus st;
+	char msbuf[16];
+	uint32_t ms = 0;
+	int rc;
+
+	(void)ctx;
+	if (req && httpd_query_param(req, "ms", msbuf, sizeof(msbuf)) == 0)
+		ms = (uint32_t)strtoul(msbuf, NULL, 10);
+
+	rc = star6e_luma_tap_scan(ctx, ms);
+	if (rc == -ENODEV)
+		return httpd_send_error(fd, 503, "tap_disabled",
+			"luma tap not armed (qr.tap_enabled off or pipeline "
+			"not running)");
+	if (rc == -EBUSY)
+		return httpd_send_error(fd, 409, "port1_busy",
+			"VPE port1 is held by stab or detect");
+	if (rc != 0)
+		return httpd_send_error(fd, 500, "scan_failed",
+			"could not program the VPE port1 tap");
+
+	star6e_luma_tap_status(ctx, &st);
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"scanning\":true,\"window_ms\":%u,"
+		"\"remaining_ms\":%lld,\"capture\":\"%ux%u\"}}",
+		st.window_ms, (long long)st.remaining_ms, st.width, st.height);
+	return httpd_send_json(fd, 200, buf);
+}
+
+/* GET /api/v1/qr/stop — end the window now and hand port1 back.  Deliberately
+ * NOT /qr/scan/stop: the router matches on prefix and accepts a '/'
+ * continuation (venc_httpd.c), so a nested path would be swallowed by the
+ * /qr/scan route unless registration order happened to save it. */
+static int handle_qr_scan_stop(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+	star6e_luma_tap_scan_stop(ctx);
+	return httpd_send_json(fd, 200,
+		"{\"ok\":true,\"data\":{\"scanning\":false}}");
+}
+
+/* GET /api/v1/qr/status — poll a running scan without disturbing it.
+ *
+ * The decode block survives the window closing and is cleared only by the next
+ * /qr/scan, so a client polling at 1 Hz still sees the payload from a window
+ * that both found its code and shut itself down between two polls. */
+static int handle_qr_status(int fd, const HttpRequest *req, void *ctx)
+{
+	char buf[512];
+	Star6eLumaTapStatus st;
+
+	(void)req; (void)ctx;
+	star6e_luma_tap_status(ctx, &st);
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"armed\":%s,\"scanning\":%s,"
+		"\"window_ms\":%u,\"remaining_ms\":%lld,\"capture\":\"%ux%u\","
+		"\"frames\":%llu,\"grabs\":%llu,\"port1_owner\":\"%s\","
+		"\"decode\":{\"attempts\":%u,\"decoded\":%s,\"payload\":\"%s\","
+		"\"stage\":\"%s\",\"decode_ms\":%llu,\"last_ms\":%llu}}}",
+		st.armed ? "true" : "false", st.scanning ? "true" : "false",
+		st.window_ms, (long long)st.remaining_ms, st.width, st.height,
+		(unsigned long long)st.frames, (unsigned long long)st.grabs,
+		st.port1_owner,
+		st.attempts, st.decoded ? "true" : "false", st.payload,
+		st.stage,
+		(unsigned long long)(st.decode_us / 1000),
+		(unsigned long long)(st.last_us / 1000));
+	return httpd_send_json(fd, 200, buf);
+}
+#endif
+
 static int handle_version(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
@@ -2546,7 +2784,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.16.1\","
+		"\"contract_version\":\"0.18.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -3153,6 +3391,7 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 		"\"path\":\"%s\","
 		"\"frames\":%u,"
 		"\"bytes\":%llu,"
+		"\"elapsed_ms\":%llu,"
 		"\"segments\":%u,"
 		"\"stop_reason\":\"%s\""
 		"}}",
@@ -3161,6 +3400,7 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 		st.path,
 		st.frames_written,
 		(unsigned long long)st.bytes_written,
+		(unsigned long long)st.elapsed_ms,
 		st.segments,
 		st.stop_reason);
 	return httpd_send_json(fd, 200, buf);
@@ -3652,9 +3892,10 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 /* ── Registration ────────────────────────────────────────────────────── */
 
 int venc_api_register(VencConfig *cfg, const char *backend_name,
-	const VencApplyCallbacks *cb)
+	const VencApplyCallbacks *cb, void *backend_ctx)
 {
 	int r = 0;
+	(void)backend_ctx; /* QR routes consume it in Star6E builds. */
 
 	pthread_mutex_lock(&g_cfg_mutex);
 	g_cfg = cfg;
@@ -3669,6 +3910,16 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	pthread_mutex_unlock(&g_cfg_mutex);
 
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
+#if HAVE_BACKEND_STAR6E
+	r |= venc_httpd_route("GET", "/api/v1/qr/tap.pgm", handle_qr_tap_pgm,
+		backend_ctx);
+	r |= venc_httpd_route("GET", "/api/v1/qr/scan", handle_qr_scan,
+		backend_ctx);
+	r |= venc_httpd_route("GET", "/api/v1/qr/stop", handle_qr_scan_stop,
+		backend_ctx);
+	r |= venc_httpd_route("GET", "/api/v1/qr/status", handle_qr_status,
+		backend_ctx);
+#endif
 	r |= venc_httpd_route("GET", "/api/v1/version",      handle_version, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config",       handle_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config.json",  handle_config, NULL);

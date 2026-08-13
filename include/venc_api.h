@@ -54,6 +54,14 @@ typedef struct {
 	 * struct and set RC priority to FRAMEBITS_FIRST when either is >0.
 	 * Both values in bytes; 0 = unlimited (restores BITRATE_FIRST). */
 	int (*apply_max_frame_size)(uint32_t max_i_bytes, uint32_t max_p_bytes);
+	/* Live-update the RC QP bounds (MinQp/MaxQp) in the RC param struct.
+	 * 0 leaves that bound at whatever the driver reported, so a config
+	 * that sets neither behaves exactly as before. Unlike the frame-size
+	 * caps these are the knobs the SDK rate controller actually honours:
+	 * the floor governs whether CBR can spend its budget on a simple
+	 * scene, the ceiling governs how hard it may compress a scene change.
+	 * NULL on backends that do not implement it. */
+	int (*apply_qp_bounds)(uint32_t min_qp, uint32_t max_qp);
 	/* Output transport observability snapshot.  Returns malloc'd JSON
 	 * string (caller frees) describing output queue fill, lifetime
 	 * delivery counters, and backpressure state.  The JSON includes a
@@ -116,9 +124,11 @@ typedef struct {
 /* Register all API routes with the httpd.
  * cfg points to the live config (read for GET, modified by SET).
  * backend_name is "star6e" or "maruko" (used in /api/v1/version).
- * cb may be NULL (set endpoints will return not_implemented). */
+ * cb may be NULL (set endpoints will return not_implemented).
+ * backend_ctx is passed only to backend-specific route handlers; NULL is
+ * valid for backends without such routes. */
 int venc_api_register(VencConfig *cfg, const char *backend_name,
-	const VencApplyCallbacks *cb);
+	const VencApplyCallbacks *cb, void *backend_ctx);
 
 /* Register the config path so restart-required sets can persist to disk
  * before triggering reinit.  Pass NULL to disable save-on-restart. */
@@ -209,6 +219,11 @@ int  venc_api_get_vpe_taps(char *buf, size_t buf_size);
 typedef struct {
 	int active;
 	uint64_t bytes_written;
+	/* Wall time since the active recorder started, CLOCK_MONOTONIC. Only
+	 * the recorder knows when it started, and a consumer polling status
+	 * cannot reconstruct it without missing everything before its first
+	 * poll (or losing the count across its own restart). 0 when idle. */
+	uint64_t elapsed_ms;
 	uint32_t frames_written;
 	uint32_t segments;
 	char path[256];

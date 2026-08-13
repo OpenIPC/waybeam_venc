@@ -1,5 +1,472 @@
 # History
 
+## [0.64.0] - 2026-08-06
+
+`ltr` resilience preset — maximum non-reference density with a long GOP.
+
+- **`video0.resilience = "ltr"` / `"ltr:<N>"`** selects the most resilient
+  SVC-T reference structure this SoC can express: `InRnRnRn…`, half the
+  frames non-referenced, so half of all frame losses cost exactly one frame
+  instead of cascading to the next IDR. Unlike `rally` (same 1:1 ratio) it
+  preserves the caller's `gopSize` and forces intra-refresh off, so it can be
+  paired with a long GOP and asymmetric transport FEC — heavy protection on
+  the IDR, light on the rest.
+- **`MI_VENC_ParamRef_t.u32Enhance` semantics established by measurement**
+  (Star6E, raw-ES NAL census; the SDK documents nothing). It is a *period*:
+  exactly one frame in every `enhance + 1` is emitted non-referenced.
+  Measured: `enhance=1` → 50.0 % droppable, `4` → 17.6 %, `299` → 0.3 %
+  (the census dilutes the short group with IDRs and partial groups; the
+  steady-state rule is exactly 1 in `enhance + 1`). **Smaller is more
+  resilient**, so bare `ltr` uses 1 and `ltr:<N>` is strictly less resilient
+  as N grows.
+- Also established: P-frames always predict from the previous frame, never
+  from the IDR (frame size is flat across the GOP under motion), and
+  `bEnablePred` is a **no-op** for non-reference marking — `rally`
+  (`pred=true`) and `ltr:1` (`pred=false`) yield identical patterns. The full
+  SigmaStar SDK exposes no long-term-reference, SmartP, or GOP-mode API, so
+  an IDR-anchored ("virtual IDR") structure is not achievable on Infinity6E.
+- **`/api/v1/set?video0.resilience=<unknown>` now returns 409** instead of
+  silently accepting. It previously returned 200, persisted the bad name to
+  `/etc/waybeam.json`, and left the derived `intra_refresh_*` / `ref_*` fields
+  holding the PREVIOUS preset's expansion — so `/api/v1/config` disagreed with
+  the running encoder until the next start, where the disk loader falls back
+  to `"off"` and the operator lands on a preset they never asked for.
+  Pre-existing, but the parameterised `ltr:<N>` form makes the invalid space
+  wide and plausible (`ltr:0`, `ltr:256`), so it is fixed here. Validation
+  matches how `video0.framing` and `video0.stab_accuracy` already reject.
+- Measured cost at pinned QP 30 on a moving scene: under 1 % bitrate delta vs
+  `off` (5.62/5.64 vs 5.65/5.68 Mbps, alternating runs). `ltr` remains
+  OSD-unsafe — it maximises the SVC-T chroma-smear condition. See README.
+- Pre-upstream API contract cleanup: `qr.windowMs` now follows its declared
+  live mutability (the next scan snapshots the new value), Maruko capabilities
+  mark the Star6E-only QR and QP-bound fields unsupported, and the HTTP
+  contract documents those backend gates plus recording `elapsed_ms`.
+
+### Frame-SHM throttle floor
+
+Dual floor for the frame-shm ring-fill bitrate clamp.
+
+- The clamp floor was a pure percentage (250 permille), which tied how hard it
+  may squeeze to the bitrate the OPERATOR configured -- a number unrelated to
+  what the radio can carry. At the measured 21839 kbps it bottomed out at
+  5459 kbps.
+- That is the wrong shape for the case it exists to cover. If the link drops
+  to MCS0 before waybeam-link's §9.6 bitrate demotion actuates (a 1.5-8 s
+  outer loop), this clamp is the only thing defending the ring, and 5.5 Mbps
+  is several times MCS0's deliverable capacity -- so the ring stays full and
+  every referenced frame is a chain-breaking drop for the whole window.
+- The floor is now `min(100 permille x configured, 2500 kbps)`: the percentage
+  keeps it proportionate at ordinary bitrates, the absolute cap stops a high
+  configured bitrate from stranding it above what the radio can carry. The two
+  coincide at 25000 kbps, today's reference-craft ceiling; the absolute term
+  only binds above that, and exists so the floor keeps its meaning when a
+  higher-bitrate mode is configured. At the measured rate the floor is now
+  2183 kbps instead of 5459.
+- 2500 kbps derivation: MCS0/HT20 is 6.5 Mbps PHY, ~4-5 Mbps goodput after
+  802.11 overhead, and 300/200 permille FEC leaves ~3.2-4 Mbps for video.
+  2500 kbps of video is ~3.1 Mbps of airtime at that FEC, and sits clear of
+  VENC_BITRATE_MIN_KBPS (1000), which remains the encoder collapse rail.
+- The AIMD integrator gains a separate, lower control-range bound
+  (VENC_SHM_THROTTLE_MIN_PERMILLE, 50) because the absolute cap can require an
+  effective ratio below the percentage floor. Recovery to unclamped now takes
+  19 AIMD windows (3.8 s) rather than 15 (3.0 s) from the deepest clamp.
+  Cascade stability is unaffected -- this changes the clamp's range, not its
+  200 ms period, so the inner/outer loop separation is preserved.
+
+### Frame-SHM reference-chain recovery
+
+Re-establish the reference chain when a frame-shm:// ring-full drop breaks it.
+
+- A full ring discards a frame that is ALREADY ENCODED, so the decoder's
+  reference chain breaks and it renders garbage until the next IDR — with a
+  long GOP that is seconds. Nothing closed that loop: `waybeam-link` requests
+  an IDR only on a `RecoveryRequest` arriving from the ground over RF, which
+  is a full round trip and is off by default (`venc.recovery_enabled`), and
+  the ring's `full_drops` counter is read by the link but wired to telemetry
+  only. The producer is the one party that knows instantly, and now acts on
+  it locally.
+- Only when the drop actually broke the chain. An SVC-T enhance frame is
+  non-referenced by construction, so discarding one costs exactly one frame;
+  firing an IDR there would push the largest frame in the stream into a ring
+  that is already full, to repair damage that never happened. The policy is
+  one shared inline (`venc_frame_drop_breaks_chain`) rather than a copy per
+  backend.
+- Routed through the existing per-channel IDR rate limiter (100 ms), so a
+  persistently full ring coalesces into at most ~10 IDRs/s instead of a
+  keyframe storm. `video0.resilience=ltr` makes this materially cheaper still:
+  half the frames are non-referenced and take the free path.
+
+Deliberately NOT included: blocking the encoder when the ring fills. Bounded
+blocking is a latency tradeoff rather than a free win, and unbounded blocking
+cannot be made safe here — a dead SHM consumer gives no error signal (there is
+no EPIPE equivalent), so it would wedge the encoder permanently with no
+recovery path on SigmaStar.
+
+### Unix queue accounting race fixes
+
+Remove the data races on the `unix://` send-queue capacity accounting.
+
+- `OutputSocketQueue` is touched by three threads, not one: the producer
+  (encode) thread raises `unix_capacity` / sets `logged_capacity` from the
+  send path, the HTTP/status thread reads both capacities to scale the
+  reported transport fill percentage, and the control thread RESETS all three
+  in `output_socket_capture_capacity()` on a live transport redirect. All
+  three fields were plain `int`.
+- The `transport_gen` seqlock does not serialise that third writer: the
+  producer consults it only to snapshot the transport into its batch and then
+  flushes outside it, so a redirect can land while a flush is still updating
+  this struct. The reset was additionally a bulk `memset` racing those
+  accesses.
+- All three fields now use relaxed atomics, matching the `__atomic_*` idiom
+  already used for `transport_gen`, and the reset writes them individually
+  instead of `memset`. Relaxed is the correct strength: each is an
+  independent scalar and nothing else is published through them.
+- `output_socket_get_fill_pct()` now snapshots both capacities once instead of
+  re-reading `unix_capacity` per use, so a calibration landing mid-call can no
+  longer mix an old and a new value into a percentage that never existed.
+
+This removes the undefined behaviour, not every interleaving: a redirect
+racing an in-flight flush can still leave `unix_capacity` holding the previous
+socket's learned value, because the compare-then-store in
+`output_socket_note_saturation()` is not itself atomic. That is bounded and
+self-healing — the next saturation on the new socket recalibrates it, and the
+only consequence meanwhile is a skewed fill percentage. Serialising it would
+need a lock on the encode thread's send path, which costs more than the
+telemetry is worth. The threading contract is now documented on the struct.
+
+No behavioural change. Flagged during review of #214, which introduced the
+calibration write and deferred this to a maintainer call.
+
+### Bounded Unix output and backpressure telemetry
+
+`unix://` output no longer stalls the encoder, and its backpressure
+telemetry now actually works.
+
+For compatibility with transmission chains that intentionally used the old
+blocking behavior as flow control, `outgoing.allowUnixEncoderStall` can now
+restore it explicitly. It defaults to `false` and requires a restart. When
+enabled, only `unix://` skips the 2 ms socket timeout and cumulative RTP frame
+budget; UDP, SHM, and frame-shm behavior is unchanged.
+
+Investigation started from streams misbehaving at and above 15 Mbps on
+`unix://` with 1500-MTU RTP. AF_UNIX itself is not the limit — the same
+send pattern measures 7.6 Gbps with a consumer that keeps up. Three
+implementation issues converged at that bitrate instead.
+
+- **`net.unix.max_dgram_qlen` is the real ceiling.** An AF_UNIX datagram
+  sender blocks on the *receiver's* queue depth, which the kernel snapshots
+  from this sysctl when the receiving socket is created. The default of 10
+  datagrams is ~7 ms of buffer at 15 Mbps with 1400-byte payloads, while a
+  single 60 fps frame is ~23 packets — so every frame overran the queue and
+  the encode thread blocked mid-flush. Measured saturation: 11 in-flight
+  datagrams. `init.d/S95waybeam` now raises it to 256 (~180 ms) at boot,
+  before any consumer starts; raising it later cannot help a socket that
+  already exists. venc warns on stderr when it finds a shallower value.
+
+- **The blocking send sat inside the `GetStream`→`ReleaseStream` window**
+  on the pinned encode thread, so a descheduled consumer held a VENC output
+  slot and cascaded into dropped capture frames — measured at up to 74 ms
+  for one `sendmmsg` burst, unbounded against a wedged consumer. Sends now
+  carry `SO_SNDTIMEO` (2 ms), and the batch flush carries a 4 ms per-frame
+  deadline. Both are needed: `sendmmsg()` applies `SO_SNDTIMEO` per message,
+  so the timeout alone still let a 64-packet batch run past a frame period.
+
+  Non-blocking sockets were evaluated and rejected: at the default qlen they
+  dropped 54% of packets, far worse than the stall. Bounded blocking keeps
+  zero drops whenever the queue is adequately sized.
+
+- **The backpressure trigger was mathematically unable to fire on
+  `unix://`.** The per-skb truesize estimate was 4096 bytes; a 1400-byte RTP
+  datagram measures 2304, so a fully blocked socket read as 61% fill against
+  a 75% high-water mark and `inPressure` never set. Worse, the denominator
+  was derived from the sender's live view of the sysctl, which is not what
+  the receiver captured — with the sysctl raised after the consumer started,
+  a 100%-blocked socket reported **2%**. The denominator is now calibrated
+  from the queue's actual saturation point, observed the first time a send
+  blocks, which is exact and immune to the sysctl skew. The estimate is only
+  a bootstrap.
+
+- **Socket transports now report drops.** `transportDrops` / `packetsSent`
+  were hardcoded to 0 for `udp://` and `unix://`, so a consumer that could
+  not keep up produced no observable signal anywhere — no `EAGAIN` (blocking),
+  no pressure flag, no counter. Congestion drops and successful sends are
+  counted and surfaced through the sidecar trailer and
+  `GET /api/v1/transport/status`. Congestion (`EAGAIN`) is counted separately
+  from real errors.
+
+- **Seqlock spin yields.** `begin_frame()` busy-spun while `apply_server()`
+  held an odd generation across `socket()`/`setsockopt()`/`connect()`; the
+  encode thread is pinned to CPU 0 and could starve the writer it waited on.
+
+- **The 4 ms bound is truly per frame.** Large encoded frames can exceed the
+  64-datagram `sendmmsg` batch. All internal flushes now share one cumulative
+  budget; once it is spent, later packets from that already-broken frame are
+  counted and discarded without starting another timeout window.
+
+- **Target-local validation consumer.** `make unix-dgram-consumer` builds a
+  small abstract-AF_UNIX RTP sink for either backend. It reports delivered
+  bitrate, RTP gaps, marker cadence, receive spread, and per-payload-type
+  packet counts, and can pause reads for deterministic backpressure/recovery
+  and shared-socket audio tests. Direct-deploy helpers now start the standard
+  binary through `S95waybeam`, so its queue-depth setup is exercised during a
+  normal cycle.
+
+Tests: the existing `unix bp` case pumped 1024-byte payloads and guarded its
+high-water assertions behind `if (fill_pct >= 75)`, which is why the fill bug
+shipped — the assertions simply never ran. It now uses MTU-sized payloads and
+asserts unconditionally, plus a drain-side assertion that pressure clears.
+A new `unix bound` case asserts a wedged consumer cannot hang the send path.
+Both were confirmed to fail against the pre-fix code.
+
+Handover and the on-device validation plan (V1-V10 with pass/fail criteria)
+are in `documentation/UNIX_SOCKET_HANDOVER.md`. Star6E V1–V9 are confirmed on
+device: 10/15/20/25 Mbps at 60 fps and 25 Mbps at 120 fps, deterministic
+backpressure/recovery, UDP/SHM regression, live Unix↔UDP redirect, and
+shared-socket Opus. The earlier device-unresponsive incident did not recur
+after a human power cycle. Maruko V10 is also confirmed on SSC378QE / IMX335:
+10/15/20/25 Mbps at 60 fps, 25 Mbps at 120 fps, and deterministic
+backpressure/recovery all passed with zero steady-state gaps or drops.
+
+Note: `SO_SNDBUF` is raised on both transports but is a no-op for `unix://`
+(1 MiB effective is ~455 datagrams, far above any sane qlen); it remains the
+binding limit for `udp://` only.
+
+### Live rate-control QP bounds
+
+RC QP bounds exposed as live controls (star6e).
+
+- **`video0.minQp` / `video0.maxQp`** (MUT_LIVE, 0 = driver default) write
+  `u32MinQp`/`u32MaxQp` in the CBR RcParam via a new `apply_qp_bounds()`
+  callback. Unlike the frame-size caps (`u32MaxISize`/`u32MaxPSize` — verified
+  no-op on star6e: 100/100 frames over a 4000 B cap at full target rate), the
+  QP bounds are honoured instantly by the SDK rate controller: `minQp=35`
+  collapses an on-target 10.3 Mbps stream to 1%.
+- Driver-default bounds are captured on the first write so clearing a bound
+  back to 0 restores the default live instead of latching the last value.
+- Validation rejects QP values > 51 and `minQp > maxQp` (the SDK accepts the
+  inversion silently and then misbehaves).
+- Maruko returns 501 for the new group (callback not implemented).
+
+Investigation context: the chronic CBR undershoot turned out to be
+`fpv.noiseLevel` (VPE 3DNR) — level 1 yields 33-42% of target on a static
+scene, level 0 yields 101-104%. No code change needed (shipped default is
+already 0); these QP levers are the follow-on granular control.
+
+### Recording elapsed-time reporting
+
+Build fix: a version bump now actually reaches the binary.
+
+- **`VERSION` is a prerequisite of every object** (`Makefile`) — `COMMON_CFLAGS`
+  bakes the file's contents in as `-DVENC_VERSION`, but nothing depended on the
+  file. `-MMD -MP` cannot cover it: `VERSION` is not a header, so the compiler
+  never sees it and no `.d` file lists it. An incremental `make build` after a
+  bump therefore recompiled nothing, and the binary went on reporting the
+  previous release through `/api/v1/version` and the mDNS beacon — the two
+  places a fleet is identified from. Only a `make clean` picked the new string
+  up, which is precisely what release builds skip when they are in a hurry.
+
+  Reproduced before the fix: bump `VERSION`, `make build`, and the old string is
+  still the only one in the binary. After: the bump rebuilds and the new string
+  is the only one present.
+
+  The prerequisite goes on the pattern rule rather than on the two current
+  consumers (`src/venc_api.c`, `src/mdns_beacon.c`) — a third consumer would
+  otherwise go stale silently, and the cost is one full rebuild per release.
+
+### Overlay-free QR scan windows
+
+Inline QR scanning on Star6E: an overlay-free luma tap on VPE port1 and scan
+windows decoded by the existing standalone `qr_decode` helper.
+
+- **`qr.tapEnabled` / `qr.tapWidth` / `qr.tapHeight`** (`src/star6e_luma_tap.c`)
+  — a read-only NV12 tap on VPE port1 with its own geometry, drained by a
+  dedicated reader thread for the duration of a scan window. Off by default.
+  `0` dimensions inherit the main stream. Unlike the MJPEG snapshot channel, a
+  VPE port is a real scaler, so these genuinely change capture resolution.
+
+  **Window-scoped, not pipeline-lifetime.** Bring-up only *arms* the tap;
+  `/qr/tap/open` claims and enables port1, `/qr/tap/close` releases it back to
+  stab/detect. Holding it for the whole run was measured too expensive: an
+  always-on 1080p60 tap adds ~186 MB/s of SCL write traffic to shared DDR and
+  cost 8-9 points of aggregate CPU while completely idle (45% → 54%). Device
+  result for the cycling this introduces: **200/200 open/grab/close cycles with
+  the encoder live, zero wedge signatures** — against snapshot.pgm's ~1 per 280.
+  A live close stops and joins the reader, then **drains the port to quiescent**
+  before resetting depth and disabling; disabling with buffers still queued is
+  what races an in-flight mhal buffer.
+
+  **The latch is the centre square** of the port output (1080×1080 from a
+  1920×1080 stream), cropped during the copy. Done in software on purpose:
+  `MI_VPE_SetPortCrop` is sticky on i6e and a leftover rect poisons a later
+  detect run. The SCL scales but does not crop, so asking the port for a square
+  directly would squash the aspect. Drops the outer frame where fisheye is
+  worst, and cuts the latch from 2.07 MB to 1.17 MB.
+
+  Why it exists: MI_RGN composites **per scaler output port**, and every
+  overlay producer targets port0 — `debug_osd` here, `osd_render` in
+  waybeam-hub. The MJPEG snapshot channel is a port0 1:N consumer, so every
+  snapshot carries whatever HUD is running, over anything a QR marker might
+  occupy. Measured on a bench craft: the hub HUD lands dead centre of frame
+  with `debug.showOsd` false. port1 is a separate scaler output and is clean.
+
+  The port is programmed and enabled **once per bounded scan window**, never
+  once per capture. A minimum open lifetime, reopen cooldown, reader join and
+  quiescent drain protect both lifecycle edges. This is the lesson of the
+  retired `/api/v1/snapshot.pgm` (0.60.0), which cycled Enable/Disable per HTTP
+  request — `DisablePort` raced an in-flight mhal buffer and jammed the VPE
+  input FIFO, about twice per 560 stressed captures. Lowest-priority claimant:
+  skipped with a log line when `video0.framing=stab` or `detect.enabled` holds
+  port1.
+
+- **Scan windows with self-closure.** `GET /api/v1/qr/scan[?ms=N]` opens a
+  window (`409 port1_busy` when stab or detect holds port1 — reported
+  immediately, never queued); a supervisor thread closes it when the deadline
+  expires, so a client that dies mid-scan cannot strand the port. Re-scanning
+  while a window is open only **extends the deadline** and never touches port
+  state, which is what keeps repeated scans from re-introducing the
+  Enable/Disable cycling that wedged snapshot.pgm. `GET /api/v1/qr/stop` ends a
+  window early; `GET /api/v1/qr/status` polls one without disturbing it
+  (`scanning`, `remaining_ms`, `frames`, `grabs`, `port1_owner`).
+  `GET /api/v1/qr/tap.pgm` returns one frame as a P5 PGM (self-describing
+  dimensions, stride removed; `503` with no window open, `504` on no frame).
+
+  The supervisor is the **only** thread that opens or closes the port, so no SDK
+  port call is ever concurrent. It waits in 200 ms slices against a
+  `CLOCK_MONOTONIC` deadline rather than sleeping to an absolute wall-clock
+  time, so a clock step cannot strand an open window.
+
+  `qr.windowMs` (default 15000, clamped 1000–60000) is the default budget,
+  `MUT_LIVE` since it is read when a window opens.
+
+  Note `/api/v1/qr/stop`, not `/qr/scan/stop`: the HTTP router matches on prefix
+  and accepts a `/` continuation, so a nested path is swallowed by the
+  `/qr/scan` route.
+
+- **The decode cascade remains isolated in `qr_decode`.** The daemon writes
+  each frozen luma frame to a bounded temporary PGM and invokes the existing
+  standalone helper, keeping vendored quirc/stb code out of the long-lived
+  encoder process. If the helper is absent, scan windows and `/qr/tap.pgm`
+  still work but no payload is decoded.
+
+  **Peak heap 5.04x -> 3.30x W*H**, measured with a live-heap interposer on a
+  1080x1080 exhaustive decode (5741 KB -> 3756 KB). The old peak held five live
+  W*H buffers at the lens-blur stage. Now the 3x3 box blur runs **in place**
+  behind a two-row ring of saved originals (bit-identical to the allocating
+  form), one scratch arena is reused across blur/lens/lens-blur/inversion with
+  the quarter-size half-scale slot behind it, and the blur is recomputed after
+  the lens stage rather than held across it — one extra ~30 ms pass on the
+  deep-failure path for a whole W*H.
+
+  The cascade also takes an abort callback, checked at every region boundary.
+  Without it the finest granularity a scan window has is one whole attempt.
+
+- **Windows decode through an isolated helper** (`src/star6e_luma_tap.c`). The
+  supervisor thread drives the helper as well as the port — one thread deliberately,
+  because "only the supervisor ever opens or closes port1" is what removes the
+  concurrency race class that retired snapshot.pgm. Each pass takes a fresh
+  frame, writes the frozen luma latch to a temporary PGM, invokes
+  `/usr/bin/qr_decode`, and publishes the result. **A decode ends the window
+  early**: the point of a window is to find one code, and
+  finishing hands port1 back to detect/stab seconds sooner.
+
+  No second frame buffer. A `decoding` flag freezes the latch for the helper's
+  duration: the reader keeps draining — that is never optional — but stops
+  overwriting, and `/api/v1/qr/tap.pgm` answers `409` rather than blocking an
+  httpd worker or handing back a frame being mutated.
+
+  `/api/v1/qr/status` grows a `decode` block: `attempts`, `decoded`, `payload`,
+  the helper `stage`, and both the winning and most recent invocation durations.
+  It survives the window closing and is cleared only by the next `/qr/scan`, so
+  a client polling at 1 Hz still sees the payload from a window that found its
+  code and shut down between two polls.
+
+  Decoder measurements before process isolation, on the Star6E bench (imx335,
+  1080x1080 centre square): a marker in
+  view decodes on the **first frame of the first attempt in 73-88 ms** (mean 81
+  ms over 100 windows). Worst case — no code present, full cascade — is 431 ms
+  at 1080x1080, 238 ms at 720x720, 117 ms at 540x540. The standalone helper
+  builds the cascade and quirc at `-O3` (1.66x on Cortex-A7); the daemon does
+  not link either. End-to-end helper overhead requires device revalidation.
+  Star6E only; Maruko has no luma tap.
+
+- **Scanning no longer starves the video pipeline.** A window that finds its
+  marker decodes on the first frame in ~85 ms and closes, which is what every
+  scan during development did. A window with *nothing to find* ran back-to-back
+  431 ms cascades for its whole budget, and on this 2-core part that measured
+  60 fps -> **23 fps** with the CPU pegged at 100%: only the encoder thread is
+  `SCHED_FIFO`, so the ISP, AWB and frame-shm threads lose to a decoder that
+  never yields. The scan thread now runs at `nice 10` and holds a duty cycle —
+  after each attempt it idles for as long as that attempt took, keeping
+  scanning under half a core at any geometry. The idle is an interruptible cond
+  wait, so `/api/v1/qr/stop` does not wait it out. Measured after: 60 fps at 55%
+  CPU through a 25 s no-decode window.
+
+  Explicitly *not* fixed by holding port1 open continuously: that addresses none
+  of the cascade CPU, and adds ~186 MB/s of SCL write traffic and 8-9 CPU points
+  for the whole run while locking detect and stab out of port1 permanently.
+
+- **Both edges of the port cycle are now rate-limited.** The port lifecycle
+  itself is cheap — instrumented, `SetPortMode` 0 ms, `EnablePort` 0 ms,
+  `SetChnOutputPortDepth` 0 ms either way, `DisablePort` 33-53 ms — but the
+  *rate* is what matters. Two hard kernel panics on the bench (`panic=20`
+  auto-reboot) came from `/api/v1/qr/scan` followed immediately by
+  `/api/v1/qr/stop`, which disables a port that only just came up while the SCL
+  still has buffers in flight: the #205 `snapshot.pgm` failure exactly.
+
+  This corrected an over-claim. The 200/200 and 100/100 cycle soaks behind
+  "window-scoped cycling is safe" had every window closing *naturally*, on
+  decode or deadline, after reaching steady state. An operator-triggered close
+  of a brand-new port was never exercised, and it is the dangerous case.
+
+  So `LT_REOPEN_COOLDOWN_MS` (500 ms) floors the interval between opens, and
+  `LT_MIN_WINDOW_MS` (750 ms) floors how long the port stays up once enabled.
+  Every early exit — `/qr/stop`, the decode-triggered close, the out-of-memory
+  exit — pulls the deadline in to that instant rather than to zero, so `/qr/stop`
+  requests a close rather than forcing one while still blocking until port1 is
+  actually free. Cost: a window that decodes in 85 ms holds port1 for 750 ms
+  instead of ~200 ms.
+
+  Device soak after the fix: **130 scan-then-immediate-stop cycles**, 30 natural
+  closes, 60 extends and 25 concurrent stop/scan/status races — 245 port
+  operations, zero wedge signatures, zero reboots, daemon pid unchanged
+  throughout.
+
+- **`tools/qr/test-images/phone.html` generates markers.** It was a viewer for
+  one checked-in SVG; it now carries a Version-1/Q alphanumeric QR encoder and
+  the 33x33 outer-frame wrapper inline, so a phone with no network can render
+  any valid payload — typed or from a **Random** button — plus tiny and inverted
+  presets alongside the existing sizes and 35-degree tilt.
+
+  Inline because the page has to work off a memory card, and validated so that
+  cannot rot: `make qr-test-phone` extracts the encoder from between sentinel
+  comments and, for ten payloads spanning both legal prefixes and the whole
+  alphanumeric set, asserts the wrapper is byte-identical to
+  `tools/qr/generate_qr.py` and that every rendered marker decodes back through
+  the same cascade the craft runs, at two scales. 51 assertions.
+
+  The data mask is deliberately *not* required to match the Python generator:
+  all eight masks are valid, and python-qrcode scores them slightly differently
+  from ISO 18004, so the two disagree on about two thirds of payloads while both
+  being correct. Where the masks do agree the matrices are identical to the
+  module, and the test asserts exactly that.
+
+- **A tap that cannot deliver is refused instead of squatting on port1.**
+  `MI_VPE_SetPortMode` and `MI_VPE_EnablePort` both return success for
+  geometries the SCL will not in fact drive — measured, a 160x90 port enables
+  cleanly and then delivers zero frames forever, while holding port1 against
+  detect and stab for the whole window. `lt_port_open()` now waits up to 1 s
+  for a first frame and tears down if none arrives, so `/api/v1/qr/scan`
+  answers an error immediately. Deliberately a frame probe rather than a
+  geometry rule: the SDK's real constraint is undocumented and the obvious
+  guess is wrong (the working 1920x1080 is not 16-aligned in height).
+
+- **`snapshot.width` / `snapshot.height` tooltips corrected**
+  (`src/venc_api.c`) — they described these as sizing the QR capture, which is
+  false in both directions. They set the VENC channel's *maximum* encodable
+  resolution and VENC has no scaler: measured, a value below the main stream
+  makes every frame fail `_MI_VENC_ValidateResolution` and `/snapshot.jpg`
+  answers `504` permanently, while a value above it changes nothing.
+
 ## [0.60.2] - 2026-07-30
 
 Star6E IMX335 driver gets the same power-on fix as Maruko's in 0.60.1.

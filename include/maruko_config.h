@@ -75,6 +75,7 @@ typedef struct {
 	double gop_size_sec;            /* mirrors video0.gop_size; 0.0 = mode auto */
 	int verbose;
 	int connected_udp;
+	int allow_unix_encoder_stall;
 	int keep_aspect;
 	int show_osd;
 	uint32_t ae_fps;        /* supervisory 3A rate (Hz); 0 disables */
