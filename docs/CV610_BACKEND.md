@@ -78,6 +78,9 @@ across API-driven process respawns and will not unload modules while any
 Waybeam process still owns the graph. Audio fields are not advertised as HTTP
 controls yet: enabling audio from a video-only boot also requires loading
 kernel modules, which an ordinary daemon respawn cannot safely perform.
+Audio remains a separate RTP/UDP side channel: UDP video uses the configured
+remote host, while local `unix://` or `frame-shm://` video sends audio to the
+co-located Waybeam Link listener on `127.0.0.1:<audioPort>`.
 
 The target module loader must provide the proven CV610 MPP stack and the
 matching sensor clock. The 100 fps mode specifically needs the 27 MHz clock

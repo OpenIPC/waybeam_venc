@@ -69,19 +69,20 @@ jobs:
           sparse-checkout: general/package/hisilicon-osdrv-hi3516cv6xx/files/lib
       - name: Fetch CV610 toolchain
         run: make toolchain-cv610
-      - name: Lint and build CV610 daemon and IMX662 plugin
+      - name: Lint and stage CV610 deployment bundle
         run: |
           make lint SOC_BUILD=cv610 \
             CV610_SDK_INC=.deps/openhisilicon \
             CV610_SDK_LIB=.deps/firmware/general/package/hisilicon-osdrv-hi3516cv6xx/files/lib
-          make build SOC_BUILD=cv610 \
-            CV610_SDK_INC=.deps/openhisilicon \
-            CV610_SDK_LIB=.deps/firmware/general/package/hisilicon-osdrv-hi3516cv6xx/files/lib
-          make sensor-cv610 SOC_BUILD=cv610 \
+          make stage SOC_BUILD=cv610 \
             CV610_SDK_INC=.deps/openhisilicon \
             CV610_SDK_LIB=.deps/firmware/general/package/hisilicon-osdrv-hi3516cv6xx/files/lib
           test -x out/cv610/waybeam
-          test -f sensors/cv610/imx662/libsns_imx662.so
+          test -x out/cv610/S95waybeam
+          test -x out/cv610/load-cv610-online
+          test -f out/cv610/waybeam.json
+          test -f out/cv610/waybeam-cv610.conf
+          test -f out/cv610/sensors/libsns_imx662.so
 
   # ── Full build + artifact upload ────────────────────────────────────
 

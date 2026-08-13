@@ -25,7 +25,9 @@ Initial HiSilicon CV610 + Sony IMX662 backend slice (#220).
   frames use the shared RTP packetizer and output-socket helpers; unsupported
   audio formats stay validation-gated. Audio configuration remains an explicit
   JSON plus platform-loader setting rather than an HTTP control because a
-  daemon respawn cannot load the opt-in kernel modules safely.
+  daemon respawn cannot load the opt-in kernel modules safely. Local transport
+  drops consume RTP sequence numbers, and UNIX/Frame-SHM video routes its
+  separate audio stream to the established loopback Waybeam Link listener.
 - Added the source-built IMX662 sensor plugin and CV610 staging/build docs.
   The staged bundle includes the device-verified CV610 init script and sensor
   clock profile. No proprietary SDK sources or runtime binaries are committed.

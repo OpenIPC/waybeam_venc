@@ -218,14 +218,28 @@ static int cv610_audio_output_start(Cv610AudioState *state,
 
 	if (config->outgoing.audio_port < 0)
 		return 0;
+	if (!video_output) {
+		fprintf(stderr, "ERROR: CV610 audio has no video transport context\n");
+		return -1;
+	}
 	memset(&audio_output, 0, sizeof(audio_output));
 	audio_output.type = VENC_OUTPUT_URI_UDP;
-	if (video_output && video_output->type == VENC_OUTPUT_URI_UDP)
+	/* Audio is always a separate RTP/UDP stream. UDP video supplies the
+	 * remote peer; unix:// and frame-shm:// are local video transports, so
+	 * their audio side channel intentionally targets the co-located Waybeam
+	 * Link process on loopback (the established 5601 ingest contract). */
+	if (video_output->type == VENC_OUTPUT_URI_UDP) {
 		snprintf(audio_output.host, sizeof(audio_output.host), "%s",
 			video_output->host);
-	else
+	} else if (video_output->type == VENC_OUTPUT_URI_UNIX ||
+		video_output->type == VENC_OUTPUT_URI_FRAME_SHM) {
 		snprintf(audio_output.host, sizeof(audio_output.host), "127.0.0.1");
-	port = config->outgoing.audio_port == 0 && video_output &&
+	} else {
+		fprintf(stderr, "ERROR: CV610 audio has no mapping for video transport %d\n",
+			video_output->type);
+		return -1;
+	}
+	port = config->outgoing.audio_port == 0 &&
 		video_output->type == VENC_OUTPUT_URI_UDP ? video_output->port :
 		(uint16_t)config->outgoing.audio_port;
 	if (port == 0) {
@@ -300,13 +314,18 @@ static void *cv610_audio_thread(void *opaque)
 
 			if (state->socket_handle < 0) {
 				sent = 1;
-			} else if (rtp_packetizer_send_packet(&state->rtp,
-				cv610_audio_write, state, stream.stream, stream.len,
-				NULL, 0, first) == 0) {
-				sent = 1;
+			} else {
+				int send_ret = rtp_packetizer_send_packet(&state->rtp,
+					cv610_audio_write, state, stream.stream, stream.len,
+					NULL, 0, first);
+				if (send_ret == 0)
+					sent = 1;
+				else
+					/* Expose the local drop as an RTP sequence gap. The
+					 * packetizer advances only after writer success. */
+					state->rtp.seq++;
 			}
-			/* RTP time follows capture cadence even when transport drops a
-			 * packet; sequence numbers advance only for emitted packets. */
+			/* RTP time follows capture cadence even when transport drops. */
 			state->rtp.timestamp += state->ticks_per_frame;
 			cv610_audio_note_frame(state, stream.len, sent);
 			if (sent)

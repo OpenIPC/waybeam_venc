@@ -63,6 +63,10 @@ typedef struct {
 	int venc_bound;
 } Cv610RunnerContext;
 
+/* Backend selection and the vendor MPP graph are process-singleton. The
+ * shared VencApplyCallbacks ABI carries no opaque pointer, so—like the
+ * Star6E and Maruko runtimes—the live-control wrappers refer to the one active
+ * runner. It is published before HTTP starts and cleared after HTTP joins. */
 static Cv610RunnerContext *g_cv610_runner;
 
 static int cv610_update_venc_attr(uint32_t bitrate, uint32_t gop,

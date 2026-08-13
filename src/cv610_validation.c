@@ -3,11 +3,8 @@
 #include <math.h>
 #include <string.h>
 
-/*
- * Phase-one CV610 builds intentionally omit the HTTP API.  Config loading
- * still calls the shared validation hook, so validate the subset the initial
- * backend actually consumes instead of linking SigmaStar-specific routes.
- */
+/* Validate the deliberately narrow CV610 feature set for both startup config
+ * loading and staged HTTP mutations. */
 const char *cv610_validate_config(const VencConfig *cfg)
 {
 	VencOutputUri uri;
@@ -54,6 +51,9 @@ const char *cv610_validate_config(const VencConfig *cfg)
 		return "invalid outgoing.server URI";
 	if (uri.type == VENC_OUTPUT_URI_SHM)
 		return "CV610 phase one supports udp://, unix://, or frame-shm:// output";
+	/* unix:// and frame-shm:// are local video transports. Their positive
+	 * audio_port intentionally selects the Waybeam Link loopback UDP side
+	 * channel; port 0 can inherit a destination only from UDP video. */
 	if (cfg->audio.enabled && cfg->outgoing.audio_port == 0 &&
 		uri.type != VENC_OUTPUT_URI_UDP)
 		return "CV610 audio port 0 requires a UDP video destination";

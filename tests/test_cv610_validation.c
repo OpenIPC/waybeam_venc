@@ -64,6 +64,13 @@ int main(void)
 	strcpy(cfg.audio.codec, "opus");
 	cfg.outgoing.audio_port = -1;
 	failures += expect_valid("cv610_reject_invalid_audio_port", &cfg, 0);
+	cfg.outgoing.audio_port = 5601;
+	strcpy(cfg.outgoing.server, "frame-shm://venc_frame_out");
+	failures += expect_valid("cv610_accept_frame_shm_audio_sidechannel",
+		&cfg, 1);
+	cfg.outgoing.audio_port = 0;
+	failures += expect_valid("cv610_reject_frame_shm_audio_port_zero",
+		&cfg, 0);
 
 	return failures ? 1 : 0;
 }
