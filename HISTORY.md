@@ -9,12 +9,23 @@ Initial HiSilicon CV610 + Sony IMX662 backend slice (#220).
   CV610 runtime libraries. SigmaStar's forced compatibility header is now
   scoped to the Star6E and Maruko builds.
 - Ported the hardware-verified IMX662 MIPI -> VI -> ISP -> H.265 VENC graph
-  into the common daemon lifecycle. The first slice accepts full-frame
+  into the common daemon lifecycle using VI-online mode with explicit mode
+  readback. The first slice accepts full-frame
   1080p30/60 RAW12 and 1080p90/100 RAW10, with bitrate, GOP, and I/P QP delta
   taken from the existing config ABI.
 - Added shared HEVC RTP output over UDP/abstract UNIX sockets and VFRM v1
   whole-frame SHM output. Packet-SHM, live output switching, sidecar, and
   pressure throttling remain follow-up work.
+- Enabled the shared HTTP/WebUI layer with a CV610 capability mask and native
+  live bitrate, GOP, I/P QP-delta, RTP payload-size, and IDR controls.
+- Added CV610 debug OSD through a thin CLUT4 region adapter over Waybeam's
+  shared drawing, palette, font, stats-panel, and CPU-sampling helpers.
+- Added the standalone-verified CV610 inner-ACODEC -> AI -> vendor AENC/Opus
+  path at 48 kHz mono, 10 ms, and 32 kbit/s restricted low delay. Encoded Opus
+  frames use the shared RTP packetizer and output-socket helpers; unsupported
+  audio formats stay validation-gated. Audio configuration remains an explicit
+  JSON plus platform-loader setting rather than an HTTP control because a
+  daemon respawn cannot load the opt-in kernel modules safely.
 - Added the source-built IMX662 sensor plugin and CV610 staging/build docs.
   The staged bundle includes the device-verified CV610 init script and sensor
   clock profile. No proprietary SDK sources or runtime binaries are committed.
@@ -27,8 +38,15 @@ decoded the stream, an independent 15-second FFmpeg pass sustained about 99
 fps, SIGTERM teardown completed in about 200 ms, and the installed init service
 completed a cold module restart in eight seconds. Frame-SHM, repeated restart
 cycles, and soak validation remain before the backend is production-ready.
-HTTP/WebUI controls are intentionally not linked until a truthful CV610
-capability mask and native callbacks land.
+The shared HTTP/WebUI now exposes only the controls backed by native CV610
+callbacks; unsupported fields are capability-gated.
+The audio encoder produced about 100 access units/s with zero send drops, and
+a host check confirmed consecutive PT98 RTP packets with 480-tick (10 ms)
+timestamp advances. Acoustic content is not verified because no microphone
+was connected. A service-stop hang exposed stale CV610 pidfile handling after
+an API respawn; the init script now tracks all respawn process names and
+refuses module unload until the graph has no owner. Device retest of that fix
+is pending a power cycle.
 
 ## [0.64.0] - 2026-08-06
 

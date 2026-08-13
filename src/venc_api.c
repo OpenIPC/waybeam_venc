@@ -5,6 +5,9 @@
 #include "idr_rate_limit.h"
 #include "intra_refresh.h"
 #include "pipeline_common.h"
+#if HAVE_BACKEND_CV610
+#include "cv610_validation.h"
+#endif
 #if HAVE_BACKEND_STAR6E
 #include "star6e_pipeline.h"
 #include "star6e_luma_tap.h"
@@ -13,8 +16,12 @@
 #include "maruko_pipeline.h"
 #endif
 #include "rtp_packetizer.h"
+#if !HAVE_BACKEND_CV610
 #include "sensor_select.h"
 #include "star6e_recorder.h"
+#else
+#define RECORDER_DEFAULT_DIR "/mnt/mmcblk0p1"
+#endif
 #include "venc_httpd.h"
 #include "venc_jpeg.h"
 #include "venc_webui.h"
@@ -809,6 +816,27 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	if (!canonical_key)
 		return 0;
 
+	/* CV610 starts with an intentionally small, truthful control surface.
+	 * All other shared-schema fields remain visible in config JSON but are
+	 * advertised unsupported and rejected before mutation. */
+	if (backend_name && strcmp(backend_name, "cv610") == 0) {
+		static const char *const supported[] = {
+			"system.web_port", "system.verbose",
+			"video0.bitrate", "video0.gop_size", "video0.qp_delta",
+			"outgoing.max_payload_size", "outgoing.audio_port",
+			"debug.show_osd",
+			"discovery.enabled", "discovery.service_type",
+			"discovery.name", "discovery.bare_alias",
+		};
+		size_t i;
+
+		for (i = 0; i < sizeof(supported) / sizeof(supported[0]); ++i) {
+			if (strcmp(canonical_key, supported[i]) == 0)
+				return 1;
+		}
+		return 0;
+	}
+
 	/* These controls have no Maruko implementation.  Keep them in the shared
 	 * schema so clients can render one dashboard, but advertise them honestly
 	 * and reject writes before they reach a missing callback or route. */
@@ -1006,6 +1034,11 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 			return "isp.sensor_bin path is not readable";
 	}
 	if (strcmp(key, "video0.qp_delta") == 0) {
+		if (strcmp(g_backend, "cv610") == 0) {
+			if (cfg->video0.qp_delta < -10 || cfg->video0.qp_delta > 30)
+				return "CV610 qp_delta must be in range [-10, 30]";
+			return NULL;
+		}
 		if (cfg->video0.qp_delta < -12 || cfg->video0.qp_delta > 12)
 			return "qp_delta must be in range [-12, 12]";
 	}
@@ -1213,6 +1246,9 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 
 const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 {
+#if HAVE_BACKEND_CV610
+	return cv610_validate_config(cfg);
+#else
 	/* Keys with rules in validate_field_cfg().  Backend-coupled checks
 	 * (validate_backend_config) intentionally excluded — g_backend is
 	 * registered after config load, so they cannot run here. */
@@ -1245,6 +1281,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 			return err;
 	}
 	return NULL;
+#endif
 }
 
 /* ── Config validation ───────────────────────────────────────────────── */
@@ -1255,9 +1292,14 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 static const char *validate_backend_config(const char *backend_name,
 	const VencConfig *cfg)
 {
-	(void)backend_name;
 	if (!cfg)
 		return "invalid config state";
+#if HAVE_BACKEND_CV610
+	if (backend_name && strcmp(backend_name, "cv610") == 0)
+		return cv610_validate_config(cfg);
+#else
+	(void)backend_name;
+#endif
 	return NULL;
 }
 
@@ -3408,12 +3450,14 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 
 /* ── Dual VENC channel API ───────────────────────────────────────────── */
 
+#if !HAVE_BACKEND_CV610
 #include "star6e.h"  /* MI_VENC_* */
 #include "star6e_controls.h"
+#endif
 
 static struct {
 	int active;
-	MI_VENC_CHN channel;
+	int channel;
 	uint32_t bitrate;   /* current kbps (may differ from config after adaptive) */
 	uint32_t fps;
 	uint32_t gop;
@@ -3430,7 +3474,7 @@ void venc_api_dual_register(int channel, uint32_t bitrate, uint32_t fps,
 	uint32_t gop)
 {
 	pthread_mutex_lock(&g_dual_mutex);
-	g_dual.channel = (MI_VENC_CHN)channel;
+	g_dual.channel = channel;
 	g_dual.bitrate = bitrate;
 	g_dual.fps = fps;
 	g_dual.gop = gop;
@@ -3847,6 +3891,12 @@ static int handle_resilience_status(int fd, const HttpRequest *req, void *ctx)
 
 static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 {
+#if HAVE_BACKEND_CV610
+	(void)req;
+	(void)ctx;
+	return httpd_send_error(fd, 501, "not_implemented",
+		"dual VENC is not available on CV610");
+#else
 	MI_VENC_CHN ch;
 	int ret;
 
@@ -3871,6 +3921,7 @@ static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 			"MI_VENC_RequestIdr failed");
 
 	return httpd_send_json(fd, 200, "{\"ok\":true,\"data\":{\"idr\":true}}");
+#endif
 }
 
 /* ── Sensor modes ────────────────────────────────────────────────────── */
@@ -3878,6 +3929,14 @@ static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
+#if HAVE_BACKEND_CV610
+	return httpd_send_json(fd, 200,
+		"{\"ok\":true,\"data\":["
+		"{\"name\":\"IMX662 1080p30 RAW12\",\"width\":1920,\"height\":1080,\"fps\":30},"
+		"{\"name\":\"IMX662 1080p60 RAW12\",\"width\":1920,\"height\":1080,\"fps\":60},"
+		"{\"name\":\"IMX662 1080p90 RAW10\",\"width\":1920,\"height\":1080,\"fps\":90},"
+		"{\"name\":\"IMX662 1080p100 RAW10\",\"width\":1920,\"height\":1080,\"fps\":100}]}");
+#else
 	pthread_mutex_lock(&g_cfg_mutex);
 	int pad = g_sensor_pad, mode = g_sensor_mode, forced = g_sensor_forced_pad;
 	pthread_mutex_unlock(&g_cfg_mutex);
@@ -3887,6 +3946,7 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 	int rc = httpd_send_json(fd, 200, json);
 	free(json);
 	return rc;
+#endif
 }
 
 /* ── Registration ────────────────────────────────────────────────────── */
@@ -3909,7 +3969,9 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	g_api_routes_registered = 1;
 	pthread_mutex_unlock(&g_cfg_mutex);
 
+#if !HAVE_BACKEND_CV610
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
+#endif
 #if HAVE_BACKEND_STAR6E
 	r |= venc_httpd_route("GET", "/api/v1/qr/tap.pgm", handle_qr_tap_pgm,
 		backend_ctx);

@@ -46,6 +46,24 @@ int main(void)
 	strcpy(cfg.video0.framing, "off");
 	cfg.video0.gop_size = 2000.0;
 	failures += expect_valid("cv610_reject_gop", &cfg, 0);
+	cfg.video0.gop_size = 3.0;
+	cfg.audio.enabled = true;
+	strcpy(cfg.audio.codec, "opus");
+	cfg.audio.sample_rate = 48000;
+	cfg.audio.channels = 1;
+	cfg.outgoing.audio_port = 5601;
+	failures += expect_valid("cv610_accept_opus", &cfg, 1);
+	cfg.audio.sample_rate = 16000;
+	failures += expect_valid("cv610_reject_audio_rate", &cfg, 0);
+	cfg.audio.sample_rate = 48000;
+	cfg.audio.channels = 2;
+	failures += expect_valid("cv610_reject_audio_channels", &cfg, 0);
+	cfg.audio.channels = 1;
+	strcpy(cfg.audio.codec, "pcm");
+	failures += expect_valid("cv610_reject_audio_codec", &cfg, 0);
+	strcpy(cfg.audio.codec, "opus");
+	cfg.outgoing.audio_port = -1;
+	failures += expect_valid("cv610_reject_invalid_audio_port", &cfg, 0);
 
 	return failures ? 1 : 0;
 }

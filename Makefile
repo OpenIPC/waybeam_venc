@@ -58,8 +58,13 @@ HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.
 MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c src/maruko_stabfill_probe.c src/maruko_ipu_yolo.c src/maruko_scl_ports.c
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c src/star6e_ipu.c src/star6e_ipu_yolo.c src/star6e_vpe_ports.c src/star6e_luma_tap.c src/star6e_awb.c
 CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
+	src/cv610_audio.c \
 	src/cv610_pipeline.c src/cv610_validation.c src/backend.c \
-	src/venc_config.c src/codec_config.c lib/cJSON.c \
+	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
+	src/venc_recordings.c src/codec_config.c src/pipeline_common.c \
+	src/file_util.c src/idr_rate_limit.c src/timing.c src/intra_refresh.c \
+	src/framing_kalman.c src/attitude_est.c src/debug_osd.c \
+	src/debug_osd_draw.c lib/cJSON.c \
 	src/h26x_util.c src/h26x_param_sets.c src/rtp_packetizer.c \
 	src/hevc_rtp.c src/rtp_session.c src/output_socket.c \
 	src/venc_frame_ring.c src/mdns_wire.c src/mdns_beacon.c \
@@ -131,10 +136,14 @@ SOC_CFLAGS := -I$(CV610_SDK_INC)/kernel/include/hi3516cv6xx \
 	-I$(CV610_SDK_INC)/libraries/isp/include/hi3516cv6xx \
 	-I$(CV610_SDK_INC)/libraries/isp/include/hi3516cv6xx/3a \
 	-I$(CV610_SDK_INC)/libraries/isp/include/hi3516cv6xx/ext_inc
-SOC_DEFS := -DPLATFORM_CV610 -DHAVE_BACKEND_CV610=1
+SOC_DEFS := -DPLATFORM_CV610 -DHAVE_BACKEND_CV610=1 \
+	-DHAVE_CV610_HTTP_API=1
 SOC_LDFLAGS := -Wl,--allow-shlib-undefined
 SOC_LIBS := -lss_mpi -lss_mpi_isp -lss_mpi_ae -lss_mpi_awb \
 	-lot_mpi_isp -lss_mpi_sysmem -lss_mpi_sysbind \
+	-lss_mpi_audio -lss_mpi_audio_adp \
+	-lopus -laac_enc -laac_dec -laac_sbr_enc -laac_sbr_dec \
+	-lmp3_enc -lmp3_dec -ldnvqe -lupvqe -lvoice_engine \
 	-lacs -lbnr -lcalcflicker -ldehaze -ldrc -lextend_stats \
 	-lir_auto -lldci -lsecurec -lot_osal -lm
 BASE_LIBS := -Wl,--start-group -lpthread -ldl -lrt -Wl,--end-group
@@ -356,6 +365,8 @@ stage: build qr-decode
 		cp -f config/waybeam.default.cv610.json $(OUT_DIR)/waybeam.json; \
 		cp -f init.d/S95waybeam.cv610 $(OUT_DIR)/S95waybeam; \
 		chmod +x $(OUT_DIR)/S95waybeam; \
+		cp -f init.d/load-cv610-online $(OUT_DIR)/load-cv610-online; \
+		chmod +x $(OUT_DIR)/load-cv610-online; \
 		cp -f config/waybeam-cv610-platform.conf \
 			$(OUT_DIR)/waybeam-cv610.conf; \
 	fi

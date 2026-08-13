@@ -1,12 +1,18 @@
 #include "cv610_runtime.h"
 
+#include "cv610_audio.h"
 #include "cv610_pipeline.h"
+#include "debug_osd.h"
 #include "h26x_param_sets.h"
 #include "h26x_util.h"
 #include "hevc_rtp.h"
+#include "idr_rate_limit.h"
 #include "output_socket.h"
 #include "rtp_session.h"
 #include "venc_frame_ring.h"
+#include "venc_api.h"
+#include "venc_httpd.h"
+#include "venc_respawn.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -42,8 +48,13 @@ typedef struct {
 	venc_frame_ring_t *frame_ring;
 	RtpPacketizerState rtp;
 	H26xParamSets param_sets;
+	DebugOsdState *debug_osd;
+	Cv610AudioState *audio;
 	HevcRtpStats rtp_stats;
 	uint32_t frame_ticks;
+	uint32_t live_bitrate;
+	uint16_t max_payload_size;
+	int verbose;
 	uint64_t frames;
 	uint64_t bytes;
 	uint64_t output_drops;
@@ -51,6 +62,124 @@ typedef struct {
 	int venc_started;
 	int venc_bound;
 } Cv610RunnerContext;
+
+static Cv610RunnerContext *g_cv610_runner;
+
+static int cv610_update_venc_attr(uint32_t bitrate, uint32_t gop,
+	int qp_delta, unsigned int fields)
+{
+	ot_venc_chn_attr attr;
+	td_s32 ret;
+
+	memset(&attr, 0, sizeof(attr));
+	ret = ss_mpi_venc_get_chn_attr(CV610_VENC_CHN, &attr);
+	if (ret != TD_SUCCESS || attr.rc_attr.rc_mode != OT_VENC_RC_MODE_H265_CBR)
+		return -1;
+	if (fields & 1u)
+		attr.rc_attr.h265_cbr.bit_rate = bitrate;
+	if (fields & 2u)
+		attr.rc_attr.h265_cbr.gop = gop;
+	if (fields & 4u)
+		attr.gop_attr.normal_p.ip_qp_delta = qp_delta;
+	ret = ss_mpi_venc_set_chn_attr(CV610_VENC_CHN, &attr);
+	return ret == TD_SUCCESS ? 0 : -1;
+}
+
+static int cv610_apply_bitrate(uint32_t kbps)
+{
+	int ret = cv610_update_venc_attr(kbps, 0, 0, 1u);
+
+	if (ret == 0 && g_cv610_runner)
+		__atomic_store_n(&g_cv610_runner->live_bitrate, kbps,
+			__ATOMIC_RELEASE);
+	return ret;
+}
+
+static int cv610_apply_gop(uint32_t frames)
+{
+	return cv610_update_venc_attr(0, frames, 0, 2u);
+}
+
+static int cv610_apply_qp_delta(int delta)
+{
+	return cv610_update_venc_attr(0, 0, delta, 4u);
+}
+
+static int cv610_apply_verbose(bool on)
+{
+	if (!g_cv610_runner)
+		return -1;
+	__atomic_store_n(&g_cv610_runner->verbose, on ? 1 : 0,
+		__ATOMIC_RELEASE);
+	return 0;
+}
+
+static int cv610_apply_max_payload_size(uint16_t size)
+{
+	Cv610RunnerContext *ctx = g_cv610_runner;
+
+	if (!ctx)
+		return -1;
+	__atomic_store_n(&ctx->max_payload_size, size, __ATOMIC_RELEASE);
+	return 0;
+}
+
+static int cv610_request_idr(void)
+{
+	if (!idr_rate_limit_allow(CV610_VENC_CHN))
+		return 0;
+	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
+		? 0 : -1;
+}
+
+static uint32_t cv610_query_live_fps(void)
+{
+	return g_cv610_runner ? g_cv610_runner->pipeline.fps : 0;
+}
+
+static char *cv610_query_transport_status(void)
+{
+	Cv610RunnerContext *ctx = g_cv610_runner;
+	char buf[384];
+	const char *transport;
+	uint8_t fill = 0;
+	int fill_valid = 0;
+	uint64_t frames;
+	uint64_t bytes;
+	uint64_t drops;
+
+	if (!ctx)
+		return NULL;
+	transport = ctx->frame_ring ? "frame-shm" :
+		(ctx->transport == VENC_OUTPUT_URI_UNIX ? "unix" : "udp");
+	if (ctx->socket_handle >= 0 &&
+		output_socket_get_fill_pct(ctx->socket_handle, &ctx->send_queue,
+			&fill) == 0)
+		fill_valid = 1;
+	frames = __atomic_load_n(&ctx->frames, __ATOMIC_RELAXED);
+	bytes = __atomic_load_n(&ctx->bytes, __ATOMIC_RELAXED);
+	drops = __atomic_load_n(&ctx->output_drops, __ATOMIC_RELAXED);
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"transport\":\"%s\","
+		"\"enabled\":%s,\"queue_fill_pct\":%u,\"queue_fill_valid\":%s,"
+		"\"frames\":%llu,\"bytes\":%llu,\"drops\":%llu}}",
+		transport, ctx->config.outgoing.enabled ? "true" : "false",
+		(unsigned int)fill, fill_valid ? "true" : "false",
+		(unsigned long long)frames, (unsigned long long)bytes,
+		(unsigned long long)drops);
+	return strdup(buf);
+}
+
+static const VencApplyCallbacks g_cv610_apply_callbacks = {
+	.apply_bitrate = cv610_apply_bitrate,
+	.apply_gop = cv610_apply_gop,
+	.apply_qp_delta = cv610_apply_qp_delta,
+	.apply_verbose = cv610_apply_verbose,
+	.request_idr = cv610_request_idr,
+	.query_live_fps = cv610_query_live_fps,
+	.apply_max_payload_size = cv610_apply_max_payload_size,
+	.query_transport_status = cv610_query_transport_status,
+};
 
 static void cv610_signal_handler(int signo)
 {
@@ -74,7 +203,7 @@ static int cv610_output_write(const uint8_t *header, size_t header_len,
 		ctx->destination_len, ctx->connected_udp, header, header_len,
 		payload1, payload1_len, payload2, payload2_len);
 	if (ret != 0) {
-		ctx->output_drops++;
+		__atomic_add_fetch(&ctx->output_drops, 1, __ATOMIC_RELAXED);
 		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)
 			return 0;
 	}
@@ -103,6 +232,9 @@ static int cv610_send_rtp_frame(Cv610RunnerContext *ctx,
 	size_t nal_len;
 	int nal_count = 0;
 	int status = 0;
+	uint16_t max_payload;
+
+	max_payload = __atomic_load_n(&ctx->max_payload_size, __ATOMIC_ACQUIRE);
 
 	while (h26x_util_annexb_next(frame, len, &cursor, &nal, &nal_len)) {
 		uint8_t nal_type;
@@ -116,10 +248,10 @@ static int cv610_send_rtp_frame(Cv610RunnerContext *ctx,
 		if (nal_type == 19 || nal_type == 20)
 			(void)hevc_rtp_prepend_param_sets(&ctx->param_sets, nal_type,
 				&ctx->rtp, cv610_output_write, ctx,
-				ctx->config.outgoing.max_payload_size, &ctx->rtp_stats);
+				max_payload, &ctx->rtp_stats);
 		if (hevc_rtp_send_nal(nal, nal_len, &ctx->rtp,
 			cv610_output_write, ctx, is_last,
-			ctx->config.outgoing.max_payload_size, &ctx->rtp_stats) == 0) {
+			max_payload, &ctx->rtp_stats) == 0) {
 			status = -1;
 			break;
 		}
@@ -232,9 +364,9 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	if (ss_mpi_sys_bind(&source, &destination) != TD_SUCCESS)
 		return -1;
 	ctx->venc_bound = 1;
-	printf("> CV610 H.265 %ux%u@%u CBR=%u kbit/s GOP=%u\n",
+	printf("> CV610 H.265 %ux%u@%u CBR=%u kbit/s GOP=%.2fs/%uf\n",
 		ctx->pipeline.width, ctx->pipeline.height, ctx->pipeline.fps,
-		ctx->config.video0.bitrate, gop);
+		ctx->config.video0.bitrate, ctx->config.video0.gop_size, gop);
 	return 0;
 }
 
@@ -325,11 +457,14 @@ static int cv610_prepare(void *opaque)
 	ctx->pipeline.data_rate_x2 = 0;
 	ctx->pipeline.bayer = 0;
 	ctx->pipeline.raw_bit = cfg->video0.fps > 60 ? 10 : 12;
-	/* Start with the standalone streamer's safest hardware-verified mode.
-	 * VI-online needs the separate OpenIPC PM-module fix tracked in #220. */
-	ctx->pipeline.vi_online = 0;
+	/* Match the standalone streamer's production graph. The CV610 module
+	 * loader now provides the clean SYS/VB lifecycle required by online VI. */
+	ctx->pipeline.vi_online = 1;
 	ctx->pipeline.i2c_bus = 0;
 	ctx->socket_handle = -1;
+	ctx->live_bitrate = cfg->video0.bitrate;
+	ctx->max_payload_size = cfg->outgoing.max_payload_size;
+	ctx->verbose = cfg->system.verbose ? 1 : 0;
 	if (cfg->outgoing.enabled &&
 		venc_config_parse_output_uri(cfg->outgoing.server,
 			&ctx->output_uri) != 0) {
@@ -355,9 +490,69 @@ static int cv610_init(void *opaque)
 		return -1;
 	if (cv610_venc_start(ctx) != 0)
 		return -1;
+	if (ctx->config.debug.show_osd) {
+		ctx->debug_osd = debug_osd_create(ctx->pipeline.width,
+			ctx->pipeline.height, NULL);
+		if (!ctx->debug_osd)
+			fprintf(stderr, "WARNING: CV610 debug OSD unavailable\n");
+	}
 	if (cv610_output_start(ctx) != 0)
 		return -1;
+	if (ctx->config.audio.enabled) {
+		ctx->audio = cv610_audio_start(&ctx->config, &ctx->output_uri);
+		if (!ctx->audio)
+			return -1;
+	}
+	g_cv610_runner = ctx;
+	if (venc_api_register(&ctx->config, "cv610",
+		&g_cv610_apply_callbacks, NULL) != 0)
+		return -1;
+	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
+	if (venc_httpd_start(ctx->config.system.web_port) != 0)
+		return -1;
 	return 0;
+}
+
+static void cv610_report_frame_status(Cv610RunnerContext *ctx)
+{
+	uint64_t audio_frames = 0;
+	uint64_t audio_bytes = 0;
+	uint64_t audio_packets = 0;
+	uint64_t audio_drops = 0;
+	uint64_t frames;
+
+	frames = __atomic_load_n(&ctx->frames, __ATOMIC_RELAXED);
+	if (frames != 1 && frames % ctx->pipeline.fps != 0)
+		return;
+	cv610_audio_get_stats(ctx->audio, &audio_frames, &audio_bytes,
+		&audio_packets, &audio_drops);
+	if (ctx->debug_osd) {
+		debug_osd_begin_frame(ctx->debug_osd);
+		debug_osd_text(ctx->debug_osd, 0, "fps", "%u", ctx->pipeline.fps);
+		debug_osd_text(ctx->debug_osd, 1, "cpu", "%d%%",
+			debug_osd_get_cpu(ctx->debug_osd));
+		debug_osd_text(ctx->debug_osd, 2, "enc", "%ux%u h265",
+			ctx->pipeline.width, ctx->pipeline.height);
+		debug_osd_text(ctx->debug_osd, 3, "br", "%uk",
+			__atomic_load_n(&ctx->live_bitrate, __ATOMIC_ACQUIRE));
+		debug_osd_text(ctx->debug_osd, 4, "drop", "%llu",
+			(unsigned long long)__atomic_load_n(&ctx->output_drops,
+				__ATOMIC_RELAXED));
+		debug_osd_end_frame(ctx->debug_osd);
+	}
+	if (!__atomic_load_n(&ctx->verbose, __ATOMIC_ACQUIRE))
+		return;
+	printf("> CV610 frames=%llu bytes=%llu output_drops=%llu\n",
+		(unsigned long long)frames,
+		(unsigned long long)__atomic_load_n(&ctx->bytes, __ATOMIC_RELAXED),
+		(unsigned long long)__atomic_load_n(&ctx->output_drops,
+			__ATOMIC_RELAXED));
+	if (ctx->audio)
+		printf("> CV610 audio frames=%llu bytes=%llu packets=%llu drops=%llu\n",
+			(unsigned long long)audio_frames,
+			(unsigned long long)audio_bytes,
+			(unsigned long long)audio_packets,
+			(unsigned long long)audio_drops);
 }
 
 static int cv610_run(void *opaque)
@@ -376,6 +571,13 @@ static int cv610_run(void *opaque)
 		size_t frame_len = 0;
 		td_s32 ret;
 		int ready;
+
+		if (venc_api_get_reinit()) {
+			venc_api_clear_reinit();
+			venc_respawn_request();
+			printf("> CV610 reinit requested: cold restart via fork+exec\n");
+			break;
+		}
 
 		FD_ZERO(&readfds);
 		FD_SET(venc_fd, &readfds);
@@ -412,20 +614,17 @@ static int cv610_run(void *opaque)
 				meta.flags = is_idr ? VENC_FRAME_FLAG_IDR : 0;
 				if (venc_frame_ring_write(ctx->frame_ring, &meta,
 					frame, (uint32_t)frame_len) != 0)
-					ctx->output_drops++;
-			} else if (ctx->socket_handle >= 0 &&
-				cv610_send_rtp_frame(ctx, frame, frame_len) != 0) {
-				ctx->output_drops++;
+					__atomic_add_fetch(&ctx->output_drops, 1,
+						__ATOMIC_RELAXED);
+			} else if (ctx->socket_handle >= 0) {
+				/* cv610_output_write owns per-datagram drop accounting. */
+				(void)cv610_send_rtp_frame(ctx, frame, frame_len);
 			}
-			ctx->frames++;
-			ctx->bytes += frame_len;
-			if (ctx->frames == 1 ||
-				ctx->frames % ctx->pipeline.fps == 0) {
-				printf("> CV610 frames=%llu bytes=%llu output_drops=%llu\n",
-					(unsigned long long)ctx->frames,
-					(unsigned long long)ctx->bytes,
-					(unsigned long long)ctx->output_drops);
-			}
+			__atomic_add_fetch(&ctx->frames, 1, __ATOMIC_RELAXED);
+			__atomic_add_fetch(&ctx->bytes, frame_len, __ATOMIC_RELAXED);
+			if (ctx->debug_osd)
+				debug_osd_sample_cpu(ctx->debug_osd);
+			cv610_report_frame_status(ctx);
 			free(frame);
 		}
 		ret = ss_mpi_venc_release_stream(CV610_VENC_CHN, &stream);
@@ -440,7 +639,14 @@ static void cv610_teardown(void *opaque)
 {
 	Cv610RunnerContext *ctx = opaque;
 
+	venc_httpd_pause();
+	venc_httpd_stop();
+	g_cv610_runner = NULL;
+	cv610_audio_stop(ctx->audio);
+	ctx->audio = NULL;
 	cv610_output_stop(ctx);
+	debug_osd_destroy(ctx->debug_osd);
+	ctx->debug_osd = NULL;
 	cv610_venc_stop(ctx);
 	cv610_pipeline_stop();
 }

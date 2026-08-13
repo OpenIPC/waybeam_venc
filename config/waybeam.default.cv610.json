@@ -19,7 +19,16 @@
     "streamMode": "rtp",
     "maxPayloadSize": 1400,
     "connectedUdp": true,
-    "allowUnixEncoderStall": false
+    "allowUnixEncoderStall": false,
+    "audioPort": 5601
+  },
+  "audio": {
+    "enabled": false,
+    "sampleRate": 48000,
+    "channels": 1,
+    "codec": "opus",
+    "volume": 80,
+    "mute": false
   },
   "discovery": {
     "enabled": true,

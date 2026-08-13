@@ -1,7 +1,9 @@
 #ifndef PIPELINE_COMMON_H
 #define PIPELINE_COMMON_H
 
+#ifndef PLATFORM_CV610
 #include "sensor_select.h"
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -11,12 +13,14 @@
 uint32_t pipeline_common_gop_frames(double gop_seconds, uint32_t fps);
 
 /** Build sensor selection config from requested video parameters. */
+#ifndef PLATFORM_CV610
 SensorSelectConfig pipeline_common_build_sensor_select_config(int forced_pad,
 	int forced_mode, uint32_t target_width, uint32_t target_height,
 	uint32_t target_fps);
 /** Log the selected sensor mode and actual frame rate. */
 void pipeline_common_report_selected_fps(const char *prefix,
 	uint32_t requested_fps, const SensorSelectResult *sensor);
+#endif
 /** Clamp requested image dimensions to maximum supported size. */
 void pipeline_common_clamp_image_size(const char *prefix, uint32_t max_width,
 	uint32_t max_height, uint32_t *image_width, uint32_t *image_height);

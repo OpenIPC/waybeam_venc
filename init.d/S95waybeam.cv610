@@ -3,15 +3,26 @@
 DAEMON=/usr/bin/waybeam
 LOADER=/usr/bin/load-cv610-online
 NAME=waybeam
+RESPAWN=waybeam-resp
+WATCHDOG=waybeam-wd
 PIDFILE=/var/run/$NAME.pid
 LOGFILE=/tmp/$NAME.log
 PLATFORM_CONFIG=/etc/waybeam-cv610.conf
 
 WAYBEAM_ENABLED=1
 CV610_SENSOR_PROFILE=sc4336p
+CV610_AUDIO=0
 # The platform override is target-local by design.
 # shellcheck disable=SC1090
 [ -r "$PLATFORM_CONFIG" ] && . "$PLATFORM_CONFIG"
+
+# API restart forks a short-lived waybeam-resp helper and the successor gets
+# a new PID. The pidfile therefore identifies only the original launch and
+# must never be used as proof that the graph is idle before unloading modules.
+still_running()
+{
+	pidof "$NAME" "$RESPAWN" "$WATCHDOG" >/dev/null 2>&1
+}
 
 start()
 {
@@ -19,47 +30,42 @@ start()
 		echo "$NAME disabled by configuration"
 		return 0
 	fi
+	if still_running; then
+		echo "$NAME already running"
+		return 0
+	fi
 	if [ -r "$PIDFILE" ]; then
-		read -r old_pid <"$PIDFILE"
-		if kill -0 "$old_pid" 2>/dev/null; then
-			echo "$NAME already running (pid $old_pid)"
-			return 0
-		fi
 		rm -f "$PIDFILE"
 	fi
-	CV610_SENSOR_PROFILE="$CV610_SENSOR_PROFILE" "$LOADER" start || return 1
+	CV610_SENSOR_PROFILE="$CV610_SENSOR_PROFILE" \
+		CV610_AUDIO="$CV610_AUDIO" "$LOADER" start || return 1
 	: >"$LOGFILE"
 	start-stop-daemon -S -m -q -p "$PIDFILE" -x "$DAEMON" -- \
 		>>"$LOGFILE" 2>&1 &
 	sleep 2
-	if [ ! -r "$PIDFILE" ]; then
-		echo "$NAME failed to create pidfile" >&2
-		"$LOADER" stop
-		return 1
-	fi
-	read -r pid <"$PIDFILE"
-	if ! kill -0 "$pid" 2>/dev/null; then
+	if ! still_running; then
 		echo "$NAME failed to start" >&2
 		cat "$LOGFILE" >&2
 		rm -f "$PIDFILE"
 		"$LOADER" stop
 		return 1
 	fi
-	echo "Started $NAME (pid $pid, sensor profile $CV610_SENSOR_PROFILE)"
+	echo "Started $NAME (sensor profile $CV610_SENSOR_PROFILE, audio $CV610_AUDIO)"
 }
 
 stop()
 {
-	pid=""
-	[ -r "$PIDFILE" ] && read -r pid <"$PIDFILE"
-	start-stop-daemon -K -q -p "$PIDFILE" 2>/dev/null || true
+	# Cover the current daemon plus either side of an API-respawn handoff.
+	# Never unload the MPP stack while any of them still owns the graph.
+	killall "$NAME" "$RESPAWN" "$WATCHDOG" 2>/dev/null || true
 	i=0
-	while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+	while still_running && [ "$i" -lt 100 ]; do
 		sleep 0.1
 		i=$((i + 1))
 	done
-	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+	if still_running; then
 		echo "$NAME did not stop within 10 seconds" >&2
+		echo "refusing to unload CV610 modules while the graph is owned" >&2
 		return 1
 	fi
 	rm -f "$PIDFILE"

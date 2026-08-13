@@ -476,6 +476,30 @@ static int test_field_support_by_backend(void)
 	CHECK("max qp unsupported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"video0.max_qp") == 0);
+	CHECK("bitrate supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.bitrate") == 1);
+	CHECK("gop alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.gopSize") == 1);
+	CHECK("opus config API unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"audio.codec") == 0);
+	CHECK("audio enable API unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"audio.enabled") == 0);
+	CHECK("audio mute unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"audio.mute") == 0);
+	CHECK("audio volume unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"audio.volume") == 0);
+	CHECK("output fps unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.fps") == 0);
+	CHECK("recording unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"record.enabled") == 0);
 
 	return failures;
 }
