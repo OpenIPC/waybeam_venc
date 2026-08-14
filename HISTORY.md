@@ -39,6 +39,22 @@ becomes a per-backend answer.
   recording start/stop buttons are disabled — nothing services a record
   request on CV610, so those routes already answered `501` through the
   existing `venc_api_set_record_http_control_supported()` opt-in.
+- **`video0.fps` is bounded by a boot-time clock profile the API cannot
+  see.** `CV610_SENSOR_PROFILE` (`init.d/S95waybeam.cv610`, overridable from
+  `/etc/waybeam-cv610.conf`) is passed as the `sensors=` modparam to
+  `open_sys_config_imx662.ko` and selects a **sensor clock profile**, not a
+  sensor — the part is IMX662 either way, and the module is the
+  IMX662-patched build. The `sc4336p` profile supplies the 27 MHz clock that
+  1080p100 needs; 30/60/90 want the `imx662` profile. Measured on the demo
+  board under the `sc4336p` profile: `video0.fps=100` delivers **100.0 fps**,
+  `video0.fps=60` delivers **43.6 fps** while `/api/v1/fps/live` and
+  `/api/v1/modes` both still report 60. A set is accepted and streams, it
+  just streams at the wrong rate. `/api/v1/modes` therefore advertises all
+  four modes as selectable when only the ones matching the loaded profile
+  are. Not fixed here: the daemon cannot read a kernel modparam, and an
+  in-process reinit never re-runs the module loader, so the real fix is for
+  `S95waybeam.cv610` to derive the profile from `video0.fps` at service
+  start.
 - **Debug OSD verified on CV610 hardware** for the first time
   (Hi3516CV610 demo board, 1080p100): `debug.showOsd=true` composites the
   CLUT4 RGN overlay into the encoded stream, with correct live values

@@ -1476,6 +1476,18 @@ Response `200`:
 selection.  The full `pads[].modes[]` list always shows every mode the
 driver enumerates so callers can show an "available modes" UI.
 
+**CV610 caveat — the mode list is wider than what the running kernel can
+deliver.** `CV610_SENSOR_PROFILE` (`init.d/S95waybeam.cv610`, overridable in
+`/etc/waybeam-cv610.conf`) selects a sensor **clock profile** in
+`open_sys_config_imx662.ko`; the sensor is IMX662 regardless of the profile
+name. The `sc4336p` profile carries the 27 MHz clock 1080p100 needs, the
+`imx662` profile carries 30/60/90. `video0.fps` is accepted and the stream
+comes up either way, but a mode outside the loaded profile runs at the wrong
+rate — measured 43.6 fps for `video0.fps=60` under the `sc4336p` profile,
+while `/api/v1/modes` and `/api/v1/fps/live` both still report 60. A client
+must not treat a `selected` mode as proof of the delivered rate; measure it
+from `framesSent` in `/api/v1/transport/status`.
+
 CV610 preserves the same envelope and `selected_pad` / `selected_mode` /
 `pads[].modes[]` shape. Its initial IMX662 backend reports one synthetic pad
 containing the four supported fixed-rate modes (1080p30/60 RAW12 and
@@ -1692,6 +1704,10 @@ divergence is listed.  As of `contract_version: 0.12.1`:
     48 kHz mono Opus configuration plus live `frames` / `bytes` / `packets` /
     `drops` counters. It answered `501 not_implemented` before while audio
     was in fact streaming.
+  - `video0.fps` on CV610 is honoured only within the sensor clock profile
+    the kernel modules were loaded with — see the CV610 caveat under
+    `/api/v1/modes`. No contract shape changed; the constraint is documented
+    because the mode list cannot express it.
   - Still unsupported on CV610, and deliberately so: `audio.sample_rate`,
     `audio.channels`, `audio.codec`, `audio.volume` (hardcoded in
     `src/cv610_audio.c`) and `video0.rc_mode` (hardcoded H.265 CBR). The
