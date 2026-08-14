@@ -200,6 +200,43 @@ static char *cv610_query_transport_status(void)
 	return strdup(buf);
 }
 
+/* The CV610 audio path is fixed at 48 kHz mono Opus with a hardcoded mic
+ * gain (src/cv610_audio.c), so this reports what the hardware is actually
+ * doing rather than echoing config fields the encoder never reads.  The
+ * counters come from the audio thread under its own stats lock. */
+static char *cv610_query_audio_status(void)
+{
+	Cv610RunnerContext *ctx = g_cv610_runner;
+	uint64_t frames = 0, bytes = 0, packets = 0, drops = 0;
+	char buf[384];
+	int pos;
+
+	if (!ctx)
+		return NULL;
+	if (!ctx->audio) {
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"enabled\":false,\"backend\":\"cv610\"}}");
+	} else {
+		cv610_audio_get_stats(ctx->audio, &frames, &bytes, &packets,
+			&drops);
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"enabled\":true,\"backend\":\"cv610\","
+			"\"running\":true,\"codec\":\"opus\","
+			"\"sample_rate\":48000,\"channels\":1,"
+			"\"muted\":%s,"
+			"\"frames\":%llu,\"bytes\":%llu,"
+			"\"packets\":%llu,\"drops\":%llu}}",
+			ctx->config.audio.mute ? "true" : "false",
+			(unsigned long long)frames, (unsigned long long)bytes,
+			(unsigned long long)packets, (unsigned long long)drops);
+	}
+	if (pos < 0 || pos >= (int)sizeof(buf))
+		return NULL;
+	return strdup(buf);
+}
+
 static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.apply_bitrate = cv610_apply_bitrate,
 	.apply_gop = cv610_apply_gop,
@@ -209,6 +246,7 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.query_live_fps = cv610_query_live_fps,
 	.apply_max_payload_size = cv610_apply_max_payload_size,
 	.query_transport_status = cv610_query_transport_status,
+	.query_audio_status = cv610_query_audio_status,
 };
 
 static void cv610_signal_handler(int signo)

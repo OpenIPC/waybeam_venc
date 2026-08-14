@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.0`
+- `contract_version`: `0.18.1`
 - `status`: `active`
 
 ## Governance Rules
@@ -997,6 +997,33 @@ Response `200` (Maruko with audio enabled):
 }
 ```
 
+Response `200` (CV610 with audio enabled):
+```json
+{
+  "ok": true,
+  "data": {
+    "enabled": true,
+    "backend": "cv610",
+    "running": true,
+    "codec": "opus",
+    "sample_rate": 48000,
+    "channels": 1,
+    "muted": false,
+    "frames": 1486,
+    "bytes": 60966,
+    "packets": 1486,
+    "drops": 0
+  }
+}
+```
+
+CV610 reports a different field set on purpose. It has no dlopened audio
+library to report on (the MPI is linked), and its 48 kHz mono Opus
+configuration is compiled in rather than read from config, so the useful
+observability there is throughput: `frames` / `bytes` / `packets` / `drops`
+are lifetime counters from the audio thread. A client must treat the field
+set as backend-specific and key off `backend`.
+
 Response `200` when `audio.enabled=false`:
 ```json
 {"ok":true,"data":{"enabled":false,"backend":"maruko"}}
@@ -1646,6 +1673,29 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.1` (additive — CV610 control surface reaches what the backend reads):
+  - CV610 now advertises `video0.fps`, `video0.size`, `outgoing.enabled`,
+    `outgoing.server`, `outgoing.connected_udp`,
+    `outgoing.allow_unix_encoder_stall`, `audio.enabled` and `audio.mute` as
+    supported. All were already read by the backend; the capability set
+    under-reported them, so `/api/v1/set` answered `501` for a value the
+    daemon would have honoured on the next start.
+  - **`mutability` is now per backend.** It may only be downgraded from the
+    shared table, never widened. CV610 reports `video0.fps`,
+    `outgoing.enabled`, `outgoing.server` and `audio.mute` as
+    `restart_required` where Star6E and Maruko report `live`, because the
+    CV610 slice reads them once at start. `/api/v1/live/set` rejects them
+    with `400 invalid_request` on CV610 and still applies them on Star6E.
+    A client must therefore read `mutability` from the target device rather
+    than assuming it per field.
+  - `/api/v1/audio/status` is implemented on CV610, reporting the fixed
+    48 kHz mono Opus configuration plus live `frames` / `bytes` / `packets` /
+    `drops` counters. It answered `501 not_implemented` before while audio
+    was in fact streaming.
+  - Still unsupported on CV610, and deliberately so: `audio.sample_rate`,
+    `audio.channels`, `audio.codec`, `audio.volume` (hardcoded in
+    `src/cv610_audio.c`) and `video0.rc_mode` (hardcoded H.265 CBR). The
+    shipped defaults coincide with the hardcoded values; that is not support.
 - `0.18.0` (additive — Unix encoder-stall compatibility):
   - Added restart-required `outgoing.allow_unix_encoder_stall` with camelCase
     alias `outgoing.allowUnixEncoderStall`. Default `false` retains bounded

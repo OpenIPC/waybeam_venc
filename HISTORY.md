@@ -1,5 +1,51 @@
 # History
 
+## [0.65.1] - 2026-08-14
+
+CV610 advertises the control surface it actually has, and `mutability`
+becomes a per-backend answer.
+
+- **The CV610 capability set was under-reporting the backend.** Eight fields
+  the slice genuinely reads were advertised unsupported, so `/api/v1/set`
+  returned `501` for values `cv610_prepare()` / `cv610_output_start()` /
+  `cv610_audio_start()` would have honoured on the next start: `video0.fps`,
+  `video0.size`, `outgoing.enabled`, `outgoing.server`,
+  `outgoing.connected_udp`, `outgoing.allow_unix_encoder_stall`,
+  `audio.enabled`, `audio.mute`. The practical consequence was that a CV610
+  craft could not be retargeted at all — `outgoing.server` was rejected, and
+  the only way to change the stream destination was to edit
+  `/etc/waybeam.json` on the device by hand.
+- **`mutability` is now per backend** (`field_mut_for_backend()`), and may
+  only be *downgraded* from the shared table — a backend can never widen a
+  restart-class field to live. CV610 reads `video0.fps`, `outgoing.enabled`,
+  `outgoing.server` and `audio.mute` once at start, so it reports them
+  `restart_required` where Star6E and Maruko report `live`. Without this the
+  widening above would have handed the dashboard four live controls that
+  accept a value and silently do nothing — the failure mode the Maruko
+  capability gates already exist to prevent. `/api/v1/live/set` rejects them
+  on CV610 with `400` and still applies them on Star6E; verified both ways.
+- **What stays unsupported is now unsupported for a stated reason.**
+  `audio.sample_rate` / `channels` / `codec` / `volume` are fixed at
+  48000 / 1 / opus / gain 8 in `src/cv610_audio.c`, and `video0.rc_mode` is
+  fixed at H.265 CBR in `cv610_venc_start()`. The shipped defaults happen to
+  match those constants, which is exactly why advertising them would be a
+  lie rather than a convenience.
+- **`/api/v1/audio/status` implemented on CV610.** It answered `501` while
+  the Opus encoder was in fact streaming. Now reports the fixed 48 kHz mono
+  configuration, the mute state, and live `frames` / `bytes` / `packets` /
+  `drops` from the audio thread's stats lock.
+- **Dashboard stops offering dead controls on CV610**: the Image Quality tab
+  is hidden (`/api/v1/iq`, `/ae`, `/awb` all answer `501` there) and the
+  recording start/stop buttons are disabled — nothing services a record
+  request on CV610, so those routes already answered `501` through the
+  existing `venc_api_set_record_http_control_supported()` opt-in.
+- **Debug OSD verified on CV610 hardware** for the first time
+  (Hi3516CV610 demo board, 1080p100): `debug.showOsd=true` composites the
+  CLUT4 RGN overlay into the encoded stream, with correct live values
+  (`fps: 100`, `br: 16000k`, `enc: 1920x1080 h265`). It was already wired in
+  `debug_osd.c` and advertised supported; it had simply never been switched
+  on with eyes on the output.
+
 ## [0.65.0] - 2026-08-13
 
 Initial HiSilicon CV610 + Sony IMX662 backend slice (#220).
