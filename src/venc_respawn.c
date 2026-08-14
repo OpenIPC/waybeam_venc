@@ -27,7 +27,7 @@
  * name in world-writable /tmp.  Preserve the established paths on existing
  * SigmaStar deployments. */
 #ifdef PLATFORM_CV610
-#define VENC_LOG_PATH       "/var/log/waybeam.log"
+#define VENC_LOG_PATH       "/var/run/waybeam.log"
 #else
 #define VENC_LOG_PATH       "/tmp/waybeam.log"
 #endif

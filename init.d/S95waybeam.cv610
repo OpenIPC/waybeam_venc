@@ -6,9 +6,10 @@ NAME=waybeam
 RESPAWN=waybeam-resp
 WATCHDOG=waybeam-wd
 PIDFILE=/var/run/$NAME.pid
-# Keep a privileged daemon's redirect outside world-writable /tmp.  The
+# Keep a privileged daemon's redirect outside world-writable /tmp.  OpenIPC
+# maps /var/log back to /tmp, while /var/run maps to root-owned /run.  The
 # respawn helper uses the same backend-specific path.
-LOGFILE=/var/log/$NAME.log
+LOGFILE=/var/run/$NAME.log
 PLATFORM_CONFIG=/etc/waybeam-cv610.conf
 
 WAYBEAM_ENABLED=1
