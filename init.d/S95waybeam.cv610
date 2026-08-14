@@ -6,7 +6,9 @@ NAME=waybeam
 RESPAWN=waybeam-resp
 WATCHDOG=waybeam-wd
 PIDFILE=/var/run/$NAME.pid
-LOGFILE=/tmp/$NAME.log
+# Keep a privileged daemon's redirect outside world-writable /tmp.  The
+# respawn helper uses the same backend-specific path.
+LOGFILE=/var/log/$NAME.log
 PLATFORM_CONFIG=/etc/waybeam-cv610.conf
 
 WAYBEAM_ENABLED=1

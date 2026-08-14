@@ -37,9 +37,8 @@
 
 /* ---- per-pipe context ----------------------------------------------------- */
 static ot_isp_sns_state   g_imx662_state[OT_ISP_MAX_PIPE_NUM];
-static ot_isp_sns_commbus g_imx662_bus_info[OT_ISP_MAX_PIPE_NUM] = {
-	[0 ...(OT_ISP_MAX_PIPE_NUM - 1)] = { .i2c_dev = 0 }
-};
+/* Static zero initialization selects I2C bus 0 for every pipe. */
+static ot_isp_sns_commbus g_imx662_bus_info[OT_ISP_MAX_PIPE_NUM];
 static td_u32 g_init_exposure[OT_ISP_MAX_PIPE_NUM] = {0};
 
 ot_isp_sns_state *imx662_get_ctx(ot_vi_pipe vi_pipe)

@@ -22,8 +22,15 @@
 /* Re-exec the same binary image as the current process. */
 #define VENC_SELF_EXE_PATH  "/proc/self/exe"
 
-/* Stdout/stderr destination for the child between dup2 and execve. */
+/* Stdout/stderr destination for the child between dup2 and execve.  CV610's
+ * service runs as root, so its log must not be opened through a predictable
+ * name in world-writable /tmp.  Preserve the established paths on existing
+ * SigmaStar deployments. */
+#ifdef PLATFORM_CV610
+#define VENC_LOG_PATH       "/var/log/waybeam.log"
+#else
 #define VENC_LOG_PATH       "/tmp/waybeam.log"
+#endif
 
 static int g_respawn_pending;
 static int g_respawn_cold_vif;
@@ -99,7 +106,7 @@ void venc_respawn_after_exit(void)
 	if (waited_ms >= wait_cap_ms) {
 		/* stderr is unbuffered and still wired to the parent's log
 		 * sink at this point — emit before the dup2 swap so the
-		 * message lands in the same /tmp/waybeam.log tail an
+		 * message lands in the same backend log tail an
 		 * operator will check. */
 		fprintf(stderr,
 			"ERROR: respawn child timed out after %d s waiting "
@@ -129,7 +136,7 @@ void venc_respawn_after_exit(void)
 	sigemptyset(&empty);
 	sigprocmask(SIG_SETMASK, &empty, NULL);
 
-	/* Re-route stdout/stderr to /tmp/waybeam.log in append mode so the
+	/* Re-route stdout/stderr to the backend log in append mode so the
 	 * pre-respawn tail stays available for diagnosis.  If dup2 fails
 	 * (e.g. fd table exhaustion from a leaked descriptor we missed in
 	 * teardown) bail before execv — running blind would lose any panic

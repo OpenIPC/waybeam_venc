@@ -26,19 +26,30 @@
 #define I2C_DEV_FILE_NUM     16
 #define I2C_BUF_NUM          8
 
-static int g_fd[OT_ISP_MAX_PIPE_NUM] = {[0 ...(OT_ISP_MAX_PIPE_NUM - 1)] = -1};
+/* Zero-initialized storage keeps this C99-portable without baking the SDK's
+ * pipe count into an explicit {-1, ...} initializer.  Store fd + 1 so zero
+ * remains the closed sentinel (open() may legally return descriptor 0). */
+static int g_fd_plus_one[OT_ISP_MAX_PIPE_NUM];
+
+static int imx662_i2c_fd(ot_vi_pipe vi_pipe)
+{
+	return g_fd_plus_one[vi_pipe] - 1;
+}
 
 td_s32 imx662_i2c_init(ot_vi_pipe vi_pipe)
 {
-	if (g_fd[vi_pipe] >= 0) {
+	int fd;
+
+	if (g_fd_plus_one[vi_pipe] != 0) {
 		return TD_SUCCESS;
 	}
 #ifdef OT_GPIO_I2C
-	g_fd[vi_pipe] = open("/dev/gpioi2c_ex", O_RDONLY, S_IRUSR);
-	if (g_fd[vi_pipe] < 0) {
+	fd = open("/dev/gpioi2c_ex", O_RDONLY, S_IRUSR);
+	if (fd < 0) {
 		isp_err_trace("Open gpioi2c_ex error!\n");
 		return TD_FAILURE;
 	}
+	g_fd_plus_one[vi_pipe] = fd + 1;
 #else
 	td_s32 ret;
 	char dev_file[I2C_DEV_FILE_NUM] = {0};
@@ -48,28 +59,28 @@ td_s32 imx662_i2c_init(ot_vi_pipe vi_pipe)
 	dev_num = bus->i2c_dev;
 	(td_void)snprintf_s(dev_file, sizeof(dev_file), sizeof(dev_file) - 1, "/dev/i2c-%u", dev_num);
 
-	g_fd[vi_pipe] = open(dev_file, O_RDWR, S_IRUSR | S_IWUSR);
-	if (g_fd[vi_pipe] < 0) {
+	fd = open(dev_file, O_RDWR, S_IRUSR | S_IWUSR);
+	if (fd < 0) {
 		isp_err_trace("Open /dev/i2c-%u error!\n", dev_num);
 		return TD_FAILURE;
 	}
 
-	ret = ioctl(g_fd[vi_pipe], OT_I2C_SLAVE_FORCE, (IMX662_I2C_ADDR >> 1));
+	ret = ioctl(fd, OT_I2C_SLAVE_FORCE, (IMX662_I2C_ADDR >> 1));
 	if (ret < 0) {
 		isp_err_trace("I2C_SLAVE_FORCE error!\n");
-		close(g_fd[vi_pipe]);
-		g_fd[vi_pipe] = -1;
+		close(fd);
 		return ret;
 	}
+	g_fd_plus_one[vi_pipe] = fd + 1;
 #endif
 	return TD_SUCCESS;
 }
 
 td_s32 imx662_i2c_exit(ot_vi_pipe vi_pipe)
 {
-	if (g_fd[vi_pipe] >= 0) {
-		close(g_fd[vi_pipe]);
-		g_fd[vi_pipe] = -1;
+	if (g_fd_plus_one[vi_pipe] != 0) {
+		close(imx662_i2c_fd(vi_pipe));
+		g_fd_plus_one[vi_pipe] = 0;
 		return TD_SUCCESS;
 	}
 	return TD_FAILURE;
@@ -85,16 +96,19 @@ td_s32 imx662_read_register(ot_vi_pipe vi_pipe, td_u32 addr)
 
 td_s32 imx662_write_register(ot_vi_pipe vi_pipe, td_u32 addr, td_u32 data)
 {
-	if (g_fd[vi_pipe] < 0) {
+	int fd;
+
+	if (g_fd_plus_one[vi_pipe] == 0) {
 		return TD_SUCCESS;
 	}
+	fd = imx662_i2c_fd(vi_pipe);
 #ifdef OT_GPIO_I2C
 	i2c_data.dev_addr      = IMX662_I2C_ADDR;
 	i2c_data.reg_addr      = addr;
 	i2c_data.addr_byte_num = IMX662_ADDR_BYTE;
 	i2c_data.data          = data;
 	i2c_data.data_byte_num = IMX662_DATA_BYTE;
-	if (ioctl(g_fd[vi_pipe], GPIO_I2C_WRITE, &i2c_data)) {
+	if (ioctl(fd, GPIO_I2C_WRITE, &i2c_data)) {
 		isp_err_trace("GPIO-I2C write failed!\n");
 		return TD_FAILURE;
 	}
@@ -106,7 +120,7 @@ td_s32 imx662_write_register(ot_vi_pipe vi_pipe, td_u32 addr, td_u32 data)
 	buf[idx++] = addr & 0xff;
 	buf[idx++] = data & 0xff;          /* IMX662_DATA_BYTE == 1 */
 
-	if (write(g_fd[vi_pipe], buf, IMX662_ADDR_BYTE + IMX662_DATA_BYTE) < 0) {
+	if (write(fd, buf, IMX662_ADDR_BYTE + IMX662_DATA_BYTE) < 0) {
 		isp_err_trace("I2C_WRITE error!\n");
 		return TD_FAILURE;
 	}

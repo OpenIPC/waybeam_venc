@@ -10,6 +10,7 @@
 #include "output_socket.h"
 #include "rtp_session.h"
 #include "venc_frame_ring.h"
+#include "venc_ring.h"
 #include "venc_api.h"
 #include "venc_httpd.h"
 #include "venc_respawn.h"
@@ -58,6 +59,7 @@ typedef struct {
 	uint64_t frames;
 	uint64_t bytes;
 	uint64_t output_drops;
+	uint64_t packets_sent;
 	int venc_created;
 	int venc_started;
 	int venc_bound;
@@ -144,33 +146,57 @@ static uint32_t cv610_query_live_fps(void)
 static char *cv610_query_transport_status(void)
 {
 	Cv610RunnerContext *ctx = g_cv610_runner;
-	char buf[384];
-	const char *transport;
-	uint8_t fill = 0;
-	int fill_valid = 0;
-	uint64_t frames;
-	uint64_t bytes;
+	char buf[640];
+	int pos;
 	uint64_t drops;
 
 	if (!ctx)
 		return NULL;
-	transport = ctx->frame_ring ? "frame-shm" :
-		(ctx->transport == VENC_OUTPUT_URI_UNIX ? "unix" : "udp");
-	if (ctx->socket_handle >= 0 &&
-		output_socket_get_fill_pct(ctx->socket_handle, &ctx->send_queue,
-			&fill) == 0)
-		fill_valid = 1;
-	frames = __atomic_load_n(&ctx->frames, __ATOMIC_RELAXED);
-	bytes = __atomic_load_n(&ctx->bytes, __ATOMIC_RELAXED);
 	drops = __atomic_load_n(&ctx->output_drops, __ATOMIC_RELAXED);
-	snprintf(buf, sizeof(buf),
-		"{\"ok\":true,\"data\":{\"transport\":\"%s\","
-		"\"enabled\":%s,\"queue_fill_pct\":%u,\"queue_fill_valid\":%s,"
-		"\"frames\":%llu,\"bytes\":%llu,\"drops\":%llu}}",
-		transport, ctx->config.outgoing.enabled ? "true" : "false",
-		(unsigned int)fill, fill_valid ? "true" : "false",
-		(unsigned long long)frames, (unsigned long long)bytes,
-		(unsigned long long)drops);
+	if (ctx->frame_ring) {
+		venc_frame_ring_fill_t fill;
+
+		if (venc_frame_ring_get_fill(ctx->frame_ring, &fill) != 0)
+			return NULL;
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":true,\"transport\":\"frame-shm\","
+			"\"fillPct\":%u,\"inPressure\":%s,"
+			"\"transportDrops\":%llu,\"pressureDrops\":0,"
+			"\"framesSent\":%llu,\"oversizeDrops\":%llu,"
+			"\"slotCount\":%u,\"usedSlots\":%u}}",
+			(unsigned)fill.fill_pct,
+			fill.fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT ? "true" : "false",
+			(unsigned long long)fill.full_drops,
+			(unsigned long long)fill.writes,
+			(unsigned long long)fill.oversize_drops,
+			(unsigned)fill.slot_count, (unsigned)fill.used_slots);
+	} else if (ctx->socket_handle >= 0) {
+		uint8_t fill_pct = 0;
+		const char *transport = ctx->transport == VENC_OUTPUT_URI_UNIX
+			? "unix" : "udp";
+
+		if (output_socket_get_fill_pct(ctx->socket_handle, &ctx->send_queue,
+			&fill_pct) != 0)
+			fill_pct = 0;
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":true,\"transport\":\"%s\","
+			"\"fillPct\":%u,\"inPressure\":%s,"
+			"\"pressureDrops\":0,\"transportDrops\":%llu,"
+			"\"packetsSent\":%llu}}",
+			transport, (unsigned)fill_pct,
+			fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT ? "true" : "false",
+			(unsigned long long)drops,
+			(unsigned long long)__atomic_load_n(&ctx->packets_sent,
+				__ATOMIC_RELAXED));
+	} else {
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":false,\"transport\":\"none\"}}");
+	}
+	if (pos < 0 || pos >= (int)sizeof(buf))
+		return NULL;
 	return strdup(buf);
 }
 
@@ -210,6 +236,8 @@ static int cv610_output_write(const uint8_t *header, size_t header_len,
 		__atomic_add_fetch(&ctx->output_drops, 1, __ATOMIC_RELAXED);
 		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)
 			return 0;
+	} else {
+		__atomic_add_fetch(&ctx->packets_sent, 1, __ATOMIC_RELAXED);
 	}
 	return ret;
 }
