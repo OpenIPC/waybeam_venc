@@ -95,7 +95,6 @@ typedef struct {
 static volatile sig_atomic_t g_stop;
 static pthread_t    g_isp_thread;
 static int          g_isp_thread_ok;
-static int          g_vpss_ok;
 
 static void *isp_thread_fn(void *arg)
 {
@@ -539,7 +538,6 @@ static int vpss_setup(const Cv610PipelineRuntimeConfig *c)
 	dst.dev_id = VPSS_GRP;
 	dst.chn_id = 0;
 	CV610_CHECK(ss_mpi_sys_bind(&src, &dst));
-	g_vpss_ok = 1;
 	printf("  ok  VPSS %ux%u -> %ux%u%s\n", c->width, c->height,
 		c->out_width, c->out_height,
 		(c->out_width == c->width && c->out_height == c->height) ?
@@ -547,18 +545,21 @@ static int vpss_setup(const Cv610PipelineRuntimeConfig *c)
 	return 0;
 }
 
+/* Unconditional, like the VI and ISP teardown below: vpss_setup() can fail
+ * at any of its four steps, and a group created by an earlier step is kernel
+ * state that outlives this process.  Skipping the destroy would leave grp 0
+ * behind, and the next start — a respawn reloads no modules — would fail
+ * create_grp with EXIST and never recover.  Each call is a no-op returning an
+ * error we ignore when the object was never created. */
 static void vpss_teardown(void)
 {
 	ot_mpp_chn src = { OT_ID_VI, VI_PIPE, VI_CHN };
 	ot_mpp_chn dst = { OT_ID_VPSS, VPSS_GRP, 0 };
 
-	if (!g_vpss_ok)
-		return;
 	(void)ss_mpi_sys_unbind(&src, &dst);
 	(void)ss_mpi_vpss_stop_grp(VPSS_GRP);
 	(void)ss_mpi_vpss_disable_chn(VPSS_GRP, VPSS_CHN);
 	(void)ss_mpi_vpss_destroy_grp(VPSS_GRP);
-	g_vpss_ok = 0;
 }
 
 /* --------------------------------------------------------------- teardown -- */
