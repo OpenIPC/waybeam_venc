@@ -223,11 +223,12 @@ static char *cv610_query_audio_status(void)
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"enabled\":true,\"backend\":\"cv610\","
-			"\"running\":true,\"codec\":\"opus\","
+			"\"running\":%s,\"codec\":\"opus\","
 			"\"sample_rate\":48000,\"channels\":1,"
 			"\"muted\":%s,"
 			"\"frames\":%llu,\"bytes\":%llu,"
 			"\"packets\":%llu,\"drops\":%llu}}",
+			cv610_audio_is_running(ctx->audio) ? "true" : "false",
 			ctx->config.audio.mute ? "true" : "false",
 			(unsigned long long)frames, (unsigned long long)bytes,
 			(unsigned long long)packets, (unsigned long long)drops);
@@ -575,9 +576,16 @@ static int cv610_init(void *opaque)
 	if (cv610_output_start(ctx) != 0)
 		return -1;
 	if (ctx->config.audio.enabled) {
+		/* Non-fatal, as on Star6E (star6e_pipeline.c discards the audio
+		 * init result): audio needs kernel modules the loader only stages
+		 * when CV610_AUDIO=1, and a daemon respawn cannot load them.  A
+		 * config toggle must not be able to take video down with it.
+		 * /api/v1/audio/status reports the running state, not the flag. */
 		ctx->audio = cv610_audio_start(&ctx->config, &ctx->output_uri);
 		if (!ctx->audio)
-			return -1;
+			fprintf(stderr,
+				"WARNING: CV610 audio did not start; continuing without it "
+				"(needs CV610_AUDIO=1 at module load)\n");
 	}
 	g_cv610_runner = ctx;
 	if (venc_api_register(&ctx->config, "cv610",

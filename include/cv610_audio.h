@@ -18,4 +18,7 @@ void cv610_audio_stop(Cv610AudioState *state);
 void cv610_audio_get_stats(Cv610AudioState *state, uint64_t *frames,
 	uint64_t *bytes, uint64_t *packets, uint64_t *drops);
 
+/** Non-zero while the capture thread is alive; clears when it exits. */
+int cv610_audio_is_running(Cv610AudioState *state);
+
 #endif /* CV610_AUDIO_H */

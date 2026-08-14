@@ -8,6 +8,7 @@ MODULE_DIR=${MODULE_DIR:-/lib/modules/$(uname -r)/hisilicon}
 ARTIFACT_DIR=${ARTIFACT_DIR:-/usr/lib/cv610}
 MMZ_START=${CV610_MMZ_START:-0x44000000}
 MMZ_SIZE=${CV610_MMZ_SIZE:-64M}
+# Clock profile for the initial insmod; the daemon retunes it per mode.
 SENSOR_PROFILE=${CV610_SENSOR_PROFILE:-imx662}
 # Analog microphone on the inner ACODEC. Off by default so the hardware-verified
 # video-only module set stays the default boot path.

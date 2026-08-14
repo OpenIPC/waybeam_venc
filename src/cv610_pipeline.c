@@ -99,36 +99,26 @@ static void *isp_thread_fn(void *arg)
 
 /* ------------------------------------------------------------------ MIPI -- */
 
-/* Sensor MCLK, chosen per mode.
- *
- * The IMX662 driver selects INCK_SEL per mode — 0x04 for the 100 fps path,
- * which feeds 27 MHz while the sensor believes it is on its 24 MHz profile,
- * and 0x01 for 30/60/90 on 37.125 MHz (see
- * sensors/cv610/imx662/imx662_sensor_ctl.c, imx662_default_reg_init()).  The
- * SoC-side clock has to match that choice or the sensor keeps its programmed
- * line timing against the wrong input clock and the frame rate scales by the
- * clock ratio — measured 43.6 fps for a 60 fps mode on the 27 MHz clock
- * (60 x 27/37.125), with every status surface still reporting 60.
- *
- * The clock lives in a CRG register that only the kernel can write, and the
- * vendor MIPI ioctls only gate it (ENABLE/DISABLE_SENSOR_CLOCK) rather than
- * set a rate, so sys_config exposes it as sns0_clk_hz.  We ask for a
- * frequency and let the module own the register encoding. */
+/* The IMX662 needs 37.125 MHz for 30/60/90 fps and 27 MHz for 100 fps, which
+ * takes the sensor's 24 MHz INCK profile overclocked (INCK_SEL 0x04, see
+ * imx662_default_reg_init() in sensors/cv610/imx662).  A mismatch is silent:
+ * the sensor keeps its programmed line timing against the wrong input clock
+ * and the rate scales by the ratio — measured 43.6 fps for a 60 fps mode on
+ * the 27 MHz clock.  The clock is a CRG register only the kernel can write,
+ * and the MIPI ioctls gate it without setting a rate, so sys_config exposes
+ * it as a frequency and keeps the register encoding. */
 #define CV610_SNS0_CLK_HZ_PATH "/sys/module/open_sys_config/parameters/sns0_clk_hz"
 
 static void sensor_clock_select(uint32_t fps)
 {
-	/* Mirrors imx662_default_reg_init(): only the 100 fps mode takes the
-	 * overclock path.  Keep the two in step. */
 	const unsigned hz = (fps > 90) ? 27000000u : 37125000u;
 	char buf[16];
 	int len, fd;
 
 	fd = open(CV610_SNS0_CLK_HZ_PATH, O_WRONLY);
 	if (fd < 0) {
-		/* An older sys_config has no runtime knob; the clock is then
-		 * whatever CV610_SENSOR_PROFILE selected at insmod, which is
-		 * right for exactly one mode.  Say which one this needs. */
+		/* Older sys_config: the clock stays as CV610_SENSOR_PROFILE left
+		 * it, which suits exactly one mode. */
 		fprintf(stderr,
 			"WARNING: %s absent — sensor clock stays as loaded; "
 			"%u fps needs %u Hz and will otherwise run at the wrong rate\n",
@@ -136,7 +126,7 @@ static void sensor_clock_select(uint32_t fps)
 		return;
 	}
 	len = snprintf(buf, sizeof(buf), "%u", hz);
-	if (len < 0 || (size_t)len >= sizeof(buf) ||
+	if (len < 0 || (size_t)len >= (int)sizeof(buf) ||
 		write(fd, buf, (size_t)len) != len) {
 		fprintf(stderr, "WARNING: set sensor clock %u Hz: %s\n", hz,
 			strerror(errno));
