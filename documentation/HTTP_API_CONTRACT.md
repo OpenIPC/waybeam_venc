@@ -1476,17 +1476,22 @@ Response `200`:
 selection.  The full `pads[].modes[]` list always shows every mode the
 driver enumerates so callers can show an "available modes" UI.
 
-**CV610 caveat — the mode list is wider than what the running kernel can
-deliver.** `CV610_SENSOR_PROFILE` (`init.d/S95waybeam.cv610`, overridable in
-`/etc/waybeam-cv610.conf`) selects a sensor **clock profile** in
-`open_sys_config_imx662.ko`; the sensor is IMX662 regardless of the profile
-name. The `sc4336p` profile carries the 27 MHz clock 1080p100 needs, the
-`imx662` profile carries 30/60/90. `video0.fps` is accepted and the stream
-comes up either way, but a mode outside the loaded profile runs at the wrong
-rate — measured 43.6 fps for `video0.fps=60` under the `sc4336p` profile,
-while `/api/v1/modes` and `/api/v1/fps/live` both still report 60. A client
-must not treat a `selected` mode as proof of the delivered rate; measure it
-from `framesSent` in `/api/v1/transport/status`.
+**CV610 note — every advertised mode is selectable, but only against a
+sys_config that exposes the runtime sensor clock.** The IMX662 runs 30/60/90
+fps on a 37.125 MHz input clock and 100 fps on 27 MHz (27 MHz fed while the
+sensor selects its 24 MHz INCK profile). The daemon sets the SoC-side clock
+to match the requested mode during MIPI bring-up, by writing
+`/sys/module/open_sys_config/parameters/sns0_clk_hz`.
+
+Against an older `open_sys_config` without that parameter the daemon logs a
+warning and continues, and the clock stays at whatever
+`CV610_SENSOR_PROFILE` selected at insmod — correct for exactly one mode.
+Every other mode then runs at the wrong rate, scaled by the clock ratio
+(measured: `video0.fps=60` on the 27 MHz profile delivers 43.6 fps =
+60 x 27/37.125) while `/api/v1/modes` and `/api/v1/fps/live` still report
+60. Neither endpoint measures anything, so a client must not treat a
+`selected` mode as proof of the delivered rate — measure it from
+`framesSent` in `/api/v1/transport/status`.
 
 CV610 preserves the same envelope and `selected_pad` / `selected_mode` /
 `pads[].modes[]` shape. Its initial IMX662 backend reports one synthetic pad
