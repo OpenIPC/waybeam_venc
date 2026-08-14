@@ -65,9 +65,13 @@ chmod +x /etc/init.d/S95waybeam /usr/bin/load-cv610-online
 
 The init script invokes the staged `/usr/bin/load-cv610-online` module
 loader before starting the daemon and unloads the MPP stack after graceful
-termination. Set `CV610_SENSOR_PROFILE=sc4336p` for 100 fps or `imx662` for
-30/60/90 fps. Only one service may own the graph; disable the standalone
+termination. Only one service may own the graph; disable the standalone
 `S95cv610-streamer` service when enabling `S95waybeam`.
+
+`CV610_SENSOR_PROFILE` picks the sensor clock the modules load with. It is
+now only a fallback: the daemon sets the clock for the selected mode during
+bring-up (see "Sensor clock" below), so the profile matters only against a
+sys_config too old to expose `sns0_clk_hz`.
 
 Audio is opt-in in both layers: set `CV610_AUDIO=1` in
 `/etc/waybeam-cv610.conf` so the loader provides `open_aio`, `open_ai`,
@@ -75,16 +79,34 @@ Audio is opt-in in both layers: set `CV610_AUDIO=1` in
 Opus, and a non-negative `outgoing.audioPort` in `/etc/waybeam.json`. The
 daemon refuses other CV610 audio formats. The init script tracks the daemon
 across API-driven process respawns and will not unload modules while any
-Waybeam process still owns the graph. Audio fields are not advertised as HTTP
-controls yet: enabling audio from a video-only boot also requires loading
-kernel modules, which an ordinary daemon respawn cannot safely perform.
+Waybeam process still owns the graph. `audio.enabled` and `audio.mute` are
+restart-required HTTP controls; the rest of the audio group is hardcoded and
+advertised unsupported. Enabling audio from a video-only boot still needs
+kernel modules that a daemon respawn cannot load, so the daemon warns and
+runs without audio rather than failing to start — `/api/v1/audio/status`
+reports the running state, not the config flag.
 Audio remains a separate RTP/UDP side channel: UDP video uses the configured
 remote host, while local `unix://` or `frame-shm://` video sends audio to the
 co-located Waybeam Link listener on `127.0.0.1:<audioPort>`.
 
-The target module loader must provide the proven CV610 MPP stack and the
-matching sensor clock. The 100 fps mode specifically needs the 27 MHz clock
-profile; 30/60/90 fps use the IMX662 37.125 MHz profile.
+## Sensor clock
+
+The IMX662 runs 30/60/90 fps on a 37.125 MHz input clock and 100 fps on
+27 MHz — the latter feeds 27 MHz while the sensor selects its 24 MHz INCK
+profile (register `0x3014 = 0x04`). The two halves must agree: the sensor
+keeps its programmed line timing regardless, so a mismatch is silent and
+scales the rate by the clock ratio (a 60 fps mode on the 27 MHz clock
+delivers 43.6 fps, measured, while every status surface still reports 60).
+
+The clock is one CRG register that only the kernel can write, and the vendor
+MIPI ioctls gate it without setting a rate. `mipi_setup()` therefore writes
+the frequency for the selected mode to
+`/sys/module/open_sys_config/parameters/sns0_clk_hz` during bring-up — after
+`ENABLE_SENSOR_CLOCK`, which rewrites the same register, and before
+`UNRESET_SENSOR`. The parameter comes from
+`0002-hi3516cv6xx-runtime-sensor-clock.patch` in the OpenIPC firmware tree;
+against an older module the daemon warns, names the clock the mode needs,
+and continues on the boot-time clock.
 
 ## Deferred phases
 

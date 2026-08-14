@@ -99,6 +99,43 @@ static void *isp_thread_fn(void *arg)
 
 /* ------------------------------------------------------------------ MIPI -- */
 
+/* The IMX662 needs 37.125 MHz for 30/60/90 fps and 27 MHz for 100 fps, which
+ * takes the sensor's 24 MHz INCK profile overclocked (INCK_SEL 0x04, see
+ * imx662_default_reg_init() in sensors/cv610/imx662).  A mismatch is silent:
+ * the sensor keeps its programmed line timing against the wrong input clock
+ * and the rate scales by the ratio — measured 43.6 fps for a 60 fps mode on
+ * the 27 MHz clock.  The clock is a CRG register only the kernel can write,
+ * and the MIPI ioctls gate it without setting a rate, so sys_config exposes
+ * it as a frequency and keeps the register encoding. */
+#define CV610_SNS0_CLK_HZ_PATH "/sys/module/open_sys_config/parameters/sns0_clk_hz"
+
+static void sensor_clock_select(uint32_t fps)
+{
+	const unsigned hz = (fps > 90) ? 27000000u : 37125000u;
+	char buf[16];
+	int len, fd;
+
+	fd = open(CV610_SNS0_CLK_HZ_PATH, O_WRONLY);
+	if (fd < 0) {
+		/* Older sys_config: the clock stays as CV610_SENSOR_PROFILE left
+		 * it, which suits exactly one mode. */
+		fprintf(stderr,
+			"WARNING: %s absent — sensor clock stays as loaded; "
+			"%u fps needs %u Hz and will otherwise run at the wrong rate\n",
+			CV610_SNS0_CLK_HZ_PATH, fps, hz);
+		return;
+	}
+	len = snprintf(buf, sizeof(buf), "%u", hz);
+	if (len < 0 || (size_t)len >= (int)sizeof(buf) ||
+		write(fd, buf, (size_t)len) != len) {
+		fprintf(stderr, "WARNING: set sensor clock %u Hz: %s\n", hz,
+			strerror(errno));
+	} else {
+		printf("  ok  sensor clock %u Hz for %u fps\n", hz, fps);
+	}
+	close(fd);
+}
+
 static int mipi_setup(const Cv610PipelineRuntimeConfig *c)
 {
 	combo_dev_attr_t attr;
@@ -148,6 +185,9 @@ static int mipi_setup(const Cv610PipelineRuntimeConfig *c)
 	mipi_ioctl(OT_MIPI_ENABLE_MIPI_CLOCK, &dev);
 	mipi_ioctl(OT_MIPI_UNRESET_MIPI, &dev);
 	mipi_ioctl(OT_MIPI_ENABLE_SENSOR_CLOCK, &clk);
+	/* After the enable, which rewrites the same CRG register, and before
+	 * the sensor leaves reset so it comes up on its final clock. */
+	sensor_clock_select(c->fps);
 	mipi_ioctl(OT_MIPI_UNRESET_SENSOR, &rst);
 #undef mipi_ioctl
 

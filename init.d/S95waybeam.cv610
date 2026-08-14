@@ -13,6 +13,11 @@ LOGFILE=/var/run/$NAME.log
 PLATFORM_CONFIG=/etc/waybeam-cv610.conf
 
 WAYBEAM_ENABLED=1
+# Sensor clock the modules load with.  Fallback only: the daemon sets the
+# clock for the selected mode at bring-up via sns0_clk_hz, so this matters
+# solely against a sys_config too old to expose that parameter, where it must
+# match video0.fps (sc4336p = 27 MHz for 100 fps, imx662 = 37.125 MHz for
+# 30/60/90).  It names a clock profile, not the sensor -- that is an IMX662.
 CV610_SENSOR_PROFILE=sc4336p
 CV610_AUDIO=0
 # The platform override is target-local by design.

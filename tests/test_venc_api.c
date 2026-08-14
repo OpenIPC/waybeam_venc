@@ -485,21 +485,93 @@ static int test_field_support_by_backend(void)
 	CHECK("opus config API unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"audio.codec") == 0);
-	CHECK("audio enable API unsupported cv610",
+	/* audio.enabled and audio.mute ARE read by cv610_audio_start(); the
+	 * rest of the audio group is hardcoded there, so it stays unsupported
+	 * even though the shipped defaults happen to match the constants. */
+	CHECK("audio enable supported cv610",
 		venc_api_field_supported_for_backend("cv610",
-			"audio.enabled") == 0);
-	CHECK("audio mute unsupported cv610",
+			"audio.enabled") == 1);
+	CHECK("audio mute supported cv610",
 		venc_api_field_supported_for_backend("cv610",
-			"audio.mute") == 0);
+			"audio.mute") == 1);
 	CHECK("audio volume unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"audio.volume") == 0);
-	CHECK("output fps unsupported cv610",
+	CHECK("audio sample rate unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
-			"video0.fps") == 0);
+			"audio.sample_rate") == 0);
+	CHECK("output fps supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.fps") == 1);
+	CHECK("output server supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"outgoing.server") == 1);
+	CHECK("rc mode unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.rc_mode") == 0);
 	CHECK("recording unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"record.enabled") == 0);
+
+	return failures;
+}
+
+/* CV610 reads video0.fps, outgoing.server/enabled and audio.mute only at
+ * start, so the shared table's MUT_LIVE must be downgraded per backend.  The
+ * observable contract: /api/v1/live/set rejects them on cv610 and keeps the
+ * config untouched, while the same field stays live on star6e and a field
+ * cv610 really does apply live still goes through. */
+static int test_cv610_restart_only_mutability(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_fps = test_apply_fps;
+	/* An fps live-set also re-derives the GOP in frames, so the timing
+	 * group needs apply_gop as well (live_group_supported_for_cfg). */
+	cb.apply_gop = test_apply_gop;
+	cb.apply_bitrate = test_apply_bitrate;
+
+	cfg.video0.fps = 100;
+	CHECK("cv610 live fps handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.fps=60", &status, response,
+			sizeof(response)) == 0);
+	CHECK("cv610 live fps rejected", status == 400);
+	CHECK("cv610 live fps cfg untouched", cfg.video0.fps == 100);
+	CHECK("cv610 live fps not applied",
+		g_api_cb_state.apply_fps_calls == 0);
+
+	/* Control 1: the same field on star6e is still a live apply, so the
+	 * rejection above is the backend gate and not a blanket fps block. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	cfg.video0.fps = 100;
+	CHECK("star6e live fps ok",
+		apply_query_http_path(&cfg, "star6e", &cb, "/api/v1/live/set",
+			"video0.fps=60", &status, response,
+			sizeof(response)) == 0);
+	CHECK("star6e live fps status 200", status == 200);
+	CHECK("star6e live fps cfg", cfg.video0.fps == 60);
+
+	/* Control 2: a field cv610 does apply live is unaffected — the
+	 * downgrade is per field, not "cv610 refuses live sets". */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	CHECK("cv610 live bitrate ok",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.bitrate=4096", &status, response,
+			sizeof(response)) == 0);
+	CHECK("cv610 live bitrate status 200", status == 200);
+	CHECK("cv610 live bitrate cfg", cfg.video0.bitrate == 4096);
+	CHECK("cv610 live bitrate applied",
+		g_api_cb_state.apply_bitrate_calls == 1);
 
 	return failures;
 }
@@ -1825,6 +1897,7 @@ int test_venc_api(void)
 	failures += test_active_precrop_setter();
 	failures += test_register_with_callbacks();
 	failures += test_field_support_by_backend();
+	failures += test_cv610_restart_only_mutability();
 	failures += test_qr_window_live_config_only();
 	failures += test_multi_set_live_success();
 	failures += test_detect_model_path_live_reload();
