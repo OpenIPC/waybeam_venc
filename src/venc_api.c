@@ -6,6 +6,7 @@
 #include "intra_refresh.h"
 #include "pipeline_common.h"
 #if HAVE_BACKEND_CV610
+#include "cv610_modes.h"
 #include "cv610_validation.h"
 #endif
 #if HAVE_BACKEND_STAR6E
@@ -3982,38 +3983,57 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
 #if HAVE_BACKEND_CV610
-	char json[1400];
+	/* Generated from the same table cv610_validate_config() rejects
+	 * against, so what this lists is exactly what /set accepts. */
+	size_t count = 0;
+	size_t i;
+	const Cv610SensorMode *modes = cv610_mode_table(&count);
+	const Cv610SensorMode *selected;
 	uint32_t fps = 0;
-	int selected_mode;
+	cJSON *root, *data, *pads, *pad, *arr;
+	char *str;
+	int rc;
 
 	pthread_mutex_lock(&g_cfg_mutex);
 	if (g_cfg)
 		fps = g_cfg->video0.fps;
 	pthread_mutex_unlock(&g_cfg_mutex);
-	switch (fps) {
-	case 30: selected_mode = 0; break;
-	case 60: selected_mode = 1; break;
-	case 90: selected_mode = 2; break;
-	case 100: selected_mode = 3; break;
-	default: selected_mode = -1; break;
+	/* The listed geometry is what the sensor captures.  video0.size is the
+	 * encoded size VPSS scales that to, so the frame rate alone selects. */
+	selected = cv610_mode_for_fps(fps);
+
+	root = cJSON_CreateObject();
+	if (!root)
+		return httpd_send_error(fd, 500, "internal_error", "out of memory");
+	cJSON_AddBoolToObject(root, "ok", 1);
+	data = cJSON_AddObjectToObject(root, "data");
+	cJSON_AddNumberToObject(data, "selected_pad", 0);
+	cJSON_AddNumberToObject(data, "selected_mode",
+		selected ? (double)(selected - modes) : -1);
+	pads = cJSON_AddArrayToObject(data, "pads");
+	pad = cJSON_CreateObject();
+	cJSON_AddItemToArray(pads, pad);
+	cJSON_AddNumberToObject(pad, "pad", 0);
+	arr = cJSON_AddArrayToObject(pad, "modes");
+	for (i = 0; i < count; i++) {
+		cJSON *m = cJSON_CreateObject();
+
+		cJSON_AddItemToArray(arr, m);
+		cJSON_AddNumberToObject(m, "index", (double)i);
+		cJSON_AddNumberToObject(m, "width", modes[i].width);
+		cJSON_AddNumberToObject(m, "height", modes[i].height);
+		cJSON_AddNumberToObject(m, "min_fps", modes[i].fps);
+		cJSON_AddNumberToObject(m, "max_fps", modes[i].fps);
+		cJSON_AddStringToObject(m, "desc", modes[i].desc);
+		cJSON_AddBoolToObject(m, "selected", &modes[i] == selected);
 	}
-	snprintf(json, sizeof(json),
-		"{\"ok\":true,\"data\":{\"selected_pad\":0,"
-		"\"selected_mode\":%d,\"pads\":[{\"pad\":0,\"modes\":["
-		"{\"index\":0,\"width\":1920,\"height\":1080,\"min_fps\":30,"
-		"\"max_fps\":30,\"desc\":\"1080p30 RAW12\",\"selected\":%s},"
-		"{\"index\":1,\"width\":1920,\"height\":1080,\"min_fps\":60,"
-		"\"max_fps\":60,\"desc\":\"1080p60 RAW12\",\"selected\":%s},"
-		"{\"index\":2,\"width\":1920,\"height\":1080,\"min_fps\":90,"
-		"\"max_fps\":90,\"desc\":\"1080p90 RAW10\",\"selected\":%s},"
-		"{\"index\":3,\"width\":1920,\"height\":1080,\"min_fps\":100,"
-		"\"max_fps\":100,\"desc\":\"1080p100 RAW10\",\"selected\":%s}]}]}}",
-		selected_mode,
-		selected_mode == 0 ? "true" : "false",
-		selected_mode == 1 ? "true" : "false",
-		selected_mode == 2 ? "true" : "false",
-		selected_mode == 3 ? "true" : "false");
-	return httpd_send_json(fd, 200, json);
+	str = cJSON_PrintUnformatted(root);
+	cJSON_Delete(root);
+	if (!str)
+		return httpd_send_error(fd, 500, "internal_error", "out of memory");
+	rc = httpd_send_json(fd, 200, str);
+	free(str);
+	return rc;
 #else
 	pthread_mutex_lock(&g_cfg_mutex);
 	int pad = g_sensor_pad, mode = g_sensor_mode, forced = g_sensor_forced_pad;

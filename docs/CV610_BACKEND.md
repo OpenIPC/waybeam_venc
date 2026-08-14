@@ -12,7 +12,9 @@ large control surface.
 
 - `SOC_BUILD=cv610` produces a 32-bit ARMv7 musl `waybeam` binary.
 - The backend owns the proven IMX662 MIPI -> VI -> ISP -> VENC lifecycle.
-- Linear 1920x1080 modes at 30/60 fps RAW12 and 90/100 fps RAW10 are accepted.
+- Linear 1920x1080 modes at 30/60 fps RAW12 and 90/100 fps RAW10 are accepted
+  (see "Sensor modes" below — the table in `src/cv610_modes.c` is the only
+  place they are written down).
 - H.265 CBR, GOP, and I/P QP delta come from the existing `VencConfig` fields.
 - UDP and abstract UNIX outputs use the shared HEVC RTP packetizer.
 - `frame-shm://` publishes the existing VFRM v1 whole-frame contract.
@@ -89,6 +91,47 @@ Audio remains a separate RTP/UDP side channel: UDP video uses the configured
 remote host, while local `unix://` or `frame-shm://` video sends audio to the
 co-located Waybeam Link listener on `127.0.0.1:<audioPort>`.
 
+## Sensor modes
+
+`video0.fps` selects a sensor mode; `video0.size` is the encoded size. They
+are independent because VPSS sits between VI and VENC and scales: the sensor
+always captures 1920x1080, and any smaller encoded geometry is produced by
+the scaler. This is the same split SigmaStar gets from its VPE SCL ports.
+
+VPSS is created even when no scaling is asked for, so the 1:1 path and a
+scaled one exercise the same graph and the same teardown order.
+
+Two attribute values are not optional, both established by probing the
+hardware (`ss_mpi_vpss_set_chn_attr` returns `0xa0078007`,
+`OT_ERR_ILLEGAL_PARAM`, otherwise):
+
+- `chn_mode` must be `OT_VPSS_CHN_MODE_USER`. `AUTO` makes the channel follow
+  the group's input size and rejects an explicit geometry — `USER` is what
+  makes the channel a scaler.
+- `frame_rate` must stay `-1/-1`. `0/0` is rejected with the same code.
+
+Pixel format is *not* one of them: VPSS accepts both NV21 and NV12 here, so
+the chain stays on NV21 to match what VI is willing to emit.
+
+Output geometry is validated against the selected mode: no upscaling past the
+capture size, and both dimensions required. Note the shared validator
+additionally requires a multiple of 8 in each dimension, so 960x540 is
+rejected on the height.
+
+`src/cv610_modes.c` holds the whole table — capture geometry, frame rate,
+MIPI RAW bit depth, and the input clock the mode's line timing assumes.
+Everything derives from it: `cv610_validate_config()` rejects anything that
+does not resolve, `cv610_prepare()` takes the bit depth and clock from the
+resolved mode, and `GET /api/v1/modes` is generated from it, so what that
+endpoint lists is exactly what `/api/v1/set` accepts. It mirrors
+`g_imx662_mode_tbl` in `sensors/cv610/imx662/imx662_cmos.c`, which is the
+sensor-side original; adding a mode means editing both. The geometry listed
+by `/api/v1/modes` is what the sensor captures, not the encoded size.
+
+A zero `video0.size` (`auto`) means the mode's own capture size. A half-set
+one (`1920x0`) is rejected rather than completed — it is a typo, not a
+request.
+
 ## Sensor clock
 
 The IMX662 runs 30/60/90 fps on a 37.125 MHz input clock and 100 fps on
@@ -100,7 +143,7 @@ delivers 43.6 fps, measured, while every status surface still reports 60).
 
 The clock is one CRG register that only the kernel can write, and the vendor
 MIPI ioctls gate it without setting a rate. `mipi_setup()` therefore writes
-the frequency for the selected mode to
+the frequency carried by the resolved mode to
 `/sys/module/open_sys_config/parameters/sns0_clk_hz` during bring-up — after
 `ENABLE_SENSOR_CLOCK`, which rewrites the same register, and before
 `UNRESET_SENSOR`. The parameter comes from
