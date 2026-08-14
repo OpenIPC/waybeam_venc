@@ -31,8 +31,8 @@
 #include "ss_mpi_sys_bind.h"
 #include "ss_mpi_venc.h"
 
-#define CV610_VI_PIPE 0
-#define CV610_VI_CHN 0
+#define CV610_VPSS_GRP 0
+#define CV610_VPSS_CHN 0
 #define CV610_VENC_CHN 0
 #define CV610_FRAME_RING_SLOTS 8
 #define CV610_FRAME_RING_BYTES (512u * 1024u)
@@ -382,13 +382,14 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 		gop = 1;
 	memset(&attr, 0, sizeof(attr));
 	attr.venc_attr.type = OT_PT_H265;
-	attr.venc_attr.max_pic_width = ctx->pipeline.width;
-	attr.venc_attr.max_pic_height = ctx->pipeline.height;
-	attr.venc_attr.buf_size = ((ctx->pipeline.width * ctx->pipeline.height * 3 / 4) + 63) & ~63u;
+	attr.venc_attr.max_pic_width = ctx->pipeline.out_width;
+	attr.venc_attr.max_pic_height = ctx->pipeline.out_height;
+	attr.venc_attr.buf_size =
+		((ctx->pipeline.out_width * ctx->pipeline.out_height * 3 / 4) + 63) & ~63u;
 	attr.venc_attr.profile = 0;
 	attr.venc_attr.is_by_frame = TD_TRUE;
-	attr.venc_attr.pic_width = ctx->pipeline.width;
-	attr.venc_attr.pic_height = ctx->pipeline.height;
+	attr.venc_attr.pic_width = ctx->pipeline.out_width;
+	attr.venc_attr.pic_height = ctx->pipeline.out_height;
 	attr.venc_attr.h265_attr.rcn_ref_share_buf_en = TD_TRUE;
 	attr.venc_attr.h265_attr.frame_buf_ratio = 75;
 	attr.rc_attr.rc_mode = OT_VENC_RC_MODE_H265_CBR;
@@ -428,9 +429,9 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	if (ss_mpi_venc_start_chn(CV610_VENC_CHN, &start) != TD_SUCCESS)
 		return -1;
 	ctx->venc_started = 1;
-	source.mod_id = OT_ID_VI;
-	source.dev_id = CV610_VI_PIPE;
-	source.chn_id = CV610_VI_CHN;
+	source.mod_id = OT_ID_VPSS;
+	source.dev_id = CV610_VPSS_GRP;
+	source.chn_id = CV610_VPSS_CHN;
 	destination.mod_id = OT_ID_VENC;
 	destination.dev_id = 0;
 	destination.chn_id = CV610_VENC_CHN;
@@ -438,14 +439,14 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 		return -1;
 	ctx->venc_bound = 1;
 	printf("> CV610 H.265 %ux%u@%u CBR=%u kbit/s GOP=%.2fs/%uf\n",
-		ctx->pipeline.width, ctx->pipeline.height, ctx->pipeline.fps,
+		ctx->pipeline.out_width, ctx->pipeline.out_height, ctx->pipeline.fps,
 		ctx->config.video0.bitrate, ctx->config.video0.gop_size, gop);
 	return 0;
 }
 
 static void cv610_venc_stop(Cv610RunnerContext *ctx)
 {
-	ot_mpp_chn source = { OT_ID_VI, CV610_VI_PIPE, CV610_VI_CHN };
+	ot_mpp_chn source = { OT_ID_VPSS, CV610_VPSS_GRP, CV610_VPSS_CHN };
 	ot_mpp_chn destination = { OT_ID_VENC, 0, CV610_VENC_CHN };
 
 	if (ctx->venc_bound) {
@@ -521,15 +522,17 @@ static int cv610_prepare(void *opaque)
 	/* Config loading and every staged HTTP mutation run the same lookup
 	 * through cv610_validate_config(), so reaching this is a config file
 	 * edited behind the daemon's back. */
-	mode = cv610_mode_lookup(cfg->video0.width, cfg->video0.height,
-		cfg->video0.fps);
-	if (mode == NULL) {
-		fprintf(stderr, "ERROR: CV610 has no sensor mode for %ux%u @ %u fps\n",
+	mode = cv610_mode_for_fps(cfg->video0.fps);
+	if (mode == NULL || cv610_mode_check_output(mode, cfg->video0.width,
+			cfg->video0.height) != NULL) {
+		fprintf(stderr, "ERROR: CV610 cannot encode %ux%u @ %u fps\n",
 			cfg->video0.width, cfg->video0.height, cfg->video0.fps);
 		return 1;
 	}
 	ctx->pipeline.width = mode->width;
 	ctx->pipeline.height = mode->height;
+	cv610_mode_resolve_output(mode, cfg->video0.width, cfg->video0.height,
+		&ctx->pipeline.out_width, &ctx->pipeline.out_height);
 	ctx->pipeline.fps = mode->fps;
 	ctx->pipeline.lanes = 4;
 	ctx->pipeline.data_rate_x2 = 0;
@@ -570,8 +573,8 @@ static int cv610_init(void *opaque)
 	if (cv610_venc_start(ctx) != 0)
 		return -1;
 	if (ctx->config.debug.show_osd) {
-		ctx->debug_osd = debug_osd_create(ctx->pipeline.width,
-			ctx->pipeline.height, NULL);
+		ctx->debug_osd = debug_osd_create(ctx->pipeline.out_width,
+			ctx->pipeline.out_height, NULL);
 		if (!ctx->debug_osd)
 			fprintf(stderr, "WARNING: CV610 debug OSD unavailable\n");
 	}
@@ -618,7 +621,7 @@ static void cv610_report_frame_status(Cv610RunnerContext *ctx)
 		debug_osd_text(ctx->debug_osd, 1, "cpu", "%d%%",
 			debug_osd_get_cpu(ctx->debug_osd));
 		debug_osd_text(ctx->debug_osd, 2, "enc", "%ux%u h265",
-			ctx->pipeline.width, ctx->pipeline.height);
+			ctx->pipeline.out_width, ctx->pipeline.out_height);
 		debug_osd_text(ctx->debug_osd, 3, "br", "%uk",
 			__atomic_load_n(&ctx->live_bitrate, __ATOMIC_ACQUIRE));
 		debug_osd_text(ctx->debug_osd, 4, "drop", "%llu",

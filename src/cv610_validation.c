@@ -12,12 +12,19 @@ const char *cv610_validate_config(const VencConfig *cfg)
 
 	if (!cfg)
 		return "missing config";
-	/* video0.size and video0.fps together name a sensor mode; there is no
-	 * scaler between VI and VENC, so a geometry the sensor cannot produce
-	 * is simply unavailable.  /api/v1/modes serves the same table. */
-	if (cv610_mode_lookup(cfg->video0.width, cfg->video0.height,
-			cfg->video0.fps) == NULL)
-		return "CV610 video0.size and video0.fps must name a mode listed by /api/v1/modes";
+	/* video0.fps selects the sensor mode; video0.size is the encoded size
+	 * VPSS scales that capture down to.  /api/v1/modes lists the modes. */
+	{
+		const Cv610SensorMode *mode = cv610_mode_for_fps(cfg->video0.fps);
+		const char *err;
+
+		if (mode == NULL)
+			return "CV610 video0.fps must name a mode listed by /api/v1/modes";
+		err = cv610_mode_check_output(mode, cfg->video0.width,
+			cfg->video0.height);
+		if (err)
+			return err;
+	}
 	if (cfg->video0.bitrate < VENC_BITRATE_MIN_KBPS ||
 		cfg->video0.bitrate > VENC_BITRATE_MAX_KBPS)
 		return "video0.bitrate is outside the supported range";

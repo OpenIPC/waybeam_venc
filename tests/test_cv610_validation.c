@@ -37,30 +37,53 @@ static int test_mode_table(void)
 	failures += expect("modes_table_non_empty", modes != NULL && count > 0);
 
 	for (i = 0; i < count; i++) {
-		m = cv610_mode_lookup(modes[i].width, modes[i].height,
-			modes[i].fps);
+		m = cv610_mode_for_fps(modes[i].fps);
 		failures += expect("modes_every_entry_resolves", m == &modes[i]);
 		failures += expect("modes_clock_set", modes[i].sensor_clock_hz != 0);
 		failures += expect("modes_raw_bit_sane",
 			modes[i].raw_bit == 10 || modes[i].raw_bit == 12);
 	}
 
-	/* Unset geometry means "the default mode's size", so fps alone picks. */
-	m = cv610_mode_lookup(0, 0, modes[count - 1].fps);
-	failures += expect("modes_auto_size_resolves", m == &modes[count - 1]);
-	/* A half-set geometry is a typo, not a request. */
-	failures += expect("modes_reject_half_set_size",
-		cv610_mode_lookup(modes[0].width, 0, modes[0].fps) == NULL);
 	failures += expect("modes_reject_unknown_fps",
-		cv610_mode_lookup(modes[0].width, modes[0].height, 45) == NULL);
-	failures += expect("modes_reject_unknown_size",
-		cv610_mode_lookup(1280, 720, modes[0].fps) == NULL);
+		cv610_mode_for_fps(45) == NULL);
+
+	/* Output geometry is checked against the mode, not matched to it: VPSS
+	 * scales the capture down to whatever video0.size asks for. */
+	m = &modes[0];
+	failures += expect("out_auto_ok",
+		cv610_mode_check_output(m, 0, 0) == NULL);
+	failures += expect("out_native_ok",
+		cv610_mode_check_output(m, m->width, m->height) == NULL);
+	failures += expect("out_720p_ok",
+		cv610_mode_check_output(m, 1280, 720) == NULL);
+	failures += expect("out_reject_half_set",
+		cv610_mode_check_output(m, m->width, 0) != NULL);
+	failures += expect("out_reject_unaligned",
+		cv610_mode_check_output(m, 1281, 720) != NULL);
+	failures += expect("out_reject_tiny",
+		cv610_mode_check_output(m, 64, 64) != NULL);
+	/* VPSS will happily upscale; refuse it — it spends link bandwidth to
+	 * carry no extra detail. */
+	failures += expect("out_reject_upscale",
+		cv610_mode_check_output(m, m->width + 8, m->height) != NULL);
+	failures += expect("out_reject_null_mode",
+		cv610_mode_check_output(NULL, 1280, 720) != NULL);
+
+	{
+		uint32_t w = 0, h = 0;
+
+		cv610_mode_resolve_output(m, 0, 0, &w, &h);
+		failures += expect("out_resolve_auto_is_capture",
+			w == m->width && h == m->height);
+		cv610_mode_resolve_output(m, 1280, 720, &w, &h);
+		failures += expect("out_resolve_explicit", w == 1280 && h == 720);
+	}
 
 	/* Control: the 100 fps mode must not share the 30 fps mode's clock.
 	 * If these ever converge the whole table is suspect. */
 	{
-		const Cv610SensorMode *slow = cv610_mode_lookup(1920, 1080, 30);
-		const Cv610SensorMode *fast = cv610_mode_lookup(1920, 1080, 100);
+		const Cv610SensorMode *slow = cv610_mode_for_fps(30);
+		const Cv610SensorMode *fast = cv610_mode_for_fps(100);
 
 		failures += expect("modes_1080p30_and_1080p100_present",
 			slow != NULL && fast != NULL);
@@ -93,7 +116,10 @@ int main(void)
 	cfg.video0.fps = 60;
 	cfg.video0.width = 1280;
 	cfg.video0.height = 720;
-	failures += expect_valid("cv610_reject_size", &cfg, 0);
+	failures += expect_valid("cv610_accept_720p_scaled", &cfg, 1);
+	cfg.video0.width = 1936;
+	cfg.video0.height = 1080;
+	failures += expect_valid("cv610_reject_upscale", &cfg, 0);
 	/* A size the sensor can produce, at a rate it cannot. */
 	cfg.video0.width = 1920;
 	cfg.video0.height = 1080;

@@ -3989,19 +3989,18 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 	size_t i;
 	const Cv610SensorMode *modes = cv610_mode_table(&count);
 	const Cv610SensorMode *selected;
-	uint32_t width = 0, height = 0, fps = 0;
+	uint32_t fps = 0;
 	cJSON *root, *data, *pads, *pad, *arr;
 	char *str;
 	int rc;
 
 	pthread_mutex_lock(&g_cfg_mutex);
-	if (g_cfg) {
-		width = g_cfg->video0.width;
-		height = g_cfg->video0.height;
+	if (g_cfg)
 		fps = g_cfg->video0.fps;
-	}
 	pthread_mutex_unlock(&g_cfg_mutex);
-	selected = cv610_mode_lookup(width, height, fps);
+	/* The listed geometry is what the sensor captures.  video0.size is the
+	 * encoded size VPSS scales that to, so the frame rate alone selects. */
+	selected = cv610_mode_for_fps(fps);
 
 	root = cJSON_CreateObject();
 	if (!root)

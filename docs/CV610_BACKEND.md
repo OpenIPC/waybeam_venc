@@ -93,23 +93,42 @@ co-located Waybeam Link listener on `127.0.0.1:<audioPort>`.
 
 ## Sensor modes
 
-`video0.size` and `video0.fps` together name a sensor mode. There is no
-scaler between VI and VENC on this graph — VENC encodes exactly what the
-sensor delivers — so a geometry the sensor cannot produce is not available at
-all, and the IMX662 plugin currently offers only 1920x1080. `video0.size` is
-still advertised and read: it participates in the lookup, and it is what will
-select between geometries once a mode with another one exists.
+`video0.fps` selects a sensor mode; `video0.size` is the encoded size. They
+are independent because VPSS sits between VI and VENC and scales: the sensor
+always captures 1920x1080, and any smaller encoded geometry is produced by
+the scaler. This is the same split SigmaStar gets from its VPE SCL ports.
 
-`src/cv610_modes.c` holds the whole table — geometry, frame rate, MIPI RAW
-bit depth, and the input clock the mode's line timing assumes. Everything
-derives from it: `cv610_validate_config()` rejects anything that does not
-resolve, `cv610_prepare()` takes the bit depth and clock from the resolved
-mode, and `GET /api/v1/modes` is generated from it, so what that endpoint
-lists is exactly what `/api/v1/set` accepts. It mirrors `g_imx662_mode_tbl`
-in `sensors/cv610/imx662/imx662_cmos.c`, which is the sensor-side original;
-adding a mode means editing both.
+VPSS is created even when no scaling is asked for, so the 1:1 path and a
+scaled one exercise the same graph and the same teardown order.
 
-A zero `video0.size` (`auto`) means the first entry's geometry. A half-set
+Two attribute values are not optional, both established by probing the
+hardware (`ss_mpi_vpss_set_chn_attr` returns `0xa0078007`,
+`OT_ERR_ILLEGAL_PARAM`, otherwise):
+
+- `chn_mode` must be `OT_VPSS_CHN_MODE_USER`. `AUTO` makes the channel follow
+  the group's input size and rejects an explicit geometry — `USER` is what
+  makes the channel a scaler.
+- `frame_rate` must stay `-1/-1`. `0/0` is rejected with the same code.
+
+Pixel format is *not* one of them: VPSS accepts both NV21 and NV12 here, so
+the chain stays on NV21 to match what VI is willing to emit.
+
+Output geometry is validated against the selected mode: no upscaling past the
+capture size, and both dimensions required. Note the shared validator
+additionally requires a multiple of 8 in each dimension, so 960x540 is
+rejected on the height.
+
+`src/cv610_modes.c` holds the whole table — capture geometry, frame rate,
+MIPI RAW bit depth, and the input clock the mode's line timing assumes.
+Everything derives from it: `cv610_validate_config()` rejects anything that
+does not resolve, `cv610_prepare()` takes the bit depth and clock from the
+resolved mode, and `GET /api/v1/modes` is generated from it, so what that
+endpoint lists is exactly what `/api/v1/set` accepts. It mirrors
+`g_imx662_mode_tbl` in `sensors/cv610/imx662/imx662_cmos.c`, which is the
+sensor-side original; adding a mode means editing both. The geometry listed
+by `/api/v1/modes` is what the sensor captures, not the encoded size.
+
+A zero `video0.size` (`auto`) means the mode's own capture size. A half-set
 one (`1920x0`) is rejected rather than completed — it is a typo, not a
 request.
 
