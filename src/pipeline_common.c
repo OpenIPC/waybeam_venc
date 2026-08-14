@@ -19,6 +19,7 @@ uint32_t pipeline_common_gop_frames(double gop_seconds, uint32_t fps)
 	return gop_frames < 1 ? 1 : gop_frames;
 }
 
+#ifndef PLATFORM_CV610
 SensorSelectConfig pipeline_common_build_sensor_select_config(int forced_pad,
 	int forced_mode, uint32_t target_width, uint32_t target_height,
 	uint32_t target_fps)
@@ -46,6 +47,7 @@ void pipeline_common_report_selected_fps(const char *prefix,
 		tag, requested_fps, sensor->fps, sensor->mode.minFps,
 		sensor->mode.maxFps);
 }
+#endif
 
 void pipeline_common_clamp_image_size(const char *prefix, uint32_t max_width,
 	uint32_t max_height, uint32_t *image_width, uint32_t *image_height)
@@ -104,6 +106,11 @@ typedef int (*isp_set_exposure_limit_fn_t)(int channel,
 int pipeline_common_cap_exposure_for_fps(uint32_t fps,
 	bool shutter_rule_180)
 {
+#ifdef PLATFORM_CV610
+	(void)fps;
+	(void)shutter_rule_180;
+	return -1;
+#else
 	isp_get_exposure_limit_fn_t fn_get;
 	isp_set_exposure_limit_fn_t fn_set;
 	PipelineIspExposureLimit config;
@@ -190,6 +197,7 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps,
 
 	dlclose(handle);
 	return ret;
+#endif
 }
 
 PipelinePrecropRect pipeline_common_compute_precrop(uint32_t sensor_w,

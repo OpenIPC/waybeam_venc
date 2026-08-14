@@ -9,6 +9,9 @@ CC_BIN := $(TOOLCHAIN_DIR)/bin/arm-openipc-linux-gnueabihf-gcc
 TOOLCHAIN_MARUKO_TGZ := toolchain.sigmastar-infinity6c.tgz
 TOOLCHAIN_MARUKO_DIR := toolchain/toolchain.sigmastar-infinity6c
 CC_MARUKO_BIN := $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
+TOOLCHAIN_CV610_TGZ := toolchain.hisilicon-hi3516cv6xx.tgz
+TOOLCHAIN_CV610_DIR := toolchain/toolchain.hisilicon-hi3516cv6xx
+CC_CV610_BIN := $(TOOLCHAIN_CV610_DIR)/bin/arm-openipc-linux-musleabi-gcc
 
 # Infinity6C kernel source for building sensor .ko via drivers/Makefile.
 # KSRC_MARUKO must point at an existing Infinity6C 5.10.61 kernel source
@@ -27,6 +30,14 @@ KSRC_STAR6E ?=
 STAR6E_CC ?= $(TOOLCHAIN_DIR)/bin/arm-openipc-linux-gnueabihf-gcc
 MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
+# Hi3516CV610 uses the public OpenHisilicon V5 headers and OpenIPC's ARMv7
+# musl sysroot.  These trees are intentionally external: the vendor SDK
+# libraries are not redistributed by this repository.
+CV610_CC ?= $(CC_CV610_BIN)
+CV610_SDK_INC ?= ../openhisilicon
+CV610_SDK_LIB ?= ../firmware/output/target/usr/lib
+CV610_CC_SUBMAKE := $(if $(findstring /,$(CV610_CC)),$(abspath $(CV610_CC)),$(CV610_CC))
+
 OUT_DIR := out/$(SOC_BUILD)
 OBJ_DIR := $(OUT_DIR)/obj
 TARGET := $(OUT_DIR)/waybeam
@@ -41,11 +52,23 @@ VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
 # -MMD -MP emits per-object .d files so a one-line change rebuilds just
 # that object + relink, instead of every source under the sun.  -s is in
 # LDFLAGS only (it's a link-time strip flag; not valid during -c).
-COMMON_CFLAGS := -Os -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VERSION=\"$(VENC_VERSION)\" -D_GNU_SOURCE -MMD -MP
+COMMON_CFLAGS := -Os -Iinclude -Ilib -DVENC_VERSION=\"$(VENC_VERSION)\" -D_GNU_SOURCE -MMD -MP
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c lib/cJSON.c
 HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_respawn.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_wire.c
 MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c src/maruko_stabfill_probe.c src/maruko_ipu_yolo.c src/maruko_scl_ports.c
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c src/star6e_ipu.c src/star6e_ipu_yolo.c src/star6e_vpe_ports.c src/star6e_luma_tap.c src/star6e_awb.c
+CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
+	src/cv610_audio.c \
+	src/cv610_pipeline.c src/cv610_validation.c src/backend.c \
+	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
+	src/venc_recordings.c src/codec_config.c src/pipeline_common.c \
+	src/file_util.c src/idr_rate_limit.c src/timing.c src/intra_refresh.c \
+	src/framing_kalman.c src/attitude_est.c src/debug_osd.c \
+	src/debug_osd_draw.c lib/cJSON.c \
+	src/h26x_util.c src/h26x_param_sets.c src/rtp_packetizer.c \
+	src/hevc_rtp.c src/rtp_session.c src/output_socket.c \
+	src/venc_frame_ring.c src/mdns_wire.c src/mdns_beacon.c \
+	src/device_id.c src/venc_respawn.c
 # Image-stabilization framing module (Star6E).  STAB=1 (default) compiles it
 # in; STAB=0 drops the source + the -DHAVE_FRAMING_STAB define, so the binary
 # carries no stabilization code and framing="stab" validate-rejects to off.
@@ -75,6 +98,7 @@ SRC := src/main.c src/backend_maruko.c $(MARUKO_ONLY_SRC) $(RECORDER_SRC) $(HELP
 DRV := vendor-libs/maruko
 DRV_EXTRA :=
 SOC_CFLAGS :=
+SOC_CFLAGS += -include include/ssc338q_compat.h
 SOC_DEFS := -DPLATFORM_STAR6E -DPLATFORM_MARUKO -DHAVE_BACKEND_MARUKO=1
 ifeq ($(STAB),1)
 SOC_DEFS += -DHAVE_FRAMING_STAB=1
@@ -92,7 +116,7 @@ CC := $(STAR6E_CC)
 SRC := src/main.c src/backend_star6e.c src/star6e_mi.c $(STAR6E_ONLY_SRC) $(RECORDER_SRC) $(HELPER_SRC) $(CONFIG_SRC)
 DRV :=
 DRV_EXTRA :=
-SOC_CFLAGS := -mfpu=neon-vfpv4 -mfloat-abi=hard -ftree-vectorize
+SOC_CFLAGS := -mfpu=neon-vfpv4 -mfloat-abi=hard -ftree-vectorize -include include/ssc338q_compat.h
 SOC_DEFS := -DPLATFORM_STAR6E -DHAVE_BACKEND_STAR6E=1
 ifeq ($(STAB),1)
 SOC_DEFS += -DHAVE_FRAMING_STAB=1
@@ -102,14 +126,37 @@ SOC_LIBS := -lm
 BASE_LIBS := -Wl,--start-group -lpthread -ldl -lrt -Wl,--end-group
 BUILD_TESTS := 1
 TOOLCHAIN_TARGET := toolchain
+else ifeq ($(SOC_BUILD),cv610)
+CC := $(CV610_CC)
+SRC := $(CV610_SRC)
+DRV := $(CV610_SDK_LIB)
+DRV_EXTRA :=
+SOC_CFLAGS := -I$(CV610_SDK_INC)/kernel/include/hi3516cv6xx \
+	-I$(CV610_SDK_INC)/kernel/include/hi3516cv6xx/exp_inc \
+	-I$(CV610_SDK_INC)/libraries/isp/include/hi3516cv6xx \
+	-I$(CV610_SDK_INC)/libraries/isp/include/hi3516cv6xx/3a \
+	-I$(CV610_SDK_INC)/libraries/isp/include/hi3516cv6xx/ext_inc
+SOC_DEFS := -DPLATFORM_CV610 -DHAVE_BACKEND_CV610=1 \
+	-DHAVE_CV610_HTTP_API=1
+SOC_LDFLAGS := -Wl,--allow-shlib-undefined
+SOC_LIBS := -lss_mpi -lss_mpi_isp -lss_mpi_ae -lss_mpi_awb \
+	-lot_mpi_isp -lss_mpi_sysmem -lss_mpi_sysbind \
+	-lss_mpi_audio -lss_mpi_audio_adp \
+	-lopus -laac_enc -laac_dec -laac_sbr_enc -laac_sbr_dec \
+	-lmp3_enc -lmp3_dec -ldnvqe -lupvqe -lvoice_engine \
+	-lacs -lbnr -lcalcflicker -ldehaze -ldrc -lextend_stats \
+	-lir_auto -lldci -lsecurec -lot_osal -lm
+BASE_LIBS := -Wl,--start-group -lpthread -ldl -lrt -Wl,--end-group
+BUILD_TESTS := 0
+TOOLCHAIN_TARGET := cv610-sdk
 else
-$(error Unsupported SOC_BUILD '$(SOC_BUILD)'; expected 'star6e' or 'maruko')
+$(error Unsupported SOC_BUILD '$(SOC_BUILD)'; expected 'star6e', 'maruko', or 'cv610')
 endif
 
 CFLAGS += $(COMMON_CFLAGS) $(SOC_CFLAGS) $(SOC_DEFS)
 LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
 
-.PHONY: help all build lint stage clean toolchain toolchain-maruko ksrc-maruko \
+.PHONY: help all build lint stage clean toolchain toolchain-maruko toolchain-cv610 cv610-sdk sensor-cv610 ksrc-maruko \
         drivers-maruko ksrc-star6e drivers-star6e maruko-pull maruko-deploy maruko-full json_cli regscan \
         remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
@@ -119,6 +166,7 @@ help:
 	@echo "Targets:"
 	@echo "  make build       Build standalone binaries (default, SOC_BUILD=star6e)"
 	@echo "  make build SOC_BUILD=maruko"
+	@echo "  make build SOC_BUILD=cv610 CV610_CC=... CV610_SDK_INC=... CV610_SDK_LIB=..."
 	@echo "  make lint        Fast warning check (-Wall -Werror, compile only)"
 	@echo "  make qr-decode   Build the freestanding QR decoder for SOC_BUILD"
 	@echo "  make unix-dgram-consumer Build the target-local unix:// RTP test consumer"
@@ -133,6 +181,9 @@ help:
 	@echo "  make clean       Clean build outputs"
 	@echo "  make toolchain   Ensure Star6E cross-toolchain is present"
 	@echo "  make toolchain-maruko Ensure Maruko cross-toolchain is present"
+	@echo "  make toolchain-cv610 Ensure CV610 cross-toolchain is present"
+	@echo "  make cv610-sdk Validate the external CV610 compiler, headers, and libraries"
+	@echo "  make sensor-cv610 Build the CV610 IMX662 userspace sensor plugin"
 	@echo "  make ksrc-maruko KSRC_MARUKO=/path/to/kernel  Validate Infinity6C kernel source tree"
 	@echo "  make drivers-maruko KSRC_MARUKO=/path/to/kernel  Build sensors/maruko/sensor_imx*_maruko.ko"
 	@echo "  make ksrc-star6e KSRC_STAR6E=/path/to/kernel  Validate Infinity6E 4.9.84 kernel source tree"
@@ -145,7 +196,7 @@ help:
 	@echo "  make remote-test Run bounded remote CLI/test-binary workflow (pass ARGS='...')"
 	@echo "  scripts/star6e_direct_deploy.sh cycle  Preferred Star6E venc deploy+HTTP smoke test"
 	@echo "  scripts/maruko_direct_deploy.sh cycle  Preferred Maruko venc deploy+HTTP smoke test"
-	@echo "  make verify      Build both backends and verify binaries exist"
+	@echo "  make verify      Build the production SigmaStar backends and run host checks"
 	@echo "  make pre-pr      Full pre-PR checklist (version, changelog, build)"
 	@echo "  make webui       Regenerate src/venc_webui.c from web/dashboard.html"
 	@echo "  make webui-check Fail if src/venc_webui.c is stale vs HTML source"
@@ -306,6 +357,19 @@ stage: build qr-decode
 			mkdir -p $(OUT_DIR)/isp-bins; cp -f iq-profiles/maruko-bin/*.bin $(OUT_DIR)/isp-bins/; \
 		fi; \
 	fi
+	@if [ "$(SOC_BUILD)" = "cv610" ]; then \
+		$(MAKE) sensor-cv610 SOC_BUILD=cv610 \
+			CV610_CC="$(CV610_CC)" CV610_SDK_INC="$(CV610_SDK_INC)"; \
+		mkdir -p $(OUT_DIR)/sensors; \
+		cp -f sensors/cv610/imx662/libsns_imx662.so $(OUT_DIR)/sensors/; \
+		cp -f config/waybeam.default.cv610.json $(OUT_DIR)/waybeam.json; \
+		cp -f init.d/S95waybeam.cv610 $(OUT_DIR)/S95waybeam; \
+		chmod +x $(OUT_DIR)/S95waybeam; \
+		cp -f init.d/load-cv610-online $(OUT_DIR)/load-cv610-online; \
+		chmod +x $(OUT_DIR)/load-cv610-online; \
+		cp -f config/waybeam-cv610-platform.conf \
+			$(OUT_DIR)/waybeam-cv610.conf; \
+	fi
 
 print-config:
 	@echo "SOC_BUILD=$(SOC_BUILD)"
@@ -321,6 +385,7 @@ HOST_CFLAGS  := -std=c99 -Wall -Wextra -g -O0 -D_GNU_SOURCE \
                 -Iinclude -Ilib -Itests -Itools/qr -Itools/qr/quirc \
                 $(QR_MATH_CFLAGS)
 TEST_RUNNER  := tests/test_runner
+CV610_VALIDATION_TEST := tests/test_cv610_validation
 TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_venc_api.c tests/test_venc_httpd.c \
                 tests/test_sensor_select.c tests/test_venc_ring.c \
@@ -364,8 +429,13 @@ TEST_LIB_SRCS := src/qr_scan.c tools/qr/waybeam_qr_format.c \
 $(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/h26x_param_sets.h include/hevc_rtp.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h include/venc_frame_ring.h include/venc_shm_throttle.h
 	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $@
 
-test: $(TEST_RUNNER)
+$(CV610_VALIDATION_TEST): tests/test_cv610_validation.c src/cv610_validation.c \
+		src/venc_config.c src/codec_config.c lib/cJSON.c
+	$(HOST_CC) $(HOST_CFLAGS) -Werror $^ -lm -o $@
+
+test: $(TEST_RUNNER) $(CV610_VALIDATION_TEST)
 	./$(TEST_RUNNER)
+	./$(CV610_VALIDATION_TEST)
 
 test-werror: HOST_CFLAGS += -Werror
 test-werror: $(TEST_RUNNER)
@@ -445,6 +515,37 @@ toolchain-maruko:
 		tar -xf "$(TOOLCHAIN_MARUKO_TGZ)" -C "$(TOOLCHAIN_MARUKO_DIR)" --strip-components=1; \
 		rm -f "$(TOOLCHAIN_MARUKO_TGZ)"; \
 	fi
+
+toolchain-cv610:
+	@if ! command -v "$(CV610_CC)" >/dev/null 2>&1 && [ ! -x "$(CV610_CC)" ]; then \
+		if [ "$(CV610_CC)" != "$(CC_CV610_BIN)" ]; then \
+			echo "ERROR: CV610 compiler not found: $(CV610_CC)" >&2; exit 1; \
+		fi; \
+		echo "Fetching $(TOOLCHAIN_CV610_TGZ)..."; \
+		wget -c -q --show-progress "$(TOOLCHAIN_URL)/$(TOOLCHAIN_CV610_TGZ)" -P "$$(pwd)"; \
+		mkdir -p "$(TOOLCHAIN_CV610_DIR)"; \
+		tar -xf "$(TOOLCHAIN_CV610_TGZ)" -C "$(TOOLCHAIN_CV610_DIR)" --strip-components=1; \
+		rm -f "$(TOOLCHAIN_CV610_TGZ)"; \
+	fi
+
+cv610-sdk: toolchain-cv610
+	@command -v "$(CV610_CC)" >/dev/null 2>&1 || { \
+		echo "ERROR: CV610 compiler not found: $(CV610_CC)" >&2; \
+		echo "       Pass CV610_CC=/path/to/arm-openipc-linux-musleabi-gcc" >&2; \
+		exit 1; \
+	}
+	@test -f "$(CV610_SDK_INC)/kernel/include/hi3516cv6xx/ss_mpi_venc.h" || { \
+		echo "ERROR: CV610 OpenHisilicon headers not found under $(CV610_SDK_INC)" >&2; \
+		exit 1; \
+	}
+	@test -f "$(CV610_SDK_LIB)/libss_mpi.so" || { \
+		echo "ERROR: CV610 runtime libraries not found under $(CV610_SDK_LIB)" >&2; \
+		exit 1; \
+	}
+
+sensor-cv610: cv610-sdk
+	$(MAKE) -C sensors/cv610/imx662 \
+		CV610_CC="$(CV610_CC_SUBMAKE)" CV610_SDK_INC="$(abspath $(CV610_SDK_INC))"
 
 # ── Maruko drivers ────────────────────────────────────────────────────
 #
@@ -584,9 +685,11 @@ pre-pr: verify
 	@echo "=== Pre-PR complete ==="
 
 clean:
-	rm -rf out/star6e out/maruko
+	rm -rf out/star6e out/maruko out/cv610
 	rm -f $(TIMING_PROBE_TARGET)
 	rm -f $(TEST_RUNNER)
+	rm -f $(CV610_VALIDATION_TEST)
 	rm -f $(QR_TEST_RUNNER)
 	rm -f $(QR_HOST_DECODE)
 	rm -f .build_soc
+	$(MAKE) -C sensors/cv610/imx662 clean

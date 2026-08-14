@@ -9,6 +9,10 @@
 #define HAVE_BACKEND_MARUKO 0
 #endif
 
+#ifndef HAVE_BACKEND_CV610
+#define HAVE_BACKEND_CV610 0
+#endif
+
 #include <stddef.h>
 
 #include "venc_config.h"

@@ -16,6 +16,7 @@ tools/ive_i6c_shift
 tools/ive_i6c_hwop
 
 tests/test_runner
+tests/test_cv610_validation
 tests/test_imu_ring
 tests/test_qr_marker
 tests/qr_decode_host
@@ -24,6 +25,10 @@ __pycache__/
 *.py[cod]
 
 enc-ctrl/tests/test_runner
+
+# Source-built CV610 sensor-plugin artifacts
+sensors/cv610/imx662/*.o
+sensors/cv610/imx662/*.so
 
 # Performance benchmark artifacts — local-only, not shipped upstream
 bench/

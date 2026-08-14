@@ -1,6 +1,47 @@
-# Crash Log — venc on Star6E
+# Crash Log — Waybeam encoder devices
 
 Per-incident notes on hangs, D-state, and recovery actions on the bench.
+
+## 2026-08-13 — CV610 module unload raced API-respawn successor
+
+**Bench:** `root@192.168.2.181` — Hi3516CV610 + IMX662, 1080p100.
+
+**Build:** issue #220 CV610 backend worktree with the standalone streamer's
+inner-ACODEC -> AI -> vendor AENC/Opus path integrated into shared Waybeam RTP
+and output helpers.
+
+**Known-good lead-up:** audio initialization completed, including the expected
+100 ms ACODEC power-up retry. The daemon sustained about 100 restricted-
+low-delay Opus access units/s beside 100 fps H.265 with zero reported audio
+drops. An isolated host receiver accepted 12 consecutive RTP v2/PT98 packets;
+sequence deltas were all 1 and 48 kHz timestamp deltas were all 480 (10 ms).
+This verifies capture/encode activity and wire timing, not acoustic content;
+no microphone was connected.
+
+**Trigger:** `/api/v1/set?outgoing.audioPort=5611` performed the expected
+process respawn and resumed audio successfully. A subsequent
+`/etc/init.d/S95waybeam stop` consulted the stale pidfile created for the
+pre-respawn parent. It therefore did not signal the active successor and
+called `load-cv610-online stop`, unloading the MPP/audio modules while the
+successor still owned the graph. The board became unreachable during that
+command. No further device commands were attempted.
+
+**Root cause/fix:** this was not an audio teardown failure: the API respawn had
+already completed one full audio teardown/re-init cycle successfully. The
+CV610 init script's PID-only stop logic was incompatible with Waybeam's
+fork/exec restart model. It now follows the mature init script: detect and
+signal `waybeam`, `waybeam-resp`, and `waybeam-wd` by process name, wait until
+all are gone, and refuse module unload on timeout.
+
+**State/recovery:** device backups exist as
+`/usr/bin/waybeam.pre-audio-20260813`,
+`/usr/bin/load-cv610-online.pre-audio-20260813`,
+`/etc/init.d/S95waybeam.pre-audio-20260813`, and matching platform/config
+backups. The test intended to restore `audio.enabled=false`, audio port 5601,
+and `CV610_AUDIO=0`, but the board became unreachable before those writes
+could be confirmed. Power-cycle before any further validation, inspect the
+three files, restore video-only defaults if necessary, and deploy the fixed
+init script before another service stop.
 
 ## 2026-08-01 — Craft unreachable during PR #214 unix:// 25 Mbps gate
 

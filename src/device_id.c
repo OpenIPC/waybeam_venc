@@ -24,6 +24,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#ifndef PLATFORM_CV610
 #define SSTAR_GEN_REG    0x1F003C00u  /* low16 = chip generation tag        */
 #define DIEID_BASE_6E    0x1F203150u  /* INFINITY6E (ssc338q) die-ID base   */
 #define DIEID_BASE_ALT   0x1F004058u  /* other SigmaStar generations        */
@@ -47,6 +48,7 @@ static bool read_phys(int fd, uint32_t phys, uint32_t *out)
 	munmap(map, (size_t)pg);
 	return true;
 }
+#endif
 
 bool device_id_serial(char *out, size_t len)
 {
@@ -54,6 +56,13 @@ bool device_id_serial(char *out, size_t len)
 		out[0] = '\0';
 	if (!out || len < 13)
 		return false;
+
+#ifdef PLATFORM_CV610
+	/* SigmaStar RIU addresses are unsafe on HiSilicon.  CV610 identity will
+	 * be added through an OTP-backed provider once its public register/API is
+	 * confirmed; mDNS falls back to the configured/host name meanwhile. */
+	return false;
+#else
 
 	/* O_RDWR|O_SYNC matches ipctool/devmem; least surprise on the chip. */
 	int fd = open("/dev/mem", O_RDWR | O_SYNC | O_CLOEXEC);
@@ -84,6 +93,7 @@ bool device_id_serial(char *out, size_t len)
 
 	snprintf(out, len, "%04X%04X%04X", a, b, c);
 	return true;
+#endif
 }
 
 static char        g_serial[16];

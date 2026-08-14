@@ -24,7 +24,7 @@
  * is a sliding ~2s average that still refreshes every 500ms. 2s is where
  * idle-derived busy measured stable (+/-2.5% on a constant load) while
  * remaining responsive enough to watch a mode change land. */
-#if defined(PLATFORM_STAR6E) || defined(PLATFORM_MARUKO)
+#if defined(PLATFORM_STAR6E) || defined(PLATFORM_MARUKO) || defined(PLATFORM_CV610)
 
 #include <stdio.h>
 #include <string.h>
@@ -117,7 +117,7 @@ static void osd_cpu_sample(OsdCpuSampler *cs)
 	cs->ts = now;
 }
 
-#endif /* PLATFORM_STAR6E || PLATFORM_MARUKO */
+#endif /* platform CPU sampler */
 
 /* Maruko build flags set BOTH PLATFORM_STAR6E and PLATFORM_MARUKO (see
  * Makefile:39 — the Star6E backend's MI shim headers are reused for
@@ -985,6 +985,240 @@ void debug_osd_line(DebugOsdState *osd, uint16_t x0, uint16_t y0,
  * offset is ever needed. Provided to satisfy the shared header. */
 void debug_osd_set_panel_offset(DebugOsdState *osd, int off_x, int off_y)
 { (void)osd; (void)off_x; (void)off_y; }
+
+#elif defined(PLATFORM_CV610)
+
+#include "debug_osd_draw.h"
+
+#include "ot_common_region.h"
+#include "ss_mpi_region.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#define RGN_HANDLE 0
+#define PANEL_X 8
+#define PANEL_Y 8
+#define LINE_MAX 64
+
+struct DebugOsdState {
+	uint32_t width, height;
+	ot_rgn_canvas_info canvas;
+	ot_mpp_chn channel;
+	OsdDirty dirty;
+	int font_scale;
+	int panel_off_x;
+	int panel_off_y;
+	int created;
+	int attached;
+	OsdCpuSampler cpu;
+};
+
+static void cv610_canvas(OsdCanvas *out, const DebugOsdState *ctx)
+{
+	out->pixels = ctx->canvas.virt_addr;
+	out->stride_bytes = ctx->canvas.stride;
+	out->width = ctx->width;
+	out->height = ctx->height;
+}
+
+static uint32_t cv610_clut_entry(const OsdPaletteEntry *entry)
+{
+	return ((uint32_t)entry->alpha << 24) |
+		((uint32_t)entry->red << 16) |
+		((uint32_t)entry->green << 8) | entry->blue;
+}
+
+DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
+	const void *vpe_port)
+{
+	DebugOsdState *ctx;
+	ot_rgn_attr attr;
+	ot_rgn_chn_attr chn_attr;
+	const OsdPaletteEntry *palette;
+	td_s32 ret;
+	unsigned int i;
+
+	(void)vpe_port;
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx)
+		return NULL;
+	ctx->width = frame_w;
+	ctx->height = frame_h;
+	ctx->font_scale = 3;
+	ctx->channel.mod_id = OT_ID_VENC;
+	ctx->channel.dev_id = 0;
+	ctx->channel.chn_id = 0;
+
+	memset(&attr, 0, sizeof(attr));
+	attr.type = OT_RGN_OVERLAY;
+	attr.attr.overlay.pixel_format = OT_PIXEL_FORMAT_ARGB_CLUT4;
+	attr.attr.overlay.bg_color = DEBUG_OSD_TRANSPARENT;
+	attr.attr.overlay.size.width = frame_w;
+	attr.attr.overlay.size.height = frame_h;
+	attr.attr.overlay.canvas_num = 2;
+	palette = osd_palette();
+	for (i = 0; i < OSD_PALETTE_SIZE; ++i)
+		attr.attr.overlay.clut[i] = cv610_clut_entry(&palette[i]);
+	ret = ss_mpi_rgn_create(RGN_HANDLE, &attr);
+	if (ret != TD_SUCCESS) {
+		fprintf(stderr, "[debug_osd] CV610 RGN create failed: 0x%x\n", ret);
+		free(ctx);
+		return NULL;
+	}
+	ctx->created = 1;
+
+	memset(&chn_attr, 0, sizeof(chn_attr));
+	chn_attr.is_show = TD_TRUE;
+	chn_attr.type = OT_RGN_OVERLAY;
+	chn_attr.attr.overlay_chn.point.x = 0;
+	chn_attr.attr.overlay_chn.point.y = 0;
+	chn_attr.attr.overlay_chn.fg_alpha = 255;
+	chn_attr.attr.overlay_chn.bg_alpha = 0;
+	chn_attr.attr.overlay_chn.layer = 0;
+	chn_attr.attr.overlay_chn.qp_info.enable = TD_FALSE;
+	chn_attr.attr.overlay_chn.dst = OT_RGN_ATTACH_JPEG_MAIN;
+	ret = ss_mpi_rgn_attach_to_chn(RGN_HANDLE, &ctx->channel, &chn_attr);
+	if (ret != TD_SUCCESS) {
+		fprintf(stderr, "[debug_osd] CV610 RGN attach failed: 0x%x\n", ret);
+		debug_osd_destroy(ctx);
+		return NULL;
+	}
+	ctx->attached = 1;
+	ret = ss_mpi_rgn_get_canvas_info(RGN_HANDLE, &ctx->canvas);
+	if (ret != TD_SUCCESS || !ctx->canvas.virt_addr ||
+		ctx->canvas.stride < (frame_w + 1u) / 2u) {
+		fprintf(stderr, "[debug_osd] CV610 canvas invalid: 0x%x\n", ret);
+		debug_osd_destroy(ctx);
+		return NULL;
+	}
+	for (i = 0; i < frame_h; ++i)
+		memset((uint8_t *)ctx->canvas.virt_addr + i * ctx->canvas.stride,
+			0, ctx->canvas.stride);
+	if (ss_mpi_rgn_update_canvas(RGN_HANDLE) != TD_SUCCESS) {
+		debug_osd_destroy(ctx);
+		return NULL;
+	}
+	osd_dirty_reset(&ctx->dirty, frame_w, frame_h);
+	fprintf(stdout, "[debug_osd] CV610 CLUT4 overlay %ux%u stride=%u\n",
+		frame_w, frame_h, ctx->canvas.stride);
+	return ctx;
+}
+
+void debug_osd_destroy(DebugOsdState *osd)
+{
+	if (!osd)
+		return;
+	if (osd->attached) {
+		(void)ss_mpi_rgn_detach_from_chn(RGN_HANDLE, &osd->channel);
+		osd->attached = 0;
+		usleep(50000);
+	}
+	if (osd->created)
+		(void)ss_mpi_rgn_destroy(RGN_HANDLE);
+	free(osd);
+}
+
+void debug_osd_begin_frame(DebugOsdState *osd)
+{
+	OsdCanvas canvas;
+
+	if (!osd || ss_mpi_rgn_get_canvas_info(RGN_HANDLE, &osd->canvas) != TD_SUCCESS)
+		return;
+	cv610_canvas(&canvas, osd);
+	osd_clear_dirty(&canvas, &osd->dirty);
+	osd_dirty_reset(&osd->dirty, osd->width, osd->height);
+}
+
+void debug_osd_end_frame(DebugOsdState *osd)
+{
+	if (osd)
+		(void)ss_mpi_rgn_update_canvas(RGN_HANDLE);
+}
+
+void debug_osd_text(DebugOsdState *osd, int row, const char *label,
+	const char *fmt, ...)
+{
+	char value[48];
+	char line[LINE_MAX];
+	va_list ap;
+	OsdCanvas canvas;
+	int s, char_h, row_h, char_w, panel_x, panel_y, len, bg_x, bg_y;
+	uint16_t y, bg_w;
+
+	if (!osd)
+		return;
+	va_start(ap, fmt);
+	vsnprintf(value, sizeof(value), fmt, ap);
+	va_end(ap);
+	s = osd->font_scale;
+	char_h = 8 * s;
+	row_h = char_h + 2 * s;
+	char_w = 6 * s;
+	panel_x = PANEL_X + osd->panel_off_x;
+	panel_y = PANEL_Y + osd->panel_off_y;
+	y = (uint16_t)(panel_y + row * row_h);
+	if ((uint32_t)y + (uint32_t)char_h > osd->height)
+		return;
+	len = snprintf(line, sizeof(line), "%s: %s", label, value);
+	if (len < 0)
+		return;
+	if (len >= (int)sizeof(line))
+		len = (int)sizeof(line) - 1;
+	cv610_canvas(&canvas, osd);
+	bg_w = (uint16_t)(len * char_w + 4 * s);
+	bg_x = panel_x - 2;
+	bg_y = (int)y - s;
+	if (bg_x < 0) bg_x = 0;
+	if (bg_y < 0) bg_y = 0;
+	osd_draw_rect(&canvas, &osd->dirty, (uint16_t)bg_x, (uint16_t)bg_y,
+		bg_w, (uint16_t)(char_h + 2 * s), DEBUG_OSD_SEMITRANS_BLACK, 1);
+	osd_draw_string(&canvas, &osd->dirty, panel_x, y, line, s,
+		DEBUG_OSD_WHITE);
+}
+
+void debug_osd_set_panel_offset(DebugOsdState *osd, int off_x, int off_y)
+{
+	if (!osd) return;
+	osd->panel_off_x = off_x;
+	osd->panel_off_y = off_y;
+}
+
+void debug_osd_sample_cpu(DebugOsdState *osd)
+{ if (osd) osd_cpu_sample(&osd->cpu); }
+
+int debug_osd_get_cpu(DebugOsdState *osd)
+{ return osd ? osd->cpu.pct : 0; }
+
+void debug_osd_rect(DebugOsdState *osd, uint16_t x, uint16_t y,
+	uint16_t w, uint16_t h, uint16_t color, int filled)
+{
+	OsdCanvas canvas;
+	if (!osd) return;
+	cv610_canvas(&canvas, osd);
+	osd_draw_rect(&canvas, &osd->dirty, x, y, w, h, color, filled);
+}
+
+void debug_osd_point(DebugOsdState *osd, uint16_t x, uint16_t y,
+	uint16_t color, int size)
+{
+	OsdCanvas canvas;
+	if (!osd) return;
+	cv610_canvas(&canvas, osd);
+	osd_draw_point(&canvas, &osd->dirty, x, y, color, size);
+}
+
+void debug_osd_line(DebugOsdState *osd, uint16_t x0, uint16_t y0,
+	uint16_t x1, uint16_t y1, uint16_t color)
+{
+	OsdCanvas canvas;
+	if (!osd) return;
+	cv610_canvas(&canvas, osd);
+	osd_draw_line(&canvas, &osd->dirty, x0, y0, x1, y1, color);
+}
 
 #else /* !PLATFORM_STAR6E && !PLATFORM_MARUKO */
 

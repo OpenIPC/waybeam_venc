@@ -1,0 +1,140 @@
+#!/bin/sh
+# Persistent CV610 IMX662 MPP module profile. Uses the registration-only PM
+# shim, never the vendor open_pm implementation.
+
+set -u
+
+MODULE_DIR=${MODULE_DIR:-/lib/modules/$(uname -r)/hisilicon}
+ARTIFACT_DIR=${ARTIFACT_DIR:-/usr/lib/cv610}
+MMZ_START=${CV610_MMZ_START:-0x44000000}
+MMZ_SIZE=${CV610_MMZ_SIZE:-64M}
+SENSOR_PROFILE=${CV610_SENSOR_PROFILE:-imx662}
+# Analog microphone on the inner ACODEC. Off by default so the hardware-verified
+# video-only module set stays the default boot path.
+AUDIO=${CV610_AUDIO:-0}
+loaded=""
+
+is_loaded()
+{
+	grep -q "^$1 " /proc/modules
+}
+
+load_stock()
+{
+	name=$1
+	shift
+	echo "load $name"
+	insmod "$MODULE_DIR/$name.ko" "$@" || return 1
+	loaded="$name $loaded"
+}
+
+cleanup_partial()
+{
+	set +e
+	for name in $loaded; do
+		rmmod "$name" 2>/dev/null
+	done
+}
+
+start_modules()
+{
+	[ -r "$ARTIFACT_DIR/open_sys_config_imx662.ko" ] || {
+		echo "missing patched IMX662 sys_config module" >&2
+		return 1
+	}
+	[ -r "$ARTIFACT_DIR/open_pm_stub.ko" ] || {
+		echo "missing registration-only PM shim" >&2
+		return 1
+	}
+	is_loaded open_pm && {
+		echo "refusing vendor open_pm" >&2
+		return 1
+	}
+	is_loaded open_base && {
+		echo "refusing dirty MPP module state" >&2
+		return 1
+	}
+
+	trap cleanup_partial EXIT HUP INT TERM
+	echo "load patched open_sys_config"
+	insmod "$ARTIFACT_DIR/open_sys_config_imx662.ko" \
+		sensors=sns0="$SENSOR_PROFILE",sns1="$SENSOR_PROFILE" \
+		board=dmeb_qfn ir_auto=0 || return 1
+	loaded="open_sys_config $loaded"
+	load_stock open_osal proc_show=1 || return 1
+	load_stock open_mmz anony=1 mmz_allocator=ot \
+		mmz=anonymous,0,"$MMZ_START","$MMZ_SIZE" mem_process_isolation=0 || return 1
+	load_stock open_base logmpp_show=1 || return 1
+
+	echo "load registration-only PM shim"
+	insmod "$ARTIFACT_DIR/open_pm_stub.ko" || return 1
+	loaded="open_pm_stub $loaded"
+	is_loaded open_pm_stub || return 1
+	is_loaded open_pm && return 1
+
+	load_stock open_vb || return 1
+	load_stock open_vca || return 1
+	load_stock open_sys profile=0 || return 1
+	load_stock open_rgn || return 1
+	load_stock open_vpp || return 1
+	load_stock open_vgs || return 1
+	load_stock open_vpss || return 1
+	load_stock open_vi || return 1
+	load_stock open_isp || return 1
+	load_stock open_chnl || return 1
+	load_stock open_rc || return 1
+	load_stock open_venc g_venc_max_chn_num=8 || return 1
+	load_stock open_h265e || return 1
+
+	# AI capture only: open_ao/open_adec are playback-side and stay out.
+	# open_acodec drives the analog front end and must come after open_aio.
+	if [ "$AUDIO" = "1" ]; then
+		load_stock open_aio || return 1
+		load_stock open_ai || return 1
+		load_stock open_aenc || return 1
+		load_stock open_acodec || return 1
+	fi
+
+	load_stock open_sensor_i2c || return 1
+	load_stock open_mipi_rx || return 1
+	load_stock open_user || return 1
+	loaded=""
+	trap - 0 1 2 15
+	return 0
+}
+
+stop_modules()
+{
+	modules="open_user open_mipi_rx open_sensor_i2c \
+		open_acodec open_aenc open_ai open_aio \
+		open_h265e open_venc open_rc open_chnl open_isp open_vi \
+		open_vpss open_vgs open_vpp open_rgn open_sys open_vca open_vb \
+		open_pm_stub open_base open_mmz open_osal open_sys_config"
+	rc=0
+	set +e
+	for name in $modules; do
+		if is_loaded "$name" && ! rmmod "$name"; then
+			echo "failed to unload $name" >&2
+			rc=1
+		fi
+	done
+	for name in $modules; do
+		if is_loaded "$name"; then
+			echo "module still loaded after stop: $name" >&2
+			rc=1
+		fi
+	done
+	return "$rc"
+}
+
+case "${1:-}" in
+	start) start_modules ;;
+	stop) stop_modules ;;
+	restart)
+		stop_modules && start_modules
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}" >&2
+		exit 1
+		;;
+esac
