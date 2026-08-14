@@ -111,6 +111,17 @@ int main(void)
 		return 1;
 	}
 	failures += expect_valid("cv610_sample", &cfg, 1);
+	/* The shipped default is what a fresh craft boots with, so pin it.
+	 * expect_valid alone cannot tell 1280x720 from any other geometry that
+	 * happens to validate. */
+	failures += expect("cv610_default_is_1280x720",
+		cfg.video0.width == 1280 && cfg.video0.height == 720);
+	failures += expect("cv610_default_is_100fps", cfg.video0.fps == 100);
+	failures += expect("cv610_default_is_8000kbps", cfg.video0.bitrate == 8000);
+	/* And that it names a real sensor mode rather than only passing the
+	 * generic range checks. */
+	failures += expect("cv610_default_names_a_mode",
+		cv610_mode_for_fps(cfg.video0.fps) != NULL);
 	cfg.video0.fps = 120;
 	failures += expect_valid("cv610_reject_fps", &cfg, 0);
 	cfg.video0.fps = 60;
