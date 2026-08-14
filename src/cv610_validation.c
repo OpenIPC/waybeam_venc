@@ -1,4 +1,5 @@
 #include "venc_api.h"
+#include "cv610_modes.h"
 
 #include <math.h>
 #include <string.h>
@@ -11,12 +12,12 @@ const char *cv610_validate_config(const VencConfig *cfg)
 
 	if (!cfg)
 		return "missing config";
-	if ((cfg->video0.width != 0 || cfg->video0.height != 0) &&
-		(cfg->video0.width != 1920 || cfg->video0.height != 1080))
-		return "CV610 currently requires video0 1920x1080";
-	if (cfg->video0.fps != 30 && cfg->video0.fps != 60 &&
-		cfg->video0.fps != 90 && cfg->video0.fps != 100)
-		return "CV610 video0.fps must be 30, 60, 90, or 100";
+	/* video0.size and video0.fps together name a sensor mode; there is no
+	 * scaler between VI and VENC, so a geometry the sensor cannot produce
+	 * is simply unavailable.  /api/v1/modes serves the same table. */
+	if (cv610_mode_lookup(cfg->video0.width, cfg->video0.height,
+			cfg->video0.fps) == NULL)
+		return "CV610 video0.size and video0.fps must name a mode listed by /api/v1/modes";
 	if (cfg->video0.bitrate < VENC_BITRATE_MIN_KBPS ||
 		cfg->video0.bitrate > VENC_BITRATE_MAX_KBPS)
 		return "video0.bitrate is outside the supported range";

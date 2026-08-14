@@ -12,7 +12,9 @@ large control surface.
 
 - `SOC_BUILD=cv610` produces a 32-bit ARMv7 musl `waybeam` binary.
 - The backend owns the proven IMX662 MIPI -> VI -> ISP -> VENC lifecycle.
-- Linear 1920x1080 modes at 30/60 fps RAW12 and 90/100 fps RAW10 are accepted.
+- Linear 1920x1080 modes at 30/60 fps RAW12 and 90/100 fps RAW10 are accepted
+  (see "Sensor modes" below — the table in `src/cv610_modes.c` is the only
+  place they are written down).
 - H.265 CBR, GOP, and I/P QP delta come from the existing `VencConfig` fields.
 - UDP and abstract UNIX outputs use the shared HEVC RTP packetizer.
 - `frame-shm://` publishes the existing VFRM v1 whole-frame contract.
@@ -89,6 +91,28 @@ Audio remains a separate RTP/UDP side channel: UDP video uses the configured
 remote host, while local `unix://` or `frame-shm://` video sends audio to the
 co-located Waybeam Link listener on `127.0.0.1:<audioPort>`.
 
+## Sensor modes
+
+`video0.size` and `video0.fps` together name a sensor mode. There is no
+scaler between VI and VENC on this graph — VENC encodes exactly what the
+sensor delivers — so a geometry the sensor cannot produce is not available at
+all, and the IMX662 plugin currently offers only 1920x1080. `video0.size` is
+still advertised and read: it participates in the lookup, and it is what will
+select between geometries once a mode with another one exists.
+
+`src/cv610_modes.c` holds the whole table — geometry, frame rate, MIPI RAW
+bit depth, and the input clock the mode's line timing assumes. Everything
+derives from it: `cv610_validate_config()` rejects anything that does not
+resolve, `cv610_prepare()` takes the bit depth and clock from the resolved
+mode, and `GET /api/v1/modes` is generated from it, so what that endpoint
+lists is exactly what `/api/v1/set` accepts. It mirrors `g_imx662_mode_tbl`
+in `sensors/cv610/imx662/imx662_cmos.c`, which is the sensor-side original;
+adding a mode means editing both.
+
+A zero `video0.size` (`auto`) means the first entry's geometry. A half-set
+one (`1920x0`) is rejected rather than completed — it is a typo, not a
+request.
+
 ## Sensor clock
 
 The IMX662 runs 30/60/90 fps on a 37.125 MHz input clock and 100 fps on
@@ -100,7 +124,7 @@ delivers 43.6 fps, measured, while every status surface still reports 60).
 
 The clock is one CRG register that only the kernel can write, and the vendor
 MIPI ioctls gate it without setting a rate. `mipi_setup()` therefore writes
-the frequency for the selected mode to
+the frequency carried by the resolved mode to
 `/sys/module/open_sys_config/parameters/sns0_clk_hz` during bring-up — after
 `ENABLE_SENSOR_CLOCK`, which rewrites the same register, and before
 `UNRESET_SENSOR`. The parameter comes from

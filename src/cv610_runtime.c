@@ -1,6 +1,7 @@
 #include "cv610_runtime.h"
 
 #include "cv610_audio.h"
+#include "cv610_modes.h"
 #include "cv610_pipeline.h"
 #include "debug_osd.h"
 #include "h26x_param_sets.h"
@@ -254,11 +255,6 @@ static void cv610_signal_handler(int signo)
 {
 	(void)signo;
 	cv610_pipeline_request_stop();
-}
-
-static int cv610_fps_supported(uint32_t fps)
-{
-	return fps == 30 || fps == 60 || fps == 90 || fps == 100;
 }
 
 static int cv610_output_write(const uint8_t *header, size_t header_len,
@@ -519,21 +515,27 @@ static int cv610_prepare(void *opaque)
 {
 	Cv610RunnerContext *ctx = opaque;
 	VencConfig *cfg = &ctx->config;
+	const Cv610SensorMode *mode;
 
 	setvbuf(stdout, NULL, _IONBF, 0);
-	if (((cfg->video0.width != 0 || cfg->video0.height != 0) &&
-		(cfg->video0.width != 1920 || cfg->video0.height != 1080)) ||
-		!cv610_fps_supported(cfg->video0.fps)) {
-		fprintf(stderr, "ERROR: CV610 bring-up supports 1920x1080 at 30/60/90/100 fps\n");
+	/* Config loading and every staged HTTP mutation run the same lookup
+	 * through cv610_validate_config(), so reaching this is a config file
+	 * edited behind the daemon's back. */
+	mode = cv610_mode_lookup(cfg->video0.width, cfg->video0.height,
+		cfg->video0.fps);
+	if (mode == NULL) {
+		fprintf(stderr, "ERROR: CV610 has no sensor mode for %ux%u @ %u fps\n",
+			cfg->video0.width, cfg->video0.height, cfg->video0.fps);
 		return 1;
 	}
-	ctx->pipeline.width = cfg->video0.width ? cfg->video0.width : 1920;
-	ctx->pipeline.height = cfg->video0.height ? cfg->video0.height : 1080;
-	ctx->pipeline.fps = cfg->video0.fps;
+	ctx->pipeline.width = mode->width;
+	ctx->pipeline.height = mode->height;
+	ctx->pipeline.fps = mode->fps;
 	ctx->pipeline.lanes = 4;
 	ctx->pipeline.data_rate_x2 = 0;
 	ctx->pipeline.bayer = 0;
-	ctx->pipeline.raw_bit = cfg->video0.fps > 60 ? 10 : 12;
+	ctx->pipeline.raw_bit = (int)mode->raw_bit;
+	ctx->pipeline.sensor_clock_hz = mode->sensor_clock_hz;
 	/* Match the standalone streamer's production graph. The CV610 module
 	 * loader now provides the clean SYS/VB lifecycle required by online VI. */
 	ctx->pipeline.vi_online = 1;
