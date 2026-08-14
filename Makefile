@@ -519,7 +519,7 @@ toolchain-maruko:
 toolchain-cv610:
 	@if ! command -v "$(CV610_CC)" >/dev/null 2>&1 && [ ! -x "$(CV610_CC)" ]; then \
 		if [ "$(CV610_CC)" != "$(CC_CV610_BIN)" ]; then \
-			echo "ERROR: CV610 compiler not found: $(CV610_CC)"; exit 1; \
+			echo "ERROR: CV610 compiler not found: $(CV610_CC)" >&2; exit 1; \
 		fi; \
 		echo "Fetching $(TOOLCHAIN_CV610_TGZ)..."; \
 		wget -c -q --show-progress "$(TOOLCHAIN_URL)/$(TOOLCHAIN_CV610_TGZ)" -P "$$(pwd)"; \
@@ -530,16 +530,16 @@ toolchain-cv610:
 
 cv610-sdk: toolchain-cv610
 	@command -v "$(CV610_CC)" >/dev/null 2>&1 || { \
-		echo "ERROR: CV610 compiler not found: $(CV610_CC)"; \
-		echo "       Pass CV610_CC=/path/to/arm-openipc-linux-musleabi-gcc"; \
+		echo "ERROR: CV610 compiler not found: $(CV610_CC)" >&2; \
+		echo "       Pass CV610_CC=/path/to/arm-openipc-linux-musleabi-gcc" >&2; \
 		exit 1; \
 	}
 	@test -f "$(CV610_SDK_INC)/kernel/include/hi3516cv6xx/ss_mpi_venc.h" || { \
-		echo "ERROR: CV610 OpenHisilicon headers not found under $(CV610_SDK_INC)"; \
+		echo "ERROR: CV610 OpenHisilicon headers not found under $(CV610_SDK_INC)" >&2; \
 		exit 1; \
 	}
 	@test -f "$(CV610_SDK_LIB)/libss_mpi.so" || { \
-		echo "ERROR: CV610 runtime libraries not found under $(CV610_SDK_LIB)"; \
+		echo "ERROR: CV610 runtime libraries not found under $(CV610_SDK_LIB)" >&2; \
 		exit 1; \
 	}
 

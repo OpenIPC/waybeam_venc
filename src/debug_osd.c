@@ -1103,7 +1103,7 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 		return NULL;
 	}
 	osd_dirty_reset(&ctx->dirty, frame_w, frame_h);
-	fprintf(stderr, "[debug_osd] CV610 CLUT4 overlay %ux%u stride=%u\n",
+	fprintf(stdout, "[debug_osd] CV610 CLUT4 overlay %ux%u stride=%u\n",
 		frame_w, frame_h, ctx->canvas.stride);
 	return ctx;
 }

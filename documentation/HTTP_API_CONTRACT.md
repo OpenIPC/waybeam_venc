@@ -869,6 +869,10 @@ scales with pixels per module, so size the channel up for longer-distance
 markers.  Pairing, commands, boot scheduling, and action dispatch are
 deliberately outside the waybeam binary and this endpoint.
 
+This route is registered by the Star6E and Maruko backends. The initial CV610
+backend does not advertise snapshot capability and does not register the
+route, so requests receive the normal HTTP `404` route response.
+
 > **Retired:** `GET /api/v1/snapshot.pgm` (grayscale P5 PGM, added 0.59.0)
 > was removed in 0.60.0 and now answers `404`.  It captured through a
 > short-lived per-request VPE/SCL tap, and device stress-testing showed the
@@ -1445,8 +1449,15 @@ Response `200`:
 selection.  The full `pads[].modes[]` list always shows every mode the
 driver enumerates so callers can show an "available modes" UI.
 
+CV610 preserves the same envelope and `selected_pad` / `selected_mode` /
+`pads[].modes[]` shape. Its initial IMX662 backend reports one synthetic pad
+containing the four supported fixed-rate modes (1080p30/60 RAW12 and
+1080p90/100 RAW10); each entry has equal `min_fps` and `max_fps`, and the entry
+matching `video0.fps` is marked selected.
+
 Error `500 modes_failed` — `MI_SNR_QueryResCount` failed (e.g. sensor
-driver not loaded yet during a brief startup window).
+driver not loaded yet during a brief startup window). This SigmaStar query
+failure does not apply to CV610's static IMX662 table.
 
 ## QR Scanning (Star6E only)
 

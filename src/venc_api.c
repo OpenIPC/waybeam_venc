@@ -3930,12 +3930,38 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
 #if HAVE_BACKEND_CV610
-	return httpd_send_json(fd, 200,
-		"{\"ok\":true,\"data\":["
-		"{\"name\":\"IMX662 1080p30 RAW12\",\"width\":1920,\"height\":1080,\"fps\":30},"
-		"{\"name\":\"IMX662 1080p60 RAW12\",\"width\":1920,\"height\":1080,\"fps\":60},"
-		"{\"name\":\"IMX662 1080p90 RAW10\",\"width\":1920,\"height\":1080,\"fps\":90},"
-		"{\"name\":\"IMX662 1080p100 RAW10\",\"width\":1920,\"height\":1080,\"fps\":100}]}");
+	char json[1400];
+	uint32_t fps = 0;
+	int selected_mode;
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	if (g_cfg)
+		fps = g_cfg->video0.fps;
+	pthread_mutex_unlock(&g_cfg_mutex);
+	switch (fps) {
+	case 30: selected_mode = 0; break;
+	case 60: selected_mode = 1; break;
+	case 90: selected_mode = 2; break;
+	case 100: selected_mode = 3; break;
+	default: selected_mode = -1; break;
+	}
+	snprintf(json, sizeof(json),
+		"{\"ok\":true,\"data\":{\"selected_pad\":0,"
+		"\"selected_mode\":%d,\"pads\":[{\"pad\":0,\"modes\":["
+		"{\"index\":0,\"width\":1920,\"height\":1080,\"min_fps\":30,"
+		"\"max_fps\":30,\"desc\":\"1080p30 RAW12\",\"selected\":%s},"
+		"{\"index\":1,\"width\":1920,\"height\":1080,\"min_fps\":60,"
+		"\"max_fps\":60,\"desc\":\"1080p60 RAW12\",\"selected\":%s},"
+		"{\"index\":2,\"width\":1920,\"height\":1080,\"min_fps\":90,"
+		"\"max_fps\":90,\"desc\":\"1080p90 RAW10\",\"selected\":%s},"
+		"{\"index\":3,\"width\":1920,\"height\":1080,\"min_fps\":100,"
+		"\"max_fps\":100,\"desc\":\"1080p100 RAW10\",\"selected\":%s}]}]}}",
+		selected_mode,
+		selected_mode == 0 ? "true" : "false",
+		selected_mode == 1 ? "true" : "false",
+		selected_mode == 2 ? "true" : "false",
+		selected_mode == 3 ? "true" : "false");
+	return httpd_send_json(fd, 200, json);
 #else
 	pthread_mutex_lock(&g_cfg_mutex);
 	int pad = g_sensor_pad, mode = g_sensor_mode, forced = g_sensor_forced_pad;

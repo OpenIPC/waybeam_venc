@@ -15,7 +15,11 @@ Referenced by: `AGENTS.md`, `CLAUDE.md`
 - **C99** (`-std=c99`). No C++ features, no GNU extensions unless required
   by the SDK.
 - No floating-point math in alignment, crop, or pipeline calculations.
-- Standard library + SigmaStar SDK + POSIX are the only allowed dependencies.
+- Standard library + POSIX + the selected SoC vendor SDK/runtime are the only
+  baseline dependencies. Backend-specific codec libraries already supplied by
+  the target firmware/sysroot (for example Opus on CV610) are allowed when the
+  backend documents and validates them; adding a separately deployed runtime
+  dependency still requires explicit review.
 
 ## 2. Formatting
 

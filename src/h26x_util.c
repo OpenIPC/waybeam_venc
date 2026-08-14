@@ -88,7 +88,15 @@ int h26x_util_annexb_next(const uint8_t *data, size_t len, size_t *cursor,
 			*nal_len = payload_len;
 			return 1;
 		}
-		pos = next;
+		/* Consecutive start codes encode an empty NAL. Normally next is
+		 * strictly beyond pos; retain an explicit progress guard so malformed
+		 * input can never make the iterator rescan the same byte forever. */
+		if (next > pos)
+			pos = next;
+		else if (start > pos)
+			pos = start;
+		else
+			break;
 	}
 	*cursor = len;
 	return 0;

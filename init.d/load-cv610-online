@@ -105,23 +105,33 @@ start_modules()
 
 stop_modules()
 {
-	set +e
-	for name in open_user open_mipi_rx open_sensor_i2c \
+	modules="open_user open_mipi_rx open_sensor_i2c \
 		open_acodec open_aenc open_ai open_aio \
 		open_h265e open_venc open_rc open_chnl open_isp open_vi \
 		open_vpss open_vgs open_vpp open_rgn open_sys open_vca open_vb \
-		open_pm_stub open_base open_mmz open_osal open_sys_config; do
-		is_loaded "$name" && rmmod "$name"
+		open_pm_stub open_base open_mmz open_osal open_sys_config"
+	rc=0
+	set +e
+	for name in $modules; do
+		if is_loaded "$name" && ! rmmod "$name"; then
+			echo "failed to unload $name" >&2
+			rc=1
+		fi
 	done
-	return 0
+	for name in $modules; do
+		if is_loaded "$name"; then
+			echo "module still loaded after stop: $name" >&2
+			rc=1
+		fi
+	done
+	return "$rc"
 }
 
 case "${1:-}" in
 	start) start_modules ;;
 	stop) stop_modules ;;
 	restart)
-		stop_modules
-		start_modules
+		stop_modules && start_modules
 		;;
 	*)
 		echo "Usage: $0 {start|stop|restart}" >&2

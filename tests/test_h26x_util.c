@@ -58,6 +58,25 @@ int test_h26x_util(void)
 			sizeof(access_unit), &(size_t){sizeof(access_unit) + 1},
 			&nal, &nal_len) == 0);
 	}
+	{
+		const uint8_t consecutive_codes[] = {
+			0x00, 0x00, 0x01,
+			0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xcc
+		};
+		size_t cursor = 0;
+		const uint8_t *nal = NULL;
+		size_t nal_len = 0;
+
+		CHECK("h26x_annexb_skips_empty", h26x_util_annexb_next(
+			consecutive_codes, sizeof(consecutive_codes), &cursor,
+			&nal, &nal_len) == 1);
+		CHECK("h26x_annexb_after_empty_ptr",
+			nal == &consecutive_codes[7]);
+		CHECK("h26x_annexb_after_empty_len", nal_len == 3);
+		CHECK("h26x_annexb_after_empty_end", h26x_util_annexb_next(
+			consecutive_codes, sizeof(consecutive_codes), &cursor,
+			&nal, &nal_len) == 0);
+	}
 
 	return failures;
 }

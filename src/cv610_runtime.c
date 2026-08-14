@@ -243,6 +243,7 @@ static int cv610_send_rtp_frame(Cv610RunnerContext *ctx,
 	while (h26x_util_annexb_next(frame, len, &cursor, &nal, &nal_len)) {
 		uint8_t nal_type;
 		int is_last;
+		size_t sent;
 
 		nal_type = h26x_util_hevc_nalu_type(nal, nal_len);
 		nal_count++;
@@ -253,9 +254,14 @@ static int cv610_send_rtp_frame(Cv610RunnerContext *ctx,
 			(void)hevc_rtp_prepend_param_sets(&ctx->param_sets, nal_type,
 				&ctx->rtp, cv610_output_write, ctx,
 				max_payload, &ctx->rtp_stats);
-		if (hevc_rtp_send_nal(nal, nal_len, &ctx->rtp,
+		sent = hevc_rtp_send_nal(nal, nal_len, &ctx->rtp,
 			cv610_output_write, ctx, is_last,
-			max_payload, &ctx->rtp_stats) == 0) {
+			max_payload, &ctx->rtp_stats);
+		if (sent != nal_len) {
+			/* A fragmented NAL may fail after some FU packets were sent.
+			 * Reserve the failed packet's sequence number so receivers see a
+			 * loss gap, and never append later NALs to the incomplete AU. */
+			ctx->rtp.seq++;
 			status = -1;
 			break;
 		}

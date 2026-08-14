@@ -284,6 +284,7 @@ static void *cv610_audio_thread(void *opaque)
 {
 	Cv610AudioState *state = opaque;
 	int first = 1;
+	int timeout_reported = 0;
 
 	while (__atomic_load_n(&state->running, __ATOMIC_ACQUIRE)) {
 		struct timeval timeout = { 1, 0 };
@@ -302,8 +303,17 @@ static void *cv610_audio_thread(void *opaque)
 			break;
 		}
 		if (ready == 0) {
-			fprintf(stderr, "WARNING: AENC timeout waiting for audio frame\n");
+			if (!timeout_reported) {
+				fprintf(stderr,
+					"WARNING: AENC timeout waiting for audio frame; "
+					"suppressing repeats until recovery\n");
+				timeout_reported = 1;
+			}
 			continue;
+		}
+		if (timeout_reported) {
+			fprintf(stdout, "> CV610 AENC frame delivery recovered\n");
+			timeout_reported = 0;
 		}
 		memset(&stream, 0, sizeof(stream));
 		ret = ss_mpi_aenc_get_stream(CV610_AENC_CHN, &stream, 0);
