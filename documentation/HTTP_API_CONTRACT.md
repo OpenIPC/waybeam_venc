@@ -1499,6 +1499,13 @@ containing the four supported fixed-rate modes (1080p30/60 RAW12 and
 1080p90/100 RAW10); each entry has equal `min_fps` and `max_fps`, and the entry
 matching `video0.fps` is marked selected.
 
+The `width` / `height` of a CV610 entry is what the **sensor captures**, not
+what is encoded. `video0.fps` alone selects the mode — every entry captures
+1920x1080 — and `video0.size` is the encoded geometry VPSS scales that capture
+down to. A client must not read a mode's `width` / `height` as the stream
+resolution — `video0.size` in `/api/v1/config` is the encoded size, and
+`auto` there means the mode's capture geometry.
+
 Error `500 modes_failed` — `MI_SNR_QueryResCount` failed (e.g. sensor
 driver not loaded yet during a brief startup window). This SigmaStar query
 failure does not apply to CV610's static IMX662 table.
@@ -1690,6 +1697,27 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.2` (additive — CV610 `video0.size` becomes a real control):
+  - **`video0.size` on CV610 now accepts any geometry the mode can be scaled
+    down to**, not just the capture size. VI has no scaler, so the backend
+    previously bound VI straight to VENC and `1920x1080` was the only value
+    that validated. A VPSS group now sits between them (VI chn → VPSS grp →
+    VPSS chn → VENC) and does the scaling, so `video0.size` is the encoded
+    geometry and `video0.fps` alone selects the sensor mode — the same split
+    Star6E has. Rejections are `409`: not a multiple of 8, below 128x128, or
+    larger than the mode's capture size (VPSS does not invent detail, and
+    upscaling would spend encoder bandwidth for no information).
+  - `/api/v1/modes` keeps its shape, but a CV610 entry's `width` / `height`
+    is now explicitly the **capture** geometry rather than the stream
+    resolution, and `selected` follows `video0.fps` alone. Previously a
+    client could infer the two were the same, because they were.
+  - **Correction to `0.18.1`**, which stated that `video0.fps` on CV610 is
+    "honoured only within the sensor clock profile the kernel modules were
+    loaded with". That shipped alongside the runtime sensor clock in the same
+    release and was stale on arrival: the daemon sets the clock for the
+    selected mode at bring-up. The boot-time profile matters only against a
+    `sys_config` too old to expose `sns0_clk_hz`, which is what the caveat
+    under `/api/v1/modes` describes.
 - `0.18.1` (additive — CV610 control surface reaches what the backend reads):
   - CV610 now advertises `video0.fps`, `video0.size`, `outgoing.enabled`,
     `outgoing.server`, `outgoing.connected_udp`,

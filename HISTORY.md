@@ -1,5 +1,75 @@
 # History
 
+## [0.65.2] - 2026-08-15
+
+CV610 gets a scaler, one mode table instead of five copies of it, and a
+default that is not a leftover. Contract `0.18.1` → `0.18.2`.
+
+- **`video0.size` means something now.** CV610 bound VI straight to VENC, and
+  VI has no scaler — its channel emits the captured geometry and nothing
+  else, so `video0.size` had exactly one legal value while being advertised
+  as supported. The chip does have the scaler: VPSS, already loaded
+  (`open_vpss.ko`, `/dev/vpss`) and already implied by the pipeline's
+  `OT_VI_ONLINE_VPSS_OFFLINE` declaration, which the graph then bound past.
+  The group is now in the graph — VI chn → VPSS grp → VPSS chn → VENC — with
+  the channel doing the scaling. `video0.fps` selects the sensor mode and
+  `video0.size` is the encoded size, the same split Star6E has. The group is
+  created even at 1:1 so the shipping path and a scaled one share one graph
+  and one teardown order. Two attribute values were found by probing, both
+  otherwise `0xa0078007` (`OT_ERR_ILLEGAL_PARAM`) and neither documented:
+  `chn_mode` must be `USER` (`AUTO` makes the channel follow the group's
+  input size and rejects an explicit geometry) and `frame_rate` must be
+  `-1/-1` (`0/0` is rejected identically). Measured on the bring-up board by
+  decoding the live stream rather than trusting the daemon's own report:
+  1920x1080 → 1920x1080 @ 100.04, 1280x720 → 1280x720 @ 100.03, 640x480 →
+  640x480 @ 100. MMZ cost of the third VB pool at 720p is 5.6 MB; at 1:1 no
+  third pool is created. **Not measured: the latency VPSS adds as an extra
+  buffer stage.**
+- **One sensor mode table instead of five copies of it.** `video0.size`,
+  `video0.fps`, the MIPI RAW bit depth and the sensor input clock were each
+  written down separately in the fps allowlist in `cv610_prepare()`, the
+  size/fps checks in `cv610_validate_config()`, the hand-written JSON in
+  `handle_modes()`, `raw_bit = fps > 60 ? 10 : 12`, and
+  `hz = fps > 90 ? 27M : 37.125M`. They describe one thing — a sensor mode —
+  and a fifth mode meant finding all five. They now live in
+  `src/cv610_modes.c`; `cv610_mode_for_fps()` plus `cv610_mode_check_output()`
+  are the only rejection rules for `video0.fps` and `video0.size`, and
+  `GET /api/v1/modes` is generated from the same table, so what it lists is
+  exactly what `/api/v1/set` accepts. The clock column is the one that had
+  already cost a day: a mismatch is silent and the delivered rate simply
+  scales by the clock ratio while every status surface reports nominal.
+  Delivered rate re-measured after the refactor by RTP marker bit — 30.00,
+  60.00, 89.98, 100.04 — which a wrong clock would show as 43.6 for the
+  60 fps mode.
+- **A half-set geometry is a typo, not a request.** `1920x0` previously
+  completed into the default mode; only a fully unset `video0.size` now means
+  "the mode's own size".
+- **VPSS teardown is unconditional, or a partial setup wedges every
+  restart.** `vpss_setup()` does four things and bails on the first failure,
+  but the success flag was only raised after the final `sys_bind` — so any
+  earlier failure left `vpss_teardown()` returning early with the group
+  already created. The group is kernel state, not process state, and a
+  respawn reloads no modules (`venc_respawn` re-execs, which is the path
+  every restart-class `/api/v1/set` takes), so the next start would hit
+  `create_grp` `EXIST` and never come up again without a manual module
+  reload. Not hypothetical: `set_chn_attr` rejecting an explicit geometry
+  under `OT_VPSS_CHN_MODE_AUTO` is exactly the failure hit while bringing
+  this up. Teardown now matches the VI and ISP blocks beside it, which
+  already destroy unconditionally and ignore the result.
+- **The shipped default is 1280x720@100 at 8000 kbps**, was 1920x1080@60 at
+  8192. The old value predates VPSS scaling existing on this backend. 720p100
+  halves the encoded pixel count while doubling the frame rate, and both cut
+  latency on the measured model (`0.9 x frame_period + 11 + 5.9 x
+  megapixels`): ~38 ms at 1080p60 down to ~24 ms at 720p100. The bitrate goes
+  to 8000 so the number means 8 Mbps rather than 8.192. Verified by booting
+  the device on this file as `/etc/waybeam.json`, which is what a fresh craft
+  does. The existing `cv610_sample` assertion only proved the file validates —
+  it would pass just as happily on 1280x728 — so the shipped values are now
+  pinned and asserted to name a real sensor mode. **Noted, not fixed:** the
+  wire rate measures ~14.2 Mbps against the 8 Mbps target while RC is
+  programmed with 8000, the same shape as the known Star6E high-fps CBR
+  overshoot.
+
 ## [0.65.1] - 2026-08-14
 
 CV610 advertises the control surface it actually has, and `mutability`
