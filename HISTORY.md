@@ -56,6 +56,20 @@ default that is not a leftover. Contract `0.18.1` → `0.18.2`.
   under `OT_VPSS_CHN_MODE_AUTO` is exactly the failure hit while bringing
   this up. Teardown now matches the VI and ISP blocks beside it, which
   already destroy unconditionally and ignore the result.
+- **A sensor clock that cannot be set now fails bring-up.** `0.65.1` made the
+  clock follow the selected mode, but treated *every* failure to apply it as a
+  warning — including the case where the knob is right there and rejects the
+  write. That left the one outcome the change exists to prevent still
+  reachable: a stream at `fps * actual/expected` while `/api/v1/modes` and
+  `/api/v1/fps/live` both report nominal. The two failures are now answered
+  differently. A `sys_config` with no `sns0_clk_hz` parameter predates it, and
+  refusing to run on that module would strand every craft still carrying one —
+  that stays a warning, naming the clock the mode needs. A parameter that is
+  present and will not take the value means the line timing is known to be
+  running against the wrong MCLK, so `mipi_setup()` aborts instead. Raised by
+  automated review on the upstream PR; no measured path changes, because a
+  board whose write succeeds is untouched and a board whose write fails was
+  already producing a rate nothing reported.
 - **The shipped default is 1280x720@100 at 8000 kbps**, was 1920x1080@60 at
   8192. The old value predates VPSS scaling existing on this backend. 720p100
   halves the encoded pixel count while doubling the frame rate, and both cut

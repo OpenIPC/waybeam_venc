@@ -116,34 +116,50 @@ static void *isp_thread_fn(void *arg)
  * keeps the register encoding. */
 #define CV610_SNS0_CLK_HZ_PATH "/sys/module/open_sys_config/parameters/sns0_clk_hz"
 
-static void sensor_clock_select(uint32_t hz, uint32_t fps)
+/* Absent knob and failed write are different answers.  A sys_config without
+ * the parameter predates it, and refusing to run on that module would strand
+ * every craft still carrying it — so that stays a warning, and the clock
+ * remains whatever CV610_SENSOR_PROFILE loaded.  A knob that is present and
+ * will not take the value is a different thing: the mode's line timing is
+ * then known to be running against the wrong MCLK, and continuing would
+ * stream at a rate nothing reports.  Fail the bring-up instead, loudly.
+ *
+ * Returns 0 to continue, -1 to abort. */
+static int sensor_clock_select(uint32_t hz, uint32_t fps)
 {
 	char buf[16];
 	int len, fd;
 
 	/* No mode clock resolved: leave whatever the loader set. */
 	if (hz == 0) {
-		return;
+		return 0;
 	}
 	fd = open(CV610_SNS0_CLK_HZ_PATH, O_WRONLY);
 	if (fd < 0) {
-		/* Older sys_config: the clock stays as CV610_SENSOR_PROFILE left
-		 * it, which suits exactly one mode. */
-		fprintf(stderr,
-			"WARNING: %s absent — sensor clock stays as loaded; "
-			"%u fps needs %u Hz and will otherwise run at the wrong rate\n",
-			CV610_SNS0_CLK_HZ_PATH, fps, hz);
-		return;
+		if (errno == ENOENT) {
+			/* Older sys_config: the clock stays as CV610_SENSOR_PROFILE
+			 * left it, which suits exactly one mode. */
+			fprintf(stderr,
+				"WARNING: %s absent — sensor clock stays as loaded; "
+				"%u fps needs %u Hz and will otherwise run at the wrong rate\n",
+				CV610_SNS0_CLK_HZ_PATH, fps, hz);
+			return 0;
+		}
+		fprintf(stderr, "FAIL open %s: %s\n", CV610_SNS0_CLK_HZ_PATH,
+			strerror(errno));
+		return -1;
 	}
 	len = snprintf(buf, sizeof(buf), "%u", hz);
-	if (len < 0 || (size_t)len >= (int)sizeof(buf) ||
+	if (len < 0 || (size_t)len >= sizeof(buf) ||
 		write(fd, buf, (size_t)len) != len) {
-		fprintf(stderr, "WARNING: set sensor clock %u Hz: %s\n", hz,
-			strerror(errno));
-	} else {
-		printf("  ok  sensor clock %u Hz for %u fps\n", hz, fps);
+		fprintf(stderr, "FAIL set sensor clock %u Hz for %u fps: %s\n", hz,
+			fps, strerror(errno));
+		close(fd);
+		return -1;
 	}
+	printf("  ok  sensor clock %u Hz for %u fps\n", hz, fps);
 	close(fd);
+	return 0;
 }
 
 static int mipi_setup(const Cv610PipelineRuntimeConfig *c)
@@ -197,7 +213,10 @@ static int mipi_setup(const Cv610PipelineRuntimeConfig *c)
 	mipi_ioctl(OT_MIPI_ENABLE_SENSOR_CLOCK, &clk);
 	/* After the enable, which rewrites the same CRG register, and before
 	 * the sensor leaves reset so it comes up on its final clock. */
-	sensor_clock_select(c->sensor_clock_hz, (uint32_t)c->fps);
+	if (sensor_clock_select(c->sensor_clock_hz, (uint32_t)c->fps) != 0) {
+		close(fd);
+		return -1;
+	}
 	mipi_ioctl(OT_MIPI_UNRESET_SENSOR, &rst);
 #undef mipi_ioctl
 

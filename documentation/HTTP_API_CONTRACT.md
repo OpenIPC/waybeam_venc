@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.1`
+- `contract_version`: `0.18.2`
 - `status`: `active`
 
 ## Governance Rules
@@ -1711,6 +1711,15 @@ divergence is listed.  As of `contract_version: 0.12.1`:
     is now explicitly the **capture** geometry rather than the stream
     resolution, and `selected` follows `video0.fps` alone. Previously a
     client could infer the two were the same, because they were.
+  - **A CV610 sensor clock that cannot be set is now fatal to bring-up**, so
+    a mode either delivers its nominal rate or the daemon does not start. The
+    two failures are answered differently: a `sys_config` with no
+    `sns0_clk_hz` parameter predates it, and that stays a warning with the
+    clock left as loaded (one mode then runs correctly, the rest do not).
+    A parameter that *is* present and rejects the write means the line timing
+    is known to be running against the wrong MCLK, and the delivered rate
+    would be wrong while `/api/v1/modes` and `/api/v1/fps/live` both report
+    nominal — so bring-up aborts rather than serve a rate nothing reports.
   - **Correction to `0.18.1`**, which stated that `video0.fps` on CV610 is
     "honoured only within the sensor clock profile the kernel modules were
     loaded with". That shipped alongside the runtime sensor clock in the same
