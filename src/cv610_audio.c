@@ -345,7 +345,16 @@ static void *cv610_audio_thread(void *opaque)
 		if (ret != TD_SUCCESS)
 			break;
 	}
+	/* The loop also exits by break, on an SDK or select error.  Clearing
+	 * the flag here makes it mean "capture thread alive", so a status
+	 * query cannot report a dead thread as running. */
+	__atomic_store_n(&state->running, 0, __ATOMIC_RELEASE);
 	return NULL;
+}
+
+int cv610_audio_is_running(Cv610AudioState *state)
+{
+	return state ? __atomic_load_n(&state->running, __ATOMIC_ACQUIRE) : 0;
 }
 
 Cv610AudioState *cv610_audio_start(const VencConfig *config,

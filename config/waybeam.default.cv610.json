@@ -5,9 +5,9 @@
   },
   "video0": {
     "rcMode": "cbr",
-    "fps": 60,
-    "size": "1920x1080",
-    "bitrate": 8192,
+    "fps": 100,
+    "size": "1280x720",
+    "bitrate": 8000,
     "gopSize": 1.0,
     "qpDelta": -4,
     "resilience": "off",

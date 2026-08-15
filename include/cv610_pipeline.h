@@ -4,13 +4,21 @@
 #include <stdint.h>
 
 typedef struct {
+	/* Sensor capture geometry (what VI and the ISP see). */
 	uint32_t width;
 	uint32_t height;
+	/* Encoded geometry (what VPSS scales to and VENC encodes).  Equal to
+	 * the capture size unless video0.size asks for something smaller. */
+	uint32_t out_width;
+	uint32_t out_height;
 	uint32_t fps;
 	int lanes;
 	int data_rate_x2;
 	int bayer;
 	int raw_bit;
+	/* MCLK this mode's sensor line timing assumes.  Zero leaves whatever
+	 * the loader set, which suits exactly one mode. */
+	uint32_t sensor_clock_hz;
 	int vi_online;
 	int i2c_bus;
 } Cv610PipelineConfig;

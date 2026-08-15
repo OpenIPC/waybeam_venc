@@ -6,6 +6,7 @@
 #include "intra_refresh.h"
 #include "pipeline_common.h"
 #if HAVE_BACKEND_CV610
+#include "cv610_modes.h"
 #include "cv610_validation.h"
 #endif
 #if HAVE_BACKEND_STAR6E
@@ -807,6 +808,42 @@ static const char *canonicalize_field_key(const char *key)
 	return key;
 }
 
+/* Fields the shared table marks MUT_LIVE that CV610 reads only at start.
+ * Star6E and Maruko can retarget the transport, re-rate the encoder and
+ * change mic gain without a respawn; the CV610 slice reads these once in
+ * cv610_prepare() / cv610_output_start() / cv610_audio_start() and never
+ * again.  Reporting them live would give the dashboard a control that
+ * accepts a value and silently does nothing — the same lie the Maruko
+ * capability gates exist to prevent. */
+static int cv610_field_is_restart_only(const char *canonical_key)
+{
+	static const char *const restart_only[] = {
+		"video0.fps",        /* pipeline fps, MIPI raw_bit, RTP clock */
+		"outgoing.enabled",  /* output_start() runs once, in cv610_init */
+		"outgoing.server",   /* URI parsed in cv610_prepare */
+		"audio.mute",        /* acodec gain set once, at audio start */
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(restart_only) / sizeof(restart_only[0]); ++i) {
+		if (strcmp(canonical_key, restart_only[i]) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* Mutability as this backend can actually honour it.  Never more permissive
+ * than the shared table — a backend may only downgrade live to restart. */
+static Mutability field_mut_for_backend(const FieldDesc *f)
+{
+	if (!f)
+		return MUT_RESTART;
+	if (f->mut == MUT_LIVE && strcmp(g_backend, "cv610") == 0 &&
+	    cv610_field_is_restart_only(f->key))
+		return MUT_RESTART;
+	return f->mut;
+}
+
 int venc_api_field_supported_for_backend(const char *backend_name,
 	const char *field_key)
 {
@@ -818,12 +855,27 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 
 	/* CV610 starts with an intentionally small, truthful control surface.
 	 * All other shared-schema fields remain visible in config JSON but are
-	 * advertised unsupported and rejected before mutation. */
+	 * advertised unsupported and rejected before mutation.
+	 *
+	 * Every entry below is a field the CV610 backend genuinely reads —
+	 * either through g_cv610_apply_callbacks (live) or once in
+	 * cv610_prepare()/cv610_init()/cv610_audio_start() (restart-class, see
+	 * cv610_field_is_restart_only()).  Fields the slice hardcodes are
+	 * deliberately absent even when the shipped default happens to match
+	 * the hardcoded value: audio.sample_rate/channels/codec/volume are
+	 * fixed at 48000/1/opus/gain 8 in src/cv610_audio.c, and video0.rc_mode
+	 * is fixed at H.265 CBR in cv610_venc_start().  Advertising those would
+	 * accept a value the encoder never reads. */
 	if (backend_name && strcmp(backend_name, "cv610") == 0) {
 		static const char *const supported[] = {
 			"system.web_port", "system.verbose",
+			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size", "video0.qp_delta",
+			"outgoing.enabled", "outgoing.server",
 			"outgoing.max_payload_size", "outgoing.audio_port",
+			"outgoing.connected_udp",
+			"outgoing.allow_unix_encoder_stall",
+			"audio.enabled", "audio.mute",
 			"debug.show_osd",
 			"discovery.enabled", "discovery.service_type",
 			"discovery.name", "discovery.bare_alias",
@@ -2193,7 +2245,7 @@ static int collect_live_groups(SetQueryParam *params, size_t param_count,
 				"field not supported on this backend",
 				status_code, response_json);
 		}
-		if (params[i].field->mut != MUT_LIVE) {
+		if (field_mut_for_backend(params[i].field) != MUT_LIVE) {
 			return make_handled_error_json(400, "invalid_request",
 				"multi-set only supports live fields; restart-required fields must be set one at a time",
 				status_code, response_json);
@@ -2642,7 +2694,7 @@ static int process_single_set_query(const char *query, int persist,
 		return rc > 0 ? 0 : rc;
 
 	init_single_set_param(&param, key, canonical_key, val, f);
-	if (f->mut == MUT_LIVE) {
+	if (field_mut_for_backend(f) == MUT_LIVE) {
 		return apply_live_set_query(&param, 1, 1, persist,
 			status_code, response_json);
 	}
@@ -2826,7 +2878,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.18.0\","
+		"\"contract_version\":\"0.18.2\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2902,7 +2954,8 @@ static int handle_capabilities(int fd, const HttpRequest *req, void *ctx)
 	for (size_t i = 0; i < FIELD_COUNT; i++) {
 		cJSON *entry = cJSON_AddObjectToObject(fields, g_fields[i].key);
 		cJSON_AddStringToObject(entry, "mutability",
-			g_fields[i].mut == MUT_LIVE ? "live" : "restart_required");
+			field_mut_for_backend(&g_fields[i]) == MUT_LIVE ?
+				"live" : "restart_required");
 		cJSON_AddBoolToObject(entry, "supported",
 			venc_api_field_supported_for_backend(g_backend,
 				g_fields[i].key));
@@ -3930,38 +3983,57 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
 #if HAVE_BACKEND_CV610
-	char json[1400];
+	/* Generated from the same table cv610_validate_config() rejects
+	 * against, so what this lists is exactly what /set accepts. */
+	size_t count = 0;
+	size_t i;
+	const Cv610SensorMode *modes = cv610_mode_table(&count);
+	const Cv610SensorMode *selected;
 	uint32_t fps = 0;
-	int selected_mode;
+	cJSON *root, *data, *pads, *pad, *arr;
+	char *str;
+	int rc;
 
 	pthread_mutex_lock(&g_cfg_mutex);
 	if (g_cfg)
 		fps = g_cfg->video0.fps;
 	pthread_mutex_unlock(&g_cfg_mutex);
-	switch (fps) {
-	case 30: selected_mode = 0; break;
-	case 60: selected_mode = 1; break;
-	case 90: selected_mode = 2; break;
-	case 100: selected_mode = 3; break;
-	default: selected_mode = -1; break;
+	/* The listed geometry is what the sensor captures.  video0.size is the
+	 * encoded size VPSS scales that to, so the frame rate alone selects. */
+	selected = cv610_mode_for_fps(fps);
+
+	root = cJSON_CreateObject();
+	if (!root)
+		return httpd_send_error(fd, 500, "internal_error", "out of memory");
+	cJSON_AddBoolToObject(root, "ok", 1);
+	data = cJSON_AddObjectToObject(root, "data");
+	cJSON_AddNumberToObject(data, "selected_pad", 0);
+	cJSON_AddNumberToObject(data, "selected_mode",
+		selected ? (double)(selected - modes) : -1);
+	pads = cJSON_AddArrayToObject(data, "pads");
+	pad = cJSON_CreateObject();
+	cJSON_AddItemToArray(pads, pad);
+	cJSON_AddNumberToObject(pad, "pad", 0);
+	arr = cJSON_AddArrayToObject(pad, "modes");
+	for (i = 0; i < count; i++) {
+		cJSON *m = cJSON_CreateObject();
+
+		cJSON_AddItemToArray(arr, m);
+		cJSON_AddNumberToObject(m, "index", (double)i);
+		cJSON_AddNumberToObject(m, "width", modes[i].width);
+		cJSON_AddNumberToObject(m, "height", modes[i].height);
+		cJSON_AddNumberToObject(m, "min_fps", modes[i].fps);
+		cJSON_AddNumberToObject(m, "max_fps", modes[i].fps);
+		cJSON_AddStringToObject(m, "desc", modes[i].desc);
+		cJSON_AddBoolToObject(m, "selected", &modes[i] == selected);
 	}
-	snprintf(json, sizeof(json),
-		"{\"ok\":true,\"data\":{\"selected_pad\":0,"
-		"\"selected_mode\":%d,\"pads\":[{\"pad\":0,\"modes\":["
-		"{\"index\":0,\"width\":1920,\"height\":1080,\"min_fps\":30,"
-		"\"max_fps\":30,\"desc\":\"1080p30 RAW12\",\"selected\":%s},"
-		"{\"index\":1,\"width\":1920,\"height\":1080,\"min_fps\":60,"
-		"\"max_fps\":60,\"desc\":\"1080p60 RAW12\",\"selected\":%s},"
-		"{\"index\":2,\"width\":1920,\"height\":1080,\"min_fps\":90,"
-		"\"max_fps\":90,\"desc\":\"1080p90 RAW10\",\"selected\":%s},"
-		"{\"index\":3,\"width\":1920,\"height\":1080,\"min_fps\":100,"
-		"\"max_fps\":100,\"desc\":\"1080p100 RAW10\",\"selected\":%s}]}]}}",
-		selected_mode,
-		selected_mode == 0 ? "true" : "false",
-		selected_mode == 1 ? "true" : "false",
-		selected_mode == 2 ? "true" : "false",
-		selected_mode == 3 ? "true" : "false");
-	return httpd_send_json(fd, 200, json);
+	str = cJSON_PrintUnformatted(root);
+	cJSON_Delete(root);
+	if (!str)
+		return httpd_send_error(fd, 500, "internal_error", "out of memory");
+	rc = httpd_send_json(fd, 200, str);
+	free(str);
+	return rc;
 #else
 	pthread_mutex_lock(&g_cfg_mutex);
 	int pad = g_sensor_pad, mode = g_sensor_mode, forced = g_sensor_forced_pad;

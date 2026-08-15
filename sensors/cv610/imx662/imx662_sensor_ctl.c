@@ -186,7 +186,8 @@ static td_s32 imx662_linear_1080p_init(ot_vi_pipe vi_pipe, td_u32 hmax,
 	/* 100 fps follows the public IMX662 mode: feed 27 MHz externally while
 	 * selecting the 24 MHz profile (0x04), which raises its 1440 Mbps timing
 	 * to 1620 Mbps. Lower modes retain the hardware-verified 37.125 MHz
-	 * profile. The sys_config clock and this selection must change together. */
+	 * profile. The sys_config clock must match this selection; the daemon
+	 * sets it from the same mode in sensor_clock_select() (cv610_pipeline.c). */
 	ret += imx662_write_register(vi_pipe, IMX662_REG_INCK_SEL,
 								 overclock_100fps ? 0x04 : 0x01);
 	ret += imx662_write_register(vi_pipe, IMX662_REG_DATARATE, 0x03); /* data rate  */ /* VERIFY */

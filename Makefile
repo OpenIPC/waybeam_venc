@@ -59,6 +59,7 @@ MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/ma
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c src/star6e_ipu.c src/star6e_ipu_yolo.c src/star6e_vpe_ports.c src/star6e_luma_tap.c src/star6e_awb.c
 CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
 	src/cv610_audio.c \
+	src/cv610_modes.c \
 	src/cv610_pipeline.c src/cv610_validation.c src/backend.c \
 	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
 	src/venc_recordings.c src/codec_config.c src/pipeline_common.c \
@@ -430,6 +431,7 @@ $(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backe
 	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $@
 
 $(CV610_VALIDATION_TEST): tests/test_cv610_validation.c src/cv610_validation.c \
+		src/cv610_modes.c \
 		src/venc_config.c src/codec_config.c lib/cJSON.c
 	$(HOST_CC) $(HOST_CFLAGS) -Werror $^ -lm -o $@
 

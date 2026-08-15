@@ -1,5 +1,160 @@
 # History
 
+## [0.65.2] - 2026-08-15
+
+CV610 gets a scaler, one mode table instead of five copies of it, and a
+default that is not a leftover. Contract `0.18.1` → `0.18.2`.
+
+- **`video0.size` means something now.** CV610 bound VI straight to VENC, and
+  VI has no scaler — its channel emits the captured geometry and nothing
+  else, so `video0.size` had exactly one legal value while being advertised
+  as supported. The chip does have the scaler: VPSS, already loaded
+  (`open_vpss.ko`, `/dev/vpss`) and already implied by the pipeline's
+  `OT_VI_ONLINE_VPSS_OFFLINE` declaration, which the graph then bound past.
+  The group is now in the graph — VI chn → VPSS grp → VPSS chn → VENC — with
+  the channel doing the scaling. `video0.fps` selects the sensor mode and
+  `video0.size` is the encoded size, the same split Star6E has. The group is
+  created even at 1:1 so the shipping path and a scaled one share one graph
+  and one teardown order. Two attribute values were found by probing, both
+  otherwise `0xa0078007` (`OT_ERR_ILLEGAL_PARAM`) and neither documented:
+  `chn_mode` must be `USER` (`AUTO` makes the channel follow the group's
+  input size and rejects an explicit geometry) and `frame_rate` must be
+  `-1/-1` (`0/0` is rejected identically). Measured on the bring-up board by
+  decoding the live stream rather than trusting the daemon's own report:
+  1920x1080 → 1920x1080 @ 100.04, 1280x720 → 1280x720 @ 100.03, 640x480 →
+  640x480 @ 100. MMZ cost of the third VB pool at 720p is 5.6 MB; at 1:1 no
+  third pool is created. **Not measured: the latency VPSS adds as an extra
+  buffer stage.**
+- **One sensor mode table instead of five copies of it.** `video0.size`,
+  `video0.fps`, the MIPI RAW bit depth and the sensor input clock were each
+  written down separately in the fps allowlist in `cv610_prepare()`, the
+  size/fps checks in `cv610_validate_config()`, the hand-written JSON in
+  `handle_modes()`, `raw_bit = fps > 60 ? 10 : 12`, and
+  `hz = fps > 90 ? 27M : 37.125M`. They describe one thing — a sensor mode —
+  and a fifth mode meant finding all five. They now live in
+  `src/cv610_modes.c`; `cv610_mode_for_fps()` plus `cv610_mode_check_output()`
+  are the only rejection rules for `video0.fps` and `video0.size`, and
+  `GET /api/v1/modes` is generated from the same table, so what it lists is
+  exactly what `/api/v1/set` accepts. The clock column is the one that had
+  already cost a day: a mismatch is silent and the delivered rate simply
+  scales by the clock ratio while every status surface reports nominal.
+  Delivered rate re-measured after the refactor by RTP marker bit — 30.00,
+  60.00, 89.98, 100.04 — which a wrong clock would show as 43.6 for the
+  60 fps mode.
+- **A half-set geometry is a typo, not a request.** `1920x0` previously
+  completed into the default mode; only a fully unset `video0.size` now means
+  "the mode's own size".
+- **VPSS teardown is unconditional, or a partial setup wedges every
+  restart.** `vpss_setup()` does four things and bails on the first failure,
+  but the success flag was only raised after the final `sys_bind` — so any
+  earlier failure left `vpss_teardown()` returning early with the group
+  already created. The group is kernel state, not process state, and a
+  respawn reloads no modules (`venc_respawn` re-execs, which is the path
+  every restart-class `/api/v1/set` takes), so the next start would hit
+  `create_grp` `EXIST` and never come up again without a manual module
+  reload. Not hypothetical: `set_chn_attr` rejecting an explicit geometry
+  under `OT_VPSS_CHN_MODE_AUTO` is exactly the failure hit while bringing
+  this up. Teardown now matches the VI and ISP blocks beside it, which
+  already destroy unconditionally and ignore the result.
+- **A sensor clock that cannot be set now fails bring-up.** `0.65.1` made the
+  clock follow the selected mode, but treated *every* failure to apply it as a
+  warning — including the case where the knob is right there and rejects the
+  write. That left the one outcome the change exists to prevent still
+  reachable: a stream at `fps * actual/expected` while `/api/v1/modes` and
+  `/api/v1/fps/live` both report nominal. The two failures are now answered
+  differently. A `sys_config` with no `sns0_clk_hz` parameter predates it, and
+  refusing to run on that module would strand every craft still carrying one —
+  that stays a warning, naming the clock the mode needs. A parameter that is
+  present and will not take the value means the line timing is known to be
+  running against the wrong MCLK, so `mipi_setup()` aborts instead. Raised by
+  automated review on the upstream PR; no measured path changes, because a
+  board whose write succeeds is untouched and a board whose write fails was
+  already producing a rate nothing reported.
+- **The shipped default is 1280x720@100 at 8000 kbps**, was 1920x1080@60 at
+  8192. The old value predates VPSS scaling existing on this backend. 720p100
+  halves the encoded pixel count while doubling the frame rate, and both cut
+  latency on the measured model (`0.9 x frame_period + 11 + 5.9 x
+  megapixels`): ~38 ms at 1080p60 down to ~24 ms at 720p100. The bitrate goes
+  to 8000 so the number means 8 Mbps rather than 8.192. Verified by booting
+  the device on this file as `/etc/waybeam.json`, which is what a fresh craft
+  does. The existing `cv610_sample` assertion only proved the file validates —
+  it would pass just as happily on 1280x728 — so the shipped values are now
+  pinned and asserted to name a real sensor mode. **Noted, not fixed:** the
+  wire rate measures ~14.2 Mbps against the 8 Mbps target while RC is
+  programmed with 8000, the same shape as the known Star6E high-fps CBR
+  overshoot.
+
+## [0.65.1] - 2026-08-14
+
+CV610 advertises the control surface it actually has, and `mutability`
+becomes a per-backend answer.
+
+- **The CV610 capability set was under-reporting the backend.** Eight fields
+  the slice genuinely reads were advertised unsupported, so `/api/v1/set`
+  returned `501` for values `cv610_prepare()` / `cv610_output_start()` /
+  `cv610_audio_start()` would have honoured on the next start: `video0.fps`,
+  `video0.size`, `outgoing.enabled`, `outgoing.server`,
+  `outgoing.connected_udp`, `outgoing.allow_unix_encoder_stall`,
+  `audio.enabled`, `audio.mute`. The practical consequence was that a CV610
+  craft could not be retargeted at all — `outgoing.server` was rejected, and
+  the only way to change the stream destination was to edit
+  `/etc/waybeam.json` on the device by hand.
+- **`mutability` is now per backend** (`field_mut_for_backend()`), and may
+  only be *downgraded* from the shared table — a backend can never widen a
+  restart-class field to live. CV610 reads `video0.fps`, `outgoing.enabled`,
+  `outgoing.server` and `audio.mute` once at start, so it reports them
+  `restart_required` where Star6E and Maruko report `live`. Without this the
+  widening above would have handed the dashboard four live controls that
+  accept a value and silently do nothing — the failure mode the Maruko
+  capability gates already exist to prevent. `/api/v1/live/set` rejects them
+  on CV610 with `400` and still applies them on Star6E; verified both ways.
+- **What stays unsupported is now unsupported for a stated reason.**
+  `audio.sample_rate` / `channels` / `codec` / `volume` are fixed at
+  48000 / 1 / opus / gain 8 in `src/cv610_audio.c`, and `video0.rc_mode` is
+  fixed at H.265 CBR in `cv610_venc_start()`. The shipped defaults happen to
+  match those constants, which is exactly why advertising them would be a
+  lie rather than a convenience.
+- **`/api/v1/audio/status` implemented on CV610.** It answered `501` while
+  the Opus encoder was in fact streaming. Now reports the fixed 48 kHz mono
+  configuration, the mute state, and live `frames` / `bytes` / `packets` /
+  `drops` from the audio thread's stats lock.
+- **Dashboard stops offering dead controls on CV610**: the Image Quality tab
+  is hidden (`/api/v1/iq`, `/ae`, `/awb` all answer `501` there) and the
+  recording start/stop buttons are disabled — nothing services a record
+  request on CV610, so those routes already answered `501` through the
+  existing `venc_api_set_record_http_control_supported()` opt-in.
+- **The sensor clock now follows the selected mode, instead of a boot-time
+  module argument.** `CV610_SENSOR_PROFILE` never named a sensor — the part
+  is IMX662 in every configuration, and the loader artifact is the
+  IMX662-patched `open_sys_config`. The string is a key into
+  `parse_sensor_clock()`, a three-entry table that writes one CRG register:
+  the IMX662 needs 37.125 MHz for 30/60/90 fps and 27 MHz for 100 fps (27 MHz
+  fed while the sensor selects its 24 MHz INCK profile, register
+  `0x3014 = 0x04`). One clock per boot therefore made exactly one mode
+  correct, and the failure was silent: the rate scaled by the clock ratio,
+  measured **43.6 fps** for a 60 fps mode on the 27 MHz clock
+  (60 x 27/37.125), with every status surface still reporting 60.
+  `mipi_setup()` now sets the clock from `video0.fps` during bring-up — after
+  `ENABLE_SENSOR_CLOCK`, which rewrites the same register, and before
+  `UNRESET_SENSOR` so the sensor leaves reset on its final clock. It writes a
+  **frequency**, not a register value, to
+  `/sys/module/open_sys_config/parameters/sns0_clk_hz`, a new writable
+  parameter on the patched sys_config module
+  (`0002-hi3516cv6xx-runtime-sensor-clock.patch` in the firmware tree); the
+  CRG encoding stays in the kernel next to `parse_sensor_clock()`.
+  **Verified with the boot profile left at `sc4336p`, so the daemon overrides
+  it every time: 30 / 60 / 90 / 100 fps all deliver their nominal rate**
+  (ratio 1.000-1.002, 100 fps repeated at both ends of the sweep), where
+  before only the mode matching the boot profile was right. Against an older
+  sys_config without the parameter the daemon warns, naming the clock the
+  mode needs, and continues on the boot-time clock.
+- **Debug OSD verified on CV610 hardware** for the first time
+  (Hi3516CV610 demo board, 1080p100): `debug.showOsd=true` composites the
+  CLUT4 RGN overlay into the encoded stream, with correct live values
+  (`fps: 100`, `br: 16000k`, `enc: 1920x1080 h265`). It was already wired in
+  `debug_osd.c` and advertised supported; it had simply never been switched
+  on with eyes on the output.
+
 ## [0.65.0] - 2026-08-13
 
 Initial HiSilicon CV610 + Sony IMX662 backend slice (#220).

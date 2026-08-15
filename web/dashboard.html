@@ -339,9 +339,9 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
 
   <div class="tab" onclick="switchTab('api')">API Reference</div>
 
-  <div class="tab" onclick="switchTab('iq')">Image Quality</div>
+  <div class="tab" id="tab-btn-iq" onclick="switchTab('iq')">Image Quality</div>
 
-  <div class="tab" onclick="switchTab('recordings')">Recordings</div>
+  <div class="tab" id="tab-btn-recordings" onclick="switchTab('recordings')">Recordings</div>
 
 </div>
 
@@ -1778,6 +1778,22 @@ async function init(){
       backendName = verR.data.backend || '';
 
       document.getElementById('tbar-backend').innerHTML = '<b>'+verR.data.backend+'</b>';
+
+      // Hide whole tabs whose every route answers 501/404 on this backend,
+      // rather than leaving a tab that loads into a permanent error. The
+      // per-field N/A greying in renderSettings() covers the Settings tab;
+      // this is for tabs with no capability entry to grey.
+      if(backendName === 'cv610'){
+        const iqTab = document.getElementById('tab-btn-iq');
+        if(iqTab) iqTab.hidden = true;   // /api/v1/iq|ae|awb are 501 here
+        // The listing works (it is a directory read), but nothing services a
+        // record request on cv610 — the routes answer 501. Keep the tab,
+        // disable the actuators so the buttons cannot lie.
+        for(const id of ['rec-btn-start','rec-btn-stop']){
+          const b = document.getElementById(id);
+          if(b){ b.disabled = true; b.title = 'Recording is not implemented on the cv610 backend'; }
+        }
+      }
 
     }
 

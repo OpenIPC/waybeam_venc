@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.0`
+- `contract_version`: `0.18.2`
 - `status`: `active`
 
 ## Governance Rules
@@ -997,6 +997,33 @@ Response `200` (Maruko with audio enabled):
 }
 ```
 
+Response `200` (CV610 with audio enabled):
+```json
+{
+  "ok": true,
+  "data": {
+    "enabled": true,
+    "backend": "cv610",
+    "running": true,
+    "codec": "opus",
+    "sample_rate": 48000,
+    "channels": 1,
+    "muted": false,
+    "frames": 1486,
+    "bytes": 60966,
+    "packets": 1486,
+    "drops": 0
+  }
+}
+```
+
+CV610 reports a different field set on purpose. It has no dlopened audio
+library to report on (the MPI is linked), and its 48 kHz mono Opus
+configuration is compiled in rather than read from config, so the useful
+observability there is throughput: `frames` / `bytes` / `packets` / `drops`
+are lifetime counters from the audio thread. A client must treat the field
+set as backend-specific and key off `backend`.
+
 Response `200` when `audio.enabled=false`:
 ```json
 {"ok":true,"data":{"enabled":false,"backend":"maruko"}}
@@ -1449,11 +1476,35 @@ Response `200`:
 selection.  The full `pads[].modes[]` list always shows every mode the
 driver enumerates so callers can show an "available modes" UI.
 
+**CV610 note — every advertised mode is selectable, but only against a
+sys_config that exposes the runtime sensor clock.** The IMX662 runs 30/60/90
+fps on a 37.125 MHz input clock and 100 fps on 27 MHz (27 MHz fed while the
+sensor selects its 24 MHz INCK profile). The daemon sets the SoC-side clock
+to match the requested mode during MIPI bring-up, by writing
+`/sys/module/open_sys_config/parameters/sns0_clk_hz`.
+
+Against an older `open_sys_config` without that parameter the daemon logs a
+warning and continues, and the clock stays at whatever
+`CV610_SENSOR_PROFILE` selected at insmod — correct for exactly one mode.
+Every other mode then runs at the wrong rate, scaled by the clock ratio
+(measured: `video0.fps=60` on the 27 MHz profile delivers 43.6 fps =
+60 x 27/37.125) while `/api/v1/modes` and `/api/v1/fps/live` still report
+60. Neither endpoint measures anything, so a client must not treat a
+`selected` mode as proof of the delivered rate — measure it from
+`framesSent` in `/api/v1/transport/status`.
+
 CV610 preserves the same envelope and `selected_pad` / `selected_mode` /
 `pads[].modes[]` shape. Its initial IMX662 backend reports one synthetic pad
 containing the four supported fixed-rate modes (1080p30/60 RAW12 and
 1080p90/100 RAW10); each entry has equal `min_fps` and `max_fps`, and the entry
 matching `video0.fps` is marked selected.
+
+The `width` / `height` of a CV610 entry is what the **sensor captures**, not
+what is encoded. `video0.fps` alone selects the mode — every entry captures
+1920x1080 — and `video0.size` is the encoded geometry VPSS scales that capture
+down to. A client must not read a mode's `width` / `height` as the stream
+resolution — `video0.size` in `/api/v1/config` is the encoded size, and
+`auto` there means the mode's capture geometry.
 
 Error `500 modes_failed` — `MI_SNR_QueryResCount` failed (e.g. sensor
 driver not loaded yet during a brief startup window). This SigmaStar query
@@ -1646,6 +1697,63 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.2` (additive — CV610 `video0.size` becomes a real control):
+  - **`video0.size` on CV610 now accepts any geometry the mode can be scaled
+    down to**, not just the capture size. VI has no scaler, so the backend
+    previously bound VI straight to VENC and `1920x1080` was the only value
+    that validated. A VPSS group now sits between them (VI chn → VPSS grp →
+    VPSS chn → VENC) and does the scaling, so `video0.size` is the encoded
+    geometry and `video0.fps` alone selects the sensor mode — the same split
+    Star6E has. Rejections are `409`: not a multiple of 8, below 128x128, or
+    larger than the mode's capture size (VPSS does not invent detail, and
+    upscaling would spend encoder bandwidth for no information).
+  - `/api/v1/modes` keeps its shape, but a CV610 entry's `width` / `height`
+    is now explicitly the **capture** geometry rather than the stream
+    resolution, and `selected` follows `video0.fps` alone. Previously a
+    client could infer the two were the same, because they were.
+  - **A CV610 sensor clock that cannot be set is now fatal to bring-up**, so
+    a mode either delivers its nominal rate or the daemon does not start. The
+    two failures are answered differently: a `sys_config` with no
+    `sns0_clk_hz` parameter predates it, and that stays a warning with the
+    clock left as loaded (one mode then runs correctly, the rest do not).
+    A parameter that *is* present and rejects the write means the line timing
+    is known to be running against the wrong MCLK, and the delivered rate
+    would be wrong while `/api/v1/modes` and `/api/v1/fps/live` both report
+    nominal — so bring-up aborts rather than serve a rate nothing reports.
+  - **Correction to `0.18.1`**, which stated that `video0.fps` on CV610 is
+    "honoured only within the sensor clock profile the kernel modules were
+    loaded with". That shipped alongside the runtime sensor clock in the same
+    release and was stale on arrival: the daemon sets the clock for the
+    selected mode at bring-up. The boot-time profile matters only against a
+    `sys_config` too old to expose `sns0_clk_hz`, which is what the caveat
+    under `/api/v1/modes` describes.
+- `0.18.1` (additive — CV610 control surface reaches what the backend reads):
+  - CV610 now advertises `video0.fps`, `video0.size`, `outgoing.enabled`,
+    `outgoing.server`, `outgoing.connected_udp`,
+    `outgoing.allow_unix_encoder_stall`, `audio.enabled` and `audio.mute` as
+    supported. All were already read by the backend; the capability set
+    under-reported them, so `/api/v1/set` answered `501` for a value the
+    daemon would have honoured on the next start.
+  - **`mutability` is now per backend.** It may only be downgraded from the
+    shared table, never widened. CV610 reports `video0.fps`,
+    `outgoing.enabled`, `outgoing.server` and `audio.mute` as
+    `restart_required` where Star6E and Maruko report `live`, because the
+    CV610 slice reads them once at start. `/api/v1/live/set` rejects them
+    with `400 invalid_request` on CV610 and still applies them on Star6E.
+    A client must therefore read `mutability` from the target device rather
+    than assuming it per field.
+  - `/api/v1/audio/status` is implemented on CV610, reporting the fixed
+    48 kHz mono Opus configuration plus live `frames` / `bytes` / `packets` /
+    `drops` counters. It answered `501 not_implemented` before while audio
+    was in fact streaming.
+  - `video0.fps` on CV610 is honoured only within the sensor clock profile
+    the kernel modules were loaded with — see the CV610 caveat under
+    `/api/v1/modes`. No contract shape changed; the constraint is documented
+    because the mode list cannot express it.
+  - Still unsupported on CV610, and deliberately so: `audio.sample_rate`,
+    `audio.channels`, `audio.codec`, `audio.volume` (hardcoded in
+    `src/cv610_audio.c`) and `video0.rc_mode` (hardcoded H.265 CBR). The
+    shipped defaults coincide with the hardcoded values; that is not support.
 - `0.18.0` (additive — Unix encoder-stall compatibility):
   - Added restart-required `outgoing.allow_unix_encoder_stall` with camelCase
     alias `outgoing.allowUnixEncoderStall`. Default `false` retains bounded

@@ -25,6 +25,7 @@
 #include "ot_common_vb.h"
 #include "ot_common_sys.h"
 #include "ot_common_vi.h"
+#include "ot_common_vpss.h"
 #include "ot_common_isp.h"
 #include "ot_common_3a.h"
 #include "ot_mipi_rx.h"
@@ -33,6 +34,8 @@
 #include "ss_mpi_sys_mem.h"
 #include "ss_mpi_vb.h"
 #include "ss_mpi_vi.h"
+#include "ss_mpi_vpss.h"
+#include "ss_mpi_sys_bind.h"
 #include "ss_mpi_isp.h"
 #include "ss_mpi_ae.h"
 #include "ss_mpi_awb.h"
@@ -46,6 +49,8 @@
 #define VI_DEV              0
 #define VI_PIPE             0
 #define VI_CHN              0
+#define VPSS_GRP            0
+#define VPSS_CHN            0
 
 #define CV610_CHECK(expr) do { \
 		td_s32 check_ret = (expr); \
@@ -81,6 +86,9 @@ typedef struct {
 	int          data_rate_x2; /* MIPI_DATA_RATE_X1 or X2 */
 	int          bayer;        /* ot_isp_bayer_format 0..3 */
 	int          raw_bit;      /* 10 or 12 */
+	uint32_t     sensor_clock_hz; /* MCLK this mode's line timing assumes */
+	unsigned int out_width;    /* VPSS output = encoded size */
+	unsigned int out_height;
 	int          vi_online;    /* VI -> ISP online/realtime mode */
 } Cv610PipelineRuntimeConfig;
 
@@ -98,6 +106,61 @@ static void *isp_thread_fn(void *arg)
 }
 
 /* ------------------------------------------------------------------ MIPI -- */
+
+/* Each sensor mode assumes a specific MCLK; the table is src/cv610_modes.c.
+ * A mismatch is silent: the sensor keeps its programmed line timing against
+ * the wrong input clock and the delivered rate scales by the ratio — measured
+ * 43.6 fps for a 60 fps mode running on the 100 fps mode's 27 MHz clock.  The
+ * clock is a CRG register only the kernel can write, and the MIPI ioctls gate
+ * it without setting a rate, so sys_config exposes it as a frequency and
+ * keeps the register encoding. */
+#define CV610_SNS0_CLK_HZ_PATH "/sys/module/open_sys_config/parameters/sns0_clk_hz"
+
+/* Absent knob and failed write are different answers.  A sys_config without
+ * the parameter predates it, and refusing to run on that module would strand
+ * every craft still carrying it — so that stays a warning, and the clock
+ * remains whatever CV610_SENSOR_PROFILE loaded.  A knob that is present and
+ * will not take the value is a different thing: the mode's line timing is
+ * then known to be running against the wrong MCLK, and continuing would
+ * stream at a rate nothing reports.  Fail the bring-up instead, loudly.
+ *
+ * Returns 0 to continue, -1 to abort. */
+static int sensor_clock_select(uint32_t hz, uint32_t fps)
+{
+	char buf[16];
+	int len, fd;
+
+	/* No mode clock resolved: leave whatever the loader set. */
+	if (hz == 0) {
+		return 0;
+	}
+	fd = open(CV610_SNS0_CLK_HZ_PATH, O_WRONLY);
+	if (fd < 0) {
+		if (errno == ENOENT) {
+			/* Older sys_config: the clock stays as CV610_SENSOR_PROFILE
+			 * left it, which suits exactly one mode. */
+			fprintf(stderr,
+				"WARNING: %s absent — sensor clock stays as loaded; "
+				"%u fps needs %u Hz and will otherwise run at the wrong rate\n",
+				CV610_SNS0_CLK_HZ_PATH, fps, hz);
+			return 0;
+		}
+		fprintf(stderr, "FAIL open %s: %s\n", CV610_SNS0_CLK_HZ_PATH,
+			strerror(errno));
+		return -1;
+	}
+	len = snprintf(buf, sizeof(buf), "%u", hz);
+	if (len < 0 || (size_t)len >= sizeof(buf) ||
+		write(fd, buf, (size_t)len) != len) {
+		fprintf(stderr, "FAIL set sensor clock %u Hz for %u fps: %s\n", hz,
+			fps, strerror(errno));
+		close(fd);
+		return -1;
+	}
+	printf("  ok  sensor clock %u Hz for %u fps\n", hz, fps);
+	close(fd);
+	return 0;
+}
 
 static int mipi_setup(const Cv610PipelineRuntimeConfig *c)
 {
@@ -148,6 +211,12 @@ static int mipi_setup(const Cv610PipelineRuntimeConfig *c)
 	mipi_ioctl(OT_MIPI_ENABLE_MIPI_CLOCK, &dev);
 	mipi_ioctl(OT_MIPI_UNRESET_MIPI, &dev);
 	mipi_ioctl(OT_MIPI_ENABLE_SENSOR_CLOCK, &clk);
+	/* After the enable, which rewrites the same CRG register, and before
+	 * the sensor leaves reset so it comes up on its final clock. */
+	if (sensor_clock_select(c->sensor_clock_hz, (uint32_t)c->fps) != 0) {
+		close(fd);
+		return -1;
+	}
 	mipi_ioctl(OT_MIPI_UNRESET_SENSOR, &rst);
 #undef mipi_ioctl
 
@@ -163,13 +232,14 @@ static int sys_setup(const Cv610PipelineRuntimeConfig *c)
 {
 	ot_vb_cfg vb;
 	ot_vi_vpss_mode vi_vpss_mode;
-	td_u64 raw_blk, yuv_blk;
+	td_u64 raw_blk, yuv_blk, out_blk;
 	td_s32 sys_ret, vb_ret;
 	unsigned int i;
 
 	/* RAW12 is stored 16bpp in the pipe buffers; be generous, this is a probe. */
 	raw_blk = (td_u64)c->width * c->height * 2 + 0x4000;
 	yuv_blk = (td_u64)c->width * c->height * 3 / 2 + 0x4000;
+	out_blk = (td_u64)c->out_width * c->out_height * 3 / 2 + 0x4000;
 
 	memset(&vb, 0, sizeof(vb));
 	vb.max_pool_cnt = 2;
@@ -177,6 +247,15 @@ static int sys_setup(const Cv610PipelineRuntimeConfig *c)
 	vb.common_pool[0].blk_cnt  = 4;
 	vb.common_pool[1].blk_size = yuv_blk;
 	vb.common_pool[1].blk_cnt  = 4;
+	/* VPSS writes its scaled output to VB.  When it is smaller than the
+	 * capture it needs a pool of its own — VB hands out the smallest block
+	 * that fits, so without this the 1080p pool would be consumed a frame at
+	 * a time for a 720p picture. */
+	if (out_blk < yuv_blk) {
+		vb.max_pool_cnt = 3;
+		vb.common_pool[2].blk_size = out_blk;
+		vb.common_pool[2].blk_cnt  = 4;
+	}
 
 	/* VB/SYS state lives in the kernel and survives the process that created
 	 * it, and only the creating process may tear it down — so after a crashed
@@ -425,6 +504,83 @@ static int enable_sensor_ccm(void)
 	return 0;
 }
 
+/* ------------------------------------------------------------------ VPSS -- */
+
+/* VI has no scaler: its channel emits the captured geometry and nothing else.
+ * VPSS is the CV610's scaling stage (the counterpart of SigmaStar's VPE SCL
+ * ports), so the encoded size lives here rather than on the VI channel.  The
+ * group is created even when no scaling is asked for, so the shipping 1080p
+ * path and a scaled one exercise the same graph and the same teardown order. */
+static int vpss_setup(const Cv610PipelineRuntimeConfig *c)
+{
+	ot_vpss_grp_attr grp_attr;
+	ot_vpss_chn_attr chn_attr;
+	ot_mpp_chn src;
+	ot_mpp_chn dst;
+
+	memset(&grp_attr, 0, sizeof(grp_attr));
+	grp_attr.max_width     = c->width;
+	grp_attr.max_height    = c->height;
+	grp_attr.pixel_format  = OT_PIXEL_FORMAT_YVU_SEMIPLANAR_420;
+	grp_attr.dynamic_range = OT_DYNAMIC_RANGE_SDR8;
+	grp_attr.dei_mode      = OT_VPSS_DEI_MODE_OFF;
+	grp_attr.frame_rate.src_frame_rate = -1;
+	grp_attr.frame_rate.dst_frame_rate = -1;
+	CV610_CHECK(ss_mpi_vpss_create_grp(VPSS_GRP, &grp_attr));
+
+	memset(&chn_attr, 0, sizeof(chn_attr));
+	chn_attr.width         = c->out_width;
+	chn_attr.height        = c->out_height;
+	/* VI accepts only YVU (NV21) on this chip; keep the whole chain on it so
+	 * VENC sees one pixel format regardless of whether VPSS scaled. */
+	chn_attr.pixel_format  = OT_PIXEL_FORMAT_YVU_SEMIPLANAR_420;
+	chn_attr.dynamic_range = OT_DYNAMIC_RANGE_SDR8;
+	chn_attr.video_format  = OT_VIDEO_FORMAT_LINEAR;
+	chn_attr.compress_mode = OT_COMPRESS_MODE_NONE;
+	/* USER, not AUTO: AUTO makes the channel follow the group's input size
+	 * and set_chn_attr rejects an explicit geometry with ILLEGAL_PARAM
+	 * (0xa0078007, probed on hardware).  USER is what lets this channel be
+	 * a scaler.  frame_rate must stay -1/-1 for the same reason — 0/0 is
+	 * rejected with the same code. */
+	chn_attr.chn_mode      = OT_VPSS_CHN_MODE_USER;
+	chn_attr.depth         = 0;
+	chn_attr.frame_rate.src_frame_rate = -1;
+	chn_attr.frame_rate.dst_frame_rate = -1;
+	CV610_CHECK(ss_mpi_vpss_set_chn_attr(VPSS_GRP, VPSS_CHN, &chn_attr));
+	CV610_CHECK(ss_mpi_vpss_enable_chn(VPSS_GRP, VPSS_CHN));
+	CV610_CHECK(ss_mpi_vpss_start_grp(VPSS_GRP));
+
+	src.mod_id = OT_ID_VI;
+	src.dev_id = VI_PIPE;
+	src.chn_id = VI_CHN;
+	dst.mod_id = OT_ID_VPSS;
+	dst.dev_id = VPSS_GRP;
+	dst.chn_id = 0;
+	CV610_CHECK(ss_mpi_sys_bind(&src, &dst));
+	printf("  ok  VPSS %ux%u -> %ux%u%s\n", c->width, c->height,
+		c->out_width, c->out_height,
+		(c->out_width == c->width && c->out_height == c->height) ?
+			" (1:1)" : " (scaled)");
+	return 0;
+}
+
+/* Unconditional, like the VI and ISP teardown below: vpss_setup() can fail
+ * at any of its four steps, and a group created by an earlier step is kernel
+ * state that outlives this process.  Skipping the destroy would leave grp 0
+ * behind, and the next start — a respawn reloads no modules — would fail
+ * create_grp with EXIST and never recover.  Each call is a no-op returning an
+ * error we ignore when the object was never created. */
+static void vpss_teardown(void)
+{
+	ot_mpp_chn src = { OT_ID_VI, VI_PIPE, VI_CHN };
+	ot_mpp_chn dst = { OT_ID_VPSS, VPSS_GRP, 0 };
+
+	(void)ss_mpi_sys_unbind(&src, &dst);
+	(void)ss_mpi_vpss_stop_grp(VPSS_GRP);
+	(void)ss_mpi_vpss_disable_chn(VPSS_GRP, VPSS_CHN);
+	(void)ss_mpi_vpss_destroy_grp(VPSS_GRP);
+}
+
 /* --------------------------------------------------------------- teardown -- */
 
 /* Safe after partial initialization; BackendOps calls this on init failure. */
@@ -433,6 +589,9 @@ static void mpp_cleanup(void)
 	td_s32 sys_ret, vb_ret;
 
 	printf("== teardown ==\n");
+	/* VPSS consumes VI, so unbind and stop it before the pipe it reads from
+	 * — the same producer-last rule the ISP block below follows. */
+	vpss_teardown();
 	/* Match the vendor sample's shutdown dependency order: stop ISP and its
 	 * 3A/sensor users before dismantling the VI pipe that feeds it. */
 	ss_mpi_isp_exit(VI_PIPE);
@@ -475,6 +634,9 @@ int cv610_pipeline_start(const Cv610PipelineConfig *config)
 	c.data_rate_x2 = config->data_rate_x2;
 	c.bayer = config->bayer;
 	c.raw_bit = config->raw_bit;
+	c.sensor_clock_hz = config->sensor_clock_hz;
+	c.out_width = config->out_width;
+	c.out_height = config->out_height;
 	c.vi_online = config->vi_online;
 	g_stop = 0;
 
@@ -493,6 +655,10 @@ int cv610_pipeline_start(const Cv610PipelineConfig *config)
 	printf("== cv610 sensor/isp ==\n");
 	if (sensor_setup(config->i2c_bus) != 0 || isp_setup(&c) != 0 ||
 		configure_output_color() != 0) {
+		return -1;
+	}
+	printf("== cv610 vpss ==\n");
+	if (vpss_setup(&c) != 0) {
 		return -1;
 	}
 	if (pthread_create(&g_isp_thread, NULL, isp_thread_fn, NULL) != 0) {
