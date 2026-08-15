@@ -36,7 +36,9 @@
 #define CV610_AENC_CHN 0
 #define CV610_ACODEC_DEVICE "/dev/acodec"
 #define CV610_AUDIO_SAMPLE_RATE 48000u
-#define CV610_AUDIO_POINT_NUM 480u
+/* 20 ms Opus frames (parity with the star6e/maruko 20 ms chunking): halves
+ * the packet rate vs 10 ms for the same encoded bitrate. */
+#define CV610_AUDIO_POINT_NUM 960u
 #define CV610_AUDIO_BITRATE 32000u
 #define CV610_AUDIO_PAYLOAD_TYPE 98u
 #define CV610_AUDIO_MIC_GAIN 8u
