@@ -319,7 +319,13 @@ static td_s32 cmos_get_awb_default(ot_vi_pipe vi_pipe, ot_isp_awb_sensor_default
 	awb_sns_dft->wb_para[5] = IMX662_AWB_C1;
 	(td_void)memcpy_s(&awb_sns_dft->ccm, sizeof(awb_sns_dft->ccm),
 					  &g_imx662_awb_ccm, sizeof(g_imx662_awb_ccm));
-	/* TODO(tuning): ISO-dependent saturation and IR-cut-aware day/night bank. */
+	/* Without these the memset above leaves agc_tbl.valid = 0 and every
+	 * saturation entry 0, so the ISP is never told what saturation to run. */
+	(td_void)memcpy_s(&awb_sns_dft->agc_tbl, sizeof(awb_sns_dft->agc_tbl),
+					  &g_imx662_awb_agc_table, sizeof(g_imx662_awb_agc_table));
+	(td_void)memcpy_s(&awb_sns_dft->sector, sizeof(awb_sns_dft->sector),
+					  &g_imx662_color_sector, sizeof(g_imx662_color_sector));
+	/* TODO(tuning): IR-cut-aware day/night bank. */
 	return TD_SUCCESS;
 }
 
@@ -349,13 +355,13 @@ static td_s32 cmos_get_isp_default(ot_vi_pipe vi_pipe, ot_isp_cmos_default *isp_
 	 *
 	 * Linear mode only; cmos_set_wdr_mode() rejects every other WDR mode.
 	 *
-	 * Enabled below is the ISP-behaviour set (see imx662_cmos_param.h for why
-	 * these transfer from sc450ai and the noise-fitted ones do not).
-	 * Still off, each for its own reason: bayer_nr / sharpen /
-	 * noise_calibration / drc await an IMX662 measurement rather than a
-	 * borrowed 4 MP noise model; lsc needs a per-module shading capture;
-	 * dpc is enabled in sc450ai's common path and is a candidate here, but
-	 * has not been measured on this sensor yet. */
+	 * Everything enabled below comes from sc450ai, which targets this same ISP
+	 * silicon; see imx662_cmos_param.h for which of it transfers on principle
+	 * and which is borrowed noise tuning kept on a hardware A/B.
+	 *
+	 * Still off, each for its own reason: lsc needs a per-module shading
+	 * capture, and dpc is enabled in sc450ai's common path and is a candidate
+	 * here but has not been measured on this sensor yet. */
 	isp_def->key.bit1_demosaic         = 1;
 	isp_def->demosaic                  = &g_cmos_demosaic;
 	isp_def->key.bit1_gamma            = 1;
@@ -372,8 +378,21 @@ static td_s32 cmos_get_isp_default(ot_vi_pipe vi_pipe, ot_isp_cmos_default *isp_
 	isp_def->dehaze                    = &g_cmos_dehaze;
 	isp_def->key.bit1_ca               = 1;
 	isp_def->ca                        = &g_cmos_ca;
+	isp_def->key.bit1_bayer_nr         = 1;
+	isp_def->bayer_nr                  = &g_cmos_bayer_nr;
+	isp_def->key.bit1_sharpen          = 1;
+	isp_def->sharpen                   = &g_cmos_yuv_sharpen;
+	isp_def->key.bit1_drc              = 1;
+	isp_def->drc                       = &g_cmos_drc;
+	(td_void)memcpy_s(&isp_def->noise_calibration, sizeof(ot_isp_noise_calibration),
+					  &g_cmos_noise_calibration, sizeof(ot_isp_noise_calibration));
 
-	isp_def->sns_mode.sns_id        = 0;
+	/* The ISP identifies the sensor by these. sns_id was 0, which disagrees
+	 * with cv610_pipeline.c's IMX662_SNS_ID -- that file already documents
+	 * the two as having to match -- and would misbind any future PQ .bin,
+	 * which is chip- and sensor-locked. sns_mode was never set at all. */
+	isp_def->sns_mode.sns_id        = IMX662_ID;
+	isp_def->sns_mode.sns_mode      = sns_state->img_mode;
 	return TD_SUCCESS;
 }
 
