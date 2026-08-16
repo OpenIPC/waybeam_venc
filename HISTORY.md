@@ -1,5 +1,43 @@
 # History
 
+## [0.65.3] - 2026-08-16
+
+CV610 sensor-mode selection reaches parity with SigmaStar, so one client can
+render one set of sensor controls against all three backends. Contract
+`0.18.2` → `0.18.3`.
+
+- **`sensor.index` and `sensor.mode` select on CV610 now.** Both parsed and
+  both sat in the config file, but the backend read neither and the capability
+  set advertised neither, so `/api/v1/set` answered `409` for a field the
+  daemon carried. `video0.fps` was the selector instead, through an
+  exact-match lookup — a request for 45 fps was a hard config error where
+  SigmaStar substitutes a mode and says so. The two knobs now mean what
+  `sensor_select()` makes them mean: a forced `sensor.mode` wins over the
+  requested rate and must exist, otherwise the rate is a target.
+- **One case diverges from SigmaStar deliberately.** Its `sensor_mode_cost()`
+  tie-break scores fps-excess at zero for every mode *below* the target, so a
+  target above them all falls back to table order — the slowest mode. That
+  rarely fires there because its modes carry min–max fps ranges; on CV610's
+  four point-rate modes it would fire constantly, so a target above every mode
+  clamps to the fastest instead. Verified on the bench: `video0.fps=120`
+  selects 1080p100, and `45` selects 1080p60.
+- **`/api/v1/modes` reports what is running, not what is configured.**
+  `selected_pad` / `selected_mode` were recomputed from `video0.fps` on every
+  request, so they described the configured mode even when bring-up had chosen
+  another or failed outright. They are now published by the backend once the
+  pipeline resolves, through the same `venc_api_set_sensor_info()` Star6E uses.
+- **`video0.gopSize` is checked against the selected mode's rate.** The
+  encoder has always derived its GOP length from that rate rather than from
+  `video0.fps`; the two were identical only while selection was exact-match.
+  A forced mode or a substituted target separates them, and the old check
+  would have passed a `gopSize` that then exceeded the encoder's 65536-frame
+  limit.
+- A substituted rate is announced (`Requested 45 fps, using 60 fps (sensor
+  mode 1: 1080p60 RAW12)`) and shows up over HTTP as `/api/v1/fps/live`
+  disagreeing with `/api/v1/fps/config`. Neither measures anything — the
+  sensor clock follows the mode automatically, but a client that needs the
+  delivered rate must still measure it downstream.
+
 ## [0.65.2] - 2026-08-15
 
 CV610 gets a scaler, one mode table instead of five copies of it, and a
