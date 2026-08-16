@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.2`
+- `contract_version`: `0.18.3`
 - `status`: `active`
 
 ## Governance Rules
@@ -1496,13 +1496,42 @@ Every other mode then runs at the wrong rate, scaled by the clock ratio
 CV610 preserves the same envelope and `selected_pad` / `selected_mode` /
 `pads[].modes[]` shape. Its initial IMX662 backend reports one synthetic pad
 containing the four supported fixed-rate modes (1080p30/60 RAW12 and
-1080p90/100 RAW10); each entry has equal `min_fps` and `max_fps`, and the entry
-matching `video0.fps` is marked selected.
+1080p90/100 RAW10); each entry has equal `min_fps` and `max_fps`.
+
+`selected_pad` / `selected_mode` are what bring-up **actually selected**, not
+what the config asks for — the backend publishes them once the pipeline is
+resolved, so a forced `sensor.mode`, a substituted rate and a failed bring-up
+are all reported honestly. Both read `-1` until bring-up completes, which in a
+healthy daemon is never observable: the HTTP server starts after the backend
+prepares.
 
 The `width` / `height` of a CV610 entry is what the **sensor captures**, not
-what is encoded. `video0.fps` alone selects the mode — every entry captures
-1920x1080 — and `video0.size` is the encoded geometry VPSS scales that capture
-down to. A client must not read a mode's `width` / `height` as the stream
+what is encoded. Every entry captures 1920x1080, and `video0.size` is the
+encoded geometry VPSS scales that capture down to.
+
+**Aspect ratio is preserved by cropping, gated on `isp.keepAspect`** (default
+`true`), the same rule and the same shared code Star6E and Maruko use. A
+`video0.size` whose aspect differs from the capture takes a centred crop of
+the capture first, then scales: `1440x1080` out of `1920x1080` uses a
+1440x1080 window at x=240 and scales 1:1, so 4:3 is framed rather than
+squashed. A matching aspect crops nothing. Setting `isp.keepAspect=false`
+restores the plain stretch-to-fit.
+
+**Selecting a CV610 mode uses the same two knobs as SigmaStar.** An explicit
+`sensor.mode` is an index into this list and wins outright; the mode's rate
+becomes the pipeline rate and `video0.fps` is left as written. With
+`sensor.mode` at `-1` (or any negative value, meaning auto) `video0.fps` is a
+**target** rather than a command: an exact match is used, otherwise the
+slowest mode still faster than the target, and a target above every mode
+clamps to the fastest. `sensor.index` accepts only `-1` or `0` — one synthetic
+pad — and anything else is `409`, as is a `sensor.mode` past the end of the
+list.
+
+A substituted rate is announced on the daemon's log
+(`Requested 45 fps, using 60 fps (sensor mode 1: 1080p60 RAW12)`) and is
+visible over HTTP as `/api/v1/fps/live` disagreeing with
+`/api/v1/fps/config`. Neither endpoint measures anything, so that pair states
+the *intended* rate, not the delivered one. A client must not read a mode's `width` / `height` as the stream
 resolution — `video0.size` in `/api/v1/config` is the encoded size, and
 `auto` there means the mode's capture geometry.
 
@@ -1697,6 +1726,45 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.3` (additive — CV610 sensor-mode selection reaches SigmaStar parity):
+  - **`sensor.index` and `sensor.mode` are now supported on CV610**, both
+    `restart_required`, the same `mutability` the shared table gives them on
+    Star6E and Maruko. They parsed before but were read by nothing, so
+    `/api/v1/set` answered `409` for a field the config file carried. A
+    client that renders sensor controls from `/api/v1/capabilities` now gets
+    the same surface on all three backends.
+  - **`video0.fps` is a target on CV610, not a command.** With `sensor.mode`
+    auto, an exact match is used, otherwise the slowest mode still faster
+    than the target, and a target above every mode clamps to the fastest.
+    Rates that are not in the table were `409` before and are now honoured
+    with a substitution — see `/api/v1/modes`. `video0.fps=0` remains `409`.
+  - **`/api/v1/modes` reports the achieved selection.** `selected_pad` /
+    `selected_mode` were recomputed from `video0.fps` per request, so they
+    described the configured mode even when another one was running. They are
+    now published by the backend at bring-up, and read `-1` before it
+    completes. Shape unchanged.
+  - **`isp.keepAspect` is now supported on CV610** (`restart_required`), and
+    a non-native `video0.size` is centre-cropped before scaling instead of
+    stretched. The field was in the config file and defaulted `true`, but
+    CV610 advertised no `isp.*` field and read none, so it was a knob that
+    did nothing — `1440x1080` validated and then squashed 16:9 into 4:3.
+    CV610 now calls the same `pipeline_common_compute_precrop()` Star6E and
+    Maruko use. No shape changed and no request that used to succeed now
+    fails; the pixels are different.
+  - **CV610 now runs the shared field validation at config load**, which it
+    had been skipping entirely: `venc_api_validate_loaded_config()` dispatched
+    to the CV610 backend validator *instead of* the shared
+    `validate_field_cfg()` sweep, so sixteen shared rules never ran on that
+    backend. The HTTP `/api/v1/set` path always applied them, so the same
+    value was accepted from `/etc/waybeam.json` at boot and rejected with
+    `409` over HTTP. A CV610 config carrying e.g. `isp.awbMode:"bogus"` used
+    to load and now fails with the same message Star6E gives. Configs that
+    were valid on Star6E are unaffected.
+  - `video0.gopSize` is validated against the **selected** mode's rate. The
+    encoder has always derived its GOP length from that rate; the check used
+    `video0.fps`, which the two knobs above can now separate from it. A
+    `gopSize` that was accepted and then exceeded the encoder's 65536-frame
+    limit is now rejected at `409`.
 - `0.18.2` (additive — CV610 `video0.size` becomes a real control):
   - **`video0.size` on CV610 now accepts any geometry the mode can be scaled
     down to**, not just the capture size. VI has no scaler, so the backend

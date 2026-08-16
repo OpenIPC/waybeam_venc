@@ -7,7 +7,7 @@
     "rcMode": "cbr",
     "fps": 100,
     "size": "1280x720",
-    "bitrate": 8000,
+    "bitrate": 2600,
     "gopSize": 1.0,
     "qpDelta": -4,
     "resilience": "off",

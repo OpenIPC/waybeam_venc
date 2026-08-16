@@ -1,5 +1,73 @@
 # History
 
+## [0.65.3] - 2026-08-16
+
+CV610 sensor-mode selection reaches parity with SigmaStar, so one client can
+render one set of sensor controls against all three backends. Contract
+`0.18.2` → `0.18.3`.
+
+- **`sensor.index` and `sensor.mode` select on CV610 now.** Both parsed and
+  both sat in the config file, but the backend read neither and the capability
+  set advertised neither, so `/api/v1/set` answered `409` for a field the
+  daemon carried. `video0.fps` was the selector instead, through an
+  exact-match lookup — a request for 45 fps was a hard config error where
+  SigmaStar substitutes a mode and says so. The two knobs now mean what
+  `sensor_select()` makes them mean: a forced `sensor.mode` wins over the
+  requested rate and must exist, otherwise the rate is a target.
+- **One case diverges from SigmaStar deliberately.** Its `sensor_mode_cost()`
+  tie-break scores fps-excess at zero for every mode *below* the target, so a
+  target above them all falls back to table order — the slowest mode. That
+  rarely fires there because its modes carry min–max fps ranges; on CV610's
+  four point-rate modes it would fire constantly, so a target above every mode
+  clamps to the fastest instead. Verified on the bench: `video0.fps=120`
+  selects 1080p100, and `45` selects 1080p60.
+- **`/api/v1/modes` reports what is running, not what is configured.**
+  `selected_pad` / `selected_mode` were recomputed from `video0.fps` on every
+  request, so they described the configured mode even when bring-up had chosen
+  another or failed outright. They are now published by the backend once the
+  pipeline resolves, through the same `venc_api_set_sensor_info()` Star6E uses.
+- **`video0.gopSize` is checked against the selected mode's rate.** The
+  encoder has always derived its GOP length from that rate rather than from
+  `video0.fps`; the two were identical only while selection was exact-match.
+  A forced mode or a substituted target separates them, and the old check
+  would have passed a `gopSize` that then exceeded the encoder's 65536-frame
+  limit.
+- A substituted rate is announced (`Requested 45 fps, using 60 fps (sensor
+  mode 1: 1080p60 RAW12)`) and shows up over HTTP as `/api/v1/fps/live`
+  disagreeing with `/api/v1/fps/config`. Neither measures anything — the
+  sensor clock follows the mode automatically, but a client that needs the
+  delivered rate must still measure it downstream.
+- **`isp.keepAspect` works on CV610 now; a 4:3 `video0.size` was silently
+  squashed.** The field sat in the config defaulting `true`, but CV610
+  advertised no `isp.*` field and read none — a knob that did nothing, which
+  is worse than one that is absent. `1440x1080` validated, then VPSS stretched
+  the whole 1920x1080 capture into it. The backend now takes a centred crop
+  first, through the same `pipeline_common_compute_precrop()` Star6E and
+  Maruko call, so the rule cannot drift between the three: `1440x1080` uses a
+  1440x1080 window at x=240 and scales 1:1. `isp.keepAspect=false` restores
+  stretch-to-fit. Verified both directions on the bench.
+- **The CV610 default bitrate drops 8000 → 2600 kbps.** waybeam-link is the
+  single rate controller and actuates within seconds, so the config value is
+  a **boot seed**, not an operating point — and what a seed has to survive is
+  the worst rung, not the expected one. Landing at the §9.8 MCS0 no-feedback
+  floor while offering 8 Mbps floods the air, and on this fleet an
+  over-offered craft has already been measured demoting a *second* craft's
+  link on the same channel within a minute. Pinning the seed low costs
+  nothing once the controller takes over.
+- **CV610 was skipping the shared config validation entirely.**
+  `venc_api_validate_loaded_config()` dispatched to the CV610 backend
+  validator *instead of* the shared `validate_field_cfg()` sweep, so sixteen
+  shared rules never ran there — and CV610 re-implemented two of them
+  (`video0.size`'s >=128 and multiple-of-8 gates) inside
+  `cv610_mode_check_output()`, which is the drift risk that made the gap
+  visible. The `/api/v1/set` path always ran the shared rules, so the same
+  value was accepted from the config file at boot and rejected with `409`
+  over HTTP. The sweep now runs first and the backend rules after.
+- The CV610 Opus banner said `10.0 ms frames` for a whole release after
+  `CV610_AUDIO_POINT_NUM` went 480 → 960. Behaviour was right at 20 ms; only
+  the one line a reader could check the packet rate against was wrong. It is
+  now derived from the constants rather than spelled out.
+
 ## [0.65.2] - 2026-08-15
 
 CV610 gets a scaler, one mode table instead of five copies of it, and a
