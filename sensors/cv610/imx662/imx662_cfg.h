@@ -7,21 +7,28 @@
  * once, while the sensor is in standby.
  *
  * Transcribed from imx662_global_settings[] in pauliustumas/imx662
- * (driver/imx662.c), which is the same 0x301C..0x4549 sequence this
- * driver's scaffold TODO named.  Values are held verbatim, comments
- * included, so a future diff against that source stays mechanical.
+ * (driver/imx662.c), covering 0x301A..0x4549.  Values are held verbatim,
+ * comments included, so a future diff against that source stays mechanical.
  *
- * Two deliberate departures from the source list:
+ * Departures from the source list:
  *
  *   - {0x3002, 0x00} (master mode operation start) is dropped.  This
  *     table runs inside standby; imx662_default_reg_init() releases
  *     STANDBY and XMSTA itself once the mode registers are in.
  *   - The HMAX pair is absent — it is commented out upstream, and HMAX
  *     is per-mode state that imx662_linear_1080p_init() owns.
+ *   - {0x44C0, 0x7F} is ADDED: upstream omits it and Sony's map requires
+ *     it.  See the comment at that entry.
+ *   - {0x30A6, 0x0F} is KEPT as upstream has it, which leaves XVS_DRV /
+ *     XHS_DRV at Hi-Z, where Sony's All-pixel modes set 0x00 (drive).
+ *     Nothing on this module consumes XVS/XHS, and starting to drive two
+ *     pads whose wiring is unknown is a hardware risk with no benefit
+ *     today.  Revisit if frame-sync or a second sensor is ever wired.
  *
- * The 0x3A50/51/52 AD-timing triplet below carries the 12-bit values.
- * The RAW10 modes overwrite it after this table runs; that ordering is
- * load-bearing (see imx662_sensor_ctl.c).
+ * The 0x3A50/51/52 AD-timing triplet below carries the 12-bit values, and
+ * 0x301A appears here and again in the per-mode block.  Both are harmless
+ * overlaps only because this table runs FIRST — see imx662_sensor_ctl.c,
+ * where that ordering is load-bearing for the RAW10 modes.
  *
  * Measured against silicon on the 192.168.2.181 bench, 2026-08-16:
  * 94 of these entries differ from the sensor's power-on state, and the
@@ -119,6 +126,14 @@ static const imx662_reg_cfg g_imx662_init_seq[] = {
 	{ 0x44BA, 0x78 }, /* RESERVED */
 	{ 0x44BC, 0x6E }, /* RESERVED */
 	{ 0x44BE, 0x69 }, /* RESERVED */
+	/* 0x44C0 is absent from pauliustumas/imx662's imx662_global_settings[],
+	 * which this table was transcribed from -- the upstream list is wrong
+	 * against Sony's map, which gives 44C0h "Set to 7Fh" (reset 00h) in all
+	 * 18 All-pixel modes.  0x44C0/0x44C1 is the first entry of an 8x16-bit
+	 * little-endian table mirrored verbatim at 0x44D0..0x44DF, and the mirror
+	 * below does carry 7F/01 -- so without this the two banks disagree at
+	 * exactly one index, bank 0 latching 0x0100 instead of 0x017F. */
+	{ 0x44C0, 0x7F }, /* RESERVED */
 	{ 0x44C1, 0x01 }, /* RESERVED */
 	{ 0x44C2, 0x7F }, /* RESERVED */
 	{ 0x44C3, 0x01 }, /* RESERVED */

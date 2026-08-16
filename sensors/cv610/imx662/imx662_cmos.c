@@ -319,8 +319,10 @@ static td_s32 cmos_get_awb_default(ot_vi_pipe vi_pipe, ot_isp_awb_sensor_default
 	awb_sns_dft->wb_para[5] = IMX662_AWB_C1;
 	(td_void)memcpy_s(&awb_sns_dft->ccm, sizeof(awb_sns_dft->ccm),
 					  &g_imx662_awb_ccm, sizeof(g_imx662_awb_ccm));
-	/* Without these the memset above leaves agc_tbl.valid = 0 and every
-	 * saturation entry 0, so the ISP is never told what saturation to run. */
+	/* Without the agc_tbl copy the memset above leaves agc_tbl.valid = 0 and
+	 * every saturation entry 0, so the ISP is never told what saturation to
+	 * run.  The sector copy is seeded but inert: g_imx662_color_sector.valid
+	 * is 0, so the ISP ignores the hue/sat shifts until that is raised. */
 	(td_void)memcpy_s(&awb_sns_dft->agc_tbl, sizeof(awb_sns_dft->agc_tbl),
 					  &g_imx662_awb_agc_table, sizeof(g_imx662_awb_agc_table));
 	(td_void)memcpy_s(&awb_sns_dft->sector, sizeof(awb_sns_dft->sector),

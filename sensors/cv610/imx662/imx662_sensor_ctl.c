@@ -228,8 +228,14 @@ static td_s32 imx662_linear_1080p_init(ot_vi_pipe vi_pipe, td_u32 hmax,
 	ret += imx662_write_register(vi_pipe, IMX662_REG_AD10_2, raw_10bit ? 0x19 : 0x00);
 
 	/* --- black level --- */
+	/* BLKLEVEL is [11:0] across 30DC/30DD, so 30DD's low nibble carries
+	 * BLKLEVEL[11:8] and its top nibble is reserved with bit 6 documented
+	 * "Fixed to 1h" (Sony's map gives 30DDh an initial value of 40h, and the
+	 * register list's own changelog calls out "Revised: Initial value of
+	 * fixed register (30DDh)").  0x40 therefore keeps BLKLEVEL at 50 and
+	 * stops clearing a fixed bit -- the black level itself does not move. */
 	ret += imx662_write_register(vi_pipe, IMX662_REG_BLKLEVEL_L, 0x32); /* 50 */
-	ret += imx662_write_register(vi_pipe, IMX662_REG_BLKLEVEL_H, 0x00);
+	ret += imx662_write_register(vi_pipe, IMX662_REG_BLKLEVEL_H, 0x40);
 
 	return ret;
 }
