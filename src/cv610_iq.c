@@ -17,12 +17,17 @@
  *     second copy of it.
  *
  * Ranges in the field table are the "Range:" comments from the SDK's
- * ot_common_isp.h.  Values are clamped to them before the write.
+ * ot_common_isp.h.  A value outside its range is REJECTED, not clamped: the
+ * HTTP layer echoes the requested value back, so silently substituting a
+ * different one would make both the response and the log a record of
+ * something that never happened.
  */
 
 #include "cv610_iq.h"
 #include "cv610_pipeline.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -58,10 +63,11 @@ typedef struct {
 	uint16_t    count;    /* 1 = scalar, N = array */
 	int32_t     min;
 	int32_t     max;
-	/* Writing a manual_attr field while the block runs its auto curve has
-	 * no visible effect, which reads exactly like a broken setter.  Fields
-	 * marked here force the group's op_type to manual on write. */
-	uint8_t     forces_manual;
+	/* Which half of the block this value lives in.  A manual_attr value is
+	 * ignored while the block runs its auto curve and vice versa, and an
+	 * ignored write reads exactly like a broken setter — so a write to a
+	 * domain also selects it.  F_DIRECT fields sit outside both halves. */
+	uint8_t     domain;
 } Cv610IqField;
 
 typedef struct {
@@ -73,10 +79,11 @@ typedef struct {
 	uint16_t    field_count;
 } Cv610IqGroup;
 
-/* forces_manual values.  Every field here is writable; these say only whether
- * the write also has to switch the block out of its auto curve. */
-#define F_DIRECT 0
-#define F_MANUAL 1
+/* domain values.  Every field here is writable; these say only which op_type
+ * the value is read under, and therefore which one a write must select. */
+#define F_DIRECT 0   /* outside manual_attr/auto_attr; op_type irrelevant */
+#define F_MANUAL 1   /* under manual_attr; a write selects op_type = manual */
+#define F_AUTO   2   /* under auto_attr;   a write selects op_type = auto   */
 
 /* ── MPI wrappers ───────────────────────────────────────────────────────
  * Typed one-liners rather than casting function pointers: converting a
@@ -128,7 +135,7 @@ static const Cv610IqField f_saturation[] = {
 	/* Indexed by AGC bucket; 128 == nominal.  This is the curve the sensor
 	 * plugin's g_imx662_awb_agc_table seeds. */
 	{ "auto.sat",          FT_U8,  OFS(ot_isp_saturation_attr, auto_attr.sat),
-		OT_ISP_AUTO_ISO_NUM, 0, 255, F_DIRECT },
+		OT_ISP_AUTO_ISO_NUM, 0, 255, F_AUTO },
 };
 
 static const Cv610IqField f_color_tone[] = {
@@ -160,9 +167,9 @@ static const Cv610IqField f_ccm[] = {
 	/* cv610_pipeline.c's enable_sensor_ccm() clears both of these so the
 	 * auto CCM never bypasses; they are surfaced to make that visible. */
 	{ "auto.iso_act_en",  FT_S32, OFS(ot_isp_color_matrix_attr, auto_attr.iso_act_en),
-		1, 0, 1, F_DIRECT },
+		1, 0, 1, F_AUTO },
 	{ "auto.temp_act_en", FT_S32, OFS(ot_isp_color_matrix_attr, auto_attr.temp_act_en),
-		1, 0, 1, F_DIRECT },
+		1, 0, 1, F_AUTO },
 };
 
 static const Cv610IqField f_wb[] = {
@@ -221,11 +228,11 @@ static const Cv610IqField f_drc[] = {
 	{ "manual.strength",    FT_U16, OFS(ot_isp_drc_attr, manual_attr.strength),
 		1, 0, 1023, F_MANUAL },
 	{ "auto.strength",      FT_U16, OFS(ot_isp_drc_attr, auto_attr.strength),
-		1, 0, 1023, F_DIRECT },
+		1, 0, 1023, F_AUTO },
 	{ "auto.strength_max",  FT_U16, OFS(ot_isp_drc_attr, auto_attr.strength_max),
-		1, 0, 1023, F_DIRECT },
+		1, 0, 1023, F_AUTO },
 	{ "auto.strength_min",  FT_U16, OFS(ot_isp_drc_attr, auto_attr.strength_min),
-		1, 0, 1023, F_DIRECT },
+		1, 0, 1023, F_AUTO },
 	{ "contrast_ctrl",      FT_U8,  OFS(ot_isp_drc_attr, contrast_ctrl),
 		1, 0, 15, F_DIRECT },
 	{ "detail_adjust_coef", FT_U8,  OFS(ot_isp_drc_attr, detail_adjust_coef),
@@ -255,7 +262,7 @@ static const Cv610IqField f_dehaze[] = {
 	{ "manual.strength", FT_U8,  OFS(ot_isp_dehaze_attr, manual_attr.strength),
 		1, 0, 255, F_MANUAL },
 	{ "auto.strength",   FT_U8,  OFS(ot_isp_dehaze_attr, auto_attr.strength),
-		1, 0, 255, F_DIRECT },
+		1, 0, 255, F_AUTO },
 };
 
 static const Cv610IqField f_ca[] = {
@@ -309,8 +316,10 @@ typedef union {
 	ot_isp_ca_attr           ca;
 } Cv610IqAttr;
 
-/* The scratch attribute is shared by query and set; both run on the httpd
- * thread today, but the ISP thread is a second writer of the same MPI. */
+/* Guards the shared scratch attribute and the static emit buffer below —
+ * nothing more.  It does NOT serialize the ss_mpi_isp_* calls themselves:
+ * cv610_pipeline.c's ISP thread never takes this lock, and MPI-level
+ * serialization is the SDK's own responsibility. */
 static pthread_mutex_t g_iq_mutex = PTHREAD_MUTEX_INITIALIZER;
 static Cv610IqAttr     g_attr;
 
@@ -339,14 +348,11 @@ static int32_t field_read(const void *attr, const Cv610IqField *f, uint16_t idx)
 	return 0;
 }
 
+/* Callers must range-check first; cv610_iq_set() is the only caller and
+ * rejects out-of-range values rather than silently substituting one. */
 static void field_write(void *attr, const Cv610IqField *f, uint16_t idx, int32_t val)
 {
 	uint8_t *p = (uint8_t *)attr + f->offset + idx * field_elem_size(f->type);
-
-	if (val < f->min)
-		val = f->min;
-	if (val > f->max)
-		val = f->max;
 
 	switch (f->type) {
 	case FT_U8:  *p = (uint8_t)val; return;
@@ -398,10 +404,11 @@ static int emit_schema(char *buf, size_t sz, int pos)
 			const Cv610IqField *fd = &g->fields[f];
 			JSON_PUT(buf, pos, sz,
 				"%s{\"name\":\"%s\",\"count\":%u,"
-				"\"min\":%d,\"max\":%d,\"forces_manual\":%s}",
+				"\"min\":%d,\"max\":%d,\"domain\":\"%s\"}",
 				f ? "," : "", fd->name,
 				(unsigned)fd->count, fd->min, fd->max,
-				fd->forces_manual ? "true" : "false");
+				fd->domain == F_MANUAL ? "manual" :
+				fd->domain == F_AUTO   ? "auto" : "direct");
 		}
 		JSON_PUT(buf, pos, sz, "]}");
 	}
@@ -481,9 +488,6 @@ char *cv610_iq_query(void)
 
 	JSON_PUT(buf, pos, sizeof(buf), ",");
 	pos = emit_module_ctrl(buf, sizeof(buf), pos);
-	/* /api/v1/iq/import has no cv610 implementation, so the WebUI must not
-	 * offer the control.  Say so rather than let the page infer it. */
-	JSON_PUT(buf, pos, sizeof(buf), ",\"_caps\":{\"import\":false}");
 	JSON_PUT(buf, pos, sizeof(buf), "}}");
 
 	/* JSON_PUT clamps at the buffer end, so an overflow would serve
@@ -504,7 +508,12 @@ char *cv610_iq_query(void)
 /* ── Set ────────────────────────────────────────────────────────────────── */
 
 /* strtol with the whole-token check the caller needs: "12abc" and "" are
- * rejected rather than silently read as 12 and 0. */
+ * rejected rather than silently read as 12 and 0.
+ *
+ * The overflow check has to be errno, not a range comparison: this target is
+ * ARM EABI where long is 32 bits, so `v < INT32_MIN || v > INT32_MAX` is
+ * `long < LONG_MIN || long > LONG_MAX` — a tautology the compiler folds away,
+ * letting a saturated LONG_MAX through as a valid value. */
 static int parse_i32(const char *s, const char **end, int32_t *out)
 {
 	char *stop = NULL;
@@ -514,11 +523,16 @@ static int parse_i32(const char *s, const char **end, int32_t *out)
 		s++;
 	if (*s == '\0')
 		return -1;
+	errno = 0;
 	v = strtol(s, &stop, 10);
 	if (stop == s)
 		return -1;
+	if (errno == ERANGE)
+		return -1;
+#if LONG_MAX > INT32_MAX
 	if (v < INT32_MIN || v > INT32_MAX)
 		return -1;
+#endif
 	while (*stop == ' ')
 		stop++;
 	if (*stop != '\0' && *stop != ',')
@@ -606,6 +620,11 @@ int cv610_iq_set(const char *param, const char *value)
 				param);
 			goto out;
 		}
+		if (v < field->min || v > field->max) {
+			fprintf(stderr, "[cv610-iq] %s: %d out of range [%d, %d]\n",
+				param, v, field->min, field->max);
+			goto out;
+		}
 		field_write(&g_attr, field, 0, v);
 	} else {
 		const char *p = value;
@@ -615,6 +634,13 @@ int cv610_iq_set(const char *param, const char *value)
 			int32_t v;
 			if (parse_i32(p, &end, &v) != 0)
 				break;
+			if (v < field->min || v > field->max) {
+				fprintf(stderr,
+					"[cv610-iq] %s: element %u = %d out of range "
+					"[%d, %d]\n",
+					param, (unsigned)n, v, field->min, field->max);
+				goto out;
+			}
 			field_write(&g_attr, field, n, v);
 			n++;
 			if (*end != ',')
@@ -632,11 +658,15 @@ int cv610_iq_set(const char *param, const char *value)
 		}
 	}
 
-	/* Manual fields are inert while the block runs its auto curve. */
-	if (field->forces_manual && group->op_type_offset >= 0) {
-		int32_t manual = OT_OP_MODE_MANUAL;
+	/* A value is inert unless the block is running the domain it lives in,
+	 * so writing one selects that domain.  One rule, both directions:
+	 * without the auto half, restoring an ISO curve after any manual write
+	 * stores the numbers, reads them back, and changes nothing. */
+	if (field->domain != F_DIRECT && group->op_type_offset >= 0) {
+		int32_t mode = (field->domain == F_MANUAL) ?
+			OT_OP_MODE_MANUAL : OT_OP_MODE_AUTO;
 		memcpy((uint8_t *)&g_attr + group->op_type_offset,
-			&manual, sizeof(manual));
+			&mode, sizeof(mode));
 	}
 
 	ret = group->set(&g_attr);

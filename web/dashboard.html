@@ -236,6 +236,7 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
 
 .iq-result pre{font-size:.75rem;color:var(--text);line-height:1.5;white-space:pre-wrap}
 
+.iq-note{color:var(--text-dim);font-size:.8rem}
 .iq-set-form{display:flex;gap:.5rem;align-items:center;margin-bottom:1.5rem;flex-wrap:wrap}
 
 .iq-set-form input{max-width:180px}
@@ -491,7 +492,7 @@ venc_gain 1024</td></tr>
 
 <div class="tab-content" id="tab-iq">
 
-  <div class="iq-intro" id="iq-intro">
+  <div class="iq-intro">
 
     Direct access to the ISP's image-processing parameters. Values are read back from the ISP rather than cached, and changes take effect on the next frame without restarting the pipeline.
 
@@ -508,7 +509,7 @@ venc_gain 1024</td></tr>
 
   <h3 style="font-size:.85rem;color:var(--text-bright);margin:.5rem 0 .6rem">Parameter Categories</h3>
 
-  <p style="font-size:.75rem;color:var(--text-dim);margin-bottom:.6rem">Click a parameter to select it for editing above.</p>
+  <p style="font-size:.75rem;color:var(--text-dim);margin-bottom:.6rem">Click a parameter to select it for editing above. <b>*</b> also selects <code>op_type = manual</code>; <b>&deg;</b> also selects <code>op_type = auto</code>.</p>
 
   <div id="iq-categories"></div>
 
@@ -792,6 +793,11 @@ function switchTab(id){
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
 
   document.getElementById('tab-'+id).classList.add('active');
+
+  /* The IQ payload is a live ISP read, so fetch it on entry rather than at
+     page load, and refresh it each time so prefills cannot go stale. */
+  if(id === 'iq') renderIQCategories().catch(e =>
+    toast('IQ load failed: ' + e.message, false));
 
   if(window._recPoll){ clearInterval(window._recPoll); window._recPoll = null; }
   if(id === 'recordings'){
@@ -1662,14 +1668,17 @@ let IQ_LAST = null;
 function iqCurrentValue(param){
   if(!IQ_LAST) return '';
   const dot = param.indexOf('.');
+  /* star6e/maruko emit a JSON boolean for bool-only params; String(true) is
+     "true", which the API's numeric validator rejects. Normalise to 1/0. */
+  const num = v => (typeof v === 'boolean') ? (v ? '1' : '0') : String(v);
   if(dot < 0){
     const p = IQ_LAST[param];
-    return (p && p.value !== undefined) ? String(p.value) : '';
+    return (p && p.value !== undefined) ? num(p.value) : '';
   }
   const g = IQ_LAST[param.substring(0, dot)];
   const v = g && g.fields ? g.fields[param.substring(dot+1)] : undefined;
   if(v === undefined) return '';
-  return Array.isArray(v) ? v.join(',') : String(v);
+  return Array.isArray(v) ? v.map(num).join(',') : num(v);
 }
 
 /* Backends that describe their own knob set (cv610) drive the list from the
@@ -1678,17 +1687,22 @@ function iqCurrentValue(param){
    hardcoded IQ_CATEGORIES below. */
 function renderIQSchema(container, schema){
   for(const g of schema){
+    if(!g || !Array.isArray(g.fields)) continue;
     const sec = document.createElement('div');
     sec.className = 'iq-cat-section collapsed';
     const chips = g.fields.map(f => {
       const param = g.name+'.'+f.name;
       const range = f.count > 1 ? (f.count+' values, '+f.min+'–'+f.max)
                                 : (f.min+'–'+f.max);
-      /* Writing these switches the block out of its auto curve; without the
-         hint a set that "does nothing" looks like a broken knob. */
-      const hint = f.forces_manual ? ' — also sets op_type to manual' : '';
+      /* A value is only read while the block runs the half it lives in, so a
+         write selects that half. Without the hint, a set that "does nothing"
+         looks like a broken knob. */
+      const hint = f.domain === 'manual' ? ' — also selects op_type = manual'
+                 : f.domain === 'auto'   ? ' — also selects op_type = auto'
+                 : '';
+      const mark = f.domain === 'manual' ? '*' : f.domain === 'auto' ? '\u00B0' : '';
       return '<span class="iq-param-chip" title="'+range+hint+'" onclick="selectIQParam(\''+param+'\')">'+
-        f.name+(f.forces_manual ? '*' : '')+'</span> ';
+        f.name+mark+'</span> ';
     }).join('');
     sec.innerHTML = '<div class="iq-cat-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'+
       '<h4>'+g.name+'</h4><span class="desc">'+g.fields.length+' fields</span>'+
@@ -1698,27 +1712,43 @@ function renderIQSchema(container, schema){
   }
 }
 
+/* Tab visibility comes from /api/v1/capabilities, which init() already fetches.
+   Probing /api/v1/iq for this instead cost a full ISP sweep on every page load
+   -- 62 getter calls on star6e -- purely to decide whether to draw a tab. */
+function applyIQCapability(routes){
+  const iqTab  = document.getElementById('tab-btn-iq');
+  const impBtn = document.getElementById('iq-import-btn');
+  if(!routes) return;                 /* unknown: leave as-is, never latch off */
+  if(iqTab)  iqTab.hidden  = (routes.iq === false);
+  /* /api/v1/iq/import is compiled per backend and 501s where it is absent. */
+  if(impBtn) impBtn.hidden = (routes.iq_import === false);
+}
+
+/* Loaded on entry to the IQ tab rather than at page load, and re-loaded on
+   every entry so a chip cannot prefill a value the ISP stopped holding -- a
+   pipeline reinit reseeds the whole ISP from the sensor plugin. */
 async function renderIQCategories(){
   const container = document.getElementById('iq-categories');
-  const iqTab = document.getElementById('tab-btn-iq');
-  container.innerHTML = '';
+  container.innerHTML = '<div class="iq-note">Loading\u2026</div>';
 
-  /* Capability probe. Every IQ route shares one backend callback, so a 501
-     here means the whole tab would load into a permanent error. */
-  let data = null;
+  let data = null, err = null;
   try{
     const r = await api('/api/v1/iq');
     if(r && r.ok && r.data) data = r.data;
-  }catch(e){ /* unreachable or non-JSON: treat as unavailable */ }
-  if(iqTab) iqTab.hidden = !data;
-  if(!data) return;
+    else err = (r && r.error && r.error.message) || 'backend returned no data';
+  }catch(e){ err = e.message; }
 
+  if(!data){
+    /* Report it in the tab. Hiding the tab here would strand the operator with
+       no diagnostic and no retry short of reloading the page. */
+    container.textContent = 'Image Quality unavailable: ' + err +
+      ' \u2014 re-open this tab to retry.';
+    return;
+  }
+
+  container.innerHTML = '';
   IQ_LAST = data;
 
-  /* /api/v1/iq/import is compiled per backend and 501s where it is absent.
-     Hide the control rather than leave a button that always fails. */
-  const impBtn = document.getElementById('iq-import-btn');
-  if(impBtn) impBtn.hidden = (data._caps && data._caps.import === false);
   if(Array.isArray(data._schema)){
     renderIQSchema(container, data._schema);
     return;
@@ -1759,7 +1789,7 @@ async function setIQParam(){
 
   try{
 
-    const r = await api('/api/v1/iq/set?'+encodeURIComponent(name)+'='+value);
+    const r = await api('/api/v1/iq/set?'+encodeURIComponent(name)+'='+encodeURIComponent(value));
 
     if(r.ok){
 
@@ -1903,7 +1933,7 @@ async function init(){
 
     renderSettings();
 
-    renderIQCategories();
+    applyIQCapability(capR.ok && capR.data ? capR.data.routes : null);
 
     pollTelemetry();
 

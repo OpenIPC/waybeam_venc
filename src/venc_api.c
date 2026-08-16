@@ -2963,6 +2963,20 @@ static int handle_capabilities(int fd, const HttpRequest *req, void *ctx)
 	cJSON *root = cJSON_CreateObject();
 	cJSON_AddBoolToObject(root, "ok", 1);
 	cJSON *data = cJSON_AddObjectToObject(root, "data");
+
+	/* Which optional routes this backend actually services.  The dashboard
+	 * already fetches this at init, so it can decide whether to show the IQ
+	 * tab from a pointer test here instead of firing a full ISP sweep at
+	 * /api/v1/iq on every page load just to find out. */
+	cJSON *routes = cJSON_AddObjectToObject(data, "routes");
+	cJSON_AddBoolToObject(routes, "iq",
+		(g_cb && g_cb->query_iq_info) ? 1 : 0);
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
+	cJSON_AddBoolToObject(routes, "iq_import", 1);
+#else
+	cJSON_AddBoolToObject(routes, "iq_import", 0);
+#endif
+
 	cJSON *fields = cJSON_AddObjectToObject(data, "fields");
 	for (size_t i = 0; i < FIELD_COUNT; i++) {
 		cJSON *entry = cJSON_AddObjectToObject(fields, g_fields[i].key);
