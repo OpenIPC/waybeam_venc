@@ -42,10 +42,16 @@ noise_calibration, DRC) are borrowed from a 4 MP sensor and are kept on a
 hardware A/B rather than a calibration — a measured IMX662 fit should replace
 them. The AWB saturation curve is scaled up from sc450ai's at the low-ISO end.
 
-These are compile-time seeds, not live controls. CV610 has no runtime IQ layer
-yet: `/api/v1/iq/get` and `/api/v1/iq/set` return `not_implemented` because the
-backend provides no `apply_iq_param`. Adding one (mirroring `src/star6e_iq.c`)
-would turn these defaults into an editable starting point.
+These are compile-time seeds, read once at pipe start. `src/cv610_iq.c` exposes
+the same blocks as live knobs over `/api/v1/iq` and `/api/v1/iq/set`, so a value
+here is a starting point that can be corrected without a rebuild — but only the
+seed survives a reboot, so a value worth keeping belongs back in this file.
+
+Two blocks are seeded but not switched on: `g_cmos_drc` and `g_cmos_dehaze`
+carry `enable = 0`, inherited from sc450ai's linear-mode defaults, and the ISP
+bypasses both at runtime (confirmed by `ss_mpi_isp_get_module_ctrl()`). Setting
+`drc.enable=1` over the IQ API is the cheap way to evaluate DRC on this sensor
+before deciding whether the seed should change.
 
 Reference material for further tuning lives outside this repo, in
 `hisilicon/vendor/imx662-docs/`.
