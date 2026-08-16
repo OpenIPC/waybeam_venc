@@ -489,9 +489,9 @@ venc_gain 1024</td></tr>
 
 <div class="tab-content" id="tab-iq">
 
-  <div class="iq-intro">
+  <div class="iq-intro" id="iq-intro">
 
-    The IQ system provides direct access to <b>SigmaStar ISP</b> image processing parameters via runtime dlopen of <code>libmi_isp.so</code>. Parameters are organized by category and can be queried and modified live without restarting the pipeline. Changes take effect on the next frame.
+    Direct access to the ISP's image-processing parameters. Values are read back from the ISP rather than cached, and changes take effect on the next frame without restarting the pipeline.
 
   </div>
 
@@ -1470,6 +1470,8 @@ async function queryIQ(){
 
       } else {
 
+        IQ_LAST = r.data;
+
         pre.textContent = JSON.stringify(r.data, null, 2);
 
       }
@@ -1528,8 +1530,8 @@ function selectIQParam(name){
     document.getElementById('iq-expanded-form').innerHTML = '';
     document.getElementById('iq-simple-form').style.display = 'flex';
     document.getElementById('iq-param-name').value = name;
-    document.getElementById('iq-param-value').value = '';
-    document.getElementById('iq-param-value').focus();
+    document.getElementById('iq-param-value').value = iqCurrentValue(name);
+    document.getElementById('iq-param-value').select();
   }
 }
 
@@ -1651,9 +1653,70 @@ const IQ_CATEGORIES = [
    params:['awb_attr_ex','awb_ct_weight','awb_multi_ls','awb_stabilizer']}
 ];
 
-function renderIQCategories(){
+/* Last /api/v1/iq response, so a chip can prefill the value the ISP holds
+   instead of an empty box the operator has to guess at. */
+let IQ_LAST = null;
+
+function iqCurrentValue(param){
+  if(!IQ_LAST) return '';
+  const dot = param.indexOf('.');
+  if(dot < 0){
+    const p = IQ_LAST[param];
+    return (p && p.value !== undefined) ? String(p.value) : '';
+  }
+  const g = IQ_LAST[param.substring(0, dot)];
+  const v = g && g.fields ? g.fields[param.substring(dot+1)] : undefined;
+  if(v === undefined) return '';
+  return Array.isArray(v) ? v.join(',') : String(v);
+}
+
+/* Backends that describe their own knob set (cv610) drive the list from the
+   response, so the field table stays in one place — the C table that also
+   enforces the ranges. The SigmaStar backend has no schema and keeps the
+   hardcoded IQ_CATEGORIES below. */
+function renderIQSchema(container, schema){
+  for(const g of schema){
+    const sec = document.createElement('div');
+    sec.className = 'iq-cat-section collapsed';
+    const chips = g.fields.map(f => {
+      const param = g.name+'.'+f.name;
+      const range = f.count > 1 ? (f.count+' values, '+f.min+'–'+f.max)
+                                : (f.min+'–'+f.max);
+      /* Writing these switches the block out of its auto curve; without the
+         hint a set that "does nothing" looks like a broken knob. */
+      const hint = f.forces_manual ? ' — also sets op_type to manual' : '';
+      return '<span class="iq-param-chip" title="'+range+hint+'" onclick="selectIQParam(\''+param+'\')">'+
+        f.name+(f.forces_manual ? '*' : '')+'</span> ';
+    }).join('');
+    sec.innerHTML = '<div class="iq-cat-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'+
+      '<h4>'+g.name+'</h4><span class="desc">'+g.fields.length+' fields</span>'+
+      '<span class="iq-cat-chevron">▼</span></div>'+
+      '<div class="iq-cat-body">'+chips+'</div>';
+    container.appendChild(sec);
+  }
+}
+
+async function renderIQCategories(){
   const container = document.getElementById('iq-categories');
+  const iqTab = document.getElementById('tab-btn-iq');
   container.innerHTML = '';
+
+  /* Capability probe. Every IQ route shares one backend callback, so a 501
+     here means the whole tab would load into a permanent error. */
+  let data = null;
+  try{
+    const r = await api('/api/v1/iq');
+    if(r && r.ok && r.data) data = r.data;
+  }catch(e){ /* unreachable or non-JSON: treat as unavailable */ }
+  if(iqTab) iqTab.hidden = !data;
+  if(!data) return;
+
+  IQ_LAST = data;
+  if(Array.isArray(data._schema)){
+    renderIQSchema(container, data._schema);
+    return;
+  }
+
   for(const cat of IQ_CATEGORIES){
     const sec = document.createElement('div');
     sec.className = 'iq-cat-section collapsed';
@@ -1691,7 +1754,25 @@ async function setIQParam(){
 
     const r = await api('/api/v1/iq/set?'+encodeURIComponent(name)+'='+value);
 
-    if(r.ok) toast(name+' = '+value);
+    if(r.ok){
+
+      /* Show what the ISP kept, not what was typed — values are clamped to
+         the backend's declared range, so the two can differ. */
+      const q = await api('/api/v1/iq');
+
+      if(q && q.ok && q.data){
+
+        IQ_LAST = q.data;
+
+        const got = iqCurrentValue(name);
+
+        document.getElementById('iq-param-value').value = got || value;
+
+        toast(name+' = '+(got || value) + (got && got !== value ? ' (clamped)' : ''));
+
+      } else toast(name+' = '+value);
+
+    }
 
     else toast(r.error?.message || 'Set failed', false);
 
@@ -1782,10 +1863,11 @@ async function init(){
       // Hide whole tabs whose every route answers 501/404 on this backend,
       // rather than leaving a tab that loads into a permanent error. The
       // per-field N/A greying in renderSettings() covers the Settings tab;
-      // this is for tabs with no capability entry to grey.
+      // this is for tabs with no capability entry to grey. The IQ tab is
+      // decided by probing /api/v1/iq in renderIQCategories(), not by
+      // backend name — a backend that gains or loses the surface then needs
+      // no edit here.
       if(backendName === 'cv610'){
-        const iqTab = document.getElementById('tab-btn-iq');
-        if(iqTab) iqTab.hidden = true;   // /api/v1/iq|ae|awb are 501 here
         // The listing works (it is a directory read), but nothing services a
         // record request on cv610 — the routes answer 501. Keep the tab,
         // disable the actuators so the buttons cannot lie.
