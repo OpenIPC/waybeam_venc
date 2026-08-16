@@ -1,5 +1,55 @@
 # History
 
+## [0.65.4] - 2026-08-16
+
+The CV610 IMX662 plugin was a scaffold in two places its comments admitted to,
+and both were costing image quality. It wrote 26 of the sensor's 131 power-on
+registers, and it handed the ISP a zeroed `ot_isp_cmos_default`, which switches
+every algorithm block off. No HTTP behaviour changes; contract stays `0.18.3`.
+
+- **The power-on register sequence is written.** `imx662_sensor_ctl.c` carried a
+  TODO naming the range it was missing, `0x301C..0x4549`. Sony's sequence for
+  that range is 131 entries — the reserved analog/ADC trim, the MIPI TX timing,
+  the readout window and the HDR context linear mode needs parked — and it now
+  lives in `imx662_cfg.h`. The table runs first, in standby, so the per-mode
+  writes that follow win where the two overlap; that ordering is load-bearing
+  for `0x3A50/51/52`, which keys off ADBIT rather than output depth, so the
+  table holds the 12-bit form and the RAW10 modes overwrite it. Measured on
+  hardware: 94 entries differ from the module's power-on state, the
+  readout-window group already matched bit for bit, and a RAW10-vs-RAW12 dump
+  of the whole range differs in only 8 registers — none of them in the reserved
+  blocks, which is what made writing the table wholesale safe.
+- **The ISP algorithm blocks are enabled.** `cmos_get_isp_default()` memset the
+  struct and returned, leaving demosaic, gamma, CLUT, LDCI, CAC,
+  anti-false-colour, dehaze, CA, sharpen, DRC and bayer NR all off. That, not
+  the sensor, was the flat and hazy image. Tables are ported from the in-tree
+  `smart_sc450ai` driver, which targets this same ISP silicon. The blocks that
+  describe ISP behaviour transfer on principle; the noise-fitted ones are
+  borrowed from a 4 MP sensor and are kept on a hardware A/B rather than a
+  calibration.
+- **Saturation is configured at all.** `cmos_get_awb_default()` left
+  `agc_tbl.valid` at 0 with every `saturation[]` entry 0, so the ISP was never
+  told what saturation to run — the washed-out colour. The shipped curve is
+  scaled up at the low-ISO end from sc450ai's and keeps its taper at high gain,
+  where chroma noise scales. Measured +41% mean chroma with sharpness flat.
+- **`sns_mode` is populated.** `sns_id` was 0, disagreeing with
+  `cv610_pipeline.c`'s `IMX662_SNS_ID` — which that file already documents as
+  having to match, and which would misbind a future PQ `.bin`, since those are
+  chip- and sensor-locked. `sns_mode` was never set.
+- **The sensor plugin Makefile generates header dependencies.** A bare
+  `%.o: %.c` rule meant a header-only edit relinked stale objects and shipped a
+  binary without the change, while `make` exited 0. Both the register sequence
+  and every tuning table live in headers. Found when two plugins built from
+  different saturation tables came out byte-identical.
+- **`tools/cv610_i2c_dump.c`** reads sensor registers over `/dev/i2c` from a
+  second process while the pipeline runs. `imx662_read_register()` is a stub —
+  the ISP only ever writes — so nothing could previously confirm an init landed.
+
+Verified on the Hi3516CV610 bench at 192.168.2.181, cold boot per arm:
+1080p30 30.03 fps, 1080p60 60.03, 1080p90 90.03, 1080p100 100.06 — all nominal
+and matching the pre-change baseline — with a 1222-register readback at zero
+I2C errors and every reference entry matching silicon.
+
 ## [0.65.3] - 2026-08-16
 
 CV610 sensor-mode selection reaches parity with SigmaStar, so one client can

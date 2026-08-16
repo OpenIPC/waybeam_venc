@@ -22,6 +22,7 @@
 #include "securec.h"
 
 #include "imx662_cmos.h"
+#include "imx662_cfg.h"
 
 #define I2C_DEV_FILE_NUM     16
 #define I2C_BUF_NUM          8
@@ -169,11 +170,24 @@ td_void imx662_blc_clamp(ot_vi_pipe vi_pipe, ot_isp_sns_blc_clamp blc_clamp)
 }
 
 /* ---- power-on register block ---------------------------------------------
- * TODO(integration): transcribe the full IMX662 power-on / reserved-register
- * sequence (~89 writes, addresses 0x301C..0x4549) from the datasheet or the
- * RPi driver's imx662_common_regs[]. The few below are the mode-defining
- * writes only; the reserved block is required for a correct image.
+ * The Sony power-on sequence (reserved analog/ADC trim, MIPI TX timing,
+ * readout window, HDR context parked for linear) lives in imx662_cfg.h and
+ * runs first, in standby. Everything below it is per-mode state that
+ * overrides the table where the two overlap -- notably the 0x3A50/51/52
+ * AD-timing triplet, which the table carries in its 12-bit form.
  */
+static td_s32 imx662_write_init_seq(ot_vi_pipe vi_pipe)
+{
+	td_s32 ret = 0;
+	td_u32 i;
+
+	for (i = 0; i < IMX662_INIT_SEQ_LEN; i++) {
+		ret += imx662_write_register(vi_pipe, g_imx662_init_seq[i].addr,
+									 g_imx662_init_seq[i].data);
+	}
+	return ret;
+}
+
 static td_s32 imx662_linear_1080p_init(ot_vi_pipe vi_pipe, td_u32 hmax,
 									   td_bool raw_10bit, td_bool overclock_100fps)
 {
@@ -181,6 +195,8 @@ static td_s32 imx662_linear_1080p_init(ot_vi_pipe vi_pipe, td_u32 hmax,
 
 	ret += imx662_write_register(vi_pipe, IMX662_REG_STANDBY,  0x01); /* stop for cfg */
 	delay_ms(1);
+
+	ret += imx662_write_init_seq(vi_pipe);
 
 	/* --- clock / interface (VERIFY against board wiring) --- */
 	/* 100 fps follows the public IMX662 mode: feed 27 MHz externally while
@@ -212,10 +228,14 @@ static td_s32 imx662_linear_1080p_init(ot_vi_pipe vi_pipe, td_u32 hmax,
 	ret += imx662_write_register(vi_pipe, IMX662_REG_AD10_2, raw_10bit ? 0x19 : 0x00);
 
 	/* --- black level --- */
+	/* BLKLEVEL is [11:0] across 30DC/30DD, so 30DD's low nibble carries
+	 * BLKLEVEL[11:8] and its top nibble is reserved with bit 6 documented
+	 * "Fixed to 1h" (Sony's map gives 30DDh an initial value of 40h, and the
+	 * register list's own changelog calls out "Revised: Initial value of
+	 * fixed register (30DDh)").  0x40 therefore keeps BLKLEVEL at 50 and
+	 * stops clearing a fixed bit -- the black level itself does not move. */
 	ret += imx662_write_register(vi_pipe, IMX662_REG_BLKLEVEL_L, 0x32); /* 50 */
-	ret += imx662_write_register(vi_pipe, IMX662_REG_BLKLEVEL_H, 0x00);
-
-	/* TODO: reserved-register block goes here (see note above). */
+	ret += imx662_write_register(vi_pipe, IMX662_REG_BLKLEVEL_H, 0x40);
 
 	return ret;
 }
