@@ -711,6 +711,11 @@ int cv610_pipeline_start(const Cv610PipelineConfig *config)
 	return 0;
 }
 
+int cv610_pipeline_isp_ready(void)
+{
+	return g_isp_thread_ok;
+}
+
 void cv610_pipeline_stop(void)
 {
 	g_stop = 1;

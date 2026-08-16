@@ -1,6 +1,7 @@
 #include "cv610_runtime.h"
 
 #include "cv610_audio.h"
+#include "cv610_iq.h"
 #include "cv610_modes.h"
 #include "cv610_pipeline.h"
 #include "debug_osd.h"
@@ -249,6 +250,8 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.apply_max_payload_size = cv610_apply_max_payload_size,
 	.query_transport_status = cv610_query_transport_status,
 	.query_audio_status = cv610_query_audio_status,
+	.query_iq_info = cv610_iq_query,
+	.apply_iq_param = cv610_iq_set,
 };
 
 static void cv610_signal_handler(int signo)
