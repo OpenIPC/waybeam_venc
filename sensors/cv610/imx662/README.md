@@ -53,5 +53,26 @@ bypasses both at runtime (confirmed by `ss_mpi_isp_get_module_ctrl()`). Setting
 `drc.enable=1` over the IQ API is the cheap way to evaluate DRC on this sensor
 before deciding whether the seed should change.
 
+## Low-light behaviour
+
+The sharpen auto tables are tapered along their ISO axis to zero by bucket 9,
+with the daylight buckets (0-3) left byte-identical. Sharpening is a high-pass
+filter, so at high gain the sc450ai tables — which *rise* along ISO, edge
+strength 195 to 500 — were amplifying noise into the encoder: measured 65.4 to
+7.8 Mbps on the bench with sharpen off. The AWB saturation curve tapers harder
+above daylight for the same reason, chroma noise being the ugliest high-gain
+artifact.
+
+Conversion gain follows the analog gain: `FDG_SEL0` selects HCG above a
+threshold and LCG below it, with the written gain code compensated by 15.3 dB
+(Rcg typ 5.8) so the switch is continuous. `max_isp_dgain_target` is 4x, which
+puts the total ceiling at 398 x 4 = 1592x (~64 dB) and makes AE exhaust analog
+before it reaches for digital.
+
+`g_cmos_noise_calibration` is still sc450ai's photon-transfer fit and is the
+main thing left wrong for this sensor; `nr.coring_ratio` and `nr.md_en` are
+exposed over `/api/v1/iq` so it can be corrected by eye until a real IMX662
+calibration exists.
+
 Reference material for further tuning lives outside this repo, in
 `hisilicon/vendor/imx662-docs/`.

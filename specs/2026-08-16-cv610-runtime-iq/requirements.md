@@ -186,8 +186,11 @@ WebUI tab driven by a capability probe rather than a backend-name test.
   it.  This is the same trap as the modes store's third copy of the mode list.
 - *`cv610_pipeline_isp_ready()` was added.* Firing MPI ioctls at an ISP that
   was never inited is not something to find out about in the field.
-- *`forces_manual` is exposed.* Not in the plan; the mutation sweep made the
-  side-effect visible and it was cheap to surface rather than document only.
+- *The field's `domain` is exposed.* Not in the plan; the mutation sweep made
+  the side-effect visible and it was cheap to surface rather than document
+  only. (Shipped first as a manual-only `forces_manual` flag, then generalised
+  to `direct`/`manual`/`auto` when review showed the auto half had the same
+  trap in the other direction.)
 
 **Found while verifying, not predicted**: DRC and dehaze are registered with
 the ISP but ship `enable = 0` and are bypassed in hardware. See HISTORY 0.65.5;

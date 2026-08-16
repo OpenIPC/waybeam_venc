@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.3`
+- `contract_version`: `0.18.4`
 - `status`: `active`
 
 ## Governance Rules
@@ -190,6 +190,23 @@ Response `200`:
     }
   }
 }
+```
+
+`data.routes` (added 0.18.4) reports which optional routes the running
+backend actually services, so a client does not have to call an expensive
+endpoint just to discover whether it exists:
+
+```json
+{"ok":true,"data":{"routes":{"iq":true,"iq_import":false},"fields":{ ... }}}
+```
+
+| key | meaning |
+|---|---|
+| `iq` | `/api/v1/iq` and `/api/v1/iq/set` are serviced (the backend registers `query_iq_info`). |
+| `iq_import` | `/api/v1/iq/import` is compiled in (Star6E/Maruko only). |
+
+Absent `routes` means an older build: treat every route as possibly present
+and fall back to calling it.
 ```
 (truncated — all fields listed in actual response)
 
@@ -1712,8 +1729,8 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `/api/v1/audio/status` | yes | yes | Both backends register `query_audio_status`. |
 | `/api/v1/dual/status`, `/dual/idr` | yes | yes | `/dual/status` always 200 (`active:false` when off, `active:true,channel,bitrate,fps,gop` when on).  `/dual/idr` returns 200 when active, 404 when not. Maruko HTTP registration landed in 0.10.4 — earlier Maruko builds returned 404 from these even when `record.mode=dual` was running. |
 | `/api/v1/dual/set` | yes | **501** | Star6E-only: the underlying `MI_VENC_*ChnAttr` write path binds to `i6_venc_chn`, but Maruko's venc library expects `i6c_venc_chn` (different layout). Maruko returns 501 until the call path is ported. |
-| `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Both backends use the same IQ table schema. |
-| `/api/v1/awb` | live | live | Both backends register `query_awb_info`. |
+| `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Star6E/Maruko share one IQ table schema. **CV610 also serves these from 0.18.4, in a DIFFERENT shape** — see "CV610 IQ response shape" below. `/api/v1/iq/import` stays Star6E/Maruko-only and 501s on CV610 (advertised as `routes.iq_import:false`). |
+| `/api/v1/awb` | live | live | Both backends register `query_awb_info`. CV610: **501**. |
 | `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
 | `/api/v1/transport/status` | yes | yes | SHM-ring fields are shown when `outgoing.server=shm://`; otherwise the UDP/Unix subset. |
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
@@ -1722,10 +1739,18 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
 | `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **live** | Both backends hot-swap the NPU detector on the pipeline thread without respawning video. Star6E uses VPE port 1; Maruko uses SCL port 3 and its drain-while-disable teardown. A model whose reported input geometry disagrees with the configured tap is refused and leaves detection off. |
 | `detect.net_width` / `net_height` | restart | restart | Tap geometry is fixed when the VPE/SCL detector port is created. |
-| `video0.min_qp` / `max_qp` | live | **501** | Star6E-only RC QP bounds; Maruko capabilities report these fields unsupported. |
+| `video0.min_qp` / `max_qp` | live | **501** | RC QP bounds. Star6E live; Maruko reports unsupported. **CV610 live from 0.18.4** (`cv610_apply_qp_bounds`, applied live and at startup); it sets the P bounds and the I-frame ceiling, leaving the I-frame floor to `video0.qp_delta`. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.4` (additive — CV610 gains the IQ surface and RC QP bounds):
+  `/api/v1/capabilities` gains `data.routes` (`iq`, `iq_import`) so a client can
+  discover optional routes without calling them. `/api/v1/iq` and
+  `/api/v1/iq/set` go from 501 to live on CV610, in a second response shape
+  documented under "CV610 IQ response shape" — group-keyed, self-describing via
+  `_schema`, and rejecting out-of-range values rather than clamping.
+  `video0.min_qp` / `video0.max_qp` become live on CV610. No field was removed
+  and no existing response key changed, so 0.18.3 clients keep working.
 - `0.18.3` (additive — CV610 sensor-mode selection reaches SigmaStar parity):
   - **`sensor.index` and `sensor.mode` are now supported on CV610**, both
     `restart_required`, the same `mutability` the shared table gives them on
@@ -2124,3 +2149,34 @@ divergence is listed.  As of `contract_version: 0.12.1`:
   - Updated examples to use `video.capture_resolution` restart semantics.
 - `0.1.0`:
   - Initial draft contract and endpoint definitions.
+
+
+## CV610 IQ response shape (0.18.4)
+
+`/api/v1/iq` on CV610 is a **second, structurally different form** from the
+Star6E/Maruko one documented above.  A client written against that shape reads
+`data["contrast"].value` and gets `undefined` on CV610 — branch on
+`data._schema` being present, not on backend name.
+
+```json
+{"ok":true,"data":{
+  "_schema":[{"name":"saturation","fields":[
+      {"name":"manual.saturation","count":1,"min":0,"max":255,"domain":"manual"}]}],
+  "saturation":{"ret":0,"fields":{"op_type":0,"manual.saturation":128}},
+  "module_ctrl":{"ret":0,"bypass":{"drc":1,"dehaze":1}}}}
+```
+
+- Keyed by ISP **group**, not by parameter. Each group has `ret` (the MPI
+  return, 0 on success) and `fields`, whose keys are dotted field names.
+- No `value`, `enabled`, `op_type` or `available` at group level, and no
+  `_diag` block.
+- `_schema` describes the whole surface — name, element `count`, `min`/`max`,
+  and `domain` (`direct` | `manual` | `auto`).  The WebUI renders from it, so
+  the field table lives only in the backend.
+- `domain` is load-bearing: writing a `manual.*` or `auto.*` field also selects
+  that `op_type`, because a value in the other half is ignored by the ISP and
+  an ignored write is indistinguishable from a broken setter.
+- `module_ctrl` is read-only and reports which ISP blocks the hardware is
+  bypassing.
+- Values out of a field's declared range are **rejected**, not clamped, so the
+  value echoed by `/api/v1/iq/set` is the value applied.

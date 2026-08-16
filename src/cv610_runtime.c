@@ -157,11 +157,28 @@ static int cv610_apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
 
 	param.h265_cbr_param.max_qp = max_qp ? max_qp : g_cv610_qp_defaults.max_qp;
 	param.h265_cbr_param.min_qp = min_qp ? min_qp : g_cv610_qp_defaults.min_qp;
-	/* I-frames get the same ceiling.  Raising only the P bound leaves the
+	/* I-frames get the same CEILING -- raising only the P bound leaves the
 	 * I-frame free to blow the budget on its own, which in a noisy scene is
-	 * exactly where the biggest frames come from. */
+	 * where the biggest frames come from.  Their FLOOR is deliberately left
+	 * alone: video0.qp_delta biases I-frames below the P QP (this craft ships
+	 * -4), and an I-frame floor would silently cancel it.  Star6E's
+	 * apply_qp_bounds() touches only the P bounds for the same reason. */
 	param.h265_cbr_param.max_i_qp = max_qp ? max_qp : g_cv610_qp_defaults.max_i_qp;
-	param.h265_cbr_param.min_i_qp = min_qp ? min_qp : g_cv610_qp_defaults.min_i_qp;
+
+	/* The API validator only compares min against max when BOTH are non-zero,
+	 * so a half-specified pair can still resolve to min > max against the
+	 * driver default.  The SDK takes that without complaint and then behaves
+	 * erratically, so reject it here rather than write it. */
+	if (param.h265_cbr_param.min_qp > param.h265_cbr_param.max_qp ||
+		param.h265_cbr_param.min_i_qp > param.h265_cbr_param.max_i_qp) {
+		fprintf(stderr, "ERROR: qpBounds min>max after resolving defaults "
+			"(p %u/%u, i %u/%u)\n",
+			(unsigned)param.h265_cbr_param.min_qp,
+			(unsigned)param.h265_cbr_param.max_qp,
+			(unsigned)param.h265_cbr_param.min_i_qp,
+			(unsigned)param.h265_cbr_param.max_i_qp);
+		return -1;
+	}
 
 	ret = ss_mpi_venc_set_rc_param(CV610_VENC_CHN, &param);
 	if (ret != TD_SUCCESS) {
@@ -478,9 +495,16 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	/* video0.minQp/maxQp are MUT_LIVE, but they also have to take effect on
 	 * a cold boot -- the config is read before the channel exists, so the
 	 * live path never runs for a value that was already in the file. */
-	if (ctx->config.video0.min_qp || ctx->config.video0.max_qp)
-		(void)cv610_apply_qp_bounds(ctx->config.video0.min_qp,
-			ctx->config.video0.max_qp);
+	if (ctx->config.video0.min_qp || ctx->config.video0.max_qp) {
+		/* Not (void): a rejected cold-boot apply would otherwise leave the
+		 * operator booting with no QP bound and no indication. */
+		if (cv610_apply_qp_bounds(ctx->config.video0.min_qp,
+				ctx->config.video0.max_qp) != 0)
+			fprintf(stderr, "WARN: qpBounds from config not applied "
+				"(min=%u max=%u)\n",
+				(unsigned)ctx->config.video0.min_qp,
+				(unsigned)ctx->config.video0.max_qp);
+	}
 	memset(&vui, 0, sizeof(vui));
 	ret = ss_mpi_venc_get_h265_vui(CV610_VENC_CHN, &vui);
 	if (ret != TD_SUCCESS)

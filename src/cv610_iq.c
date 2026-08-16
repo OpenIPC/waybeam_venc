@@ -576,10 +576,10 @@ char *cv610_iq_query(void)
  * rejected rather than silently read as 12 and 0.  64-bit because the AE
  * gain/exposure fields are td_u32 and a legitimate value can exceed INT32_MAX.
  *
- * The overflow check has to be errno, not a range comparison: this target is
- * ARM EABI where long is 32 bits, so `v < INT32_MIN || v > INT32_MAX` is
- * `long < LONG_MIN || long > LONG_MAX` — a tautology the compiler folds away,
- * letting a saturated LONG_MAX through as a valid value. */
+ * 64-bit because the AE gain and exposure fields are td_u32 and a legitimate
+ * value can exceed INT32_MAX; overflow is caught by errno == ERANGE from
+ * strtoll, which is the only portable check once the value type is as wide as
+ * the return type. */
 static int parse_i64(const char *s, const char **end, int64_t *out)
 {
 	char *stop = NULL;
@@ -729,8 +729,19 @@ int cv610_iq_set(const char *param, const char *value)
 	if (field->domain != F_DIRECT && group->op_type_offset >= 0) {
 		int32_t mode = (field->domain == F_MANUAL) ?
 			OT_OP_MODE_MANUAL : OT_OP_MODE_AUTO;
+		int32_t was = 0;
+
+		memcpy(&was, (uint8_t *)&g_attr + group->op_type_offset,
+			sizeof(was));
 		memcpy((uint8_t *)&g_attr + group->op_type_offset,
 			&mode, sizeof(mode));
+		/* Say so when it actually moves.  Selecting a domain is a side effect
+		 * of the write, and an operator who pinned op_type by hand deserves a
+		 * trace of it being taken back. */
+		if (was != mode)
+			printf("[cv610-iq] %s: op_type %s -> %s\n", group->name,
+				was == OT_OP_MODE_MANUAL ? "manual" : "auto",
+				mode == OT_OP_MODE_MANUAL ? "manual" : "auto");
 	}
 
 	ret = group->set(&g_attr);

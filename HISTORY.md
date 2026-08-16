@@ -39,24 +39,84 @@ CBR target produced 29-65 Mbps. In good light the same build holds target
   the standard allows.
 
 - **AE is exposed as an `exposure` IQ group** — the gain ceilings and exposure
-  window that decide how much noise is created in the first place. The bench
-  reports `a_gain_max` 407654 (398x, matching `IMX662_AGAIN_MAX`),
-  `ispd_gain_max` 32768 (32x) and `sys_gain_max` 13044928 — **12739x total,
-  about 82 dB**, which is why a dark room ends up as amplified noise. These
-  are now readable and settable at runtime instead of being a compile-time
-  constant marked `VERIFY`.
+  window that decide how much noise is created in the first place. Before this
+  release the bench ran `a_gain_max` 407654 (398x, matching
+  `IMX662_AGAIN_MAX`), `ispd_gain_max` 32768 (32x) and `sys_gain_max` 13044928
+  — **12739x total, about 82 dB**, which is why a dark room ended up as
+  amplified noise. Those ceilings are now readable and settable at runtime
+  instead of being compile-time constants, and the digital one is lowered
+  below.
 
 - **Saturation tapers harder above daylight.** Chroma noise is the ugliest
   high-gain artifact and colour is least trustworthy exactly where gain is
   highest; dropping chroma measured -7.3%. The first four buckets are
   unchanged, the top drops from 90 to 32.
 
+- **ISP digital gain is capped 32x -> 4x.** It is the worst gain in the chain:
+  it amplifies noise and quantisation equally and buys no SNR, where analog
+  gain and HCG act ahead of the ADC. The shipped total ceiling moves from
+  12739x (~82 dB) to **398 x 4 = 1592x (64.0 dB)**, inside the range an
+  operator preferred on the bench, and AE now exhausts analog before reaching
+  for digital. Tunable live at
+  `/api/v1/iq/set?exposure.auto.ispd_gain_max=<n>` (1024 = 1x), because
+  darker-but-cleaner is an operator trade rather than a constant.
+  `IMX662_AGAIN_MAX`'s comment claimed ~72 dB while the value gives 52; the
+  comment is corrected and the value deliberately left alone.
+
+- **IMX662 HCG conversion gain is selected at high analog gain.** `FDG_SEL0`
+  (0x3030) was defined and never written, so the sensor sat at its 0h reset —
+  low conversion gain — and every dark frame was amplified through the noisier
+  path. It is now a ninth fast-update register, chosen per frame from the gain
+  code with hysteresis.
+
+  HCG is **not** brightness-neutral: the GAIN register is PGA gain applied
+  after the conversion gain, so the two multiply. The datasheet gives the ratio
+  (Rcg typ 5.8, corroborated by G sensitivity HCG 18383 vs LCG 3166
+  Digit/lx/s), which is 15.3 dB — so the written code has the offset
+  subtracted while HCG is on, and the thresholds sit where the compensated code
+  still clears Sony's 34-code floor (on at 91, off below 85). Without that
+  there is no fixed point between 12 dB and 25.5 dB: AE brightens 5.8x, slams
+  the code down past the floor, HCG drops out, and it limit-cycles — a band
+  that neither daylight nor a dark room enters, which is why an uncompensated
+  first cut measured clean in both.
+
+  Sony's 34-code floor is a saturation constraint, not the conversion gain:
+  Vsat is 3895 digits in LCG against 1204 in HCG, a ratio of 3.235, and 34
+  codes x 0.3 dB = 10.2 dB = 3.236x — the floor exists so HCG's clip level
+  refills the ADC to LCG's.
+
+- **`nr.md_en` and `nr.coring_ratio` are exposed.** The intended fix here was a
+  re-fit of `g_cmos_noise_calibration`, which is sc450ai's photon-transfer
+  curve — 16 doubles measured from different silicon. That is a lab
+  calibration, not a code change, and inventing coefficients would be strictly
+  worse than keeping a real fit while looking identical in review. The knobs
+  that fit drives are exposed instead, so the borrowed model can be corrected
+  by eye until someone measures the real one. `md_en` reads back 1 — CV610's
+  motion-detect temporal NR was already on.
+
 The IQ field table is now 64-bit internally: the AE gain and exposure fields
 are `td_u32`, and a driver default of 0xFFFFFFFF would have read back as -1.
 
-Verified on `.181`: dark room holds target (operator-confirmed on the live
-stream), daylight unchanged at 10.09 Mbps against 9.26 with the encoder
-nominal at 100.20 fps, and `make verify` green with lint clean on all three
+`/api/v1/capabilities` gains `data.routes` and `contract_version` moves to
+`0.18.4`; the CV610 IQ response shape is documented in
+`documentation/HTTP_API_CONTRACT.md`.
+
+A pre-merge adversarial review pass also corrected this release's own record
+and three defects in it: the WebUI IQ tab no longer starts hidden (that made
+visibility depend on `init()` completing, so any failed init fetch latched the
+tab off permanently on star6e and maruko); a chip click no longer prefills the
+actuator (on star6e's legacy path even an identical value forces `enable=1`
+and `op_type=manual`); the per-set full-ISP re-query is gone; the shared query
+parser rejects an over-long value instead of truncating it mid-token; and the
+QP-bounds path leaves the I-frame FLOOR alone so `video0.qp_delta` still
+biases I-frames. The 0.65.5 entry above was revised where this stack
+invalidated it.
+
+Verified on `.181`: the sharpen taper was confirmed by the operator on the
+live stream (dark room holds target) with daylight unchanged at 10.09 Mbps
+against 9.26 and the encoder nominal at 100.20 fps. The gain-chain and HCG
+changes landed after that arm and were re-verified separately — see the
+per-commit evidence — and `make verify` is green with lint clean on all three
 backends.
 
 ## [0.65.5] - 2026-08-16
@@ -73,11 +133,13 @@ change; `/api/v1/iq` and `/api/v1/iq/set` are existing routes that answered
   hand-computed struct offsets: the backend links `ss_mpi` directly, so every
   field is an `offsetof()` into the SDK's own type and every range is the
   header's documented one. Values are read back from the ISP rather than
-  cached, so a rejected or clamped set is visible instead of silently assumed.
-- **Writing a `manual.*` field forces that group's `op_type` to manual.**
-  A manual value is inert while the block runs its auto curve, which is
-  indistinguishable from a broken setter. The schema marks which fields do
-  this and the WebUI shows it on the chip.
+  cached, and a value outside its declared range is REJECTED rather than
+  clamped, so the value echoed by `/api/v1/iq/set` is the value applied.
+- **Writing a field selects the half of the block it lives in.** A value under
+  `manual_attr` is inert while the block runs its auto curve and vice versa,
+  and an ignored write is indistinguishable from a broken setter — so the
+  write selects that `op_type`. The schema reports each field's `domain`
+  (`direct` | `manual` | `auto`) and the WebUI marks both kinds on the chip.
 - **DRC and dehaze are registered but bypassed**, measured through the new
   surface: `drc.enable` and `dehaze.enable` both read 0, and
   `ss_mpi_isp_get_module_ctrl()` confirms the hardware bypasses both. Toggling
@@ -86,14 +148,15 @@ change; `/api/v1/iq` and `/api/v1/iq/set` are existing routes that answered
   that entry is corrected. Their sc450ai-derived tables ship `enable = 0`, so
   DRC has never contributed to a CV610 image and remains unevaluated.
 - **The WebUI IQ tab is capability-driven.** It was hidden by a hardcoded
-  `backendName === 'cv610'` test; it now probes `/api/v1/iq` and renders its
-  knob list from the `_schema` the backend describes itself with, so the field
-  table stays in one place instead of being copied into the page. Backends
-  with no schema keep the existing hardcoded list. A set re-queries and reports
-  the value the ISP kept, which differs from the request when clamped.
+  `backendName === 'cv610'` test; visibility now comes from
+  `/api/v1/capabilities`' `data.routes.iq`, and the knob list is rendered from
+  the `_schema` the backend describes itself with, so the field table stays in
+  one place instead of being copied into the page. Backends with no schema keep
+  the existing hardcoded list.
 
-Verified on the `.181` bench, cold-booted onto the shipped build
-(`md5 dda3bec7…`, `/proc/PID/exe` confirmed not `(deleted)`): all 11 groups
+Verified on the `.181` bench, cold-booted onto a build of this change
+(`/proc/PID/exe` confirmed not `(deleted)`; the binary was rebuilt again for
+0.65.6, so the hash is not quoted here): all 11 groups
 return `ret=0`; a mutation sweep wrote and read back one field per group with
 11/11 agreeing and the device diffing clean against its boot state afterwards;
 saturation 60 → 220 → 60 moved mean chroma 4.84 → 22.95 → 4.81, the repeat of
@@ -102,9 +165,10 @@ arrays of the wrong length in either direction and unknown names are
 rejected; encoder rate stayed nominal at 100.10 fps with `pressureDrops`
 frozen at 0.
 
-`_caps.import` is advertised as false because `handle_iq_import()` is compiled
-only for Star6E and Maruko; the WebUI hides the control rather than offer a
-button that 501s.
+`/api/v1/capabilities` advertises `routes.iq_import:false` because
+`handle_iq_import()` is compiled only for Star6E and Maruko; the WebUI hides
+the control rather than offer a button that 501s. (An earlier `_caps` block in
+the IQ payload was replaced by this before release — one fact, one place.)
 
 ## [0.65.4] - 2026-08-16
 

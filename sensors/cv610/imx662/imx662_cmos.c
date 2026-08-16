@@ -261,23 +261,38 @@ static td_void cmos_gains_update(ot_vi_pipe vi_pipe, td_u32 again, td_u32 dgain)
 		reg = IMX662_GAIN_REG_MAX;
 	}
 
-	/* Dual conversion gain.  IMX662 is a STARVIS 2 part whose low-light
-	 * answer is HCG, and leaving FDG_SEL0 at its 0h reset means every dark
-	 * frame is amplified through the noisier low-conversion-gain path.
+	/* Dual conversion gain.  HCG lowers read noise; it also multiplies the
+	 * frame by ~5.8x, so the written code must give that back or AE has no
+	 * fixed point in the band where it engages (see imx662_cmos.h).
 	 *
-	 * The gain code is total dB in both modes, so this is transparent to AE:
-	 * the same request produces the same brightness either side of the
-	 * switch.  Hysteresis between ON and OFF keeps AE noise around the
-	 * boundary from toggling the register frame to frame. */
-	if (vi_pipe >= 0 && vi_pipe < OT_ISP_MAX_PIPE_NUM) {
+	 * `reg` arrives as the TOTAL gain the AE asked for, so subtracting the
+	 * offset keeps cmos_again_calc_table()'s reported again_lin -- and hence
+	 * the ISP's ISO bucket, which indexes the sharpen, saturation and NR
+	 * tables -- describing the gain actually delivered.
+	 *
+	 * Slot 8 is linear-mode only: ClearHDR needs 3030h = 02h and a matching
+	 * FDG_SEL1 (3031h) that has no slot here, so stamping 0/1 every frame
+	 * would silently corrupt an HDR blend.  cmos_set_wdr_mode() rejects every
+	 * non-linear mode today; this keeps that true if it stops doing so. */
+	if (sns_state->wdr_mode == OT_WDR_MODE_NONE) {
 		if (!g_imx662_hcg_on[vi_pipe] && reg >= IMX662_HCG_ON_REG) {
 			g_imx662_hcg_on[vi_pipe] = TD_TRUE;
 		} else if (g_imx662_hcg_on[vi_pipe] && reg < IMX662_HCG_OFF_REG) {
 			g_imx662_hcg_on[vi_pipe] = TD_FALSE;
 		}
-		if (g_imx662_hcg_on[vi_pipe] && reg < IMX662_HCG_GAIN_REG_MIN) {
-			/* Sony forbids codes below 34 while HCG is selected. */
-			reg = IMX662_HCG_GAIN_REG_MIN;
+		if (g_imx662_hcg_on[vi_pipe]) {
+			/* Test BEFORE subtracting: reg is unsigned, so an underflow
+			 * would wrap to a huge value that a post-subtraction floor
+			 * check reads as "above the floor" and lets through.  The
+			 * hysteresis makes this unreachable (latched implies
+			 * reg >= OFF_REG, and the header asserts
+			 * OFF_REG - OFFSET >= the floor), but a guard that cannot
+			 * catch the case it names is worse than no guard. */
+			if (reg < IMX662_HCG_GAIN_OFFSET + IMX662_HCG_GAIN_REG_MIN) {
+				reg = IMX662_HCG_GAIN_REG_MIN;
+			} else {
+				reg -= IMX662_HCG_GAIN_OFFSET;
+			}
 		}
 		sns_state->regs_info[0].i2c_data[8].data =
 			g_imx662_hcg_on[vi_pipe] ? IMX662_FDG_HCG : IMX662_FDG_LCG;
@@ -585,6 +600,11 @@ static td_void sensor_global_init(ot_vi_pipe vi_pipe)
 					  sizeof(ot_isp_sns_regs_info));
 	(td_void)memset_s(&sns_state->regs_info[1], sizeof(ot_isp_sns_regs_info), 0,
 					  sizeof(ot_isp_sns_regs_info));
+	/* Conversion-gain latch is per-session state, reset alongside regs_info.
+	 * A reinit landing while the scene is still dark would otherwise assert
+	 * HCG on frame 1 with no gain measurement behind it -- with the offset
+	 * compensation now applied, that is a 5.8x exposure error. */
+	g_imx662_hcg_on[vi_pipe] = TD_FALSE;
 }
 
 static td_s32 cmos_init_sensor_exp_function(ot_isp_sns_exp_func *sensor_exp_func)

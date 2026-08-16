@@ -94,20 +94,39 @@ extern "C" {
 #define IMX662_GAIN_STEP_MDB         30       /* 0.3 dB, in milli-dB            */
 #define IMX662_GAIN_REG_MAX          240u     /* 72 dB / 0.3 dB                 */
 
-/* Dual conversion gain.  Sony's SRM restricts the GAIN register to 22h..F0h
- * while FDG_SEL0 = 1 (HCG) against 00h..F0h in LCG, and the register is
- * "Gain [dB] x 10/3" in both modes -- so the code carries the same total dB
- * either way and the switch at 34 is seamless in brightness.  HCG lowers read
- * noise; its cost is a smaller saturation signal (SRM: "Saturation signal gets
- * smaller according to Vsat"), which is why bright scenes must stay in LCG.
+/* Dual conversion gain.
  *
- * The two thresholds give hysteresis so AE hunting around the boundary cannot
- * toggle the register every frame.  HCG_MIN is Sony's floor, not a choice. */
+ * HCG is NOT brightness-neutral.  The GAIN register is PGA gain applied after
+ * the conversion gain, so the two multiply: asserting FDG_SEL0=1 at an
+ * unchanged code brightens the frame by the conversion-efficiency ratio.  The
+ * datasheet gives that ratio directly -- Rcg (HCG/LCG) min 5.6, typ 5.8, max
+ * 6.0, corroborated by the electro-optical table's G sensitivity, HCG 18383 vs
+ * LCG 3166 Digit/lx/s = 5.81x.  5.8x is 15.3 dB, and at 0.3 dB per code that
+ * is IMX662_HCG_GAIN_OFFSET below.
+ *
+ * Sony's 22h (34-code) floor is NOT the conversion gain -- that reading would
+ * require a 51-code floor.  It is a saturation constraint: Vsat is 3895 digits
+ * in LCG against 1204 in HCG, a ratio of 3.235, and 34 codes x 0.3 dB = 10.2 dB
+ * = 3.236x.  The floor exists so HCG's clip level refills the ADC to LCG's.
+ *
+ * So a write must subtract the offset while HCG is selected, and the thresholds
+ * must sit where the compensated code still clears the floor: a stable HCG
+ * solution needs (requested - 51) >= 34, i.e. requested >= 85.  Latching on
+ * below that has no fixed point -- AE brightens 5.8x, slams the code down past
+ * the floor, HCG drops out, the frame goes dark, and it limit-cycles.  That
+ * band is ordinary dim-indoor light, between the daylight and dark-room cases
+ * that are easy to test. */
+#define IMX662_HCG_GAIN_OFFSET       51u      /* 15.3 dB / 0.3 dB per code      */
 #define IMX662_HCG_GAIN_REG_MIN      34u      /* 10.2 dB; SRM lower bound       */
-#define IMX662_HCG_ON_REG            40u      /* 12.0 dB: enter HCG above this  */
-#define IMX662_HCG_OFF_REG           34u      /* 10.2 dB: fall back to LCG here */
+#define IMX662_HCG_ON_REG            91u      /* requested; writes 40           */
+#define IMX662_HCG_OFF_REG           85u      /* requested; writes 34 = floor   */
 #define IMX662_FDG_LCG               0x00u
 #define IMX662_FDG_HCG               0x01u
+
+/* The floor is held by the OFF threshold, not by the clamp in
+ * cmos_gains_update(); keep them consistent if either is ever retuned. */
+typedef char imx662_hcg_off_clears_floor[
+	(IMX662_HCG_OFF_REG - IMX662_HCG_GAIN_OFFSET >= IMX662_HCG_GAIN_REG_MIN) ? 1 : -1];
 
 /* ---- resolution modes -----------------------------------------------------
  * Bring linear up first. Add Clear-HDR (2-frame) as a second mode later.
