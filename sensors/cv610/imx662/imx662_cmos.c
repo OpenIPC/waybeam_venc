@@ -232,7 +232,11 @@ static td_void cmos_dgain_calc_table(ot_vi_pipe vi_pipe, td_u32 *dgain_lin, td_u
 	*dgain_db  = 0;
 }
 
-/* gain register at fast-update i2c_data[3..4]. */
+/* Conversion-gain state, per pipe.  Held here rather than derived fresh each
+ * frame so the hysteresis below has something to latch against. */
+static td_bool g_imx662_hcg_on[OT_ISP_MAX_PIPE_NUM] = { 0 };
+
+/* gain register at fast-update i2c_data[3..4], conversion gain at [8]. */
 static td_void cmos_gains_update(ot_vi_pipe vi_pipe, td_u32 again, td_u32 dgain)
 {
 	ot_isp_sns_state *sns_state = imx662_get_ctx(vi_pipe);
@@ -245,6 +249,28 @@ static td_void cmos_gains_update(ot_vi_pipe vi_pipe, td_u32 again, td_u32 dgain)
 
 	if (reg > IMX662_GAIN_REG_MAX) {
 		reg = IMX662_GAIN_REG_MAX;
+	}
+
+	/* Dual conversion gain.  IMX662 is a STARVIS 2 part whose low-light
+	 * answer is HCG, and leaving FDG_SEL0 at its 0h reset means every dark
+	 * frame is amplified through the noisier low-conversion-gain path.
+	 *
+	 * The gain code is total dB in both modes, so this is transparent to AE:
+	 * the same request produces the same brightness either side of the
+	 * switch.  Hysteresis between ON and OFF keeps AE noise around the
+	 * boundary from toggling the register frame to frame. */
+	if (vi_pipe >= 0 && vi_pipe < OT_ISP_MAX_PIPE_NUM) {
+		if (!g_imx662_hcg_on[vi_pipe] && reg >= IMX662_HCG_ON_REG) {
+			g_imx662_hcg_on[vi_pipe] = TD_TRUE;
+		} else if (g_imx662_hcg_on[vi_pipe] && reg < IMX662_HCG_OFF_REG) {
+			g_imx662_hcg_on[vi_pipe] = TD_FALSE;
+		}
+		if (g_imx662_hcg_on[vi_pipe] && reg < IMX662_HCG_GAIN_REG_MIN) {
+			/* Sony forbids codes below 34 while HCG is selected. */
+			reg = IMX662_HCG_GAIN_REG_MIN;
+		}
+		sns_state->regs_info[0].i2c_data[8].data =
+			g_imx662_hcg_on[vi_pipe] ? IMX662_FDG_HCG : IMX662_FDG_LCG;
 	}
 
 	sns_state->regs_info[0].i2c_data[3].data = low_8bits(reg);
@@ -446,16 +472,20 @@ static td_s32 cmos_set_wdr_mode(ot_vi_pipe vi_pipe, td_u8 mode)
 static td_void cmos_comm_sns_reg_info_init(ot_vi_pipe vi_pipe, ot_isp_sns_state *sns_state)
 {
 	td_u32 i;
-	const td_u16 reg_addr[8] = {
+	/* Sized from the initializer so adding a slot cannot silently overflow;
+	 * reg_num below is derived from it for the same reason. */
+	const td_u16 reg_addr[] = {
 		IMX662_REG_SHR0_L, IMX662_REG_SHR0_M, IMX662_REG_SHR0_H,   /* 0..2 exposure */
 		IMX662_REG_GAIN_L, IMX662_REG_GAIN_H,                       /* 3..4 gain     */
-		IMX662_REG_VMAX_L, IMX662_REG_VMAX_M, IMX662_REG_VMAX_H     /* 5..7 vmax     */
+		IMX662_REG_VMAX_L, IMX662_REG_VMAX_M, IMX662_REG_VMAX_H,    /* 5..7 vmax     */
+		IMX662_REG_FDG_SEL0                                         /* 8    HCG/LCG  */
 	};
 
 	sns_state->regs_info[0].sns_type         = OT_ISP_SNS_TYPE_I2C;
 	sns_state->regs_info[0].com_bus.i2c_dev  = g_imx662_bus_info[vi_pipe].i2c_dev;
 	sns_state->regs_info[0].cfg2_valid_delay_max = 2;
-	sns_state->regs_info[0].reg_num          = 8;
+	sns_state->regs_info[0].reg_num =
+		(td_u32)(sizeof(reg_addr) / sizeof(reg_addr[0]));
 
 	for (i = 0; i < sns_state->regs_info[0].reg_num; i++) {
 		sns_state->regs_info[0].i2c_data[i].update        = TD_TRUE;

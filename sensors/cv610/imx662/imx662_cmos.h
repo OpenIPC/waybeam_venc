@@ -88,6 +88,21 @@ extern "C" {
 #define IMX662_GAIN_STEP_MDB         30       /* 0.3 dB, in milli-dB            */
 #define IMX662_GAIN_REG_MAX          240u     /* 72 dB / 0.3 dB                 */
 
+/* Dual conversion gain.  Sony's SRM restricts the GAIN register to 22h..F0h
+ * while FDG_SEL0 = 1 (HCG) against 00h..F0h in LCG, and the register is
+ * "Gain [dB] x 10/3" in both modes -- so the code carries the same total dB
+ * either way and the switch at 34 is seamless in brightness.  HCG lowers read
+ * noise; its cost is a smaller saturation signal (SRM: "Saturation signal gets
+ * smaller according to Vsat"), which is why bright scenes must stay in LCG.
+ *
+ * The two thresholds give hysteresis so AE hunting around the boundary cannot
+ * toggle the register every frame.  HCG_MIN is Sony's floor, not a choice. */
+#define IMX662_HCG_GAIN_REG_MIN      34u      /* 10.2 dB; SRM lower bound       */
+#define IMX662_HCG_ON_REG            40u      /* 12.0 dB: enter HCG above this  */
+#define IMX662_HCG_OFF_REG           34u      /* 10.2 dB: fall back to LCG here */
+#define IMX662_FDG_LCG               0x00u
+#define IMX662_FDG_HCG               0x01u
+
 /* ---- resolution modes -----------------------------------------------------
  * Bring linear up first. Add Clear-HDR (2-frame) as a second mode later.
  */
