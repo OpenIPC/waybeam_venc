@@ -226,6 +226,18 @@ static const Cv610IqField f_sharpen[] = {
 static const Cv610IqField f_nr[] = {
 	{ "enable",  FT_S32, OFS(ot_isp_nr_attr, enable),  1, 0, 1, F_DIRECT },
 	{ "op_type", FT_S32, OFS(ot_isp_nr_attr, op_type), 1, 0, 1, F_DIRECT },
+	/* Motion-detect temporal NR -- CV610's variant of the tnr_en slot, which
+	 * this chip does not have.  Temporal filtering is the strongest tool
+	 * against high-gain grain because the noise is uncorrelated frame to
+	 * frame while the scene is not; its cost is smearing on motion. */
+	{ "md_en",   FT_S32, OFS(ot_isp_nr_attr, md_en),   1, 0, 1, F_DIRECT },
+	/* "Strength of reserving the random noise according to luma" -- so LOWER
+	 * values filter harder.  This is what g_cmos_noise_calibration's fit
+	 * ultimately drives, and that fit is sc450ai's, not IMX662's.  Until a
+	 * real photon-transfer calibration exists for this sensor, this is the
+	 * honest way to correct it: by eye, against the live image. */
+	{ "coring_ratio", FT_U16, OFS(ot_isp_nr_attr, coring_ratio),
+		OT_ISP_BAYERNR_LUT_LENGTH, 0, 1023, F_DIRECT },
 };
 
 static const Cv610IqField f_drc[] = {
