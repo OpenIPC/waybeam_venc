@@ -517,18 +517,30 @@ static int cv610_prepare(void *opaque)
 	Cv610RunnerContext *ctx = opaque;
 	VencConfig *cfg = &ctx->config;
 	const Cv610SensorMode *mode;
+	int mode_index = -1;
 
 	setvbuf(stdout, NULL, _IONBF, 0);
 	/* Config loading and every staged HTTP mutation run the same lookup
 	 * through cv610_validate_config(), so reaching this is a config file
 	 * edited behind the daemon's back. */
-	mode = cv610_mode_for_fps(cfg->video0.fps);
+	mode = cv610_mode_select(cfg->sensor.mode, cfg->video0.fps, &mode_index);
 	if (mode == NULL || cv610_mode_check_output(mode, cfg->video0.width,
 			cfg->video0.height) != NULL) {
 		fprintf(stderr, "ERROR: CV610 cannot encode %ux%u @ %u fps\n",
 			cfg->video0.width, cfg->video0.height, cfg->video0.fps);
 		return 1;
 	}
+	/* The sensor runs at the MODE's rate.  Say so when that is not what was
+	 * asked for — a forced sensor.mode and a substituted target both land
+	 * here, and silence would leave every status endpoint reporting a rate
+	 * the operator never chose. */
+	if (mode->fps != cfg->video0.fps)
+		printf("> Requested %u fps, using %u fps (sensor mode %d: %s)\n",
+			cfg->video0.fps, mode->fps, mode_index, mode->desc);
+	/* Publish what was actually selected, so /api/v1/modes reports the
+	 * achieved mode rather than recomputing the configured one — the same
+	 * contract star6e_pipeline.c fulfils after sensor_select(). */
+	venc_api_set_sensor_info(0, mode_index, cfg->sensor.index);
 	ctx->pipeline.width = mode->width;
 	ctx->pipeline.height = mode->height;
 	cv610_mode_resolve_output(mode, cfg->video0.width, cfg->video0.height,

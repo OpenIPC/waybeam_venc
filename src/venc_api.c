@@ -869,6 +869,7 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	if (backend_name && strcmp(backend_name, "cv610") == 0) {
 		static const char *const supported[] = {
 			"system.web_port", "system.verbose",
+			"sensor.index", "sensor.mode",
 			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size", "video0.qp_delta",
 			"outgoing.enabled", "outgoing.server",
@@ -3988,28 +3989,28 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 	size_t count = 0;
 	size_t i;
 	const Cv610SensorMode *modes = cv610_mode_table(&count);
-	const Cv610SensorMode *selected;
-	uint32_t fps = 0;
+	int selected, selected_pad;
 	cJSON *root, *data, *pads, *pad, *arr;
 	char *str;
 	int rc;
 
+	/* What the backend actually brought up, published by cv610_prepare()
+	 * through the same venc_api_set_sensor_info() star6e_pipeline.c uses.
+	 * Recomputing it from video0.fps here would report the CONFIGURED mode
+	 * even when a forced sensor.mode, a substituted rate, or a failed
+	 * bring-up means something else is running.  -1 until bring-up runs. */
 	pthread_mutex_lock(&g_cfg_mutex);
-	if (g_cfg)
-		fps = g_cfg->video0.fps;
+	selected = g_sensor_mode;
+	selected_pad = g_sensor_pad;
 	pthread_mutex_unlock(&g_cfg_mutex);
-	/* The listed geometry is what the sensor captures.  video0.size is the
-	 * encoded size VPSS scales that to, so the frame rate alone selects. */
-	selected = cv610_mode_for_fps(fps);
 
 	root = cJSON_CreateObject();
 	if (!root)
 		return httpd_send_error(fd, 500, "internal_error", "out of memory");
 	cJSON_AddBoolToObject(root, "ok", 1);
 	data = cJSON_AddObjectToObject(root, "data");
-	cJSON_AddNumberToObject(data, "selected_pad", 0);
-	cJSON_AddNumberToObject(data, "selected_mode",
-		selected ? (double)(selected - modes) : -1);
+	cJSON_AddNumberToObject(data, "selected_pad", selected_pad);
+	cJSON_AddNumberToObject(data, "selected_mode", selected);
 	pads = cJSON_AddArrayToObject(data, "pads");
 	pad = cJSON_CreateObject();
 	cJSON_AddItemToArray(pads, pad);
@@ -4025,7 +4026,7 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 		cJSON_AddNumberToObject(m, "min_fps", modes[i].fps);
 		cJSON_AddNumberToObject(m, "max_fps", modes[i].fps);
 		cJSON_AddStringToObject(m, "desc", modes[i].desc);
-		cJSON_AddBoolToObject(m, "selected", &modes[i] == selected);
+		cJSON_AddBoolToObject(m, "selected", (int)i == selected);
 	}
 	str = cJSON_PrintUnformatted(root);
 	cJSON_Delete(root);
