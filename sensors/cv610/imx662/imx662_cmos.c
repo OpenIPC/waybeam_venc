@@ -119,7 +119,17 @@ static td_s32 cmos_get_ae_default(ot_vi_pipe vi_pipe, ot_isp_ae_sensor_default *
 	 * zero makes the AE library emit 1, below the ISP's legal minimum 256. */
 	ae_sns_dft->isp_dgain_shift          = 8;
 	ae_sns_dft->min_isp_dgain_target     = 1u << ae_sns_dft->isp_dgain_shift;
-	ae_sns_dft->max_isp_dgain_target     = 32u << ae_sns_dft->isp_dgain_shift;
+	/* ISP digital gain is the worst gain in the chain: it amplifies the noise
+	 * and the quantisation equally and buys no SNR, where analog gain and HCG
+	 * at least act before the ADC.  32x let the total ceiling reach 398 * 32
+	 * = 12739x (~82 dB), and on the .181 bench a dark room at that ceiling was
+	 * judged "super grainy" while 1-2 steps down looked better.  4x puts the
+	 * ceiling at 398 * 4 = 1592x (~64 dB), inside the range that was preferred,
+	 * and makes AE exhaust analog before it reaches for digital.
+	 *
+	 * This is an operator trade -- darker but cleaner -- so it is also live at
+	 * /api/v1/iq/set?exposure.auto.ispd_gain_max=<n> for tuning by eye. */
+	ae_sns_dft->max_isp_dgain_target     = 4u << ae_sns_dft->isp_dgain_shift;
 
 	switch (sns_state->wdr_mode) {
 		case OT_WDR_MODE_NONE:

@@ -84,7 +84,13 @@ extern "C" {
 #define IMX662_MIN_SHR0_HDR          10u      /* min shutter (Clear-HDR)        */
 
 #define IMX662_AGAIN_MIN             1024u                  /* 1x  (0 dB)        */
-#define IMX662_AGAIN_MAX             (1024u * 3981u / 10u)  /* ~72 dB, VERIFY    */
+/* 398x = 52 dB, NOT the ~72 dB the old comment claimed -- the /10 makes it a
+ * factor of 10 (20 dB) smaller than 10^(72/20).  Left at 52 dB deliberately:
+ * IMX662_GAIN_REG_MAX (240 codes x 0.3 dB) does allow 72 dB, but the measured
+ * complaint on this bench is too much gain, not too little.  Raise this only
+ * together with the ISP-digital cap below, and A/B it -- the two together set
+ * the total ceiling. */
+#define IMX662_AGAIN_MAX             (1024u * 3981u / 10u)  /* 398x = 52 dB     */
 #define IMX662_GAIN_STEP_MDB         30       /* 0.3 dB, in milli-dB            */
 #define IMX662_GAIN_REG_MAX          240u     /* 72 dB / 0.3 dB                 */
 
