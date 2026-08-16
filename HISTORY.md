@@ -46,6 +46,14 @@ render one set of sensor controls against all three backends. Contract
   Maruko call, so the rule cannot drift between the three: `1440x1080` uses a
   1440x1080 window at x=240 and scales 1:1. `isp.keepAspect=false` restores
   stretch-to-fit. Verified both directions on the bench.
+- **The CV610 default bitrate drops 8000 → 2600 kbps.** waybeam-link is the
+  single rate controller and actuates within seconds, so the config value is
+  a **boot seed**, not an operating point — and what a seed has to survive is
+  the worst rung, not the expected one. Landing at the §9.8 MCS0 no-feedback
+  floor while offering 8 Mbps floods the air, and on this fleet an
+  over-offered craft has already been measured demoting a *second* craft's
+  link on the same channel within a minute. Pinning the seed low costs
+  nothing once the controller takes over.
 - **CV610 was skipping the shared config validation entirely.**
   `venc_api_validate_loaded_config()` dispatched to the CV610 backend
   validator *instead of* the shared `validate_field_cfg()` sweep, so sixteen

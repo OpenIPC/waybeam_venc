@@ -198,7 +198,15 @@ int main(void)
 	failures += expect("cv610_default_is_1280x720",
 		cfg.video0.width == 1280 && cfg.video0.height == 720);
 	failures += expect("cv610_default_is_100fps", cfg.video0.fps == 100);
-	failures += expect("cv610_default_is_8000kbps", cfg.video0.bitrate == 8000);
+	/* The shipped bitrate is a BOOT SEED, not an operating point: waybeam-link
+	 * is the single rate controller and actuates within seconds of the link
+	 * coming up.  What the seed has to survive is the worst rung — landing at
+	 * the MCS0 no-feedback floor while offering 8 Mbps floods the air, and on
+	 * this fleet an over-offered craft has already been measured demoting a
+	 * SECOND craft's link on the same channel.  So this pins low on purpose;
+	 * it asserted 8000 until that was understood. */
+	failures += expect("cv610_default_bitrate_survives_mcs0",
+		cfg.video0.bitrate == 2600);
 	/* And that it names a real sensor mode rather than only passing the
 	 * generic range checks. */
 	failures += expect("cv610_default_names_a_mode",
