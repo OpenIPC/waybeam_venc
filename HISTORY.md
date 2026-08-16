@@ -1,5 +1,64 @@
 # History
 
+## [0.65.6] - 2026-08-16
+
+Low-light bitrate. On the `.181` bench with the room lights off, a 9.26 Mbps
+CBR target produced 29-65 Mbps. In good light the same build holds target
+(measured 9.98 vs 9.26), so this was specific to high sensor gain.
+
+- **The borrowed sharpen table was the cause — 88% of it.** Measured by
+  A/B with interleaved controls: turning sharpen off dropped the stream
+  65.4 -> 7.8 Mbps, *below* the target. Pinning sharpen strength to a constant
+  gave 0 -> 11.8, 40 -> 36.5, 80 -> 62.7, 150 -> 91.5 Mbps. Nothing else came
+  close: saturation -7.3%, CSC satu -4.5%, CA +1.7%, LDCI +2.2% (inside drift,
+  no effect). Disabling bayer NR *raised* the bitrate 15.7%, so NR was already
+  earning its keep and is untouched.
+
+  Sharpening is a high-pass filter, so at high gain it amplifies precisely the
+  noise that inter prediction cannot code. `g_cmos_yuv_sharpen` runs in AUTO,
+  and its sc450ai-derived `[32 gain][16 ISO]` tables *rise* along the ISO axis
+  — `texture_strength` to 310 where the low-ISO value is 216, `edge_strength`
+  195 -> 500. They sharpen harder the darker it gets. Defensible for sc450ai's
+  noise model and NR softening; backwards on IMX662.
+
+  Both tables are now tapered along ISO only, to 0 by bucket 9, with the rule
+  the original breaks: sharpening never increases with gain. Verified by four
+  invariants — ISO buckets 0-3 byte-identical, ISO 9-15 zero, monotonic
+  non-increasing from bucket 3, and no value anywhere raised.
+
+- **QP bounds are wired on CV610** (`apply_qp_bounds`, `video0.minQp/maxQp`,
+  live and at startup). The config fields, mutability and WebUI metadata
+  already existed; only the backend callback was missing.
+
+  This is **not** the low-light fix, and the measurement says so: the driver
+  default is `min=10 max=51`, already the H.265 maximum. The rate controller
+  always had full authority and still emitted 29-65 Mbps, so QP saturation was
+  never the cause. At 100 fps even maximum-QP frames of a noise-dominated
+  image exceed 10 Mbps. The knob is worth having to *cap* quality or raise the
+  floor; it cannot rescue a scene the encoder is already coding as coarsely as
+  the standard allows.
+
+- **AE is exposed as an `exposure` IQ group** — the gain ceilings and exposure
+  window that decide how much noise is created in the first place. The bench
+  reports `a_gain_max` 407654 (398x, matching `IMX662_AGAIN_MAX`),
+  `ispd_gain_max` 32768 (32x) and `sys_gain_max` 13044928 — **12739x total,
+  about 82 dB**, which is why a dark room ends up as amplified noise. These
+  are now readable and settable at runtime instead of being a compile-time
+  constant marked `VERIFY`.
+
+- **Saturation tapers harder above daylight.** Chroma noise is the ugliest
+  high-gain artifact and colour is least trustworthy exactly where gain is
+  highest; dropping chroma measured -7.3%. The first four buckets are
+  unchanged, the top drops from 90 to 32.
+
+The IQ field table is now 64-bit internally: the AE gain and exposure fields
+are `td_u32`, and a driver default of 0xFFFFFFFF would have read back as -1.
+
+Verified on `.181`: dark room holds target (operator-confirmed on the live
+stream), daylight unchanged at 10.09 Mbps against 9.26 with the encoder
+nominal at 100.20 fps, and `make verify` green with lint clean on all three
+backends.
+
 ## [0.65.5] - 2026-08-16
 
 0.65.4 seeded the CV610 ISP well but froze every value into the sensor plugin,

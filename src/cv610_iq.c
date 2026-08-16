@@ -41,6 +41,7 @@
 #include "ot_common_isp.h"
 #include "ss_mpi_isp.h"
 #include "ss_mpi_awb.h"
+#include "ss_mpi_ae.h"
 
 /* The backend runs a single VI pipe; cv610_pipeline.c calls it VI_PIPE 0. */
 #define CV610_IQ_PIPE 0
@@ -54,6 +55,7 @@ typedef enum {
 	FT_U8,
 	FT_U16,
 	FT_S32,   /* also carries td_bool and ot_op_mode */
+	FT_U32,   /* AE gain/exposure ranges; needs 64-bit to stay exact */
 } Cv610IqType;
 
 typedef struct {
@@ -61,8 +63,10 @@ typedef struct {
 	Cv610IqType type;
 	uint16_t    offset;   /* offsetof() into the group's attr struct */
 	uint16_t    count;    /* 1 = scalar, N = array */
-	int32_t     min;
-	int32_t     max;
+	/* 64-bit because td_u32 fields (AE gain and exposure ranges) do not fit
+	 * an int32_t -- a driver default of 0xFFFFFFFF would read back as -1. */
+	int64_t     min;
+	int64_t     max;
 	/* Which half of the block this value lives in.  A manual_attr value is
 	 * ignored while the block runs its auto curve and vice versa, and an
 	 * ignored write reads exactly like a broken setter — so a write to a
@@ -117,6 +121,8 @@ IQ_ACCESSORS(dehaze,
 	ss_mpi_isp_get_dehaze_attr, ss_mpi_isp_set_dehaze_attr)
 IQ_ACCESSORS(ca,
 	ss_mpi_isp_get_ca_attr, ss_mpi_isp_set_ca_attr)
+IQ_ACCESSORS(exposure,
+	ss_mpi_isp_get_exposure_attr, ss_mpi_isp_set_exposure_attr)
 
 #undef IQ_ACCESSORS
 
@@ -269,6 +275,46 @@ static const Cv610IqField f_ca[] = {
 	{ "enable", FT_S32, OFS(ot_isp_ca_attr, enable), 1, 0, 1, F_DIRECT },
 };
 
+/* AE.  Gains are 22.10 fixed point, so 1024 == 1x.  The ceilings are what
+ * stop the sensor climbing into the regime where the frame is mostly
+ * amplified noise -- which is where sharpening then multiplies the bitrate.
+ * Exposure time is in microseconds and is the better lever of the two: it
+ * collects photons rather than amplifying them, at the cost of frame rate.
+ *
+ * These sit under auto_attr, so writing one selects AE auto mode -- which is
+ * the mode a ceiling is meant to apply in. */
+static const Cv610IqField f_exposure[] = {
+	{ "bypass",  FT_S32, OFS(ot_isp_exposure_attr, bypass),  1, 0, 1, F_DIRECT },
+	{ "op_type", FT_S32, OFS(ot_isp_exposure_attr, op_type), 1, 0, 1, F_DIRECT },
+	{ "ae_run_interval", FT_U8, OFS(ot_isp_exposure_attr, ae_run_interval),
+		1, 1, 255, F_DIRECT },
+	{ "auto.exp_time_max",  FT_U32,
+		OFS(ot_isp_exposure_attr, auto_attr.exp_time_range.max),
+		1, 0, 4294967295LL, F_AUTO },
+	{ "auto.exp_time_min",  FT_U32,
+		OFS(ot_isp_exposure_attr, auto_attr.exp_time_range.min),
+		1, 0, 4294967295LL, F_AUTO },
+	{ "auto.a_gain_max",    FT_U32,
+		OFS(ot_isp_exposure_attr, auto_attr.a_gain_range.max),
+		1, 1024, 4294967295LL, F_AUTO },
+	{ "auto.d_gain_max",    FT_U32,
+		OFS(ot_isp_exposure_attr, auto_attr.d_gain_range.max),
+		1, 1024, 4294967295LL, F_AUTO },
+	{ "auto.ispd_gain_max", FT_U32,
+		OFS(ot_isp_exposure_attr, auto_attr.ispd_gain_range.max),
+		1, 1024, 262144, F_AUTO },
+	/* The single cap that bounds the product of all three. */
+	{ "auto.sys_gain_max",  FT_U32,
+		OFS(ot_isp_exposure_attr, auto_attr.sys_gain_range.max),
+		1, 1024, 4294967295LL, F_AUTO },
+	{ "auto.compensation",  FT_U8,
+		OFS(ot_isp_exposure_attr, auto_attr.compensation), 1, 0, 255, F_AUTO },
+	{ "auto.speed",         FT_U8,
+		OFS(ot_isp_exposure_attr, auto_attr.speed),        1, 0, 255, F_AUTO },
+	{ "auto.tolerance",     FT_U8,
+		OFS(ot_isp_exposure_attr, auto_attr.tolerance),    1, 0, 255, F_AUTO },
+};
+
 #undef OFS
 
 #define GROUP(n, ops) \
@@ -295,6 +341,8 @@ static const Cv610IqGroup g_groups[] = {
 	GROUP(dehaze,
 		(int32_t)offsetof(ot_isp_dehaze_attr, op_type)),
 	GROUP(ca, -1),
+	GROUP(exposure,
+		(int32_t)offsetof(ot_isp_exposure_attr, op_type)),
 };
 
 #undef GROUP
@@ -314,6 +362,7 @@ typedef union {
 	ot_isp_ldci_attr         ldci;
 	ot_isp_dehaze_attr       dehaze;
 	ot_isp_ca_attr           ca;
+	ot_isp_exposure_attr     exposure;
 } Cv610IqAttr;
 
 /* Guards the shared scratch attribute and the static emit buffer below —
@@ -330,34 +379,37 @@ static size_t field_elem_size(Cv610IqType t)
 	switch (t) {
 	case FT_U8:  return 1;
 	case FT_U16: return 2;
-	case FT_S32: return 4;
+	case FT_S32:
+	case FT_U32: return 4;
 	}
 	return 4;
 }
 
-static int32_t field_read(const void *attr, const Cv610IqField *f, uint16_t idx)
+static int64_t field_read(const void *attr, const Cv610IqField *f, uint16_t idx)
 {
 	const uint8_t *p = (const uint8_t *)attr + f->offset +
 		idx * field_elem_size(f->type);
 
 	switch (f->type) {
-	case FT_U8:  return (int32_t)*p;
-	case FT_U16: { uint16_t v; memcpy(&v, p, sizeof(v)); return (int32_t)v; }
-	case FT_S32: { int32_t  v; memcpy(&v, p, sizeof(v)); return v; }
+	case FT_U8:  return (int64_t)*p;
+	case FT_U16: { uint16_t v; memcpy(&v, p, sizeof(v)); return (int64_t)v; }
+	case FT_S32: { int32_t  v; memcpy(&v, p, sizeof(v)); return (int64_t)v; }
+	case FT_U32: { uint32_t v; memcpy(&v, p, sizeof(v)); return (int64_t)v; }
 	}
 	return 0;
 }
 
 /* Callers must range-check first; cv610_iq_set() is the only caller and
  * rejects out-of-range values rather than silently substituting one. */
-static void field_write(void *attr, const Cv610IqField *f, uint16_t idx, int32_t val)
+static void field_write(void *attr, const Cv610IqField *f, uint16_t idx, int64_t val)
 {
 	uint8_t *p = (uint8_t *)attr + f->offset + idx * field_elem_size(f->type);
 
 	switch (f->type) {
 	case FT_U8:  *p = (uint8_t)val; return;
 	case FT_U16: { uint16_t v = (uint16_t)val; memcpy(p, &v, sizeof(v)); return; }
-	case FT_S32: { int32_t  v = val;           memcpy(p, &v, sizeof(v)); return; }
+	case FT_S32: { int32_t  v = (int32_t)val;  memcpy(p, &v, sizeof(v)); return; }
+	case FT_U32: { uint32_t v = (uint32_t)val; memcpy(p, &v, sizeof(v)); return; }
 	}
 }
 
@@ -378,13 +430,14 @@ static int emit_group_values(char *buf, size_t sz, int pos,
 
 		JSON_PUT(buf, pos, sz, "%s\"%s\":", i ? "," : "", f->name);
 		if (f->count == 1) {
-			JSON_PUT(buf, pos, sz, "%d", field_read(attr, f, 0));
+			JSON_PUT(buf, pos, sz, "%lld",
+				(long long)field_read(attr, f, 0));
 			continue;
 		}
 		JSON_PUT(buf, pos, sz, "[");
 		for (uint16_t e = 0; e < f->count; e++)
-			JSON_PUT(buf, pos, sz, "%s%d",
-				e ? "," : "", field_read(attr, f, e));
+			JSON_PUT(buf, pos, sz, "%s%lld",
+				e ? "," : "", (long long)field_read(attr, f, e));
 		JSON_PUT(buf, pos, sz, "]");
 	}
 	return pos;
@@ -404,9 +457,9 @@ static int emit_schema(char *buf, size_t sz, int pos)
 			const Cv610IqField *fd = &g->fields[f];
 			JSON_PUT(buf, pos, sz,
 				"%s{\"name\":\"%s\",\"count\":%u,"
-				"\"min\":%d,\"max\":%d,\"domain\":\"%s\"}",
+				"\"min\":%lld,\"max\":%lld,\"domain\":\"%s\"}",
 				f ? "," : "", fd->name,
-				(unsigned)fd->count, fd->min, fd->max,
+				(unsigned)fd->count, (long long)fd->min, (long long)fd->max,
 				fd->domain == F_MANUAL ? "manual" :
 				fd->domain == F_AUTO   ? "auto" : "direct");
 		}
@@ -507,37 +560,34 @@ char *cv610_iq_query(void)
 
 /* ── Set ────────────────────────────────────────────────────────────────── */
 
-/* strtol with the whole-token check the caller needs: "12abc" and "" are
- * rejected rather than silently read as 12 and 0.
+/* strtoll with the whole-token check the caller needs: "12abc" and "" are
+ * rejected rather than silently read as 12 and 0.  64-bit because the AE
+ * gain/exposure fields are td_u32 and a legitimate value can exceed INT32_MAX.
  *
  * The overflow check has to be errno, not a range comparison: this target is
  * ARM EABI where long is 32 bits, so `v < INT32_MIN || v > INT32_MAX` is
  * `long < LONG_MIN || long > LONG_MAX` — a tautology the compiler folds away,
  * letting a saturated LONG_MAX through as a valid value. */
-static int parse_i32(const char *s, const char **end, int32_t *out)
+static int parse_i64(const char *s, const char **end, int64_t *out)
 {
 	char *stop = NULL;
-	long v;
+	long long v;
 
 	while (*s == ' ')
 		s++;
 	if (*s == '\0')
 		return -1;
 	errno = 0;
-	v = strtol(s, &stop, 10);
+	v = strtoll(s, &stop, 10);
 	if (stop == s)
 		return -1;
 	if (errno == ERANGE)
 		return -1;
-#if LONG_MAX > INT32_MAX
-	if (v < INT32_MIN || v > INT32_MAX)
-		return -1;
-#endif
 	while (*stop == ' ')
 		stop++;
 	if (*stop != '\0' && *stop != ',')
 		return -1;
-	*out = (int32_t)v;
+	*out = (int64_t)v;
 	*end = stop;
 	return 0;
 }
@@ -613,16 +663,17 @@ int cv610_iq_set(const char *param, const char *value)
 	}
 
 	if (field->count == 1) {
-		int32_t v;
+		int64_t v;
 		const char *end;
-		if (parse_i32(value, &end, &v) != 0 || *end == ',') {
+		if (parse_i64(value, &end, &v) != 0 || *end == ',') {
 			fprintf(stderr, "[cv610-iq] %s: expected one integer\n",
 				param);
 			goto out;
 		}
 		if (v < field->min || v > field->max) {
-			fprintf(stderr, "[cv610-iq] %s: %d out of range [%d, %d]\n",
-				param, v, field->min, field->max);
+			fprintf(stderr, "[cv610-iq] %s: %lld out of range [%lld, %lld]\n",
+				param, (long long)v, (long long)field->min,
+				(long long)field->max);
 			goto out;
 		}
 		field_write(&g_attr, field, 0, v);
@@ -631,14 +682,15 @@ int cv610_iq_set(const char *param, const char *value)
 		const char *end = value;
 		uint16_t n = 0;
 		while (n < field->count) {
-			int32_t v;
-			if (parse_i32(p, &end, &v) != 0)
+			int64_t v;
+			if (parse_i64(p, &end, &v) != 0)
 				break;
 			if (v < field->min || v > field->max) {
 				fprintf(stderr,
-					"[cv610-iq] %s: element %u = %d out of range "
-					"[%d, %d]\n",
-					param, (unsigned)n, v, field->min, field->max);
+					"[cv610-iq] %s: element %u = %lld out of range "
+					"[%lld, %lld]\n",
+					param, (unsigned)n, (long long)v,
+					(long long)field->min, (long long)field->max);
 				goto out;
 			}
 			field_write(&g_attr, field, n, v);

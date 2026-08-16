@@ -113,6 +113,70 @@ static int cv610_apply_qp_delta(int delta)
 	return cv610_update_venc_attr(0, 0, delta, 4u);
 }
 
+/* Captured on the first write so that 0 restores the driver's own default
+ * rather than pinning whatever happened to be in force at the time. */
+static struct {
+	td_u32 max_qp, min_qp, max_i_qp, min_i_qp;
+	int captured;
+} g_cv610_qp_defaults;
+
+/* CBR can only hold its target by raising QP.  In a high-gain, noise-dominated
+ * scene the QP the encoder needs can exceed the driver's default ceiling, and
+ * once it saturates the bitrate overshoots with the rate controller powerless
+ * — measured at 3-7x target on the .181 bench with the lights off.  This is
+ * the knob that lets it squeeze; it does not make the picture better, it stops
+ * the overshoot.  0 on either bound leaves/restores the driver default. */
+static int cv610_apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
+{
+	ot_venc_chn_attr attr;
+	ot_venc_rc_param param;
+	td_s32 ret;
+
+	if (min_qp == 0 && max_qp == 0 && !g_cv610_qp_defaults.captured)
+		return 0;   /* never written — driver defaults already in force */
+
+	memset(&attr, 0, sizeof(attr));
+	if (ss_mpi_venc_get_chn_attr(CV610_VENC_CHN, &attr) != TD_SUCCESS)
+		return -1;
+	/* Only CBR carries these bounds; the backend configures nothing else,
+	 * but a future mode change must not write through the wrong union arm. */
+	if (attr.rc_attr.rc_mode != OT_VENC_RC_MODE_H265_CBR)
+		return -1;
+
+	memset(&param, 0, sizeof(param));
+	if (ss_mpi_venc_get_rc_param(CV610_VENC_CHN, &param) != TD_SUCCESS)
+		return -1;
+
+	if (!g_cv610_qp_defaults.captured) {
+		g_cv610_qp_defaults.max_qp   = param.h265_cbr_param.max_qp;
+		g_cv610_qp_defaults.min_qp   = param.h265_cbr_param.min_qp;
+		g_cv610_qp_defaults.max_i_qp = param.h265_cbr_param.max_i_qp;
+		g_cv610_qp_defaults.min_i_qp = param.h265_cbr_param.min_i_qp;
+		g_cv610_qp_defaults.captured = 1;
+	}
+
+	param.h265_cbr_param.max_qp = max_qp ? max_qp : g_cv610_qp_defaults.max_qp;
+	param.h265_cbr_param.min_qp = min_qp ? min_qp : g_cv610_qp_defaults.min_qp;
+	/* I-frames get the same ceiling.  Raising only the P bound leaves the
+	 * I-frame free to blow the budget on its own, which in a noisy scene is
+	 * exactly where the biggest frames come from. */
+	param.h265_cbr_param.max_i_qp = max_qp ? max_qp : g_cv610_qp_defaults.max_i_qp;
+	param.h265_cbr_param.min_i_qp = min_qp ? min_qp : g_cv610_qp_defaults.min_i_qp;
+
+	ret = ss_mpi_venc_set_rc_param(CV610_VENC_CHN, &param);
+	if (ret != TD_SUCCESS) {
+		fprintf(stderr, "ERROR: ss_mpi_venc_set_rc_param=0x%x\n",
+			(unsigned)ret);
+		return -1;
+	}
+	printf("> qpBounds: min=%u max=%u (0 = driver default %u/%u)\n",
+		(unsigned)param.h265_cbr_param.min_qp,
+		(unsigned)param.h265_cbr_param.max_qp,
+		(unsigned)g_cv610_qp_defaults.min_qp,
+		(unsigned)g_cv610_qp_defaults.max_qp);
+	return 0;
+}
+
 static int cv610_apply_verbose(bool on)
 {
 	if (!g_cv610_runner)
@@ -252,6 +316,7 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.query_audio_status = cv610_query_audio_status,
 	.query_iq_info = cv610_iq_query,
 	.apply_iq_param = cv610_iq_set,
+	.apply_qp_bounds = cv610_apply_qp_bounds,
 };
 
 static void cv610_signal_handler(int signo)
@@ -410,6 +475,12 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 		return -1;
 	}
 	ctx->venc_created = 1;
+	/* video0.minQp/maxQp are MUT_LIVE, but they also have to take effect on
+	 * a cold boot -- the config is read before the channel exists, so the
+	 * live path never runs for a value that was already in the file. */
+	if (ctx->config.video0.min_qp || ctx->config.video0.max_qp)
+		(void)cv610_apply_qp_bounds(ctx->config.video0.min_qp,
+			ctx->config.video0.max_qp);
 	memset(&vui, 0, sizeof(vui));
 	ret = ss_mpi_venc_get_h265_vui(CV610_VENC_CHN, &vui);
 	if (ret != TD_SUCCESS)

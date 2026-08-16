@@ -873,6 +873,10 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"isp.keep_aspect",
 			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size", "video0.qp_delta",
+			/* Read by cv610_apply_qp_bounds(), live and at startup.
+			 * CBR cannot hold its target in a noise-dominated scene
+			 * without room to raise QP. */
+			"video0.min_qp", "video0.max_qp",
 			"outgoing.enabled", "outgoing.server",
 			"outgoing.max_payload_size", "outgoing.audio_port",
 			"outgoing.connected_udp",
