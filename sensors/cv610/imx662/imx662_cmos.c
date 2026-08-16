@@ -342,16 +342,37 @@ static td_s32 cmos_get_isp_default(ot_vi_pipe vi_pipe, ot_isp_cmos_default *isp_
 	sns_check_pointer_return(sns_state);
 	(td_void)memset_s(isp_def, sizeof(ot_isp_cmos_default), 0, sizeof(ot_isp_cmos_default));
 
-	/* TODO(tuning): assign noise / demosaic / sharpen / gamma /
-	 * drc / dpc / shading blocks. These get you from "flat" to "good". */
 	/* ot_isp_cmos_alg_key holds its bitfields directly, not under a .bits
-	 * member. All keys default to 0 from the memset above, which disables every
-	 * ISP block and yields a flat image -- the in-tree cv6xx drivers enable
-	 * demosaic / sharpen / drc / bayer_nr / anti_false_color / cac / ldci here
-	 * (cf. sc450ai_cmos.c:911-923). Left off until first light, so the raw path
-	 * can be judged without the ISP in the way. */
-	isp_def->key.bit1_ca            = 0;
-	isp_def->key.bit1_dpc           = 0;
+	 * member. Everything is 0 from the memset above, so a block is off unless
+	 * it is turned on here -- and each key needs its parameter table, or the
+	 * ISP reads a null pointer.
+	 *
+	 * Linear mode only; cmos_set_wdr_mode() rejects every other WDR mode.
+	 *
+	 * Enabled below is the ISP-behaviour set (see imx662_cmos_param.h for why
+	 * these transfer from sc450ai and the noise-fitted ones do not).
+	 * Still off, each for its own reason: bayer_nr / sharpen /
+	 * noise_calibration / drc await an IMX662 measurement rather than a
+	 * borrowed 4 MP noise model; lsc needs a per-module shading capture;
+	 * dpc is enabled in sc450ai's common path and is a candidate here, but
+	 * has not been measured on this sensor yet. */
+	isp_def->key.bit1_demosaic         = 1;
+	isp_def->demosaic                  = &g_cmos_demosaic;
+	isp_def->key.bit1_gamma            = 1;
+	isp_def->gamma                     = &g_cmos_gamma;
+	isp_def->key.bit1_clut             = 1;
+	isp_def->clut                      = &g_cmos_clut;
+	isp_def->key.bit1_anti_false_color = 1;
+	isp_def->anti_false_color          = &g_cmos_anti_false_color;
+	isp_def->key.bit1_cac              = 1;
+	isp_def->cac                       = &g_cmos_cac;
+	isp_def->key.bit1_ldci             = 1;
+	isp_def->ldci                      = &g_cmos_ldci;
+	isp_def->key.bit1_dehaze           = 1;
+	isp_def->dehaze                    = &g_cmos_dehaze;
+	isp_def->key.bit1_ca               = 1;
+	isp_def->ca                        = &g_cmos_ca;
+
 	isp_def->sns_mode.sns_id        = 0;
 	return TD_SUCCESS;
 }
