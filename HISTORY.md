@@ -34,13 +34,18 @@ change; `/api/v1/iq` and `/api/v1/iq/set` are existing routes that answered
   the value the ISP kept, which differs from the request when clamped.
 
 Verified on the `.181` bench, cold-booted onto the shipped build
-(`md5 96eecf68…`, `/proc/PID/exe` confirmed not `(deleted)`): all 11 groups
+(`md5 dda3bec7…`, `/proc/PID/exe` confirmed not `(deleted)`): all 11 groups
 return `ret=0`; a mutation sweep wrote and read back one field per group with
 11/11 agreeing and the device diffing clean against its boot state afterwards;
 saturation 60 → 220 → 60 moved mean chroma 4.84 → 22.95 → 4.81, the repeat of
 the first arm landing within 0.6% so the change is the knob and not the scene;
-short arrays and unknown names are rejected; encoder rate stayed nominal at
-100.13 fps with `pressureDrops` frozen at 0.
+arrays of the wrong length in either direction and unknown names are
+rejected; encoder rate stayed nominal at 100.10 fps with `pressureDrops`
+frozen at 0.
+
+`_caps.import` is advertised as false because `handle_iq_import()` is compiled
+only for Star6E and Maruko; the WebUI hides the control rather than offer a
+button that 501s.
 
 ## [0.65.4] - 2026-08-16
 
