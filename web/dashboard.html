@@ -339,7 +339,9 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
 
   <div class="tab" onclick="switchTab('api')">API Reference</div>
 
-  <div class="tab" id="tab-btn-iq" onclick="switchTab('iq')">Image Quality</div>
+  <!-- Hidden until the /api/v1/iq probe in renderIQCategories() answers, so a
+       backend without the surface never flashes a tab that then vanishes. -->
+  <div class="tab" id="tab-btn-iq" onclick="switchTab('iq')" hidden>Image Quality</div>
 
   <div class="tab" id="tab-btn-recordings" onclick="switchTab('recordings')">Recordings</div>
 
@@ -514,7 +516,7 @@ venc_gain 1024</td></tr>
   <div class="iq-controls">
     <button class="iq-btn" onclick="queryIQ()">Query All</button>
     <button class="iq-btn" onclick="exportIQ()">Export JSON</button>
-    <label class="iq-btn" style="cursor:pointer">Import JSON <input type="file" accept=".json" style="display:none" onchange="importIQ(this)"></label>
+    <label class="iq-btn" id="iq-import-btn" style="cursor:pointer">Import JSON <input type="file" accept=".json" style="display:none" onchange="importIQ(this)"></label>
   </div>
 
   <div class="iq-result" id="iq-params-result">
@@ -1712,6 +1714,11 @@ async function renderIQCategories(){
   if(!data) return;
 
   IQ_LAST = data;
+
+  /* /api/v1/iq/import is compiled per backend and 501s where it is absent.
+     Hide the control rather than leave a button that always fails. */
+  const impBtn = document.getElementById('iq-import-btn');
+  if(impBtn) impBtn.hidden = (data._caps && data._caps.import === false);
   if(Array.isArray(data._schema)){
     renderIQSchema(container, data._schema);
     return;

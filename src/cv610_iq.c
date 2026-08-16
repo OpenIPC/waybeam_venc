@@ -47,9 +47,7 @@ typedef char cv610_iq_mode_is_int[(sizeof(ot_op_mode) == 4) ? 1 : -1];
 
 typedef enum {
 	FT_U8,
-	FT_S8,
 	FT_U16,
-	FT_S16,
 	FT_S32,   /* also carries td_bool and ot_op_mode */
 } Cv610IqType;
 
@@ -70,14 +68,15 @@ typedef struct {
 	const char *name;
 	int       (*get)(void *attr);
 	int       (*set)(const void *attr);
-	size_t      size;
 	int32_t     op_type_offset;  /* -1 when the group has no op_type */
 	const Cv610IqField *fields;
 	uint16_t    field_count;
 } Cv610IqGroup;
 
-#define F_RO 0
-#define F_MAN 1
+/* forces_manual values.  Every field here is writable; these say only whether
+ * the write also has to switch the block out of its auto curve. */
+#define F_DIRECT 0
+#define F_MANUAL 1
 
 /* ── MPI wrappers ───────────────────────────────────────────────────────
  * Typed one-liners rather than casting function pointers: converting a
@@ -85,31 +84,31 @@ typedef struct {
  * undefined behaviour, and void * -> struct * is a plain implicit
  * conversion. */
 
-#define IQ_ACCESSORS(group, type, getter, setter)                          \
+#define IQ_ACCESSORS(group, getter, setter)                                \
 	static int iq_get_##group(void *a) { return getter(CV610_IQ_PIPE, a); } \
 	static int iq_set_##group(const void *a) { return setter(CV610_IQ_PIPE, a); }
 
-IQ_ACCESSORS(saturation, ot_isp_saturation_attr,
+IQ_ACCESSORS(saturation,
 	ss_mpi_isp_get_saturation_attr, ss_mpi_isp_set_saturation_attr)
-IQ_ACCESSORS(color_tone, ot_isp_color_tone_attr,
+IQ_ACCESSORS(color_tone,
 	ss_mpi_isp_get_color_tone_attr, ss_mpi_isp_set_color_tone_attr)
-IQ_ACCESSORS(csc, ot_isp_csc_attr,
+IQ_ACCESSORS(csc,
 	ss_mpi_isp_get_csc_attr, ss_mpi_isp_set_csc_attr)
-IQ_ACCESSORS(ccm, ot_isp_color_matrix_attr,
+IQ_ACCESSORS(ccm,
 	ss_mpi_isp_get_ccm_attr, ss_mpi_isp_set_ccm_attr)
-IQ_ACCESSORS(wb, ot_isp_wb_attr,
+IQ_ACCESSORS(wb,
 	ss_mpi_isp_get_wb_attr, ss_mpi_isp_set_wb_attr)
-IQ_ACCESSORS(sharpen, ot_isp_sharpen_attr,
+IQ_ACCESSORS(sharpen,
 	ss_mpi_isp_get_sharpen_attr, ss_mpi_isp_set_sharpen_attr)
-IQ_ACCESSORS(nr, ot_isp_nr_attr,
+IQ_ACCESSORS(nr,
 	ss_mpi_isp_get_nr_attr, ss_mpi_isp_set_nr_attr)
-IQ_ACCESSORS(drc, ot_isp_drc_attr,
+IQ_ACCESSORS(drc,
 	ss_mpi_isp_get_drc_attr, ss_mpi_isp_set_drc_attr)
-IQ_ACCESSORS(ldci, ot_isp_ldci_attr,
+IQ_ACCESSORS(ldci,
 	ss_mpi_isp_get_ldci_attr, ss_mpi_isp_set_ldci_attr)
-IQ_ACCESSORS(dehaze, ot_isp_dehaze_attr,
+IQ_ACCESSORS(dehaze,
 	ss_mpi_isp_get_dehaze_attr, ss_mpi_isp_set_dehaze_attr)
-IQ_ACCESSORS(ca, ot_isp_ca_attr,
+IQ_ACCESSORS(ca,
 	ss_mpi_isp_get_ca_attr, ss_mpi_isp_set_ca_attr)
 
 #undef IQ_ACCESSORS
@@ -123,172 +122,172 @@ IQ_ACCESSORS(ca, ot_isp_ca_attr,
 
 static const Cv610IqField f_saturation[] = {
 	{ "op_type",           FT_S32, OFS(ot_isp_saturation_attr, op_type),
-		1, 0, 1, F_RO },
+		1, 0, 1, F_DIRECT },
 	{ "manual.saturation", FT_U8,  OFS(ot_isp_saturation_attr, manual_attr.saturation),
-		1, 0, 255, F_MAN },
+		1, 0, 255, F_MANUAL },
 	/* Indexed by AGC bucket; 128 == nominal.  This is the curve the sensor
 	 * plugin's g_imx662_awb_agc_table seeds. */
 	{ "auto.sat",          FT_U8,  OFS(ot_isp_saturation_attr, auto_attr.sat),
-		OT_ISP_AUTO_ISO_NUM, 0, 255, F_RO },
+		OT_ISP_AUTO_ISO_NUM, 0, 255, F_DIRECT },
 };
 
 static const Cv610IqField f_color_tone[] = {
 	{ "red_cast_gain",   FT_U16, OFS(ot_isp_color_tone_attr, red_cast_gain),
-		1, 256, 384, F_RO },
+		1, 256, 384, F_DIRECT },
 	{ "green_cast_gain", FT_U16, OFS(ot_isp_color_tone_attr, green_cast_gain),
-		1, 256, 384, F_RO },
+		1, 256, 384, F_DIRECT },
 	{ "blue_cast_gain",  FT_U16, OFS(ot_isp_color_tone_attr, blue_cast_gain),
-		1, 256, 384, F_RO },
+		1, 256, 384, F_DIRECT },
 };
 
 static const Cv610IqField f_csc[] = {
-	{ "enable",           FT_S32, OFS(ot_isp_csc_attr, enable), 1, 0, 1, F_RO },
-	{ "hue",              FT_U8,  OFS(ot_isp_csc_attr, hue),    1, 0, 100, F_RO },
-	{ "luma",             FT_U8,  OFS(ot_isp_csc_attr, luma),   1, 0, 100, F_RO },
-	{ "contr",            FT_U8,  OFS(ot_isp_csc_attr, contr),  1, 0, 100, F_RO },
-	{ "satu",             FT_U8,  OFS(ot_isp_csc_attr, satu),   1, 0, 100, F_RO },
+	{ "enable",           FT_S32, OFS(ot_isp_csc_attr, enable), 1, 0, 1, F_DIRECT },
+	{ "hue",              FT_U8,  OFS(ot_isp_csc_attr, hue),    1, 0, 100, F_DIRECT },
+	{ "luma",             FT_U8,  OFS(ot_isp_csc_attr, luma),   1, 0, 100, F_DIRECT },
+	{ "contr",            FT_U8,  OFS(ot_isp_csc_attr, contr),  1, 0, 100, F_DIRECT },
+	{ "satu",             FT_U8,  OFS(ot_isp_csc_attr, satu),   1, 0, 100, F_DIRECT },
 	{ "limited_range_en", FT_S32, OFS(ot_isp_csc_attr, limited_range_en),
-		1, 0, 1, F_RO },
+		1, 0, 1, F_DIRECT },
 };
 
 static const Cv610IqField f_ccm[] = {
 	{ "op_type",          FT_S32, OFS(ot_isp_color_matrix_attr, op_type),
-		1, 0, 1, F_RO },
+		1, 0, 1, F_DIRECT },
 	{ "manual.sat_en",    FT_S32, OFS(ot_isp_color_matrix_attr, manual_attr.sat_en),
-		1, 0, 1, F_MAN },
+		1, 0, 1, F_MANUAL },
 	{ "manual.ccm",       FT_U16, OFS(ot_isp_color_matrix_attr, manual_attr.ccm),
-		OT_ISP_CCM_MATRIX_SIZE, 0, 65535, F_MAN },
+		OT_ISP_CCM_MATRIX_SIZE, 0, 65535, F_MANUAL },
 	/* cv610_pipeline.c's enable_sensor_ccm() clears both of these so the
 	 * auto CCM never bypasses; they are surfaced to make that visible. */
 	{ "auto.iso_act_en",  FT_S32, OFS(ot_isp_color_matrix_attr, auto_attr.iso_act_en),
-		1, 0, 1, F_RO },
+		1, 0, 1, F_DIRECT },
 	{ "auto.temp_act_en", FT_S32, OFS(ot_isp_color_matrix_attr, auto_attr.temp_act_en),
-		1, 0, 1, F_RO },
+		1, 0, 1, F_DIRECT },
 };
 
 static const Cv610IqField f_wb[] = {
-	{ "bypass",         FT_S32, OFS(ot_isp_wb_attr, bypass),  1, 0, 1, F_RO },
-	{ "op_type",        FT_S32, OFS(ot_isp_wb_attr, op_type), 1, 0, 1, F_RO },
+	{ "bypass",         FT_S32, OFS(ot_isp_wb_attr, bypass),  1, 0, 1, F_DIRECT },
+	{ "op_type",        FT_S32, OFS(ot_isp_wb_attr, op_type), 1, 0, 1, F_DIRECT },
 	{ "manual.r_gain",  FT_U16, OFS(ot_isp_wb_attr, manual_attr.r_gain),
-		1, 0, 4095, F_MAN },
+		1, 0, 4095, F_MANUAL },
 	{ "manual.gr_gain", FT_U16, OFS(ot_isp_wb_attr, manual_attr.gr_gain),
-		1, 0, 4095, F_MAN },
+		1, 0, 4095, F_MANUAL },
 	{ "manual.gb_gain", FT_U16, OFS(ot_isp_wb_attr, manual_attr.gb_gain),
-		1, 0, 4095, F_MAN },
+		1, 0, 4095, F_MANUAL },
 	{ "manual.b_gain",  FT_U16, OFS(ot_isp_wb_attr, manual_attr.b_gain),
-		1, 0, 4095, F_MAN },
+		1, 0, 4095, F_MANUAL },
 };
 
 static const Cv610IqField f_sharpen[] = {
 	{ "enable",                  FT_S32, OFS(ot_isp_sharpen_attr, enable),
-		1, 0, 1, F_RO },
+		1, 0, 1, F_DIRECT },
 	{ "op_type",                 FT_S32, OFS(ot_isp_sharpen_attr, op_type),
-		1, 0, 1, F_RO },
+		1, 0, 1, F_DIRECT },
 	{ "manual.texture_strength", FT_U16, OFS(ot_isp_sharpen_attr, manual_attr.texture_strength),
-		OT_ISP_SHARPEN_GAIN_NUM, 0, 4095, F_MAN },
+		OT_ISP_SHARPEN_GAIN_NUM, 0, 4095, F_MANUAL },
 	{ "manual.edge_strength",    FT_U16, OFS(ot_isp_sharpen_attr, manual_attr.edge_strength),
-		OT_ISP_SHARPEN_GAIN_NUM, 0, 4095, F_MAN },
+		OT_ISP_SHARPEN_GAIN_NUM, 0, 4095, F_MANUAL },
 	{ "manual.texture_freq",     FT_U16, OFS(ot_isp_sharpen_attr, manual_attr.texture_freq),
-		1, 0, 4095, F_MAN },
+		1, 0, 4095, F_MANUAL },
 	{ "manual.edge_freq",        FT_U16, OFS(ot_isp_sharpen_attr, manual_attr.edge_freq),
-		1, 0, 4095, F_MAN },
+		1, 0, 4095, F_MANUAL },
 	{ "manual.over_shoot",       FT_U8,  OFS(ot_isp_sharpen_attr, manual_attr.over_shoot),
-		1, 0, 127, F_MAN },
+		1, 0, 127, F_MANUAL },
 	{ "manual.under_shoot",      FT_U8,  OFS(ot_isp_sharpen_attr, manual_attr.under_shoot),
-		1, 0, 127, F_MAN },
+		1, 0, 127, F_MANUAL },
 	{ "manual.shoot_sup_strength", FT_U8, OFS(ot_isp_sharpen_attr, manual_attr.shoot_sup_strength),
-		1, 0, 255, F_MAN },
+		1, 0, 255, F_MANUAL },
 	{ "manual.detail_ctrl",      FT_U8,  OFS(ot_isp_sharpen_attr, manual_attr.detail_ctrl),
-		1, 0, 255, F_MAN },
+		1, 0, 255, F_MANUAL },
 	{ "manual.edge_filt_strength", FT_U8, OFS(ot_isp_sharpen_attr, manual_attr.edge_filt_strength),
-		1, 0, 63, F_MAN },
+		1, 0, 63, F_MANUAL },
 	{ "manual.max_sharp_gain",   FT_U16, OFS(ot_isp_sharpen_attr, manual_attr.max_sharp_gain),
-		1, 0, 2047, F_MAN },
+		1, 0, 2047, F_MANUAL },
 	{ "manual.luma_wgt",         FT_U8,  OFS(ot_isp_sharpen_attr, manual_attr.luma_wgt),
-		OT_ISP_SHARPEN_LUMA_NUM, 0, 31, F_MAN },
+		OT_ISP_SHARPEN_LUMA_NUM, 0, 31, F_MANUAL },
 };
 
 /* Bayer NR.  Only the switches are exposed: the strength LUTs are the
  * sc450ai-derived tables PR #229 borrowed, and re-tuning those is a
  * calibration exercise, not a slider. */
 static const Cv610IqField f_nr[] = {
-	{ "enable",  FT_S32, OFS(ot_isp_nr_attr, enable),  1, 0, 1, F_RO },
-	{ "op_type", FT_S32, OFS(ot_isp_nr_attr, op_type), 1, 0, 1, F_RO },
+	{ "enable",  FT_S32, OFS(ot_isp_nr_attr, enable),  1, 0, 1, F_DIRECT },
+	{ "op_type", FT_S32, OFS(ot_isp_nr_attr, op_type), 1, 0, 1, F_DIRECT },
 };
 
 static const Cv610IqField f_drc[] = {
-	{ "enable",             FT_S32, OFS(ot_isp_drc_attr, enable),  1, 0, 1, F_RO },
-	{ "op_type",            FT_S32, OFS(ot_isp_drc_attr, op_type), 1, 0, 1, F_RO },
+	{ "enable",             FT_S32, OFS(ot_isp_drc_attr, enable),  1, 0, 1, F_DIRECT },
+	{ "op_type",            FT_S32, OFS(ot_isp_drc_attr, op_type), 1, 0, 1, F_DIRECT },
 	{ "manual.strength",    FT_U16, OFS(ot_isp_drc_attr, manual_attr.strength),
-		1, 0, 1023, F_MAN },
+		1, 0, 1023, F_MANUAL },
 	{ "auto.strength",      FT_U16, OFS(ot_isp_drc_attr, auto_attr.strength),
-		1, 0, 1023, F_RO },
+		1, 0, 1023, F_DIRECT },
 	{ "auto.strength_max",  FT_U16, OFS(ot_isp_drc_attr, auto_attr.strength_max),
-		1, 0, 1023, F_RO },
+		1, 0, 1023, F_DIRECT },
 	{ "auto.strength_min",  FT_U16, OFS(ot_isp_drc_attr, auto_attr.strength_min),
-		1, 0, 1023, F_RO },
+		1, 0, 1023, F_DIRECT },
 	{ "contrast_ctrl",      FT_U8,  OFS(ot_isp_drc_attr, contrast_ctrl),
-		1, 0, 15, F_RO },
+		1, 0, 15, F_DIRECT },
 	{ "detail_adjust_coef", FT_U8,  OFS(ot_isp_drc_attr, detail_adjust_coef),
-		1, 0, 15, F_RO },
+		1, 0, 15, F_DIRECT },
 	{ "bright_gain_limit",  FT_U8,  OFS(ot_isp_drc_attr, bright_gain_limit),
-		1, 0, 15, F_RO },
+		1, 0, 15, F_DIRECT },
 	{ "dark_gain_limit_luma", FT_U8, OFS(ot_isp_drc_attr, dark_gain_limit_luma),
-		1, 0, 133, F_RO },
+		1, 0, 133, F_DIRECT },
 };
 
 static const Cv610IqField f_ldci[] = {
-	{ "enable",           FT_S32, OFS(ot_isp_ldci_attr, enable),  1, 0, 1, F_RO },
-	{ "op_type",          FT_S32, OFS(ot_isp_ldci_attr, op_type), 1, 0, 1, F_RO },
+	{ "enable",           FT_S32, OFS(ot_isp_ldci_attr, enable),  1, 0, 1, F_DIRECT },
+	{ "op_type",          FT_S32, OFS(ot_isp_ldci_attr, op_type), 1, 0, 1, F_DIRECT },
 	{ "gauss_lpf_sigma",  FT_U8,  OFS(ot_isp_ldci_attr, gauss_lpf_sigma),
-		1, 1, 255, F_RO },
+		1, 1, 255, F_DIRECT },
 	{ "manual.blc_ctrl",  FT_U16, OFS(ot_isp_ldci_attr, manual_attr.blc_ctrl),
-		1, 0, 511, F_MAN },
+		1, 0, 511, F_MANUAL },
 	{ "tpr_incr_coef",    FT_U16, OFS(ot_isp_ldci_attr, tpr_incr_coef),
-		1, 0, 256, F_RO },
+		1, 0, 256, F_DIRECT },
 	{ "tpr_decr_coef",    FT_U16, OFS(ot_isp_ldci_attr, tpr_decr_coef),
-		1, 0, 256, F_RO },
+		1, 0, 256, F_DIRECT },
 };
 
 static const Cv610IqField f_dehaze[] = {
-	{ "enable",          FT_S32, OFS(ot_isp_dehaze_attr, enable),  1, 0, 1, F_RO },
-	{ "op_type",         FT_S32, OFS(ot_isp_dehaze_attr, op_type), 1, 0, 1, F_RO },
+	{ "enable",          FT_S32, OFS(ot_isp_dehaze_attr, enable),  1, 0, 1, F_DIRECT },
+	{ "op_type",         FT_S32, OFS(ot_isp_dehaze_attr, op_type), 1, 0, 1, F_DIRECT },
 	{ "manual.strength", FT_U8,  OFS(ot_isp_dehaze_attr, manual_attr.strength),
-		1, 0, 255, F_MAN },
+		1, 0, 255, F_MANUAL },
 	{ "auto.strength",   FT_U8,  OFS(ot_isp_dehaze_attr, auto_attr.strength),
-		1, 0, 255, F_RO },
+		1, 0, 255, F_DIRECT },
 };
 
 static const Cv610IqField f_ca[] = {
-	{ "enable", FT_S32, OFS(ot_isp_ca_attr, enable), 1, 0, 1, F_RO },
+	{ "enable", FT_S32, OFS(ot_isp_ca_attr, enable), 1, 0, 1, F_DIRECT },
 };
 
 #undef OFS
 
-#define GROUP(n, t, ops) \
-	{ #n, iq_get_##n, iq_set_##n, sizeof(t), ops, f_##n, \
+#define GROUP(n, ops) \
+	{ #n, iq_get_##n, iq_set_##n, ops, f_##n, \
 	  (uint16_t)(sizeof(f_##n) / sizeof(f_##n[0])) }
 
 static const Cv610IqGroup g_groups[] = {
-	GROUP(saturation, ot_isp_saturation_attr,
+	GROUP(saturation,
 		(int32_t)offsetof(ot_isp_saturation_attr, op_type)),
-	GROUP(color_tone, ot_isp_color_tone_attr, -1),
-	GROUP(csc,        ot_isp_csc_attr,        -1),
-	GROUP(ccm,        ot_isp_color_matrix_attr,
+	GROUP(color_tone, -1),
+	GROUP(csc, -1),
+	GROUP(ccm,
 		(int32_t)offsetof(ot_isp_color_matrix_attr, op_type)),
-	GROUP(wb,         ot_isp_wb_attr,
+	GROUP(wb,
 		(int32_t)offsetof(ot_isp_wb_attr, op_type)),
-	GROUP(sharpen,    ot_isp_sharpen_attr,
+	GROUP(sharpen,
 		(int32_t)offsetof(ot_isp_sharpen_attr, op_type)),
-	GROUP(nr,         ot_isp_nr_attr,
+	GROUP(nr,
 		(int32_t)offsetof(ot_isp_nr_attr, op_type)),
-	GROUP(drc,        ot_isp_drc_attr,
+	GROUP(drc,
 		(int32_t)offsetof(ot_isp_drc_attr, op_type)),
-	GROUP(ldci,       ot_isp_ldci_attr,
+	GROUP(ldci,
 		(int32_t)offsetof(ot_isp_ldci_attr, op_type)),
-	GROUP(dehaze,     ot_isp_dehaze_attr,
+	GROUP(dehaze,
 		(int32_t)offsetof(ot_isp_dehaze_attr, op_type)),
-	GROUP(ca,         ot_isp_ca_attr,         -1),
+	GROUP(ca, -1),
 };
 
 #undef GROUP
@@ -320,10 +319,8 @@ static Cv610IqAttr     g_attr;
 static size_t field_elem_size(Cv610IqType t)
 {
 	switch (t) {
-	case FT_U8:
-	case FT_S8:  return 1;
-	case FT_U16:
-	case FT_S16: return 2;
+	case FT_U8:  return 1;
+	case FT_U16: return 2;
 	case FT_S32: return 4;
 	}
 	return 4;
@@ -336,9 +333,7 @@ static int32_t field_read(const void *attr, const Cv610IqField *f, uint16_t idx)
 
 	switch (f->type) {
 	case FT_U8:  return (int32_t)*p;
-	case FT_S8:  return (int32_t)*(const int8_t *)p;
 	case FT_U16: { uint16_t v; memcpy(&v, p, sizeof(v)); return (int32_t)v; }
-	case FT_S16: { int16_t  v; memcpy(&v, p, sizeof(v)); return (int32_t)v; }
 	case FT_S32: { int32_t  v; memcpy(&v, p, sizeof(v)); return v; }
 	}
 	return 0;
@@ -355,9 +350,7 @@ static void field_write(void *attr, const Cv610IqField *f, uint16_t idx, int32_t
 
 	switch (f->type) {
 	case FT_U8:  *p = (uint8_t)val; return;
-	case FT_S8:  *(int8_t *)p = (int8_t)val; return;
 	case FT_U16: { uint16_t v = (uint16_t)val; memcpy(p, &v, sizeof(v)); return; }
-	case FT_S16: { int16_t  v = (int16_t)val;  memcpy(p, &v, sizeof(v)); return; }
 	case FT_S32: { int32_t  v = val;           memcpy(p, &v, sizeof(v)); return; }
 	}
 }
@@ -488,7 +481,20 @@ char *cv610_iq_query(void)
 
 	JSON_PUT(buf, pos, sizeof(buf), ",");
 	pos = emit_module_ctrl(buf, sizeof(buf), pos);
+	/* /api/v1/iq/import has no cv610 implementation, so the WebUI must not
+	 * offer the control.  Say so rather than let the page infer it. */
+	JSON_PUT(buf, pos, sizeof(buf), ",\"_caps\":{\"import\":false}");
 	JSON_PUT(buf, pos, sizeof(buf), "}}");
+
+	/* JSON_PUT clamps at the buffer end, so an overflow would serve
+	 * syntactically broken JSON and the page would fail to parse it with no
+	 * clue why.  Fail the request instead; the caller answers 500. */
+	if (pos >= (int)sizeof(buf) - 1) {
+		fprintf(stderr, "[cv610-iq] query truncated at %d bytes; "
+			"grow buf[] past %zu\n", pos, sizeof(buf));
+		pthread_mutex_unlock(&g_iq_mutex);
+		return NULL;
+	}
 
 	result = strdup(buf);
 	pthread_mutex_unlock(&g_iq_mutex);
@@ -603,10 +609,10 @@ int cv610_iq_set(const char *param, const char *value)
 		field_write(&g_attr, field, 0, v);
 	} else {
 		const char *p = value;
+		const char *end = value;
 		uint16_t n = 0;
 		while (n < field->count) {
 			int32_t v;
-			const char *end;
 			if (parse_i32(p, &end, &v) != 0)
 				break;
 			field_write(&g_attr, field, n, v);
@@ -615,11 +621,13 @@ int cv610_iq_set(const char *param, const char *value)
 				break;
 			p = end + 1;
 		}
-		/* A short list would leave the tail at whatever the ISP held,
-		 * which reads as a partly-applied curve.  Require all of it. */
-		if (n != field->count) {
-			fprintf(stderr, "[cv610-iq] %s: expected %u values, got %u\n",
-				param, (unsigned)field->count, (unsigned)n);
+		/* Require exactly the declared count, in both directions.  A short
+		 * list leaves the tail at whatever the ISP held; a long one drops
+		 * its excess.  Either way the curve applied is not the curve asked
+		 * for, and a partly-applied curve reads as a successful set. */
+		if (n != field->count || *end != '\0') {
+			fprintf(stderr, "[cv610-iq] %s: expected exactly %u values\n",
+				param, (unsigned)field->count);
 			goto out;
 		}
 	}
