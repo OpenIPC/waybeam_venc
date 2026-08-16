@@ -28,6 +28,7 @@ enc-ctrl/tests/test_runner
 
 # Source-built CV610 sensor-plugin artifacts
 sensors/cv610/imx662/*.o
+sensors/cv610/imx662/*.d
 sensors/cv610/imx662/*.so
 
 # Performance benchmark artifacts — local-only, not shipped upstream
