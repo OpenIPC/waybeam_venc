@@ -11,6 +11,10 @@ typedef struct {
 	 * the capture size unless video0.size asks for something smaller. */
 	uint32_t out_width;
 	uint32_t out_height;
+	/* isp.keepAspect: centre-crop the capture to the encoded aspect ratio
+	 * before scaling, so a 4:3 video0.size out of a 16:9 sensor is framed
+	 * rather than squashed.  Same rule Star6E and Maruko apply. */
+	int keep_aspect;
 	uint32_t fps;
 	int lanes;
 	int data_rate_x2;

@@ -4,6 +4,8 @@
  * the public lifecycle is the small cv610_pipeline_* interface below.
  */
 #include "cv610_pipeline.h"
+
+#include "pipeline_common.h"
 /* Minimal Hi3516CV610 + IMX662 MIPI/VI/ISP graph. The target's MPP module
  * loader and sensor-clock prerequisites are documented in
  * docs/CV610_BACKEND.md. VENC and output ownership stay in cv610_runtime.c. */
@@ -89,6 +91,7 @@ typedef struct {
 	uint32_t     sensor_clock_hz; /* MCLK this mode's line timing assumes */
 	unsigned int out_width;    /* VPSS output = encoded size */
 	unsigned int out_height;
+	int          keep_aspect;  /* isp.keepAspect: crop before scaling */
 	int          vi_online;    /* VI -> ISP online/realtime mode */
 } Cv610PipelineRuntimeConfig;
 
@@ -528,6 +531,36 @@ static int vpss_setup(const Cv610PipelineRuntimeConfig *c)
 	grp_attr.frame_rate.dst_frame_rate = -1;
 	CV610_CHECK(ss_mpi_vpss_create_grp(VPSS_GRP, &grp_attr));
 
+	/* Aspect: the channel below scales whatever the group hands it, so
+	 * without this a 4:3 video0.size out of a 16:9 capture is squashed
+	 * rather than framed.  Crop the group's input to the encoded aspect
+	 * first — the same centre-crop rule Star6E and Maruko apply through
+	 * pipeline_common_compute_precrop(), from the same shared function so
+	 * the three backends cannot drift.  A matching aspect (or
+	 * keepAspect=false) yields the full frame, and the crop is then left
+	 * disabled rather than set to a no-op rectangle. */
+	{
+		PipelinePrecropRect precrop = pipeline_common_compute_precrop(
+			c->width, c->height, c->out_width, c->out_height,
+			c->keep_aspect ? true : false);
+		ot_vpss_crop_info crop;
+
+		if (precrop.w != c->width || precrop.h != c->height) {
+			memset(&crop, 0, sizeof(crop));
+			crop.enable = TD_TRUE;
+			crop.crop_mode = OT_COORD_ABS;
+			crop.crop_rect.x = precrop.x;
+			crop.crop_rect.y = precrop.y;
+			crop.crop_rect.width = precrop.w;
+			crop.crop_rect.height = precrop.h;
+			CV610_CHECK(ss_mpi_vpss_set_grp_crop(VPSS_GRP, &crop));
+			printf("  ok  aspect crop %ux%u+%u+%u of %ux%u -> %ux%u\n",
+				(unsigned)precrop.w, (unsigned)precrop.h,
+				(unsigned)precrop.x, (unsigned)precrop.y,
+				c->width, c->height, c->out_width, c->out_height);
+		}
+	}
+
 	memset(&chn_attr, 0, sizeof(chn_attr));
 	chn_attr.width         = c->out_width;
 	chn_attr.height        = c->out_height;
@@ -637,6 +670,7 @@ int cv610_pipeline_start(const Cv610PipelineConfig *config)
 	c.sensor_clock_hz = config->sensor_clock_hz;
 	c.out_width = config->out_width;
 	c.out_height = config->out_height;
+	c.keep_aspect = config->keep_aspect;
 	c.vi_online = config->vi_online;
 	g_stop = 0;
 

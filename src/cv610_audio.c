@@ -208,7 +208,13 @@ static int cv610_aenc_start(Cv610AudioState *state)
 	destination.chn_id = CV610_AENC_CHN;
 	AUDIO_CHECK(ss_mpi_sys_bind(&source, &destination));
 	state->bound = 1;
-	printf("> CV610 AENC Opus 32000 bit/s restricted-low-delay, 10.0 ms frames\n");
+	/* Derived, not spelled out: this line claimed "10.0 ms" for a release
+	 * after CV610_AUDIO_POINT_NUM went 480 -> 960, so the only banner a
+	 * reader could check the packet rate against was wrong. */
+	printf("> CV610 AENC Opus %u bit/s restricted-low-delay, %.1f ms frames\n",
+		CV610_AUDIO_BITRATE,
+		(double)CV610_AUDIO_POINT_NUM * 1000.0 /
+			(double)CV610_AUDIO_SAMPLE_RATE);
 	return 0;
 }
 

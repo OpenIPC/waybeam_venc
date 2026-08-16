@@ -37,6 +37,19 @@ render one set of sensor controls against all three backends. Contract
   disagreeing with `/api/v1/fps/config`. Neither measures anything — the
   sensor clock follows the mode automatically, but a client that needs the
   delivered rate must still measure it downstream.
+- **`isp.keepAspect` works on CV610 now; a 4:3 `video0.size` was silently
+  squashed.** The field sat in the config defaulting `true`, but CV610
+  advertised no `isp.*` field and read none — a knob that did nothing, which
+  is worse than one that is absent. `1440x1080` validated, then VPSS stretched
+  the whole 1920x1080 capture into it. The backend now takes a centred crop
+  first, through the same `pipeline_common_compute_precrop()` Star6E and
+  Maruko call, so the rule cannot drift between the three: `1440x1080` uses a
+  1440x1080 window at x=240 and scales 1:1. `isp.keepAspect=false` restores
+  stretch-to-fit. Verified both directions on the bench.
+- The CV610 Opus banner said `10.0 ms frames` for a whole release after
+  `CV610_AUDIO_POINT_NUM` went 480 → 960. Behaviour was right at 20 ms; only
+  the one line a reader could check the packet rate against was wrong. It is
+  now derived from the constants rather than spelled out.
 
 ## [0.65.2] - 2026-08-15
 

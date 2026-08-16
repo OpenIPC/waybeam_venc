@@ -1509,6 +1509,14 @@ The `width` / `height` of a CV610 entry is what the **sensor captures**, not
 what is encoded. Every entry captures 1920x1080, and `video0.size` is the
 encoded geometry VPSS scales that capture down to.
 
+**Aspect ratio is preserved by cropping, gated on `isp.keepAspect`** (default
+`true`), the same rule and the same shared code Star6E and Maruko use. A
+`video0.size` whose aspect differs from the capture takes a centred crop of
+the capture first, then scales: `1440x1080` out of `1920x1080` uses a
+1440x1080 window at x=240 and scales 1:1, so 4:3 is framed rather than
+squashed. A matching aspect crops nothing. Setting `isp.keepAspect=false`
+restores the plain stretch-to-fit.
+
 **Selecting a CV610 mode uses the same two knobs as SigmaStar.** An explicit
 `sensor.mode` is an index into this list and wins outright; the mode's rate
 becomes the pipeline rate and `video0.fps` is left as written. With
@@ -1735,6 +1743,14 @@ divergence is listed.  As of `contract_version: 0.12.1`:
     described the configured mode even when another one was running. They are
     now published by the backend at bring-up, and read `-1` before it
     completes. Shape unchanged.
+  - **`isp.keepAspect` is now supported on CV610** (`restart_required`), and
+    a non-native `video0.size` is centre-cropped before scaling instead of
+    stretched. The field was in the config file and defaulted `true`, but
+    CV610 advertised no `isp.*` field and read none, so it was a knob that
+    did nothing — `1440x1080` validated and then squashed 16:9 into 4:3.
+    CV610 now calls the same `pipeline_common_compute_precrop()` Star6E and
+    Maruko use. No shape changed and no request that used to succeed now
+    fails; the pixels are different.
   - `video0.gopSize` is validated against the **selected** mode's rate. The
     encoder has always derived its GOP length from that rate; the check used
     `video0.fps`, which the two knobs above can now separate from it. A

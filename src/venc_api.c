@@ -870,6 +870,7 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 		static const char *const supported[] = {
 			"system.web_port", "system.verbose",
 			"sensor.index", "sensor.mode",
+			"isp.keep_aspect",
 			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size", "video0.qp_delta",
 			"outgoing.enabled", "outgoing.server",

@@ -545,6 +545,7 @@ static int cv610_prepare(void *opaque)
 	ctx->pipeline.height = mode->height;
 	cv610_mode_resolve_output(mode, cfg->video0.width, cfg->video0.height,
 		&ctx->pipeline.out_width, &ctx->pipeline.out_height);
+	ctx->pipeline.keep_aspect = cfg->isp.keep_aspect ? 1 : 0;
 	ctx->pipeline.fps = mode->fps;
 	ctx->pipeline.lanes = 4;
 	ctx->pipeline.data_rate_x2 = 0;
