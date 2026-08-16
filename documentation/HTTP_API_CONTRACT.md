@@ -1751,6 +1751,15 @@ divergence is listed.  As of `contract_version: 0.12.1`:
     CV610 now calls the same `pipeline_common_compute_precrop()` Star6E and
     Maruko use. No shape changed and no request that used to succeed now
     fails; the pixels are different.
+  - **CV610 now runs the shared field validation at config load**, which it
+    had been skipping entirely: `venc_api_validate_loaded_config()` dispatched
+    to the CV610 backend validator *instead of* the shared
+    `validate_field_cfg()` sweep, so sixteen shared rules never ran on that
+    backend. The HTTP `/api/v1/set` path always applied them, so the same
+    value was accepted from `/etc/waybeam.json` at boot and rejected with
+    `409` over HTTP. A CV610 config carrying e.g. `isp.awbMode:"bogus"` used
+    to load and now fails with the same message Star6E gives. Configs that
+    were valid on Star6E are unaffected.
   - `video0.gopSize` is validated against the **selected** mode's rate. The
     encoder has always derived its GOP length from that rate; the check used
     `video0.fps`, which the two knobs above can now separate from it. A

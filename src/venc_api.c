@@ -1300,9 +1300,6 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 
 const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 {
-#if HAVE_BACKEND_CV610
-	return cv610_validate_config(cfg);
-#else
 	/* Keys with rules in validate_field_cfg().  Backend-coupled checks
 	 * (validate_backend_config) intentionally excluded — g_backend is
 	 * registered after config load, so they cannot run here. */
@@ -1334,6 +1331,20 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		if (err)
 			return err;
 	}
+#if HAVE_BACKEND_CV610
+	/* CV610's rules run AFTER the shared sweep, not instead of it.  This
+	 * branch used to return cv610_validate_config() directly, so CV610 was
+	 * the one backend that never ran validate_field_cfg() at all — it
+	 * re-implemented video0.size's >=128 and multiple-of-8 gates inside
+	 * cv610_mode_check_output() and silently skipped every other shared
+	 * rule.  Two copies of one HEVC constraint is a drift risk; missing the
+	 * rest is a parity hole, and it also meant the same bad value produced
+	 * different error text on CV610 than on Star6E.  CV610 keeps its own
+	 * copy of the size gates as a pipeline-boundary guard, because
+	 * cv610_prepare() calls cv610_mode_check_output() directly against a
+	 * config file edited behind the daemon's back. */
+	return cv610_validate_config(cfg);
+#else
 	return NULL;
 #endif
 }

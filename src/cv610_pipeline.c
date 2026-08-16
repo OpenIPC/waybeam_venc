@@ -536,29 +536,34 @@ static int vpss_setup(const Cv610PipelineRuntimeConfig *c)
 	 * rather than framed.  Crop the group's input to the encoded aspect
 	 * first — the same centre-crop rule Star6E and Maruko apply through
 	 * pipeline_common_compute_precrop(), from the same shared function so
-	 * the three backends cannot drift.  A matching aspect (or
-	 * keepAspect=false) yields the full frame, and the crop is then left
-	 * disabled rather than set to a no-op rectangle. */
+	 * the three backends cannot drift.
+	 *
+	 * Written UNCONDITIONALLY, including the disable.  MPP objects are
+	 * kernel state on this SoC and a group that outlives a teardown keeps
+	 * whatever crop it was last given, so "skip the call when no crop is
+	 * needed" would inherit a stale rectangle from the previous run's
+	 * geometry.  vpss_teardown() destroys the group precisely so that
+	 * cannot happen today — this keeps it true without depending on it. */
 	{
 		PipelinePrecropRect precrop = pipeline_common_compute_precrop(
 			c->width, c->height, c->out_width, c->out_height,
 			c->keep_aspect ? true : false);
+		int cropping = (precrop.w != c->width || precrop.h != c->height);
 		ot_vpss_crop_info crop;
 
-		if (precrop.w != c->width || precrop.h != c->height) {
-			memset(&crop, 0, sizeof(crop));
-			crop.enable = TD_TRUE;
-			crop.crop_mode = OT_COORD_ABS;
-			crop.crop_rect.x = precrop.x;
-			crop.crop_rect.y = precrop.y;
-			crop.crop_rect.width = precrop.w;
-			crop.crop_rect.height = precrop.h;
-			CV610_CHECK(ss_mpi_vpss_set_grp_crop(VPSS_GRP, &crop));
+		memset(&crop, 0, sizeof(crop));
+		crop.enable = cropping ? TD_TRUE : TD_FALSE;
+		crop.crop_mode = OT_COORD_ABS;
+		crop.crop_rect.x = precrop.x;
+		crop.crop_rect.y = precrop.y;
+		crop.crop_rect.width = precrop.w;
+		crop.crop_rect.height = precrop.h;
+		CV610_CHECK(ss_mpi_vpss_set_grp_crop(VPSS_GRP, &crop));
+		if (cropping)
 			printf("  ok  aspect crop %ux%u+%u+%u of %ux%u -> %ux%u\n",
 				(unsigned)precrop.w, (unsigned)precrop.h,
 				(unsigned)precrop.x, (unsigned)precrop.y,
 				c->width, c->height, c->out_width, c->out_height);
-		}
 	}
 
 	memset(&chn_attr, 0, sizeof(chn_attr));

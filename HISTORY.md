@@ -46,6 +46,15 @@ render one set of sensor controls against all three backends. Contract
   Maruko call, so the rule cannot drift between the three: `1440x1080` uses a
   1440x1080 window at x=240 and scales 1:1. `isp.keepAspect=false` restores
   stretch-to-fit. Verified both directions on the bench.
+- **CV610 was skipping the shared config validation entirely.**
+  `venc_api_validate_loaded_config()` dispatched to the CV610 backend
+  validator *instead of* the shared `validate_field_cfg()` sweep, so sixteen
+  shared rules never ran there — and CV610 re-implemented two of them
+  (`video0.size`'s >=128 and multiple-of-8 gates) inside
+  `cv610_mode_check_output()`, which is the drift risk that made the gap
+  visible. The `/api/v1/set` path always ran the shared rules, so the same
+  value was accepted from the config file at boot and rejected with `409`
+  over HTTP. The sweep now runs first and the backend rules after.
 - The CV610 Opus banner said `10.0 ms frames` for a whole release after
   `CV610_AUDIO_POINT_NUM` went 480 → 960. Behaviour was right at 20 ms; only
   the one line a reader could check the packet rate against was wrong. It is
