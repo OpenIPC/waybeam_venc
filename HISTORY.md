@@ -1,5 +1,41 @@
 # History
 
+## [0.65.8] - 2026-08-17
+
+CV610 venc restarts no longer reload the MPP kernel modules — the same model
+star6e and maruko have always used, where the init script never touches
+`insmod`/`rmmod` at all.
+
+- **The reload was bring-up scaffolding.** Both cv610 init scripts have been
+  unchanged since the initial backend commit. `mpp_cleanup()` is already a
+  complete teardown and, critically, calls `ss_mpi_vb_exit()` *from the process
+  that created VB* — the only process permitted to. So after a graceful stop
+  there is nothing for a module reload to clean up, and the next start can
+  re-init the graph against the modules already loaded.
+
+- **What the reload was actually protecting.** A venc that dies without running
+  `mpp_cleanup()` leaves VB held by a dead owner; `vb_set_cfg` then returns
+  BUSY. That was tolerated blindly, which is only harmless while the modules
+  are reloaded every time. Without the reload it would mean running on the
+  previous mode's pool sizes.
+
+  `sys_setup()` now reads the live config back with `ss_mpi_vb_get_cfg()` and
+  compares the pools it was about to request. Identical layout is adopted and
+  says so; a different layout is a hard failure naming the way out
+  (`load-cv610-online restart`) instead of silently handing out wrong-sized
+  blocks that surface later as corruption.
+
+- `load-cv610-online start` is idempotent when the full set is up (`open_user`
+  is the last module loaded, so its presence means a completed sequence); a
+  *partial* set is still refused as dirty. `S95waybeam stop` leaves the modules
+  loaded, and a new `S95waybeam reload` is the recovery path after a crash —
+  it unloads, so the holder guard applies and the hub must be stopped first.
+
+- Device verification: `scripts/cv610_reload_free_verify.sh`, which restarts
+  across a **mode change** rather than only in place — a same-mode restart
+  passes even when a stale VB layout was inherited, so it cannot distinguish
+  the fix from the bug.
+
 ## [0.65.7] - 2026-08-17
 
 CV610 SoC wedge on `stop`. On the `.181` bench, `S95waybeam stop` while

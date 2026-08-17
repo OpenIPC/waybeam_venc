@@ -90,6 +90,19 @@ start_modules()
 		echo "refusing vendor open_pm" >&2
 		return 1
 	}
+	# open_user is the last module the sequence loads, so its presence means a
+	# previous run completed. Loading is idempotent from here: a venc restart
+	# re-inits the graph against the modules already up, the way star6e and
+	# maruko have always worked. Only a *partial* set is dirty.
+	if is_loaded open_user && is_loaded open_base; then
+		if [ "$AUDIO" = "1" ] && ! is_loaded open_acodec; then
+			echo "modules are up but were loaded without audio;" >&2
+			echo "run '$0 restart' to reload with the audio set" >&2
+			return 1
+		fi
+		echo "MPP modules already loaded"
+		return 0
+	fi
 	is_loaded open_base && {
 		echo "refusing dirty MPP module state" >&2
 		return 1
