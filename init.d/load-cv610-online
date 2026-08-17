@@ -96,8 +96,11 @@ start_modules()
 	# maruko have always worked. Only a *partial* set is dirty.
 	if is_loaded open_user && is_loaded open_base; then
 		if [ "$AUDIO" = "1" ] && ! is_loaded open_acodec; then
+			# Point at the init script, not at "$0 restart": run bare, this
+			# loader reloads with its own defaults (video-only, imx662 clock)
+			# and lands right back here.
 			echo "modules are up but were loaded without audio;" >&2
-			echo "run '$0 restart' to reload with the audio set" >&2
+			echo "run '/etc/init.d/S95waybeam reload' to reload the right set" >&2
 			return 1
 		fi
 		echo "MPP modules already loaded"
