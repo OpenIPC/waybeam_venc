@@ -1,5 +1,54 @@
 # History
 
+## [0.65.10] - 2026-08-17
+
+Removes both CV610 paths that unloaded MPP modules on a running craft: the
+`S95waybeam reload` action, and `start()`'s module rollback on a failed daemon
+start. `reload` was dead code built on a premise the hardware disproved in the
+release that added it; the rollback was reachable on the post-crash start this
+release prescribes as the recovery.
+
+- **Nothing in production called it** — the hub uses `restart`
+  (`mod_venc.c:687`), venc never did, and the crash test does not. Only the
+  suite's own T5 exercised it, to test the action itself.
+
+- **Its premise was already falsified.** Its comment claimed VB is left held by a
+  dead owner after a crash and reload is "the way out". 0.65.8's own notes say
+  the opposite — *"ISP, not VB, is what a crash leaves behind… VB is released"* —
+  and the suite prints `VB was released when the process died` on every run. What
+  a crash actually leaves (ISP, and since 0.65.9 the AI device claim) venc
+  pre-cleans itself, so a hard-killed venc recovers from a plain `start`, video
+  and audio both.
+
+- **Unloading is not free.** A hard kill poisons module reloading for the rest of
+  the boot (`no sys ko!` → `load vpp.ko ...FAILURE!`), so a reload issued
+  afterwards leaves the craft with no modules at all — and on a video-only craft
+  it resets the SoC outright (measured). The underlying defect is in the vendor
+  modules and is unchanged.
+
+  `reload` was not the only unload on that path, which an adversarial review
+  caught before this merged: `start()` rolled back with `"$LOADER" stop` on a
+  failed daemon start, and since 0.65.8 made the loader's start idempotent
+  ("MPP modules already loaded" → success) that rollback tore down a set the
+  invocation had not created — on exactly the post-crash start this release
+  prescribes as the recovery. That rollback is removed too. Leaving the modules
+  up after a failed start costs nothing, because the next start re-inits against
+  them.
+
+- The loader's audio-mismatch hint pointed at `S95waybeam reload`; it now says
+  reboot, which is what actually applies a `CV610_AUDIO` or sensor-profile
+  change. `load-cv610-online restart` remains for a dirty or partial module set,
+  but run **bare** it reloads with the loader's defaults (video-only, imx662
+  clock) rather than the craft's profile — a caveat that used to live inside
+  `reload()` and is now recorded where it survives it. `load-cv610-online stop`
+  followed by `S95waybeam start` is the safer form; that passes the profile.
+
+- The suite loses T5 (it tested `reload`) and, with it, the contaminated-boot
+  precondition T5 needed. The suite no longer *performs* an unload: T1 still
+  attempts one, but only to assert the loader refuses it while the hub holds
+  `/dev/rgn`. It also no longer stops the hub anywhere, so T6 now always runs
+  with a holder present.
+
 ## [0.65.9] - 2026-08-17
 
 CV610 audio now survives an abnormal venc exit. Investigating the "aenc MMB

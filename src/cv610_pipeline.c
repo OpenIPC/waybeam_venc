@@ -325,9 +325,12 @@ static int sys_setup(const Cv610PipelineRuntimeConfig *c)
 		memset(&live, 0, sizeof(live));
 		if (ss_mpi_vb_get_cfg(&live) != TD_SUCCESS ||
 			!vb_cfg_equal(&live, &vb)) {
+			/* Points at a reboot, not a module reload. This fires only after
+			 * a predecessor died abnormally, which is exactly the boot state
+			 * where an unload cannot be undone: the modules will not load
+			 * back, and on a video-only craft the attempt resets the SoC. */
 			fprintf(stderr, "FAIL VB is held by a dead owner and its layout "
-					"differs from this mode; reload the MPP stack with "
-					"'load-cv610-online restart'\n");
+					"differs from this mode; reboot to clear it\n");
 			return -1;
 		}
 		printf("  ok  ss_mpi_vb_set_cfg  (adopted identical live config)\n");

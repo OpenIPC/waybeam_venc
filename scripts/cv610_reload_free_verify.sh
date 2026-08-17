@@ -21,8 +21,10 @@
 #   T1 attempts the unload the guard is supposed to refuse. If the guard has
 #      regressed, the unload proceeds under the hub and wedges the board --
 #      that is exactly the bug, observed as no network and ARP incomplete.
-#   T6 hard-kills venc so MPP state is left dirty on purpose. It also poisons
-#      module reloading for the rest of the boot, so it runs last.
+#   T6 hard-kills venc so MPP state is left dirty on purpose. The kill itself
+#      is survivable -- venc self-heals -- but it poisons module reloading for
+#      the rest of the boot, and an unload issued after this point leaves the
+#      craft with no modules (and resets a video-only SoC). So it runs last.
 # Everything else is a normal restart.
 #
 # Usage: cv610_reload_free_verify.sh [--keep-going]
@@ -151,12 +153,6 @@ base_mods=$(mods)
 base_rgn=$(rgn_jobs)
 audio_cfg=0
 audio_enabled && audio_cfg=1
-# A hard kill anywhere earlier in this boot -- T6 of a previous run, or hand
-# debugging -- poisons module reloading until reboot ("no sys ko!" then "load
-# vpp.ko ...FAILURE!"). T5 unloads, so on such a boot it fails for a reason that
-# has nothing to do with the code under test. Two MMB LEAK lines per hard kill is
-# the marker; count them BEFORE this run adds its own in T6.
-boot_kills=$(dmesg 2>/dev/null | grep -c "MMB LEAK")
 echo "  venc=$(venc_pid) hub=$(hub_pid) modules=$base_mods osd_jobs=${base_rgn:-none} audio=$audio_cfg"
 [ -n "$(hub_pid)" ] || { echo "hub is not running -- T1/T2/T3 need it up"; exit 1; }
 
@@ -250,35 +246,20 @@ sleep 8
 chk "restored mode: venc up" test -n "$(venc_pid)"
 chk "restored mode: streaming" flowing
 
-# ------------------------------------------------------- T5: reload recovery
-echo
-echo "=== T5: reload recovery path (hub stopped first, as the guard requires) ==="
+# T5 tested the init script's "reload" action, which no longer exists: it was
+# built for a VB-held-by-a-dead-owner case the hardware disproved, nothing called
+# it, and it was the only shipped path that unloaded modules on a running craft.
+# With it gone, nothing in this suite unloads, so the contaminated-boot check it
+# needed is gone too -- a hard kill can no longer poison anything this suite does.
 cp "$BACKUP" "$CFG"
-if [ "$boot_kills" -gt 0 ]; then
-	# Refuse rather than fail: on this boot the reload cannot succeed for
-	# reasons predating the run, and reporting FAIL would point at the code.
-	info "a hard kill already happened this boot ($boot_kills MMB LEAK lines):"
-	info "  module reloading is poisoned until reboot, so T5 is SKIPPED and the"
-	info "  reload path is UNVERIFIED. Reboot and re-run to cover it."
-else
-	$HUB stop >/dev/null 2>&1
-	sleep 2
-	$INIT reload >/dev/null 2>&1
-	sleep 10
-	chk "reload restored venc" test -n "$(venc_pid)"
-	chk "frames flowing after reload" flowing
-	$HUB start >/dev/null 2>&1
-	sleep 5
-	chk "hub restarted" test -n "$(hub_pid)"
-fi
 
 # --------------------------------------------------------- T6: the crash path
-# LAST on purpose. Measured on .181: a SIGKILL leaks two aenc MMB blocks
-# ('aenc(0)_strm', 'aenc(0)_cir', 16 KB each) and after that the next module
+# LAST on purpose. Measured on .181: after a SIGKILL the next module
 # unload/reload fails at sys.ko init -- 'no sys ko!' then 'load vpp.ko
-# ...FAILURE!' -- for the rest of the boot. So this must not run before T5,
-# or it poisons the reload it would be testing. Graceful restarts leak
-# nothing; only the hard kill does.
+# ...FAILURE!' -- for the rest of the boot, and on a video-only craft it resets
+# the SoC outright. Nothing in this suite unloads any more, so that no longer
+# breaks a later step; it still runs last so it cannot poison a hand-run
+# 'load-cv610-online restart' someone does afterwards.
 # Expected result is NOT known in advance: if the driver's .release frees VB
 # when the process dies, a hard kill self-heals and set_cfg simply succeeds.
 # Report what happens rather than asserting.
@@ -292,7 +273,7 @@ set_size 640x360 || info "config edit failed; T6 degraded to a same-mode start"
 $INIT start >/dev/null 2>&1
 sleep 8
 if grep -q "held by a dead owner" "$LOG"; then
-	info "VB survived the kill and the mismatch was REFUSED (reload needed)"
+	info "VB survived the kill and the mismatch was REFUSED (reboot needed)"
 elif grep -q "adopted identical live config" "$LOG"; then
 	bad "stale VB adopted across a mode change after a crash -- silent wrong pools"
 elif grep -q "ok  ss_mpi_vb_set_cfg" "$LOG"; then
@@ -325,13 +306,13 @@ leaks=$(dmesg | grep -c "MMB LEAK")
 info "MMB LEAK lines this boot: $leaks (2 per hard kill; they are the kernel"
 info "  RECLAIMING those blocks, not losing them -- measured: the pool returns"
 info "  to its exact baseline across repeated kills)"
-echo "  NOTE  module reload is now poisoned until reboot -- 'reload' is NOT the"
+echo "  NOTE  module reloading is poisoned until reboot -- unloading is NOT the"
 echo "        recovery after a hard kill; reboot is. venc itself self-heals above."
 
 echo
-# T6 leaves video0.size at the test value, and only T5 restored it. Put the
-# craft back on its configured mode and restart into it, so the bench is not
-# silently left encoding 640x360 under a message claiming it was restored.
+# T6 leaves video0.size at the test value. Put the craft back on its configured
+# mode and restart into it, so the bench is not silently left encoding 640x360
+# under a message claiming it was restored.
 cp "$BACKUP" "$CFG"
 $INIT restart >/dev/null 2>&1
 sleep 8
