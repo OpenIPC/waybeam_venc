@@ -31,10 +31,41 @@ star6e and maruko have always used, where the init script never touches
   loaded, and a new `S95waybeam reload` is the recovery path after a crash —
   it unloads, so the holder guard applies and the hub must be stopped first.
 
-- Device verification: `scripts/cv610_reload_free_verify.sh`, which restarts
-  across a **mode change** rather than only in place — a same-mode restart
-  passes even when a stale VB layout was inherited, so it cannot distinguish
-  the fix from the bug.
+- **ISP, not VB, is what a crash leaves behind.** Measured on `.181`: after
+  `kill -9`, VB *is* released (set_cfg succeeds) but ISP[0] stays inited and the
+  next run dies at `ss_mpi_isp_mem_init` with `0xa01c800c` "already inited".
+  `sys_setup()` now pre-cleans with `ss_mpi_isp_exit(VI_PIPE)` alongside the
+  existing `sys_exit`/`vb_exit`, before anything of ours is registered, so a
+  hard kill recovers without a module reload.
+
+- `S95waybeam reload` passes `CV610_SENSOR_PROFILE`/`CV610_AUDIO` through to the
+  loader. A bare `$LOADER restart` reloads with the loader's own defaults —
+  video-only, imx662 clock — and `start()` then correctly refuses the audio
+  mismatch, leaving the craft with no daemon at all.
+
+- Device verification on `.181`, `scripts/cv610_reload_free_verify.sh`:
+  **20 passed, 0 failed**. T3 restarts across a real mode change and asserts the
+  *encoded geometry* moved (1920x1080 → 640x360) from venc's own VPSS line,
+  because asserting the config key instead let an earlier revision report a mode
+  change that never happened.
+
+Two things the hardware showed that are **not** fixed here:
+
+- **A SIGKILL leaks two `aenc` MMB blocks** (`aenc(0)_strm`, `aenc(0)_cir`,
+  16 KB each) and after that the next module unload/reload fails at sys.ko init
+  — `no sys ko!` then `load vpp.ko ...FAILURE!` — for the rest of the boot, so
+  even a fresh load from zero modules fails. Graceful stops leak nothing. This
+  makes `reload` the wrong recovery after a hard kill; reboot is. It is also an
+  independent argument for this change: the fewer module reload cycles, the
+  better, and it plausibly underlies the old "reboot instead" folklore.
+
+- **The hub's RGN OSD does not survive a venc restart.** With `open_rgn` no
+  longer unloaded the hub keeps its `/dev/rgn` handle, but the region was bound
+  to a VENC channel venc destroys and recreates: `osd_render` goes from
+  `40 rgn … drops 0` to `0 rgn … drops 42` — still painting, every push
+  dropped. A hub restart restores it (`drops 0`). Reattach belongs in
+  waybeam-hub; until it lands, restarting venc on a craft means restarting the
+  hub after it.
 
 ## [0.65.7] - 2026-08-17
 

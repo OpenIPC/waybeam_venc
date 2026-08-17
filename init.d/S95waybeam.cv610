@@ -91,7 +91,11 @@ stop()
 reload()
 {
 	stop || return 1
-	"$LOADER" restart || return 1
+	# Pass the same profile start() does. A bare "$LOADER" restart reloads with
+	# the loader's own defaults -- video-only, imx662 clock -- and then start()
+	# refuses the audio mismatch, so the craft comes back with no daemon at all.
+	CV610_SENSOR_PROFILE="$CV610_SENSOR_PROFILE" \
+		CV610_AUDIO="$CV610_AUDIO" "$LOADER" restart || return 1
 	start
 }
 

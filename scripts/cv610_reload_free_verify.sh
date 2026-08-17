@@ -7,9 +7,9 @@
 # The interesting case is a restart across a MODE CHANGE. A same-mode restart
 # passes even when the VB config was silently inherited, because the inherited
 # layout happens to be the right one -- so a suite that only restarts in place
-# proves nothing about the thing being changed. T3 changes video0.width/height,
-# which moves out_blk and the pool count (sys_setup() adds a third pool only
-# when out_blk < yuv_blk), and then checks which path sys_setup() actually took.
+# proves nothing about the thing being changed. T3 changes video0.size and then
+# asserts the ENCODED SIZE moved in venc's own VPSS line, which is what moves
+# out_blk, before checking which path sys_setup() took.
 #
 # Instruments are the markers sys_setup() prints:
 #   "ok  ss_mpi_vb_set_cfg"                          -> fresh config applied
@@ -21,7 +21,8 @@
 #   T1 attempts the unload the guard is supposed to refuse. If the guard has
 #      regressed, the unload proceeds under the hub and wedges the board --
 #      that is exactly the bug, observed as no network and ARP incomplete.
-#   T5 hard-kills venc so MPP state is left dirty on purpose.
+#   T6 hard-kills venc so MPP state is left dirty on purpose. It also poisons
+#      module reloading for the rest of the boot, so it runs last.
 # Everything else is a normal restart.
 #
 # Usage: cv610_reload_free_verify.sh [--keep-going]
@@ -54,14 +55,21 @@ flowing() {
 	[ -n "$a" ] && [ -n "$b" ] && [ "$b" -gt "$a" ] 2>/dev/null
 }
 
-set_out_size() {
-	if command -v json_cli >/dev/null 2>&1; then
-		json_cli "$CFG" set video0.width "$1" >/dev/null 2>&1 || return 1
-		json_cli "$CFG" set video0.height "$2" >/dev/null 2>&1 || return 1
-	else
-		sed -i "s/\"width\"[[:space:]]*:[[:space:]]*[0-9]\+/\"width\": $1/;
-		        s/\"height\"[[:space:]]*:[[:space:]]*[0-9]\+/\"height\": $2/" "$CFG" || return 1
-	fi
+# The encoded size venc actually chose, straight from its own bring-up line:
+#   "ok  VPSS 1920x1080 -> 1280x720 (scaled)"
+# This, not the config, is what decides out_blk and the pool count.
+out_size() {
+	sed -n 's/.*VPSS [0-9]*x[0-9]* -> \([0-9]*x[0-9]*\).*/\1/p' "$LOG" | tail -1
+}
+
+# video0.size is a STRING ("1920x1080"), and video0.width/height do not exist --
+# setting those creates keys nothing reads, which is how the first version of
+# this suite reported a mode change that never happened. Assert the geometry,
+# not the key.
+set_size() {
+	command -v json_cli >/dev/null 2>&1 || return 1
+	json_cli -s .video0.size "\"$1\"" -i "$CFG" >/dev/null 2>&1 || return 1
+	[ "$(json_cli -g .video0.size --raw -i "$CFG" 2>/dev/null)" = "$1" ] || return 1
 	return 0
 }
 
@@ -101,25 +109,37 @@ chk "sys_setup ran vb_set_cfg" grep -q "ss_mpi_vb_set_cfg" "$LOG"
 
 # ------------------------------------------- T3: restart ACROSS a mode change
 echo
-echo "=== T3: restart across a mode change (1080p -> 720p), hub up ==="
-if set_out_size 1280 720; then
+echo "=== T3: restart across a mode change, hub up ==="
+base_out=$(out_size)
+echo "  baseline encoded size: ${base_out:-unknown}"
+if [ -z "$base_out" ]; then
+	info "no VPSS size line in $LOG -- cannot tell a mode change from a no-op, T3 skipped"
+elif ! set_size 640x360; then
+	info "could not edit $CFG -- T3 skipped, mode-change path UNVERIFIED"
+else
 	: >"$LOG"
 	$INIT restart >/dev/null 2>&1
 	sleep 8
-	if grep -q "adopted identical live config" "$LOG"; then
-		bad "VB config was ADOPTED across a mode change -- pools are stale"
-	elif grep -q "held by a dead owner" "$LOG"; then
-		bad "vb_set_cfg refused after a *graceful* stop -- vb_exit did not release"
-	elif grep -q "ok  ss_mpi_vb_set_cfg" "$LOG"; then
-		ok "fresh VB config applied for the new layout"
+	new_out=$(out_size)
+	if [ -z "$new_out" ] || [ "$new_out" = "$base_out" ]; then
+		# The whole point of T3. Without this the suite happily "passes" a
+		# same-mode restart and leaves the layout-change path unexercised.
+		bad "encoded size did not move ($base_out -> ${new_out:-none}) -- NOT a mode change"
 	else
-		bad "no vb_set_cfg marker at all"
+		ok "encoded size moved $base_out -> $new_out, so the VB layout differs"
+		if grep -q "adopted identical live config" "$LOG"; then
+			bad "VB config was ADOPTED across a mode change -- pools are stale"
+		elif grep -q "held by a dead owner" "$LOG"; then
+			bad "vb_set_cfg refused after a *graceful* stop -- vb_exit did not release"
+		elif grep -q "ok  ss_mpi_vb_set_cfg" "$LOG"; then
+			ok "fresh VB config applied for the new layout"
+		else
+			bad "no vb_set_cfg marker at all"
+		fi
+		chk "venc running in the new mode" test -n "$(venc_pid)"
+		chk "frames flowing in the new mode" flowing
+		chk "still no module reload" test "$(mods)" = "$base_mods"
 	fi
-	chk "venc running at 720p" test -n "$(venc_pid)"
-	chk "frames flowing at 720p" flowing
-	chk "still no module reload" test "$(mods)" = "$base_mods"
-else
-	info "could not edit $CFG -- T3 skipped, mode-change path UNVERIFIED"
 fi
 
 # ------------------------------------------------ T4: back to the original mode
@@ -132,32 +152,9 @@ sleep 8
 chk "restored mode: venc up" test -n "$(venc_pid)"
 chk "restored mode: streaming" flowing
 
-# ------------------------------------------------------ T5: the crash path
-# Expected result is NOT known in advance: if the driver's .release frees VB
-# when the process dies, a hard kill self-heals and set_cfg simply succeeds.
-# Report what happens rather than asserting.
+# ------------------------------------------------------- T5: reload recovery
 echo
-echo "=== T5: hard-kill venc (no mpp_cleanup), then start in a DIFFERENT mode ==="
-echo "    measurement, not an assertion"
-killall -9 waybeam 2>/dev/null
-sleep 3
-set_out_size 1280 720 || info "config edit failed; T5 degraded to a same-mode start"
-: >"$LOG"
-$INIT start >/dev/null 2>&1
-sleep 8
-if grep -q "held by a dead owner" "$LOG"; then
-	info "VB survived the kill and the mismatch was REFUSED (guard works, reload needed)"
-elif grep -q "adopted identical live config" "$LOG"; then
-	bad "stale VB adopted across a mode change after a crash -- silent wrong pools"
-elif grep -q "ok  ss_mpi_vb_set_cfg" "$LOG"; then
-	info "VB was released when the process died -- crash path self-heals"
-else
-	info "no marker; venc pid=$(venc_pid). Inspect $LOG"
-fi
-
-# ------------------------------------------------------------ T6: recovery
-echo
-echo "=== T6: reload recovery path (hub stopped first, as the guard requires) ==="
+echo "=== T5: reload recovery path (hub stopped first, as the guard requires) ==="
 cp "$BACKUP" "$CFG"
 $HUB stop >/dev/null 2>&1
 sleep 2
@@ -168,6 +165,46 @@ chk "frames flowing after reload" flowing
 $HUB start >/dev/null 2>&1
 sleep 5
 chk "hub restarted" test -n "$(hub_pid)"
+
+# --------------------------------------------------------- T6: the crash path
+# LAST on purpose. Measured on .181: a SIGKILL leaks two aenc MMB blocks
+# ('aenc(0)_strm', 'aenc(0)_cir', 16 KB each) and after that the next module
+# unload/reload fails at sys.ko init -- 'no sys ko!' then 'load vpp.ko
+# ...FAILURE!' -- for the rest of the boot. So this must not run before T5,
+# or it poisons the reload it would be testing. Graceful restarts leak
+# nothing; only the hard kill does.
+# Expected result is NOT known in advance: if the driver's .release frees VB
+# when the process dies, a hard kill self-heals and set_cfg simply succeeds.
+# Report what happens rather than asserting.
+echo
+echo "=== T6: hard-kill venc (no mpp_cleanup), then start in a DIFFERENT mode ==="
+echo "    measurement, not an assertion"
+killall -9 waybeam 2>/dev/null
+sleep 3
+set_size 640x360 || info "config edit failed; T6 degraded to a same-mode start"
+: >"$LOG"
+$INIT start >/dev/null 2>&1
+sleep 8
+if grep -q "held by a dead owner" "$LOG"; then
+	info "VB survived the kill and the mismatch was REFUSED (reload needed)"
+elif grep -q "adopted identical live config" "$LOG"; then
+	bad "stale VB adopted across a mode change after a crash -- silent wrong pools"
+elif grep -q "ok  ss_mpi_vb_set_cfg" "$LOG"; then
+	info "VB was released when the process died"
+else
+	info "no VB marker; inspect $LOG"
+fi
+grep -q "already inited" "$LOG" && bad "ISP survived the kill and blocked the restart"
+# The VB marker alone says nothing about whether the daemon came up: the first
+# run of this suite recorded a cheerful NOTE while venc was dead on the floor at
+# ss_mpi_isp_mem_init. Assert the outcome, not just the milestone.
+chk "venc actually running after the crash restart" test -n "$(venc_pid)"
+chk "streaming after the crash restart" flowing
+
+leaks=$(dmesg | grep -c "MMB LEAK")
+info "MMB leaks this boot: $leaks (a SIGKILL leaks 2; graceful stops leak 0)"
+echo "  NOTE  module reload is now poisoned until reboot -- 'reload' is NOT the"
+echo "        recovery after a hard kill; reboot is. venc itself self-heals above."
 
 echo
 echo "Config restored from $BACKUP."

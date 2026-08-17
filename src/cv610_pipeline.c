@@ -255,7 +255,7 @@ static int sys_setup(const Cv610PipelineRuntimeConfig *c)
 	ot_vb_cfg vb;
 	ot_vi_vpss_mode vi_vpss_mode;
 	td_u64 raw_blk, yuv_blk, out_blk;
-	td_s32 sys_ret, vb_ret, set_ret;
+	td_s32 sys_ret, vb_ret, set_ret, isp_ret;
 	unsigned int i;
 
 	/* RAW12 is stored 16bpp in the pipe buffers; be generous, this is a probe. */
@@ -288,9 +288,17 @@ static int sys_setup(const Cv610PipelineRuntimeConfig *c)
 	 * successful SYS init and before any VI pipe exists. */
 	/* C does not define function-argument evaluation order. Keep the vendor
 	 * API's SYS-then-VB shutdown order explicit and make each result legible. */
+	/* ISP mem-init is the one piece of graph state a hard kill leaves behind:
+	 * measured on the .181 bench, SIGKILL releases VB (set_cfg then succeeds)
+	 * but leaves ISP[0] inited, so the next run dies at ss_mpi_isp_mem_init
+	 * with 0xa01c800c "already inited". Clear it here, with the other
+	 * pre-cleans and before anything of ours is registered, so a crash does
+	 * not need a module reload to recover. */
+	isp_ret = ss_mpi_isp_exit(VI_PIPE);
 	sys_ret = ss_mpi_sys_exit();
 	vb_ret = ss_mpi_vb_exit();
-	printf("  pre-clean: sys_exit=0x%x vb_exit=0x%x\n", sys_ret, vb_ret);
+	printf("  pre-clean: isp_exit=0x%x sys_exit=0x%x vb_exit=0x%x\n",
+		   isp_ret, sys_ret, vb_ret);
 
 	memset(&vi_vpss_mode, 0, sizeof(vi_vpss_mode));
 	for (i = 0; i < OT_VI_MAX_PIPE_NUM; i++) {
