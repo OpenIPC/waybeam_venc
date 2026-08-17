@@ -37,4 +37,9 @@ void cv610_pipeline_stop(void);
 void cv610_pipeline_request_stop(void);
 int cv610_pipeline_stop_requested(void);
 
+/* Nonzero once ss_mpi_isp_run() is up, so callers outside this file know the
+ * ISP will answer an ss_mpi_isp_* attribute call.  Used by cv610_iq.c to
+ * refuse rather than fire MPI ioctls at an ISP that was never inited. */
+int cv610_pipeline_isp_ready(void);
+
 #endif /* CV610_PIPELINE_H */

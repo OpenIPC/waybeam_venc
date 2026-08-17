@@ -1,8 +1,10 @@
 # CV610 runtime IQ control surface
 
-Status: **SPEC — not started.** Date: 2026-08-16.
+Status: **IMPLEMENTED** in v0.65.5 — see the closing note at the end of this
+file for what shipped, what changed from this plan, and what is still open.
+Date: 2026-08-16.
 Device: `root@192.168.2.181` (Hi3516CV610 DEMO Board, IMX662).
-Follows PR #229, which landed the compile-time ISP seeds this would make editable.
+Follows PR #229, which landed the compile-time ISP seeds this made editable.
 
 ## Why
 
@@ -154,6 +156,50 @@ Per-step checks, each independently confirmable:
 
 1. Which knobs matter most day to day — is saturation/sharpen enough to start, or is
    CCM/WB needed in the first cut?
+   → Answered by building all of them: the field table costs one line per knob,
+   so picking a subset would have saved nothing. 11 groups, 59 fields.
 2. Should tuned values persist across reboot, and if so via config fields or a
    profile file? (Deliberately out of scope above; needs a decision before anyone
    asks why their tuning vanished.)
+   → **Still open.** Values are live-only; a reboot returns to the plugin's
+   seeds. Nothing in v0.65.5 changes that.
+
+---
+
+## Closing note (v0.65.5)
+
+**Shipped as planned**: `src/cv610_iq.c` + `include/cv610_iq.h`, wired into
+`g_cv610_apply_callbacks`; all seven "must" knobs plus drc, ldci, dehaze and
+ca; read-back from the ISP rather than a cache; unknown names rejected; the
+WebUI tab driven by a capability probe rather than a backend-name test.
+
+**Changed from the plan**, and why:
+
+- *No byte offsets.* The plan said "matching the `star6e_iq.h` contract".  The
+  wire contract matches, but the implementation does not copy Star6E's
+  hand-computed offsets — CV610 links `ss_mpi` directly, so every field is an
+  `offsetof()` into the SDK's own struct.  A mistyped member is then a compile
+  error rather than a write into a neighbouring field.
+- *The schema is emitted, not duplicated.* The plan only said "un-hide the tab
+  by capability".  Un-hiding it alone would have shown the SigmaStar knob list
+  on a CV610, so `query()` emits a `_schema` block and the page renders from
+  it.  This is the same trap as the modes store's third copy of the mode list.
+- *`cv610_pipeline_isp_ready()` was added.* Firing MPI ioctls at an ISP that
+  was never inited is not something to find out about in the field.
+- *`forces_manual` is exposed.* Not in the plan; the mutation sweep made the
+  side-effect visible and it was cheap to surface rather than document only.
+
+**Found while verifying, not predicted**: DRC and dehaze are registered with
+the ISP but ship `enable = 0` and are bypassed in hardware. See HISTORY 0.65.5;
+0.65.4's wording is corrected. DRC has never contributed to a CV610 image.
+
+**Still open**:
+
+- Persistence (question 2 above).
+- `/api/v1/ae` and `/api/v1/awb` remain 501 — deliberately out of scope.
+- The `!cv610_pipeline_isp_ready()` path returns cleanly by inspection but was
+  not exercised: reaching it means stopping the pipeline, and stop/start is the
+  one thing that hard-hangs this SoC.
+- Re-tuning the sc450ai-derived tables. The instrument now exists; using it is
+  the follow-on, and DRC is the obvious first candidate since it has never been
+  switched on.

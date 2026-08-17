@@ -1,5 +1,52 @@
 # History
 
+## [0.65.5] - 2026-08-16
+
+0.65.4 seeded the CV610 ISP well but froze every value into the sensor plugin,
+which the ISP reads once at pipe start — correcting one meant a cross-compile,
+a plugin deploy and a reboot. This makes those blocks live knobs. No contract
+change; `/api/v1/iq` and `/api/v1/iq/set` are existing routes that answered
+`501` on this backend only because it supplied no callbacks.
+
+- **`cv610_iq.c` exposes 11 ISP groups, 59 fields.** saturation, color_tone,
+  csc, ccm, wb, sharpen, nr, drc, ldci, dehaze and ca, wired into
+  `g_cv610_apply_callbacks`. Unlike `star6e_iq.c` there is no `dlopen` and no
+  hand-computed struct offsets: the backend links `ss_mpi` directly, so every
+  field is an `offsetof()` into the SDK's own type and every range is the
+  header's documented one. Values are read back from the ISP rather than
+  cached, so a rejected or clamped set is visible instead of silently assumed.
+- **Writing a `manual.*` field forces that group's `op_type` to manual.**
+  A manual value is inert while the block runs its auto curve, which is
+  indistinguishable from a broken setter. The schema marks which fields do
+  this and the WebUI shows it on the chip.
+- **DRC and dehaze are registered but bypassed**, measured through the new
+  surface: `drc.enable` and `dehaze.enable` both read 0, and
+  `ss_mpi_isp_get_module_ctrl()` confirms the hardware bypasses both. Toggling
+  `drc.enable` clears and restores that bypass bit, so the two agree. 0.65.4's
+  note that the algorithm blocks were "enabled" over-stated it for these two;
+  that entry is corrected. Their sc450ai-derived tables ship `enable = 0`, so
+  DRC has never contributed to a CV610 image and remains unevaluated.
+- **The WebUI IQ tab is capability-driven.** It was hidden by a hardcoded
+  `backendName === 'cv610'` test; it now probes `/api/v1/iq` and renders its
+  knob list from the `_schema` the backend describes itself with, so the field
+  table stays in one place instead of being copied into the page. Backends
+  with no schema keep the existing hardcoded list. A set re-queries and reports
+  the value the ISP kept, which differs from the request when clamped.
+
+Verified on the `.181` bench, cold-booted onto the shipped build
+(`md5 dda3bec7…`, `/proc/PID/exe` confirmed not `(deleted)`): all 11 groups
+return `ret=0`; a mutation sweep wrote and read back one field per group with
+11/11 agreeing and the device diffing clean against its boot state afterwards;
+saturation 60 → 220 → 60 moved mean chroma 4.84 → 22.95 → 4.81, the repeat of
+the first arm landing within 0.6% so the change is the knob and not the scene;
+arrays of the wrong length in either direction and unknown names are
+rejected; encoder rate stayed nominal at 100.10 fps with `pressureDrops`
+frozen at 0.
+
+`_caps.import` is advertised as false because `handle_iq_import()` is compiled
+only for Star6E and Maruko; the WebUI hides the control rather than offer a
+button that 501s.
+
 ## [0.65.4] - 2026-08-16
 
 The CV610 IMX662 plugin was a scaffold in two places its comments admitted to,
@@ -26,7 +73,10 @@ every algorithm block off. No HTTP behaviour changes; contract stays `0.18.3`.
   `smart_sc450ai` driver, which targets this same ISP silicon. The blocks that
   describe ISP behaviour transfer on principle; the noise-fitted ones are
   borrowed from a 4 MP sensor and are kept on a hardware A/B rather than a
-  calibration.
+  calibration. Two of them are registered but not switched on: `g_cmos_drc`
+  and `g_cmos_dehaze` carry `enable = 0`, inherited from sc450ai's linear-mode
+  defaults, so the ISP bypasses both at runtime. See 0.65.5, which measured
+  that on hardware.
 - **Saturation is configured at all.** `cmos_get_awb_default()` left
   `agc_tbl.valid` at 0 with every `saturation[]` entry 0, so the ISP was never
   told what saturation to run — the washed-out colour. The shipped curve is
