@@ -1730,6 +1730,79 @@ static int test_capabilities_emits_ui(void)
  * behind it.  isp.awb_fps paces a loop only Star6E has; on Maruko the entry
  * must still be present (schema is shared) but marked unsupported, with the
  * tooltip explaining why. */
+/* Minimal stand-in: the routes test only cares that the pointer is non-NULL,
+ * not what it returns. */
+static char *api_test_stub_query_iq(void)
+{
+	return strdup("{\"ok\":true,\"data\":{}}");
+}
+
+/* /api/v1/capabilities advertises which optional routes the running backend
+ * actually services, so the dashboard can decide whether to draw the Image
+ * Quality tab without paying for a whole ISP sweep on /api/v1/iq.  The value
+ * has to track the callback pointer, not the backend name -- the two existing
+ * capabilities tests both zero the callbacks struct, so neither could ever
+ * observe routes.iq true. */
+static int test_capabilities_routes_track_callbacks(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0, fd;
+	char response[65536];
+	const char *request =
+		"GET /api/v1/capabilities HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+	size_t sent, req_len = strlen(request);
+	int pass;
+
+	/* Two arms: without query_iq_info, then with it.  Only the pointer
+	 * changes, so a difference in the response can only come from it. */
+	for (pass = 0; pass < 2; pass++) {
+		venc_config_defaults(&cfg);
+		memset(&cb, 0, sizeof(cb));
+		if (pass == 1)
+			cb.query_iq_info = api_test_stub_query_iq;
+
+		if (venc_api_register(&cfg, "star6e", &cb, NULL) != 0) {
+			CHECK("routes register", 0);
+			return failures;
+		}
+		if (ensure_api_test_server() != 0) {
+			CHECK("routes server", 0);
+			return failures;
+		}
+		fd = connect_api_test_socket();
+		CHECK("routes connect", fd >= 0);
+		if (fd < 0)
+			return failures;
+		for (sent = 0; sent < req_len; ) {
+			ssize_t n = write(fd, request + sent, req_len - sent);
+			if (n < 0 && errno == EINTR)
+				continue;
+			if (n <= 0) {
+				close(fd);
+				CHECK("routes write", 0);
+				return failures;
+			}
+			sent += (size_t)n;
+		}
+		shutdown(fd, SHUT_WR);
+		CHECK("routes read",
+			read_http_response(fd, &status, response, sizeof(response)) == 0);
+		close(fd);
+		CHECK("routes status", status == 200);
+		CHECK("routes block present", strstr(response, "\"routes\"") != NULL);
+		if (pass == 0) {
+			CHECK("routes.iq false without query_iq_info",
+				strstr(response, "\"iq\":false") != NULL);
+		} else {
+			CHECK("routes.iq true with query_iq_info",
+				strstr(response, "\"iq\":true") != NULL);
+		}
+	}
+	return failures;
+}
+
 static int test_capabilities_awb_fps_backend_gate(void)
 {
 	int failures = 0;
@@ -1929,6 +2002,7 @@ int test_venc_api(void)
 	failures += test_set_rejects_malformed_percent_escape();
 	failures += test_capabilities_emits_ui();
 	failures += test_capabilities_awb_fps_backend_gate();
+	failures += test_capabilities_routes_track_callbacks();
 	failures += test_snapshot_routes();
 	stop_api_test_server();
 	return failures;
