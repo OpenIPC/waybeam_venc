@@ -365,6 +365,64 @@ int cv610_audio_is_running(Cv610AudioState *state)
 	return state ? __atomic_load_n(&state->running, __ATOMIC_ACQUIRE) : 0;
 }
 
+/* Release what a predecessor that died without cv610_audio_stop() left behind.
+ *
+ * MPP objects are kernel state, not process state, so a venc killed with
+ * SIGKILL leaves the AI device claimed by the dead pid. Measured on the .181
+ * bench: the next start is then refused at ss_mpi_ai_set_pub_attr with
+ * OT_ERR_AI_NOT_PERM (0xa015800d) and the craft comes back SILENTLY WITHOUT
+ * AUDIO -- 2 of 2 runs, while a graceful restart restores it every time. The
+ * kernel does reclaim the two aenc MMB blocks (those "MMB LEAK(pid=...)" lines
+ * are that reclaim reporting itself, not a leak); it does not undo the claim.
+ *
+ * The module cycle is what does the work. Releasing the objects one by one does
+ * not: ss_mpi_ai_disable() is refused with the same NOT_PERM as the
+ * set_pub_attr it was meant to unblock. A module-level exit/init pair from a
+ * process that has initialised is what clears the claim -- measured, and it is
+ * exactly why a SECOND graceful restart recovered audio where the first did
+ * not. This folds that cycle into the first start. The pair runs AFTER the
+ * caller's own ss_mpi_audio_init() on purpose: that is the ordering verified on
+ * hardware.
+ *
+ * An earlier revision also called sys_unbind/aenc_destroy_chn/opus_deinit/
+ * ai_disable_chn here, mirroring cv610_audio_stop()'s teardown. They were
+ * removed: the SDK tracks those objects PROCESS-locally, so a successor cannot
+ * release a dead predecessor's copies, and all four returned the same code in
+ * the broken and healthy cases while only ai_disable's changed. opus_deinit was
+ * worse than inert -- it printed "illegal handle(-1)!" to stderr on every clean
+ * start, from a process-local static that is -1 in a fresh process. Removal was
+ * re-verified on hardware, not assumed. ai_disable is kept because it is the
+ * one call measured to reach kernel state.
+ *
+ * Same shape and the same reason as sys_setup()'s isp_exit/sys_exit/vb_exit. */
+static int cv610_audio_preclean(void)
+{
+	td_s32 exit_ret, init_ret, ai;
+
+	/* audio_initialized is deliberately NOT touched across the cycle. It only
+	 * decides whether cv610_audio_stop() calls ss_mpi_audio_exit(), and the two
+	 * error directions are not symmetric: a second exit is safe (the module's
+	 * sub-exits are flag-guarded, so it is not a double free), while a SKIPPED
+	 * exit leaks the kernel AUDIO_INIT claim and the /dev fd -- which is opened
+	 * without O_CLOEXEC and therefore survives venc_respawn_after_exit()'s
+	 * execv. A partially-succeeded re-init leaves exactly that to clean up, so
+	 * the flag must stay set. */
+	exit_ret = ss_mpi_audio_exit();
+	init_ret = ss_mpi_audio_init();
+	ai = ss_mpi_ai_disable(CV610_AUDIO_DEV);
+	printf("  audio pre-clean: exit=0x%x init=0x%x ai=0x%x\n",
+		   exit_ret, init_ret, ai);
+
+	/* Fatal only when the exit actually happened and the re-init did not: that
+	 * is the one combination where this function has taken the module down and
+	 * failed to bring it back. If the EXIT failed, nothing was reclaimed and
+	 * there is nothing to restore -- returning -1 there would turn a start that
+	 * previously worked into a dead one, on a call that was not on the start
+	 * path before this change. Let bring-up proceed and let the AUDIO_CHECKs
+	 * below produce the real diagnosis. */
+	return (exit_ret == TD_SUCCESS && init_ret != TD_SUCCESS) ? -1 : 0;
+}
+
 Cv610AudioState *cv610_audio_start(const VencConfig *config,
 	const VencOutputUri *video_output)
 {
@@ -374,18 +432,33 @@ Cv610AudioState *cv610_audio_start(const VencConfig *config,
 	if (!config || !config->audio.enabled)
 		return NULL;
 	state = calloc(1, sizeof(*state));
-	if (!state)
+	if (!state) {
+		fprintf(stderr, "ERROR: audio state alloc failed\n");
 		return NULL;
+	}
 	state->acodec_fd = -1;
 	state->aenc_fd = -1;
 	state->socket_handle = -1;
-	if (pthread_mutex_init(&state->stats_lock, NULL) != 0)
+	if (pthread_mutex_init(&state->stats_lock, NULL) != 0) {
+		fprintf(stderr, "ERROR: audio stats lock init failed\n");
 		goto fail;
+	}
 	if (ss_mpi_audio_init() != TD_SUCCESS) {
-		fprintf(stderr, "ERROR: ss_mpi_audio_init failed\n");
+		/* This is where an absent module set lands, not the /dev/acodec open
+		 * below: audio_init opens /dev/ab first, and open_aio -- the module
+		 * that creates it -- is staged only under CV610_AUDIO=1
+		 * (load-cv610-online). audio.enabled in the JSON is a separate switch,
+		 * so the two diverging is a configuration the operator can reach. */
+		fprintf(stderr, "ERROR: ss_mpi_audio_init failed "
+			"(are the audio modules loaded? they need CV610_AUDIO=1 at "
+			"module load, which is separate from audio.enabled)\n");
 		goto fail_mutex;
 	}
 	state->audio_initialized = 1;
+	if (cv610_audio_preclean() != 0) {
+		fprintf(stderr, "ERROR: audio module re-init failed after pre-clean\n");
+		goto fail_started;
+	}
 	/* Load-bearing order, established by the standalone hardware bring-up. */
 	if (cv610_acodec_reset(state) != 0 || cv610_ai_set_attr(state) != 0 ||
 		cv610_ai_enable(state) != 0 ||

@@ -90,6 +90,25 @@ rgn_field() {
 rgn_jobs()  { rgn_field 2; }
 rgn_fails() { rgn_field 4; }
 
+# The audio encoder's two MMZ blocks: present exactly when AENC is up. Reading
+# these rather than the log because the log's own message is misleading (it
+# blames the module load for what is actually a dead predecessor's AI claim).
+# grep -c prints "0" AND exits 1 when it matches nothing, so "|| echo 0" would
+# print 0 twice. Count with awk, which has one exit path and one line of output.
+aenc_blocks() {
+	awk '/aenc\(0\)/ { n++ } END { print n + 0 }' /proc/umap/media-mem 2>/dev/null ||
+		echo 0
+}
+
+# Is audio even configured? Without this a video-only craft would "fail" the
+# audio assertion for the correct reason of having no audio.
+audio_enabled() {
+	command -v json_cli >/dev/null 2>&1 || return 1
+	[ "$(json_cli -g .audio.enabled --raw -i "$CFG" 2>/dev/null)" = "true" ]
+}
+
+not_grep() { ! grep -q "$1" "$2"; }
+
 osd_compositing() {
 	# Two samples must advance, with no failed jobs. Retried once because the
 	# counters belong to the region, not to the hub: if the hub recreates the
@@ -130,7 +149,15 @@ sleep 8
 base_mods=$(mods)
 [ -n "$(hub_pid)" ] && wait_for_rgn
 base_rgn=$(rgn_jobs)
-echo "  venc=$(venc_pid) hub=$(hub_pid) modules=$base_mods osd_jobs=${base_rgn:-none}"
+audio_cfg=0
+audio_enabled && audio_cfg=1
+# A hard kill anywhere earlier in this boot -- T6 of a previous run, or hand
+# debugging -- poisons module reloading until reboot ("no sys ko!" then "load
+# vpp.ko ...FAILURE!"). T5 unloads, so on such a boot it fails for a reason that
+# has nothing to do with the code under test. Two MMB LEAK lines per hard kill is
+# the marker; count them BEFORE this run adds its own in T6.
+boot_kills=$(dmesg 2>/dev/null | grep -c "MMB LEAK")
+echo "  venc=$(venc_pid) hub=$(hub_pid) modules=$base_mods osd_jobs=${base_rgn:-none} audio=$audio_cfg"
 [ -n "$(hub_pid)" ] || { echo "hub is not running -- T1/T2/T3 need it up"; exit 1; }
 
 # ------------------------------------------------------- T1: the guard still fires
@@ -227,15 +254,23 @@ chk "restored mode: streaming" flowing
 echo
 echo "=== T5: reload recovery path (hub stopped first, as the guard requires) ==="
 cp "$BACKUP" "$CFG"
-$HUB stop >/dev/null 2>&1
-sleep 2
-$INIT reload >/dev/null 2>&1
-sleep 10
-chk "reload restored venc" test -n "$(venc_pid)"
-chk "frames flowing after reload" flowing
-$HUB start >/dev/null 2>&1
-sleep 5
-chk "hub restarted" test -n "$(hub_pid)"
+if [ "$boot_kills" -gt 0 ]; then
+	# Refuse rather than fail: on this boot the reload cannot succeed for
+	# reasons predating the run, and reporting FAIL would point at the code.
+	info "a hard kill already happened this boot ($boot_kills MMB LEAK lines):"
+	info "  module reloading is poisoned until reboot, so T5 is SKIPPED and the"
+	info "  reload path is UNVERIFIED. Reboot and re-run to cover it."
+else
+	$HUB stop >/dev/null 2>&1
+	sleep 2
+	$INIT reload >/dev/null 2>&1
+	sleep 10
+	chk "reload restored venc" test -n "$(venc_pid)"
+	chk "frames flowing after reload" flowing
+	$HUB start >/dev/null 2>&1
+	sleep 5
+	chk "hub restarted" test -n "$(hub_pid)"
+fi
 
 # --------------------------------------------------------- T6: the crash path
 # LAST on purpose. Measured on .181: a SIGKILL leaks two aenc MMB blocks
@@ -272,8 +307,24 @@ grep -q "already inited" "$LOG" && bad "ISP survived the kill and blocked the re
 chk "venc actually running after the crash restart" test -n "$(venc_pid)"
 chk "streaming after the crash restart" flowing
 
+# "streaming" above is VIDEO. It passed for months while AUDIO was silently
+# dead: a SIGKILL leaves the AI device claimed by the dead pid, every AI call
+# from the successor is refused with OT_ERR_AI_NOT_PERM, and venc reports it as
+# "needs CV610_AUDIO=1 at module load" -- so neither the log nor this suite said
+# anything true. The aenc MMB blocks are the observable: the audio encoder has
+# exactly two, and they are absent when audio failed to start.
+if [ "$audio_cfg" = 1 ]; then
+	echo "  aenc blocks: $(aenc_blocks) (2 = audio up, 0 = audio silently lost)"
+	chk "audio came back after the crash restart" test "$(aenc_blocks)" = 2
+	chk "no audio-start failure logged" not_grep "audio did not start" "$LOG"
+else
+	info "audio disabled in $CFG -- crash-restart audio recovery UNVERIFIED"
+fi
+
 leaks=$(dmesg | grep -c "MMB LEAK")
-info "MMB leaks this boot: $leaks (a SIGKILL leaks 2; graceful stops leak 0)"
+info "MMB LEAK lines this boot: $leaks (2 per hard kill; they are the kernel"
+info "  RECLAIMING those blocks, not losing them -- measured: the pool returns"
+info "  to its exact baseline across repeated kills)"
 echo "  NOTE  module reload is now poisoned until reboot -- 'reload' is NOT the"
 echo "        recovery after a hard kill; reboot is. venc itself self-heals above."
 
