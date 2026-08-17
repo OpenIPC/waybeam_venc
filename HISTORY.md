@@ -1,5 +1,43 @@
 # History
 
+## [0.65.7] - 2026-08-17
+
+CV610 SoC wedge on `stop`. On the `.181` bench, `S95waybeam stop` while
+`waybeam_hub` was running killed the SoC outright — no network, ARP
+incomplete, physical power cycle required. It had been misfiled as an
+intermittent "reboot sometimes hangs" for weeks.
+
+- **Root cause: the MPP modules were unloaded under a live consumer.**
+  `stop()` waits only for `waybeam`/`waybeam-resp`/`waybeam-wd` and then calls
+  `load-cv610-online stop`, which rmmods the whole stack. `waybeam_hub` holds
+  `/dev/rgn` for the CV610 RGN OSD and `/dev/mmz_userdev`, and the MPP drivers
+  do not set `.owner` on their file operations — `/proc/modules` reports
+  `open_rgn used=0` while the hub has `/dev/rgn` open. `rmmod` therefore
+  succeeds and frees the file operations out from under a live consumer.
+
+  The script already carried the right invariant in a comment — *"Never unload
+  the MPP stack while any of them still owns the graph"* — it just never
+  counted the hub as an owner.
+
+- **Measured, with controls.** 10/10 monitored `reboot` cycles clean (ping gap
+  12.6–15.8 s, back 18–20.5 s). 20/20 venc stop/start cycles clean with the hub
+  stopped, 2100 frames and 0 output drops afterwards. First stop/start with the
+  hub running: dead. Then 5/5 clean again once the hub was released first.
+
+  Reboot was never safe for the reason everyone assumed. `rcK` iterates
+  `ls -r /etc/init.d/S??*`, so `S97waybeam-hub` stops *before* `S95waybeam`.
+  That accident is the entire difference, and it retro-explains the standing
+  "never stop/start venc on cv610, reboot instead" rule.
+
+- **Fix.** `stop()` scans `/proc/*/fd` for processes outside the venc family
+  holding an MPP character device and refuses, naming them, before killing
+  anything. Checking first matters: refusing after the kill would leave venc
+  dead with the modules still loaded, which `load-cv610-online start` then
+  rejects as dirty state. `rcK` and `reboot` are unaffected because the hub is
+  already gone by then; a manual `S95waybeam stop`/`restart` on a live craft
+  now fails with a message instead of wedging the SoC. `/api/v1/restart` is
+  untouched — it re-execs the daemon without unloading modules.
+
 ## [0.65.6] - 2026-08-16
 
 Low-light bitrate. On the `.181` bench with the room lights off, a 9.26 Mbps
