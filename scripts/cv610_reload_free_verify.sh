@@ -21,9 +21,10 @@
 #   T1 attempts the unload the guard is supposed to refuse. If the guard has
 #      regressed, the unload proceeds under the hub and wedges the board --
 #      that is exactly the bug, observed as no network and ARP incomplete.
-#   T6 hard-kills venc so MPP state is left dirty on purpose. It poisons
-#      module reloading for the rest of the boot (and resets a video-only SoC),
-#      so it runs last.
+#   T6 hard-kills venc so MPP state is left dirty on purpose. The kill itself
+#      is survivable -- venc self-heals -- but it poisons module reloading for
+#      the rest of the boot, and an unload issued after this point leaves the
+#      craft with no modules (and resets a video-only SoC). So it runs last.
 # Everything else is a normal restart.
 #
 # Usage: cv610_reload_free_verify.sh [--keep-going]
@@ -272,7 +273,7 @@ set_size 640x360 || info "config edit failed; T6 degraded to a same-mode start"
 $INIT start >/dev/null 2>&1
 sleep 8
 if grep -q "held by a dead owner" "$LOG"; then
-	info "VB survived the kill and the mismatch was REFUSED (reload needed)"
+	info "VB survived the kill and the mismatch was REFUSED (reboot needed)"
 elif grep -q "adopted identical live config" "$LOG"; then
 	bad "stale VB adopted across a mode change after a crash -- silent wrong pools"
 elif grep -q "ok  ss_mpi_vb_set_cfg" "$LOG"; then
@@ -305,7 +306,7 @@ leaks=$(dmesg | grep -c "MMB LEAK")
 info "MMB LEAK lines this boot: $leaks (2 per hard kill; they are the kernel"
 info "  RECLAIMING those blocks, not losing them -- measured: the pool returns"
 info "  to its exact baseline across repeated kills)"
-echo "  NOTE  module reload is now poisoned until reboot -- 'reload' is NOT the"
+echo "  NOTE  module reloading is poisoned until reboot -- unloading is NOT the"
 echo "        recovery after a hard kill; reboot is. venc itself self-heals above."
 
 echo

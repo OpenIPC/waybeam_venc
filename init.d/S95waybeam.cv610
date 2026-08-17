@@ -55,7 +55,14 @@ start()
 		echo "$NAME failed to start" >&2
 		cat "$LOGFILE" >&2
 		rm -f "$PIDFILE"
-		"$LOADER" stop
+		# Deliberately no module rollback here. The loader's start is
+		# idempotent -- it returns success having done nothing when the set is
+		# already up -- so unloading on a failed daemon start tears down a set
+		# this invocation did not create. That is the same hazard as the
+		# deleted reload action, on the worse path: a venc that dies at
+		# bring-up is usually a venc that was hard-killed earlier, and on such
+		# a boot the modules cannot be loaded back. Leaving them up costs
+		# nothing; the next start re-inits against them.
 		return 1
 	fi
 	echo "Started $NAME (sensor profile $CV610_SENSOR_PROFILE, audio $CV610_AUDIO)"
@@ -91,12 +98,18 @@ stop()
 # crash actually leaves behind (ISP, and the AI device claim) venc now pre-cleans
 # itself. A hard-killed venc recovers from a plain start, video and audio both.
 #
-# Nothing called it, and unloading is not free: a hard kill poisons module
-# reloading for the rest of the boot, so a reload issued afterwards leaves the
-# craft with no modules at all -- or, measured on a video-only craft, resets the
-# SoC. Recovery after a hard kill is a plain start; applying a module-parameter
-# change (CV610_AUDIO, sensor profile) is a reboot. 'load-cv610-online restart'
-# is still there for the expert case, guarded by its holder check.
+# Nothing in production called it, and unloading is not free: a hard kill
+# poisons module reloading for the rest of the boot, so a reload issued
+# afterwards leaves the craft with no modules at all -- or, measured on a
+# video-only craft, resets the SoC. Recovery after a hard kill is a plain start;
+# applying a module-parameter change (CV610_AUDIO, sensor profile) is a reboot.
+#
+# 'load-cv610-online restart' still exists for a dirty/partial module set, but
+# run it BARE and it reloads with the loader's own defaults -- video-only,
+# imx662 clock -- not this craft's profile. That caveat used to live inside
+# reload(); it is stated here because it outlived the function. Prefer
+# 'load-cv610-online stop' followed by 'S95waybeam start', which passes
+# CV610_SENSOR_PROFILE and CV610_AUDIO for you.
 case "${1:-}" in
 	start|stop) "$1" ;;
 	restart) stop && start ;;
