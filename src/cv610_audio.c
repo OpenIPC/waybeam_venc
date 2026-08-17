@@ -375,48 +375,52 @@ int cv610_audio_is_running(Cv610AudioState *state)
  * kernel does reclaim the two aenc MMB blocks (those "MMB LEAK(pid=...)" lines
  * are that reclaim reporting itself, not a leak); it does not undo the claim.
  *
- * Two halves, and only the first is best-effort:
+ * The module cycle is what does the work. Releasing the objects one by one does
+ * not: ss_mpi_ai_disable() is refused with the same NOT_PERM as the
+ * set_pub_attr it was meant to unblock. A module-level exit/init pair from a
+ * process that has initialised is what clears the claim -- measured, and it is
+ * exactly why a SECOND graceful restart recovered audio where the first did
+ * not. This folds that cycle into the first start. The pair runs AFTER the
+ * caller's own ss_mpi_audio_init() on purpose: that is the ordering verified on
+ * hardware.
  *
- *   - The module cycle is LOAD-BEARING. Releasing the objects one by one does
- *     not work, because ss_mpi_ai_disable() is refused with the same NOT_PERM
- *     as the set_pub_attr it was meant to unblock. A module-level exit/init
- *     pair from a process that has initialised is what clears the claim --
- *     measured, and it is exactly why a SECOND graceful restart recovered audio
- *     where the first did not. This folds that cycle into the first start.
- *     The pair runs AFTER the caller's own ss_mpi_audio_init() on purpose: that
- *     is the ordering verified on hardware.
- *
- *   - The object releases after it are best-effort: on a clean start there is
- *     nothing to undo. Order is cv610_audio_stop()'s, reversed bring-up.
+ * An earlier revision also called sys_unbind/aenc_destroy_chn/opus_deinit/
+ * ai_disable_chn here, mirroring cv610_audio_stop()'s teardown. They were
+ * removed: the SDK tracks those objects PROCESS-locally, so a successor cannot
+ * release a dead predecessor's copies, and all four returned the same code in
+ * the broken and healthy cases while only ai_disable's changed. opus_deinit was
+ * worse than inert -- it printed "illegal handle(-1)!" to stderr on every clean
+ * start, from a process-local static that is -1 in a fresh process. Removal was
+ * re-verified on hardware, not assumed. ai_disable is kept because it is the
+ * one call measured to reach kernel state.
  *
  * Same shape and the same reason as sys_setup()'s isp_exit/sys_exit/vb_exit. */
-static int cv610_audio_preclean(Cv610AudioState *state)
+static int cv610_audio_preclean(void)
 {
-	ot_mpp_chn source = { OT_ID_AI, CV610_AUDIO_DEV, CV610_AI_CHN };
-	ot_mpp_chn destination = { OT_ID_AENC, 0, CV610_AENC_CHN };
-	td_s32 exit_ret, init_ret, unbind, aenc, opus, ai_chn, ai;
+	td_s32 exit_ret, init_ret, ai;
 
-	/* Track audio_initialized against what each call actually did, in both
-	 * directions. Leaving it set through a failed re-init would make
-	 * cv610_audio_stop() call ss_mpi_audio_exit() on a de-initialised module --
-	 * an unbalanced exit, which is the same class of stale state this function
-	 * exists to clear. */
+	/* audio_initialized is deliberately NOT touched across the cycle. It only
+	 * decides whether cv610_audio_stop() calls ss_mpi_audio_exit(), and the two
+	 * error directions are not symmetric: a second exit is safe (the module's
+	 * sub-exits are flag-guarded, so it is not a double free), while a SKIPPED
+	 * exit leaks the kernel AUDIO_INIT claim and the /dev fd -- which is opened
+	 * without O_CLOEXEC and therefore survives venc_respawn_after_exit()'s
+	 * execv. A partially-succeeded re-init leaves exactly that to clean up, so
+	 * the flag must stay set. */
 	exit_ret = ss_mpi_audio_exit();
-	if (exit_ret == TD_SUCCESS)
-		state->audio_initialized = 0;
 	init_ret = ss_mpi_audio_init();
-	if (init_ret == TD_SUCCESS)
-		state->audio_initialized = 1;
-
-	unbind = ss_mpi_sys_unbind(&source, &destination);
-	aenc = ss_mpi_aenc_destroy_chn(CV610_AENC_CHN);
-	opus = ss_mpi_aenc_opus_deinit();
-	ai_chn = ss_mpi_ai_disable_chn(CV610_AUDIO_DEV, CV610_AI_CHN);
 	ai = ss_mpi_ai_disable(CV610_AUDIO_DEV);
-	printf("  audio pre-clean: exit=0x%x init=0x%x unbind=0x%x aenc=0x%x "
-		   "opus=0x%x ai_chn=0x%x ai=0x%x\n", exit_ret, init_ret, unbind,
-		   aenc, opus, ai_chn, ai);
-	return init_ret == TD_SUCCESS ? 0 : -1;
+	printf("  audio pre-clean: exit=0x%x init=0x%x ai=0x%x\n",
+		   exit_ret, init_ret, ai);
+
+	/* Fatal only when the exit actually happened and the re-init did not: that
+	 * is the one combination where this function has taken the module down and
+	 * failed to bring it back. If the EXIT failed, nothing was reclaimed and
+	 * there is nothing to restore -- returning -1 there would turn a start that
+	 * previously worked into a dead one, on a call that was not on the start
+	 * path before this change. Let bring-up proceed and let the AUDIO_CHECKs
+	 * below produce the real diagnosis. */
+	return (exit_ret == TD_SUCCESS && init_ret != TD_SUCCESS) ? -1 : 0;
 }
 
 Cv610AudioState *cv610_audio_start(const VencConfig *config,
@@ -440,7 +444,7 @@ Cv610AudioState *cv610_audio_start(const VencConfig *config,
 		goto fail_mutex;
 	}
 	state->audio_initialized = 1;
-	if (cv610_audio_preclean(state) != 0) {
+	if (cv610_audio_preclean() != 0) {
 		fprintf(stderr, "ERROR: audio module re-init failed after pre-clean\n");
 		goto fail_started;
 	}

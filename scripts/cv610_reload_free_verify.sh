@@ -93,7 +93,12 @@ rgn_fails() { rgn_field 4; }
 # The audio encoder's two MMZ blocks: present exactly when AENC is up. Reading
 # these rather than the log because the log's own message is misleading (it
 # blames the module load for what is actually a dead predecessor's AI claim).
-aenc_blocks() { grep -c 'aenc(0)' /proc/umap/media-mem 2>/dev/null || echo 0; }
+# grep -c prints "0" AND exits 1 when it matches nothing, so "|| echo 0" would
+# print 0 twice. Count with awk, which has one exit path and one line of output.
+aenc_blocks() {
+	awk '/aenc\(0\)/ { n++ } END { print n + 0 }' /proc/umap/media-mem 2>/dev/null ||
+		echo 0
+}
 
 # Is audio even configured? Without this a video-only craft would "fail" the
 # audio assertion for the correct reason of having no audio.
