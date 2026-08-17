@@ -44,14 +44,17 @@ star6e and maruko have always used, where the init script never touches
   mismatch, leaving the craft with no daemon at all.
 
 - Device verification on `.181`, `scripts/cv610_reload_free_verify.sh`:
-  **22 passed, 0 failed**. T3 restarts across a real mode change and asserts the
+  **23 passed, 0 failed**. T3 restarts across a real mode change and asserts the
   *encoded geometry* moved (1920x1080 → 640x360) from venc's own VPSS line,
   because asserting the config key instead let an earlier revision report a mode
   change that never happened. T2 asserts the hub's OSD survived, from the
   compositor's VGS job counters in `/proc/umap/rgn` rather than the hub's own
   perf line — the hub counts the publish it made, which is the stimulus; those
   counters count the composite that consumed it. Verified to fail on a region
-  that is not there.
+  that is not there. T3 asserts it too, across the mode change, because the hub
+  rebinds at its old window size and only its own source poll re-anchors it: an
+  oversized region sits on the smaller channel for a few seconds. Measured
+  benign — 30 s at 640x360 with `job_fail` 0 and venc streaming.
 
 Two things the hardware showed that are **not** fixed here:
 
