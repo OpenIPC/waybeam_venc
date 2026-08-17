@@ -698,17 +698,15 @@ static int cv610_init(void *opaque)
 		 * config toggle must not be able to take video down with it.
 		 * /api/v1/audio/status reports the running state, not the flag. */
 		ctx->audio = cv610_audio_start(&ctx->config, &ctx->output_uri);
+		/* No cause is guessed here. This line used to assert "needs
+		 * CV610_AUDIO=1 at module load" for every failure, which sent the
+		 * operator after the module set while the real cause was a
+		 * predecessor's stale AI claim. Each failure point in
+		 * cv610_audio_start() names itself, including the module-absent one. */
 		if (!ctx->audio)
-			/* Name the evidence, not one guessed cause. This line used to
-			 * assert "needs CV610_AUDIO=1 at module load" for every failure,
-			 * which sent the operator after the module set while the real
-			 * cause was a predecessor's stale AI claim -- and every failure
-			 * this function can report would have said the same thing. */
 			fprintf(stderr,
-				"WARNING: CV610 audio did not start; continuing without it. "
-				"The failing call is logged above; a /dev/acodec open error "
-				"means the audio modules are absent (CV610_AUDIO=1 at module "
-				"load), anything else does not.\n");
+				"WARNING: CV610 audio did not start; continuing without it "
+				"(cause reported above)\n");
 	}
 	g_cv610_runner = ctx;
 	if (venc_api_register(&ctx->config, "cv610",

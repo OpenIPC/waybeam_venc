@@ -25,22 +25,37 @@ real regression.
   a way out — a hard kill also poisons module reloading for the rest of the boot.
 
 - **Fix: cycle the audio module before bring-up.** `cv610_audio_start()` now
-  calls `ss_mpi_audio_exit()` + `ss_mpi_audio_init()` and then releases the
-  stale AI/AENC objects, before configuring anything. Releasing the objects
-  alone is not enough — that is refused. The module cycle is what clears the
-  dead owner's claim, and it is precisely why a *second* graceful restart used
-  to recover audio where the first did not; this folds that cycle into the first
-  start. Same shape as `sys_setup()`'s `isp_exit`/`sys_exit`/`vb_exit` pre-clean.
+  calls `ss_mpi_audio_exit()` + `ss_mpi_audio_init()`, then `ss_mpi_ai_disable()`,
+  before configuring anything. The module cycle is what clears the dead owner's
+  claim — it is precisely why a *second* graceful restart used to recover audio
+  where the first did not, and this folds that cycle into the first start. Same
+  shape as `sys_setup()`'s `isp_exit`/`sys_exit`/`vb_exit` pre-clean.
+
+  Releasing the objects one by one does **not** work and is not attempted: the
+  SDK tracks `sys_unbind`, `aenc_destroy_chn`, `opus_deinit` and
+  `ai_disable_chn` process-locally, so a successor cannot release a dead
+  predecessor's copies. Only `ss_mpi_ai_disable()` reaches kernel state, and it
+  is the only one whose return code ever differed between the broken and healthy
+  cases. `opus_deinit` was additionally printing `illegal handle(-1)!` to stderr
+  on every clean start.
 
   Verified on `.181`: kill a venc with healthy audio, start, audio back — **2 of
   2**, `aenc` blocks 0 → 2, `ai_disable` `0xa015800d` → `0x0`. It also recovered
   a craft already stuck in the broken state with no reboot, and a graceful
   restart is unchanged.
 
+- **The audio warning no longer guesses a cause.** It asserted *"needs
+  CV610_AUDIO=1 at module load"* for every failure — the misreport above. The
+  module hint moved to `ss_mpi_audio_init()`, which is where an absent module set
+  actually lands (it opens `/dev/ab`, created by `open_aio`, which the loader
+  stages only under `CV610_AUDIO=1` — a switch independent of `audio.enabled`).
+  The `/dev/acodec` open is *not* that path.
+
 - The verify suite's T6 asserted *video* streaming, which is why this went
   unnoticed — it passed with audio dead. It now asserts the aenc block count and
   the absence of an audio-start failure, and skips explicitly (not silently) on
-  a video-only craft.
+  a video-only craft. T5 refuses to run on a boot where a hard kill already
+  happened, instead of failing for a reason that predates the run.
 
 ## [0.65.8] - 2026-08-17
 

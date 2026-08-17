@@ -432,15 +432,26 @@ Cv610AudioState *cv610_audio_start(const VencConfig *config,
 	if (!config || !config->audio.enabled)
 		return NULL;
 	state = calloc(1, sizeof(*state));
-	if (!state)
+	if (!state) {
+		fprintf(stderr, "ERROR: audio state alloc failed\n");
 		return NULL;
+	}
 	state->acodec_fd = -1;
 	state->aenc_fd = -1;
 	state->socket_handle = -1;
-	if (pthread_mutex_init(&state->stats_lock, NULL) != 0)
+	if (pthread_mutex_init(&state->stats_lock, NULL) != 0) {
+		fprintf(stderr, "ERROR: audio stats lock init failed\n");
 		goto fail;
+	}
 	if (ss_mpi_audio_init() != TD_SUCCESS) {
-		fprintf(stderr, "ERROR: ss_mpi_audio_init failed\n");
+		/* This is where an absent module set lands, not the /dev/acodec open
+		 * below: audio_init opens /dev/ab first, and open_aio -- the module
+		 * that creates it -- is staged only under CV610_AUDIO=1
+		 * (load-cv610-online). audio.enabled in the JSON is a separate switch,
+		 * so the two diverging is a configuration the operator can reach. */
+		fprintf(stderr, "ERROR: ss_mpi_audio_init failed "
+			"(are the audio modules loaded? they need CV610_AUDIO=1 at "
+			"module load, which is separate from audio.enabled)\n");
 		goto fail_mutex;
 	}
 	state->audio_initialized = 1;
