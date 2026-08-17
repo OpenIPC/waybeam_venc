@@ -365,6 +365,47 @@ int cv610_audio_is_running(Cv610AudioState *state)
 	return state ? __atomic_load_n(&state->running, __ATOMIC_ACQUIRE) : 0;
 }
 
+/* Release what a predecessor that died without cv610_audio_stop() left behind.
+ *
+ * MPP objects are kernel state, not process state, so a venc killed with
+ * SIGKILL leaves the AI device configured and enabled. Measured on the .181
+ * bench: the next start is then refused at ss_mpi_ai_set_pub_attr with
+ * 0xa015800d and the craft comes back SILENTLY WITHOUT AUDIO -- 2 of 2 runs,
+ * while a graceful restart restores it every time. The kernel does reclaim the
+ * two aenc MMB blocks (those "MMB LEAK(pid=...)" lines are that reclaim
+ * reporting itself, not a leak), but it does not undo the device state.
+ *
+ * Same shape and the same reason as sys_setup()'s isp_exit/sys_exit/vb_exit
+ * pre-clean. The order is cv610_audio_stop()'s, and every call is best-effort:
+ * on a clean start there is simply nothing to undo. */
+static int cv610_audio_preclean(void)
+{
+	ot_mpp_chn source = { OT_ID_AI, CV610_AUDIO_DEV, CV610_AI_CHN };
+	ot_mpp_chn destination = { OT_ID_AENC, 0, CV610_AENC_CHN };
+	td_s32 exit_ret, init_ret, unbind, aenc, opus, ai_chn, ai;
+
+	/* Cycle the audio module first. Releasing the objects one by one is not
+	 * enough on its own: ss_mpi_ai_disable() from a pid that is not the dead
+	 * owner is refused with OT_ERR_AI_NOT_PERM (0xa015800d), and so is the
+	 * ss_mpi_ai_set_pub_attr() that follows. What clears it is a module-level
+	 * exit/init pair from a process that has initialised -- measured, that is
+	 * exactly why a SECOND graceful restart recovered audio where the first
+	 * did not. Doing it here folds that second cycle into the first start. */
+	exit_ret = ss_mpi_audio_exit();
+	init_ret = ss_mpi_audio_init();
+
+	unbind = ss_mpi_sys_unbind(&source, &destination);
+	aenc = ss_mpi_aenc_destroy_chn(CV610_AENC_CHN);
+	opus = ss_mpi_aenc_opus_deinit();
+	ai_chn = ss_mpi_ai_disable_chn(CV610_AUDIO_DEV, CV610_AI_CHN);
+	ai = ss_mpi_ai_disable(CV610_AUDIO_DEV);
+	printf("  audio pre-clean: exit=0x%x init=0x%x unbind=0x%x aenc=0x%x "
+		   "opus=0x%x ai_chn=0x%x ai=0x%x\n", exit_ret, init_ret, unbind,
+		   aenc, opus, ai_chn, ai);
+	/* Only the re-init is load-bearing: without it nothing below works. */
+	return init_ret == TD_SUCCESS ? 0 : -1;
+}
+
 Cv610AudioState *cv610_audio_start(const VencConfig *config,
 	const VencOutputUri *video_output)
 {
@@ -386,6 +427,10 @@ Cv610AudioState *cv610_audio_start(const VencConfig *config,
 		goto fail_mutex;
 	}
 	state->audio_initialized = 1;
+	if (cv610_audio_preclean() != 0) {
+		fprintf(stderr, "ERROR: audio module re-init failed after pre-clean\n");
+		goto fail_started;
+	}
 	/* Load-bearing order, established by the standalone hardware bring-up. */
 	if (cv610_acodec_reset(state) != 0 || cv610_ai_set_attr(state) != 0 ||
 		cv610_ai_enable(state) != 0 ||

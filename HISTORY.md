@@ -1,5 +1,47 @@
 # History
 
+## [0.65.9] - 2026-08-17
+
+CV610 audio now survives an abnormal venc exit. Investigating the "aenc MMB
+leak" reported in 0.65.8 showed it is **not a leak** — and that it was masking a
+real regression.
+
+- **The MMB LEAK lines are the kernel reclaiming, not losing.** Measured on
+  `.181`: a hard kill prints `MMB LEAK(pid=N) 'aenc(0)_strm'`/`'aenc(0)_cir'`,
+  and the two blocks are gone from `/proc/umap/media-mem` immediately after.
+  Across **five** kill cycles the pool returned to its exact baseline —
+  `34 blocks / 38332 KB` before and after. Nothing accumulates.
+
+- **What actually broke: audio, silently.** MPP objects are kernel state, so a
+  killed venc leaves the AI device claimed by the dead pid. Every AI call from
+  the successor is then refused with `OT_ERR_AI_NOT_PERM` (`0xa015800d`) —
+  including `ss_mpi_ai_disable()`, so the successor could not even clean up.
+  `ss_mpi_ai_set_pub_attr()` failed, audio never started, and venc reported
+  *"needs CV610_AUDIO=1 at module load"* — which is not what happened. Video
+  streamed normally, so nothing looked wrong. Deterministic, 2 of 2.
+
+  This was masked until 0.65.8: the module reload that release removed also
+  wiped the AI claim. So the hard-kill path regressed there, and `reload` is not
+  a way out — a hard kill also poisons module reloading for the rest of the boot.
+
+- **Fix: cycle the audio module before bring-up.** `cv610_audio_start()` now
+  calls `ss_mpi_audio_exit()` + `ss_mpi_audio_init()` and then releases the
+  stale AI/AENC objects, before configuring anything. Releasing the objects
+  alone is not enough — that is refused. The module cycle is what clears the
+  dead owner's claim, and it is precisely why a *second* graceful restart used
+  to recover audio where the first did not; this folds that cycle into the first
+  start. Same shape as `sys_setup()`'s `isp_exit`/`sys_exit`/`vb_exit` pre-clean.
+
+  Verified on `.181`: kill a venc with healthy audio, start, audio back — **2 of
+  2**, `aenc` blocks 0 → 2, `ai_disable` `0xa015800d` → `0x0`. It also recovered
+  a craft already stuck in the broken state with no reboot, and a graceful
+  restart is unchanged.
+
+- The verify suite's T6 asserted *video* streaming, which is why this went
+  unnoticed — it passed with audio dead. It now asserts the aenc block count and
+  the absence of an audio-start failure, and skips explicitly (not silently) on
+  a video-only craft.
+
 ## [0.65.8] - 2026-08-17
 
 CV610 venc restarts no longer reload the MPP kernel modules — the same model
