@@ -84,23 +84,21 @@ stop()
 	echo "Stopped $NAME (MPP modules left loaded)"
 }
 
-# Recovery: after a venc that died without running mpp_cleanup(), VB is held by
-# a dead owner and the next start refuses if the mode's pool layout differs.
-# This is the way out. It unloads, so the loader's holder check applies -- stop
-# waybeam_hub first.
-reload()
-{
-	stop || return 1
-	# Pass the same profile start() does. A bare "$LOADER" restart reloads with
-	# the loader's own defaults -- video-only, imx662 clock -- and then start()
-	# refuses the audio mismatch, so the craft comes back with no daemon at all.
-	CV610_SENSOR_PROFILE="$CV610_SENSOR_PROFILE" \
-		CV610_AUDIO="$CV610_AUDIO" "$LOADER" restart || return 1
-	start
-}
-
+# There is deliberately no "reload" action. It existed to unload and reload the
+# MPP modules after a venc that died without mpp_cleanup(), on the premise that
+# VB was left held by a dead owner -- a premise the hardware disproved in the
+# same release that added it: VB *is* released when the process dies, and what a
+# crash actually leaves behind (ISP, and the AI device claim) venc now pre-cleans
+# itself. A hard-killed venc recovers from a plain start, video and audio both.
+#
+# Nothing called it, and unloading is not free: a hard kill poisons module
+# reloading for the rest of the boot, so a reload issued afterwards leaves the
+# craft with no modules at all -- or, measured on a video-only craft, resets the
+# SoC. Recovery after a hard kill is a plain start; applying a module-parameter
+# change (CV610_AUDIO, sensor profile) is a reboot. 'load-cv610-online restart'
+# is still there for the expert case, guarded by its holder check.
 case "${1:-}" in
-	start|stop|reload) "$1" ;;
+	start|stop) "$1" ;;
 	restart) stop && start ;;
-	*) echo "Usage: $0 {start|stop|restart|reload}" >&2; exit 1 ;;
+	*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
 esac

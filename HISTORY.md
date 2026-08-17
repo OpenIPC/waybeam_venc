@@ -1,5 +1,38 @@
 # History
 
+## [0.65.10] - 2026-08-17
+
+Removes the CV610 `S95waybeam reload` action. It was dead code built on a
+premise the hardware disproved in the release that added it, and it was the only
+shipped path that unloaded MPP modules on a running craft.
+
+- **Nothing called it** — not the hub (`mod_venc` uses `restart`), not the verify
+  suite's crash test, not venc.
+
+- **Its premise was already falsified.** Its comment claimed VB is left held by a
+  dead owner after a crash and reload is "the way out". 0.65.8's own notes say
+  the opposite — *"ISP, not VB, is what a crash leaves behind… VB is released"* —
+  and the suite prints `VB was released when the process died` on every run. What
+  a crash actually leaves (ISP, and since 0.65.9 the AI device claim) venc
+  pre-cleans itself, so a hard-killed venc recovers from a plain `start`, video
+  and audio both.
+
+- **Unloading is not free.** A hard kill poisons module reloading for the rest of
+  the boot (`no sys ko!` → `load vpp.ko ...FAILURE!`), so a reload issued
+  afterwards leaves the craft with no modules at all — and on a video-only craft
+  it resets the SoC outright (measured). Deleting the action removes the only way
+  to reach that through normal operation. The underlying defect is in the vendor
+  modules and is unchanged.
+
+- The loader's audio-mismatch hint pointed at `S95waybeam reload`; it now says
+  reboot, which is what actually applies a `CV610_AUDIO` or sensor-profile
+  change. `load-cv610-online restart` remains for the expert case, still guarded
+  by its holder check.
+
+- The suite loses T5 (it tested `reload`) and, with it, the contaminated-boot
+  precondition T5 needed: nothing in the suite unloads any more, so a hard kill
+  can no longer poison anything it does.
+
 ## [0.65.9] - 2026-08-17
 
 CV610 audio now survives an abnormal venc exit. Investigating the "aenc MMB
