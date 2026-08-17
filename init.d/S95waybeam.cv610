@@ -32,40 +32,17 @@ still_running()
 	pidof "$NAME" "$RESPAWN" "$WATCHDOG" >/dev/null 2>&1
 }
 
-# Character devices created by the MPP modules that "$LOADER" stop unloads.
-MPP_DEVICES="ab acodec adec aenc ai aio ao bus chnl h265e i2c isp_dev
-mipi_rx mmz_userdev rc rgn sys user vb vca venc vgs vi vpp vpss"
-
-is_mpp_device()
-{
-	case "$1" in /dev/*) ;; *) return 1 ;; esac
-	case " $MPP_DEVICES " in *" ${1#/dev/} "*) return 0 ;; esac
-	return 1
-}
-
-# Processes outside the venc family holding one of those devices open.
+# Foreign holders of an MPP device, ignoring the venc family. The check itself
+# lives in the loader, next to the rmmod it protects -- see the comment there
+# for why unloading under a live consumer wedges the SoC. This wrapper exists
+# only so stop() can refuse *before* it kills anything.
 #
-# The drivers do not set .owner on their file operations, so opening the device
-# takes no module reference -- /proc/modules reports open_rgn "used=0" while a
-# consumer holds /dev/rgn. rmmod therefore succeeds under a live consumer and
-# frees the file operations it is still using, wedging the SoC hard enough to
-# need a physical power cycle.
-#
-# waybeam_hub is the one that matters in practice: it holds /dev/rgn for the
-# CV610 RGN OSD. rcK already gets the ordering right, because "ls -r" runs
-# S97waybeam-hub stop before S95waybeam -- which is the only reason a reboot
-# has always been safe here while a bare "stop" was not.
+# rcK already gets the ordering right, because "ls -r" runs S97waybeam-hub stop
+# before S95waybeam -- the only reason a reboot has always been safe here while
+# a bare "stop" was not.
 mpp_holders()
 {
-	own=" $(pidof "$NAME" "$RESPAWN" "$WATCHDOG" 2>/dev/null) "
-	for fd in /proc/[0-9]*/fd/*; do
-		[ -L "$fd" ] || continue
-		is_mpp_device "$(readlink "$fd" 2>/dev/null)" || continue
-		pid=${fd#/proc/}
-		pid=${pid%%/*}
-		case "$own" in *" $pid "*) continue ;; esac
-		echo "$pid($(cat "/proc/$pid/comm" 2>/dev/null))"
-	done | sort -u | tr '\n' ' '
+	"$LOADER" holders "$(pidof "$NAME" "$RESPAWN" "$WATCHDOG" 2>/dev/null)"
 }
 
 start()

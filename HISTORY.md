@@ -29,14 +29,21 @@ intermittent "reboot sometimes hangs" for weeks.
   That accident is the entire difference, and it retro-explains the standing
   "never stop/start venc on cv610, reboot instead" rule.
 
-- **Fix.** `stop()` scans `/proc/*/fd` for processes outside the venc family
-  holding an MPP character device and refuses, naming them, before killing
-  anything. Checking first matters: refusing after the kill would leave venc
-  dead with the modules still loaded, which `load-cv610-online start` then
-  rejects as dirty state. `rcK` and `reboot` are unaffected because the hub is
-  already gone by then; a manual `S95waybeam stop`/`restart` on a live craft
-  now fails with a message instead of wedging the SoC. `/api/v1/restart` is
-  untouched — it re-execs the daemon without unloading modules.
+- **Fix.** The guard lives in `load-cv610-online stop_modules()`, next to the
+  `rmmod` it protects, so it covers every path that unloads — `S95waybeam
+  stop`, the start-failure rollback that also calls `$LOADER stop`, and a
+  hand-run `load-cv610-online stop`. It scans `/proc/*/fd` and refuses, naming
+  the holders.
+
+  `S95waybeam stop` additionally asks up front, via `load-cv610-online holders`
+  ignoring its own pids, so it can refuse *before* killing anything: refusing
+  after the kill would leave venc dead with the modules still loaded, which
+  `load-cv610-online start` then rejects as dirty state.
+
+  `rcK` and `reboot` are unaffected because the hub is already gone by then; a
+  manual `S95waybeam stop`/`restart` on a live craft now fails with a message
+  instead of wedging the SoC. `/api/v1/restart` is untouched — it re-execs the
+  daemon without unloading modules.
 
 ## [0.65.6] - 2026-08-16
 
