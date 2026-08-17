@@ -32,6 +32,19 @@ still_running()
 	pidof "$NAME" "$RESPAWN" "$WATCHDOG" >/dev/null 2>&1
 }
 
+# Foreign holders of an MPP device, ignoring the venc family. The check itself
+# lives in the loader, next to the rmmod it protects -- see the comment there
+# for why unloading under a live consumer wedges the SoC. This wrapper exists
+# only so stop() can refuse *before* it kills anything.
+#
+# rcK already gets the ordering right, because "ls -r" runs S97waybeam-hub stop
+# before S95waybeam -- the only reason a reboot has always been safe here while
+# a bare "stop" was not.
+mpp_holders()
+{
+	"$LOADER" holders "$(pidof "$NAME" "$RESPAWN" "$WATCHDOG" 2>/dev/null)"
+}
+
 start()
 {
 	if [ "$WAYBEAM_ENABLED" != "1" ]; then
@@ -63,6 +76,23 @@ start()
 
 stop()
 {
+	# Check for foreign holders before killing anything, so a refusal leaves
+	# the device streaming rather than half torn down -- venc dead with the
+	# modules still loaded is a state "$LOADER" start then refuses as dirty.
+	# Fail closed when the query itself fails. A loader predating the "holders"
+	# subcommand exits non-zero with empty stdout, which would otherwise read as
+	# "no holders" and hand back the very wedge this guards -- and a partially
+	# deployed pair (new init script, old loader) is exactly how that happens.
+	if ! holders=$(mpp_holders); then
+		echo "cannot query MPP holders via $LOADER -- refusing to unload" >&2
+		return 1
+	fi
+	if [ -n "$holders" ]; then
+		echo "refusing to unload CV610 modules: MPP devices still open by $holders" >&2
+		echo "stop those consumers first, e.g. /etc/init.d/S97waybeam-hub stop" >&2
+		return 1
+	fi
+
 	# Cover the current daemon plus either side of an API-respawn handoff.
 	# Never unload the MPP stack while any of them still owns the graph.
 	killall "$NAME" "$RESPAWN" "$WATCHDOG" 2>/dev/null || true

@@ -20,6 +20,45 @@ is_loaded()
 	grep -q "^$1 " /proc/modules
 }
 
+# Character devices created by the modules below. Derived from the target's
+# actual /dev, not from module names -- guessing from names missed ot_mipi_rx
+# (not "mipi_rx"), logmpp and venc_msg. To re-derive after a module set change:
+#   ls -l /dev | awk '$1 ~ /^c/ {print $NF}' | sort   # before and after a load
+# Built by concatenation, not as one multi-line literal: the lookup below matches
+# on " name ", so a name landing on a line boundary would carry a newline
+# instead of a space and never match at all.
+MPP_DEVICES="ab acodec adec aenc ai aio ao bus chnl h265e i2c isp_dev logmpp"
+MPP_DEVICES="$MPP_DEVICES mipi_rx mmz_userdev ot_mipi_rx rc rgn sys user vb"
+MPP_DEVICES="$MPP_DEVICES vca venc venc_msg vgs vi vpp vpss"
+
+is_mpp_device()
+{
+	case "$1" in /dev/*) ;; *) return 1 ;; esac
+	case " $MPP_DEVICES " in *" ${1#/dev/} "*) return 0 ;; esac
+	return 1
+}
+
+# Processes holding one of those devices open, minus any pid in $1.
+#
+# The drivers do not set .owner on their file operations, so opening the device
+# takes no module reference -- /proc/modules reports open_rgn "used=0" while a
+# consumer holds /dev/rgn. rmmod therefore succeeds under a live consumer and
+# frees the file operations it is still using, wedging the SoC hard enough to
+# need a physical power cycle. waybeam_hub is the one that matters in practice:
+# it holds /dev/rgn for the CV610 RGN OSD.
+mpp_holders()
+{
+	ignore=" ${1:-} "
+	for fd in /proc/[0-9]*/fd/*; do
+		[ -L "$fd" ] || continue
+		is_mpp_device "$(readlink "$fd" 2>/dev/null)" || continue
+		pid=${fd#/proc/}
+		pid=${pid%%/*}
+		case "$ignore" in *" $pid "*) continue ;; esac
+		echo "$pid($(cat "/proc/$pid/comm" 2>/dev/null))"
+	done | sort -u | tr '\n' ' '
+}
+
 load_stock()
 {
 	name=$1
@@ -106,6 +145,15 @@ start_modules()
 
 stop_modules()
 {
+	# Guard the rmmod itself, not its callers: every path that unloads --
+	# S95waybeam stop, the start-failure rollback, a hand-run stop -- is
+	# equally fatal with a consumer still attached.
+	holders=$(mpp_holders)
+	if [ -n "$holders" ]; then
+		echo "refusing to unload: MPP devices still open by $holders" >&2
+		echo "stop those consumers first, e.g. /etc/init.d/S97waybeam-hub stop" >&2
+		return 1
+	fi
 	modules="open_user open_mipi_rx open_sensor_i2c \
 		open_acodec open_aenc open_ai open_aio \
 		open_h265e open_venc open_rc open_chnl open_isp open_vi \
@@ -134,8 +182,13 @@ case "${1:-}" in
 	restart)
 		stop_modules && start_modules
 		;;
+	holders)
+		# Callers that must decide *before* destroying state ask here, passing
+		# the pids they own as one space-separated argument.
+		mpp_holders "${2:-}"
+		;;
 	*)
-		echo "Usage: $0 {start|stop|restart}" >&2
+		echo "Usage: $0 {start|stop|restart|holders [ignore-pids]}" >&2
 		exit 1
 		;;
 esac
