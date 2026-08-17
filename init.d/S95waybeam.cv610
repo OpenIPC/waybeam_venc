@@ -79,7 +79,14 @@ stop()
 	# Check for foreign holders before killing anything, so a refusal leaves
 	# the device streaming rather than half torn down -- venc dead with the
 	# modules still loaded is a state "$LOADER" start then refuses as dirty.
-	holders=$(mpp_holders)
+	# Fail closed when the query itself fails. A loader predating the "holders"
+	# subcommand exits non-zero with empty stdout, which would otherwise read as
+	# "no holders" and hand back the very wedge this guards -- and a partially
+	# deployed pair (new init script, old loader) is exactly how that happens.
+	if ! holders=$(mpp_holders); then
+		echo "cannot query MPP holders via $LOADER -- refusing to unload" >&2
+		return 1
+	fi
 	if [ -n "$holders" ]; then
 		echo "refusing to unload CV610 modules: MPP devices still open by $holders" >&2
 		echo "stop those consumers first, e.g. /etc/init.d/S97waybeam-hub stop" >&2

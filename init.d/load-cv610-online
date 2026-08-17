@@ -20,9 +20,16 @@ is_loaded()
 	grep -q "^$1 " /proc/modules
 }
 
-# Character devices created by the modules below.
-MPP_DEVICES="ab acodec adec aenc ai aio ao bus chnl h265e i2c isp_dev
-mipi_rx mmz_userdev rc rgn sys user vb vca venc vgs vi vpp vpss"
+# Character devices created by the modules below. Derived from the target's
+# actual /dev, not from module names -- guessing from names missed ot_mipi_rx
+# (not "mipi_rx"), logmpp and venc_msg. To re-derive after a module set change:
+#   ls -l /dev | awk '$1 ~ /^c/ {print $NF}' | sort   # before and after a load
+# Built by concatenation, not as one multi-line literal: the lookup below matches
+# on " name ", so a name landing on a line boundary would carry a newline
+# instead of a space and never match at all.
+MPP_DEVICES="ab acodec adec aenc ai aio ao bus chnl h265e i2c isp_dev logmpp"
+MPP_DEVICES="$MPP_DEVICES mipi_rx mmz_userdev ot_mipi_rx rc rgn sys user vb"
+MPP_DEVICES="$MPP_DEVICES vca venc venc_msg vgs vi vpp vpss"
 
 is_mpp_device()
 {
