@@ -91,9 +91,33 @@ rgn_jobs()  { rgn_field 2; }
 rgn_fails() { rgn_field 4; }
 
 osd_compositing() {
-	a=$(rgn_jobs); sleep 3; b=$(rgn_jobs)
-	[ -n "$a" ] && [ -n "$b" ] && [ "$b" -gt "$a" ] 2>/dev/null &&
-		[ "$(rgn_fails)" = 0 ]
+	# Two samples must advance, with no failed jobs. Retried once because the
+	# counters belong to the region, not to the hub: if the hub recreates the
+	# region between the samples the count RESTARTS, so b < a is a rebind in
+	# progress, not a stall. Without the retry this flakes exactly when the
+	# thing it is checking is working.
+	i=0
+	while [ "$i" -lt 3 ]; do
+		i=$((i + 1))
+		a=$(rgn_jobs); sleep 3; b=$(rgn_jobs)
+		[ -n "$a" ] && [ -n "$b" ] || return 1
+		[ "$b" -lt "$a" ] 2>/dev/null && continue
+		[ "$b" -gt "$a" ] 2>/dev/null && [ "$(rgn_fails)" = 0 ] && return 0
+		return 1
+	done
+	return 1
+}
+
+# The region is created by the hub a few seconds after ITS start, not ours, so
+# a baseline sampled too early reads as "this build has no OSD" and silently
+# downgrades the T2 assertion to a note. Wait for it when the hub is up.
+wait_for_rgn() {
+	i=0
+	while [ "$i" -lt 12 ]; do
+		[ -n "$(rgn_jobs)" ] && return 0
+		i=$((i + 1)); sleep 2
+	done
+	return 1
 }
 
 # ---------------------------------------------------------------- preconditions
@@ -104,6 +128,7 @@ echo "  config backed up to $BACKUP"
 [ -n "$(hub_pid)" ]  || $HUB  start >/dev/null 2>&1
 sleep 8
 base_mods=$(mods)
+[ -n "$(hub_pid)" ] && wait_for_rgn
 base_rgn=$(rgn_jobs)
 echo "  venc=$(venc_pid) hub=$(hub_pid) modules=$base_mods osd_jobs=${base_rgn:-none}"
 [ -n "$(hub_pid)" ] || { echo "hub is not running -- T1/T2/T3 need it up"; exit 1; }
@@ -177,6 +202,14 @@ else
 		chk "venc running in the new mode" test -n "$(venc_pid)"
 		chk "frames flowing in the new mode" flowing
 		chk "still no module reload" test "$(mods)" = "$base_mods"
+		# The nastier OSD case. The hub rebinds its region within ~1 s, but at
+		# the OLD window size, and only its own 5 s source poll re-anchors it
+		# to the smaller frame -- so for a few seconds an oversized region is
+		# attached to this channel. Assert both that venc survived it (above)
+		# and that the OSD ends up compositing anyway.
+		if [ -n "$base_rgn" ]; then
+			chk "hub OSD compositing after a mode-change restart" osd_compositing
+		fi
 	fi
 fi
 
