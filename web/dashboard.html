@@ -340,9 +340,10 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
 
   <div class="tab" onclick="switchTab('api')">API Reference</div>
 
-  <!-- Hidden until the /api/v1/iq probe in renderIQCategories() answers, so a
-       backend without the surface never flashes a tab that then vanishes. -->
-  <div class="tab" id="tab-btn-iq" onclick="switchTab('iq')" hidden>Image Quality</div>
+  <!-- Visible by default. applyIQCapability() hides it only when
+       /api/v1/capabilities positively reports routes.iq === false; starting
+       hidden made an init failure latch the tab off with no way back. -->
+  <div class="tab" id="tab-btn-iq" onclick="switchTab('iq')">Image Quality</div>
 
   <div class="tab" id="tab-btn-recordings" onclick="switchTab('recordings')">Recordings</div>
 
@@ -1478,8 +1479,6 @@ async function queryIQ(){
 
       } else {
 
-        IQ_LAST = r.data;
-
         pre.textContent = JSON.stringify(r.data, null, 2);
 
       }
@@ -1538,8 +1537,12 @@ function selectIQParam(name){
     document.getElementById('iq-expanded-form').innerHTML = '';
     document.getElementById('iq-simple-form').style.display = 'flex';
     document.getElementById('iq-param-name').value = name;
-    document.getElementById('iq-param-value').value = iqCurrentValue(name);
-    document.getElementById('iq-param-value').select();
+    /* Deliberately left empty. setIQParam() refuses an empty value, so
+       clicking a chip to inspect a parameter cannot write it back -- on
+       star6e's legacy path even an identical value forces enable=1 and
+       op_type=manual, dropping the block out of its auto curve. */
+    document.getElementById('iq-param-value').value = '';
+    document.getElementById('iq-param-value').focus();
   }
 }
 
@@ -1604,7 +1607,7 @@ function closeExpandedForm(){
 
 async function toggleIQEnabled(paramName, on){
   try{
-    const r = await api('/api/v1/iq/set?'+paramName+'.enabled='+(on?'1':'0'));
+    const r = await api('/api/v1/iq/set?'+encodeURIComponent(paramName+'.enabled')+'='+(on?'1':'0'));
     if(r.ok) toast(paramName+' '+(on?'enabled':'disabled'));
     else toast(r.error?.message||'Failed',false);
   }catch(e){toast(e.message,false);}
@@ -1626,7 +1629,7 @@ async function applyExpandedForm(paramName){
       val = Array.from(inputs).map(inp=>inp.value).join(',');
     }
     try{
-      const r = await api('/api/v1/iq/set?'+paramName+'.'+fd.n+'='+val);
+      const r = await api('/api/v1/iq/set?'+encodeURIComponent(paramName+'.'+fd.n)+'='+encodeURIComponent(val));
       if(r.ok){
         ok++;
         inputs.forEach(inp=>{inp.dataset.orig=inp.value;inp.classList.remove('changed');});
@@ -1660,26 +1663,6 @@ const IQ_CATEGORIES = [
   {name:'AWB Control',desc:'Auto white-balance engine parameters',
    params:['awb_attr_ex','awb_ct_weight','awb_multi_ls','awb_stabilizer']}
 ];
-
-/* Last /api/v1/iq response, so a chip can prefill the value the ISP holds
-   instead of an empty box the operator has to guess at. */
-let IQ_LAST = null;
-
-function iqCurrentValue(param){
-  if(!IQ_LAST) return '';
-  const dot = param.indexOf('.');
-  /* star6e/maruko emit a JSON boolean for bool-only params; String(true) is
-     "true", which the API's numeric validator rejects. Normalise to 1/0. */
-  const num = v => (typeof v === 'boolean') ? (v ? '1' : '0') : String(v);
-  if(dot < 0){
-    const p = IQ_LAST[param];
-    return (p && p.value !== undefined) ? num(p.value) : '';
-  }
-  const g = IQ_LAST[param.substring(0, dot)];
-  const v = g && g.fields ? g.fields[param.substring(dot+1)] : undefined;
-  if(v === undefined) return '';
-  return Array.isArray(v) ? v.map(num).join(',') : num(v);
-}
 
 /* Backends that describe their own knob set (cv610) drive the list from the
    response, so the field table stays in one place — the C table that also
@@ -1718,10 +1701,12 @@ function renderIQSchema(container, schema){
 function applyIQCapability(routes){
   const iqTab  = document.getElementById('tab-btn-iq');
   const impBtn = document.getElementById('iq-import-btn');
-  if(!routes) return;                 /* unknown: leave as-is, never latch off */
-  if(iqTab)  iqTab.hidden  = (routes.iq === false);
+  /* Hide ONLY on a positive false. An absent or unreadable capabilities
+     response must leave both controls visible -- a backend that cannot be
+     asked is not a backend that lacks the surface. */
+  if(iqTab)  iqTab.hidden  = !!(routes && routes.iq === false);
   /* /api/v1/iq/import is compiled per backend and 501s where it is absent. */
-  if(impBtn) impBtn.hidden = (routes.iq_import === false);
+  if(impBtn) impBtn.hidden = !!(routes && routes.iq_import === false);
 }
 
 /* Loaded on entry to the IQ tab rather than at page load, and re-loaded on
@@ -1747,7 +1732,6 @@ async function renderIQCategories(){
   }
 
   container.innerHTML = '';
-  IQ_LAST = data;
 
   if(Array.isArray(data._schema)){
     renderIQSchema(container, data._schema);
@@ -1791,25 +1775,7 @@ async function setIQParam(){
 
     const r = await api('/api/v1/iq/set?'+encodeURIComponent(name)+'='+encodeURIComponent(value));
 
-    if(r.ok){
-
-      /* Show what the ISP kept, not what was typed — values are clamped to
-         the backend's declared range, so the two can differ. */
-      const q = await api('/api/v1/iq');
-
-      if(q && q.ok && q.data){
-
-        IQ_LAST = q.data;
-
-        const got = iqCurrentValue(name);
-
-        document.getElementById('iq-param-value').value = got || value;
-
-        toast(name+' = '+(got || value) + (got && got !== value ? ' (clamped)' : ''));
-
-      } else toast(name+' = '+value);
-
-    }
+    if(r.ok) toast(name+' = '+value);
 
     else toast(r.error?.message || 'Set failed', false);
 
@@ -1851,11 +1817,11 @@ async function init(){
 
     const [cfgR, capR, verR, modesR] = await Promise.all([
 
-      api('/api/v1/config'),
+      api('/api/v1/config').catch(()=>({ok:false})),
 
-      api('/api/v1/capabilities'),
+      api('/api/v1/capabilities').catch(()=>({ok:false})),
 
-      api('/api/v1/version'),
+      api('/api/v1/version').catch(()=>({ok:false})),
 
       api('/api/v1/modes').catch(()=>({ok:false}))
 
@@ -1901,9 +1867,9 @@ async function init(){
       // rather than leaving a tab that loads into a permanent error. The
       // per-field N/A greying in renderSettings() covers the Settings tab;
       // this is for tabs with no capability entry to grey. The IQ tab is
-      // decided by probing /api/v1/iq in renderIQCategories(), not by
-      // backend name — a backend that gains or loses the surface then needs
-      // no edit here.
+      // decided by applyIQCapability() from /api/v1/capabilities'
+      // data.routes.iq, not by backend name — a backend that gains or loses
+      // the surface then needs no edit here.
       if(backendName === 'cv610'){
         // The listing works (it is a directory read), but nothing services a
         // record request on cv610 — the routes answer 501. Keep the tab,

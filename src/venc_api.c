@@ -873,6 +873,10 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"isp.keep_aspect",
 			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size", "video0.qp_delta",
+			/* Read by cv610_apply_qp_bounds(), live and at startup.
+			 * CBR cannot hold its target in a noise-dominated scene
+			 * without room to raise QP. */
+			"video0.min_qp", "video0.max_qp",
 			"outgoing.enabled", "outgoing.server",
 			"outgoing.max_payload_size", "outgoing.audio_port",
 			"outgoing.connected_udp",
@@ -1420,18 +1424,32 @@ static int parse_first_query_param(const char *query, char *key, size_t key_sz,
 	const char *amp = strchr(query, '&');
 	if (eq) {
 		size_t klen = (size_t)(eq - query);
-		if (klen >= key_sz) klen = key_sz - 1;
+		if (klen >= key_sz) {
+			if (error_message) *error_message = "parameter name too long";
+			return -1;
+		}
 		memcpy(key, query, klen);
 		key[klen] = '\0';
 		const char *vstart = eq + 1;
 		size_t vlen = amp ? (size_t)(amp - vstart) : strlen(vstart);
-		if (vlen >= val_sz) vlen = val_sz - 1;
+		/* Reject rather than truncate.  A silently shortened value can still
+		 * satisfy a caller's own validation -- an array setter counting
+		 * comma-separated elements sees the right count with its last element
+		 * cut mid-token -- and then writes something the operator never asked
+		 * for.  No legitimate request approaches this length. */
+		if (vlen >= val_sz) {
+			if (error_message) *error_message = "parameter value too long";
+			return -1;
+		}
 		memcpy(val, vstart, vlen);
 		val[vlen] = '\0';
 	} else {
 		/* key only, no value (used by GET) */
 		size_t klen = amp ? (size_t)(amp - query) : strlen(query);
-		if (klen >= key_sz) klen = key_sz - 1;
+		if (klen >= key_sz) {
+			if (error_message) *error_message = "parameter name too long";
+			return -1;
+		}
 		memcpy(key, query, klen);
 		key[klen] = '\0';
 		val[0] = '\0';
@@ -2891,7 +2909,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.18.3\","
+		"\"contract_version\":\"0.18.4\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);

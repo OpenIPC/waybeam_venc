@@ -1,12 +1,12 @@
 /*
  * imx662_sensor_ctl.c — IMX662 low-level transport + power-on register init.
  *
- * SCAFFOLD (original). Implements the standard HiSilicon sensor transport
- * (Linux /dev/i2c-N + OT_I2C_SLAVE_FORCE) and the per-mode register init the
- * ISP calls at stream start. The bulk power-on "reserved register" block is
- * left as a TODO to transcribe from the Sony IMX662 datasheet /
- * will127534/imx662-v4l2-driver at integration — those magic values cannot be
- * invented and must match silicon.
+ * Implements the standard HiSilicon sensor transport (Linux /dev/i2c-N +
+ * OT_I2C_SLAVE_FORCE) and the per-mode register init the ISP calls at stream
+ * start. The bulk power-on "reserved register" block lives in imx662_cfg.h,
+ * transcribed from pauliustumas/imx662 and cross-checked against Sony's
+ * IMX662_Register.xlsx; imx662_write_init_seq() writes it in standby, before
+ * the per-mode registers below, so the per-mode writes win where they overlap.
  */
 
 #include <stdio.h>

@@ -119,7 +119,17 @@ static td_s32 cmos_get_ae_default(ot_vi_pipe vi_pipe, ot_isp_ae_sensor_default *
 	 * zero makes the AE library emit 1, below the ISP's legal minimum 256. */
 	ae_sns_dft->isp_dgain_shift          = 8;
 	ae_sns_dft->min_isp_dgain_target     = 1u << ae_sns_dft->isp_dgain_shift;
-	ae_sns_dft->max_isp_dgain_target     = 32u << ae_sns_dft->isp_dgain_shift;
+	/* ISP digital gain is the worst gain in the chain: it amplifies the noise
+	 * and the quantisation equally and buys no SNR, where analog gain and HCG
+	 * at least act before the ADC.  32x let the total ceiling reach 398 * 32
+	 * = 12739x (~82 dB), and on the .181 bench a dark room at that ceiling was
+	 * judged "super grainy" while 1-2 steps down looked better.  4x puts the
+	 * ceiling at 398 * 4 = 1592x (~64 dB), inside the range that was preferred,
+	 * and makes AE exhaust analog before it reaches for digital.
+	 *
+	 * This is an operator trade -- darker but cleaner -- so it is also live at
+	 * /api/v1/iq/set?exposure.auto.ispd_gain_max=<n> for tuning by eye. */
+	ae_sns_dft->max_isp_dgain_target     = 4u << ae_sns_dft->isp_dgain_shift;
 
 	switch (sns_state->wdr_mode) {
 		case OT_WDR_MODE_NONE:
@@ -232,7 +242,11 @@ static td_void cmos_dgain_calc_table(ot_vi_pipe vi_pipe, td_u32 *dgain_lin, td_u
 	*dgain_db  = 0;
 }
 
-/* gain register at fast-update i2c_data[3..4]. */
+/* Conversion-gain state, per pipe.  Held here rather than derived fresh each
+ * frame so the hysteresis below has something to latch against. */
+static td_bool g_imx662_hcg_on[OT_ISP_MAX_PIPE_NUM] = { 0 };
+
+/* gain register at fast-update i2c_data[3..4], conversion gain at [8]. */
 static td_void cmos_gains_update(ot_vi_pipe vi_pipe, td_u32 again, td_u32 dgain)
 {
 	ot_isp_sns_state *sns_state = imx662_get_ctx(vi_pipe);
@@ -245,6 +259,43 @@ static td_void cmos_gains_update(ot_vi_pipe vi_pipe, td_u32 again, td_u32 dgain)
 
 	if (reg > IMX662_GAIN_REG_MAX) {
 		reg = IMX662_GAIN_REG_MAX;
+	}
+
+	/* Dual conversion gain.  HCG lowers read noise; it also multiplies the
+	 * frame by ~5.8x, so the written code must give that back or AE has no
+	 * fixed point in the band where it engages (see imx662_cmos.h).
+	 *
+	 * `reg` arrives as the TOTAL gain the AE asked for, so subtracting the
+	 * offset keeps cmos_again_calc_table()'s reported again_lin -- and hence
+	 * the ISP's ISO bucket, which indexes the sharpen, saturation and NR
+	 * tables -- describing the gain actually delivered.
+	 *
+	 * Slot 8 is linear-mode only: ClearHDR needs 3030h = 02h and a matching
+	 * FDG_SEL1 (3031h) that has no slot here, so stamping 0/1 every frame
+	 * would silently corrupt an HDR blend.  cmos_set_wdr_mode() rejects every
+	 * non-linear mode today; this keeps that true if it stops doing so. */
+	if (sns_state->wdr_mode == OT_WDR_MODE_NONE) {
+		if (!g_imx662_hcg_on[vi_pipe] && reg >= IMX662_HCG_ON_REG) {
+			g_imx662_hcg_on[vi_pipe] = TD_TRUE;
+		} else if (g_imx662_hcg_on[vi_pipe] && reg < IMX662_HCG_OFF_REG) {
+			g_imx662_hcg_on[vi_pipe] = TD_FALSE;
+		}
+		if (g_imx662_hcg_on[vi_pipe]) {
+			/* Test BEFORE subtracting: reg is unsigned, so an underflow
+			 * would wrap to a huge value that a post-subtraction floor
+			 * check reads as "above the floor" and lets through.  The
+			 * hysteresis makes this unreachable (latched implies
+			 * reg >= OFF_REG, and the header asserts
+			 * OFF_REG - OFFSET >= the floor), but a guard that cannot
+			 * catch the case it names is worse than no guard. */
+			if (reg < IMX662_HCG_GAIN_OFFSET + IMX662_HCG_GAIN_REG_MIN) {
+				reg = IMX662_HCG_GAIN_REG_MIN;
+			} else {
+				reg -= IMX662_HCG_GAIN_OFFSET;
+			}
+		}
+		sns_state->regs_info[0].i2c_data[8].data =
+			g_imx662_hcg_on[vi_pipe] ? IMX662_FDG_HCG : IMX662_FDG_LCG;
 	}
 
 	sns_state->regs_info[0].i2c_data[3].data = low_8bits(reg);
@@ -446,16 +497,20 @@ static td_s32 cmos_set_wdr_mode(ot_vi_pipe vi_pipe, td_u8 mode)
 static td_void cmos_comm_sns_reg_info_init(ot_vi_pipe vi_pipe, ot_isp_sns_state *sns_state)
 {
 	td_u32 i;
-	const td_u16 reg_addr[8] = {
+	/* Sized from the initializer so adding a slot cannot silently overflow;
+	 * reg_num below is derived from it for the same reason. */
+	const td_u16 reg_addr[] = {
 		IMX662_REG_SHR0_L, IMX662_REG_SHR0_M, IMX662_REG_SHR0_H,   /* 0..2 exposure */
 		IMX662_REG_GAIN_L, IMX662_REG_GAIN_H,                       /* 3..4 gain     */
-		IMX662_REG_VMAX_L, IMX662_REG_VMAX_M, IMX662_REG_VMAX_H     /* 5..7 vmax     */
+		IMX662_REG_VMAX_L, IMX662_REG_VMAX_M, IMX662_REG_VMAX_H,    /* 5..7 vmax     */
+		IMX662_REG_FDG_SEL0                                         /* 8    HCG/LCG  */
 	};
 
 	sns_state->regs_info[0].sns_type         = OT_ISP_SNS_TYPE_I2C;
 	sns_state->regs_info[0].com_bus.i2c_dev  = g_imx662_bus_info[vi_pipe].i2c_dev;
 	sns_state->regs_info[0].cfg2_valid_delay_max = 2;
-	sns_state->regs_info[0].reg_num          = 8;
+	sns_state->regs_info[0].reg_num =
+		(td_u32)(sizeof(reg_addr) / sizeof(reg_addr[0]));
 
 	for (i = 0; i < sns_state->regs_info[0].reg_num; i++) {
 		sns_state->regs_info[0].i2c_data[i].update        = TD_TRUE;
@@ -545,6 +600,11 @@ static td_void sensor_global_init(ot_vi_pipe vi_pipe)
 					  sizeof(ot_isp_sns_regs_info));
 	(td_void)memset_s(&sns_state->regs_info[1], sizeof(ot_isp_sns_regs_info), 0,
 					  sizeof(ot_isp_sns_regs_info));
+	/* Conversion-gain latch is per-session state, reset alongside regs_info.
+	 * A reinit landing while the scene is still dark would otherwise assert
+	 * HCG on frame 1 with no gain measurement behind it -- with the offset
+	 * compensation now applied, that is a 5.8x exposure error. */
+	g_imx662_hcg_on[vi_pipe] = TD_FALSE;
 }
 
 static td_s32 cmos_init_sensor_exp_function(ot_isp_sns_exp_func *sensor_exp_func)
