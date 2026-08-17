@@ -207,6 +207,14 @@ echo "  NOTE  module reload is now poisoned until reboot -- 'reload' is NOT the"
 echo "        recovery after a hard kill; reboot is. venc itself self-heals above."
 
 echo
+# T6 leaves video0.size at the test value, and only T5 restored it. Put the
+# craft back on its configured mode and restart into it, so the bench is not
+# silently left encoding 640x360 under a message claiming it was restored.
+cp "$BACKUP" "$CFG"
+$INIT restart >/dev/null 2>&1
+sleep 8
+chk "config restored and venc restarted into it" test -n "$(venc_pid)"
+echo "  encoded size now: $(out_size)"
 echo "Config restored from $BACKUP."
 echo "Still to check by hand: the OSD still renders after T2 (the hub keeps its"
 echo "RGN regions now that open_rgn is never unloaded), and one reboot."
