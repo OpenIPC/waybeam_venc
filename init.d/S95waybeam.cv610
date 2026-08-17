@@ -32,19 +32,6 @@ still_running()
 	pidof "$NAME" "$RESPAWN" "$WATCHDOG" >/dev/null 2>&1
 }
 
-# Foreign holders of an MPP device, ignoring the venc family. The check itself
-# lives in the loader, next to the rmmod it protects -- see the comment there
-# for why unloading under a live consumer wedges the SoC. This wrapper exists
-# only so stop() can refuse *before* it kills anything.
-#
-# rcK already gets the ordering right, because "ls -r" runs S97waybeam-hub stop
-# before S95waybeam -- the only reason a reboot has always been safe here while
-# a bare "stop" was not.
-mpp_holders()
-{
-	"$LOADER" holders "$(pidof "$NAME" "$RESPAWN" "$WATCHDOG" 2>/dev/null)"
-}
-
 start()
 {
 	if [ "$WAYBEAM_ENABLED" != "1" ]; then
@@ -76,25 +63,7 @@ start()
 
 stop()
 {
-	# Check for foreign holders before killing anything, so a refusal leaves
-	# the device streaming rather than half torn down -- venc dead with the
-	# modules still loaded is a state "$LOADER" start then refuses as dirty.
-	# Fail closed when the query itself fails. A loader predating the "holders"
-	# subcommand exits non-zero with empty stdout, which would otherwise read as
-	# "no holders" and hand back the very wedge this guards -- and a partially
-	# deployed pair (new init script, old loader) is exactly how that happens.
-	if ! holders=$(mpp_holders); then
-		echo "cannot query MPP holders via $LOADER -- refusing to unload" >&2
-		return 1
-	fi
-	if [ -n "$holders" ]; then
-		echo "refusing to unload CV610 modules: MPP devices still open by $holders" >&2
-		echo "stop those consumers first, e.g. /etc/init.d/S97waybeam-hub stop" >&2
-		return 1
-	fi
-
 	# Cover the current daemon plus either side of an API-respawn handoff.
-	# Never unload the MPP stack while any of them still owns the graph.
 	killall "$NAME" "$RESPAWN" "$WATCHDOG" 2>/dev/null || true
 	i=0
 	while still_running && [ "$i" -lt 100 ]; do
@@ -103,16 +72,35 @@ stop()
 	done
 	if still_running; then
 		echo "$NAME did not stop within 10 seconds" >&2
-		echo "refusing to unload CV610 modules while the graph is owned" >&2
 		return 1
 	fi
 	rm -f "$PIDFILE"
-	"$LOADER" stop
-	echo "Stopped $NAME"
+	# The MPP modules stay loaded, the way they do on star6e and maruko. venc
+	# tears its own graph down in mpp_cleanup() -- including vb_exit() from the
+	# process that created it, which is the only process allowed to -- so the
+	# next start re-inits against the modules already up. Unloading them here
+	# was bring-up scaffolding, and it is what wedged the SoC whenever a
+	# consumer still held one of their devices.
+	echo "Stopped $NAME (MPP modules left loaded)"
+}
+
+# Recovery: after a venc that died without running mpp_cleanup(), VB is held by
+# a dead owner and the next start refuses if the mode's pool layout differs.
+# This is the way out. It unloads, so the loader's holder check applies -- stop
+# waybeam_hub first.
+reload()
+{
+	stop || return 1
+	# Pass the same profile start() does. A bare "$LOADER" restart reloads with
+	# the loader's own defaults -- video-only, imx662 clock -- and then start()
+	# refuses the audio mismatch, so the craft comes back with no daemon at all.
+	CV610_SENSOR_PROFILE="$CV610_SENSOR_PROFILE" \
+		CV610_AUDIO="$CV610_AUDIO" "$LOADER" restart || return 1
+	start
 }
 
 case "${1:-}" in
-	start|stop) "$1" ;;
+	start|stop|reload) "$1" ;;
 	restart) stop && start ;;
-	*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+	*) echo "Usage: $0 {start|stop|restart|reload}" >&2; exit 1 ;;
 esac

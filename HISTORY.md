@@ -1,5 +1,81 @@
 # History
 
+## [0.65.8] - 2026-08-17
+
+CV610 venc restarts no longer reload the MPP kernel modules — the same model
+star6e and maruko have always used, where the init script never touches
+`insmod`/`rmmod` at all.
+
+- **The reload was bring-up scaffolding.** Both cv610 init scripts have been
+  unchanged since the initial backend commit. `mpp_cleanup()` is already a
+  complete teardown and, critically, calls `ss_mpi_vb_exit()` *from the process
+  that created VB* — the only process permitted to. So after a graceful stop
+  there is nothing for a module reload to clean up, and the next start can
+  re-init the graph against the modules already loaded.
+
+- **What the reload was actually protecting.** A venc that dies without running
+  `mpp_cleanup()` leaves VB held by a dead owner; `vb_set_cfg` then returns
+  BUSY. That was tolerated blindly, which is only harmless while the modules
+  are reloaded every time. Without the reload it would mean running on the
+  previous mode's pool sizes.
+
+  `sys_setup()` now reads the live config back with `ss_mpi_vb_get_cfg()` and
+  compares the pools it was about to request. Identical layout is adopted and
+  says so; a different layout is a hard failure naming the way out
+  (`load-cv610-online restart`) instead of silently handing out wrong-sized
+  blocks that surface later as corruption.
+
+- `load-cv610-online start` is idempotent when the full set is up (`open_user`
+  is the last module loaded, so its presence means a completed sequence); a
+  *partial* set is still refused as dirty. `S95waybeam stop` leaves the modules
+  loaded, and a new `S95waybeam reload` is the recovery path after a crash —
+  it unloads, so the holder guard applies and the hub must be stopped first.
+
+- **ISP, not VB, is what a crash leaves behind.** Measured on `.181`: after
+  `kill -9`, VB *is* released (set_cfg succeeds) but ISP[0] stays inited and the
+  next run dies at `ss_mpi_isp_mem_init` with `0xa01c800c` "already inited".
+  `sys_setup()` now pre-cleans with `ss_mpi_isp_exit(VI_PIPE)` alongside the
+  existing `sys_exit`/`vb_exit`, before anything of ours is registered, so a
+  hard kill recovers without a module reload.
+
+- `S95waybeam reload` passes `CV610_SENSOR_PROFILE`/`CV610_AUDIO` through to the
+  loader. A bare `$LOADER restart` reloads with the loader's own defaults —
+  video-only, imx662 clock — and `start()` then correctly refuses the audio
+  mismatch, leaving the craft with no daemon at all.
+
+- Device verification on `.181`, `scripts/cv610_reload_free_verify.sh`:
+  **23 passed, 0 failed**. T3 restarts across a real mode change and asserts the
+  *encoded geometry* moved (1920x1080 → 640x360) from venc's own VPSS line,
+  because asserting the config key instead let an earlier revision report a mode
+  change that never happened. T2 asserts the hub's OSD survived, from the
+  compositor's VGS job counters in `/proc/umap/rgn` rather than the hub's own
+  perf line — the hub counts the publish it made, which is the stimulus; those
+  counters count the composite that consumed it. Verified to fail on a region
+  that is not there. T3 asserts it too, across the mode change, because the hub
+  rebinds at its old window size and only its own source poll re-anchors it: an
+  oversized region sits on the smaller channel for a few seconds. Measured
+  benign — 30 s at 640x360 with `job_fail` 0 and venc streaming.
+
+Two things the hardware showed that are **not** fixed here:
+
+- **A SIGKILL leaks two `aenc` MMB blocks** (`aenc(0)_strm`, `aenc(0)_cir`,
+  16 KB each) and after that the next module unload/reload fails at sys.ko init
+  — `no sys ko!` then `load vpp.ko ...FAILURE!` — for the rest of the boot, so
+  even a fresh load from zero modules fails. Graceful stops leak nothing. This
+  makes `reload` the wrong recovery after a hard kill; reboot is. It is also an
+  independent argument for this change: the fewer module reload cycles, the
+  better, and it plausibly underlies the old "reboot instead" folklore.
+
+- **The hub's RGN OSD does not survive a venc restart.** With `open_rgn` no
+  longer unloaded the hub keeps its `/dev/rgn` handle, but the region does not
+  survive our teardown: after a restart `/proc/umap/rgn` lists **no regions at
+  all** — `mpp_cleanup()`'s `ss_mpi_sys_exit()` takes the whole table with it,
+  because MPP objects are kernel state shared across processes. The hub keeps
+  painting into a handle that no longer exists: `osd_render` goes from
+  `40 rgn … drops 0` to `0 rgn … drops 42`, silently. A hub restart restores it.
+  Fixed on the hub side in waybeam-hub#213 (the region is recreated and rebound
+  after five consecutive failed publishes), which is what T2 now asserts.
+
 ## [0.65.7] - 2026-08-17
 
 CV610 SoC wedge on `stop`. On the `.181` bench, `S95waybeam stop` while
