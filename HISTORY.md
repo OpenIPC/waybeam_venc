@@ -44,10 +44,14 @@ star6e and maruko have always used, where the init script never touches
   mismatch, leaving the craft with no daemon at all.
 
 - Device verification on `.181`, `scripts/cv610_reload_free_verify.sh`:
-  **20 passed, 0 failed**. T3 restarts across a real mode change and asserts the
+  **22 passed, 0 failed**. T3 restarts across a real mode change and asserts the
   *encoded geometry* moved (1920x1080 → 640x360) from venc's own VPSS line,
   because asserting the config key instead let an earlier revision report a mode
-  change that never happened.
+  change that never happened. T2 asserts the hub's OSD survived, from the
+  compositor's VGS job counters in `/proc/umap/rgn` rather than the hub's own
+  perf line — the hub counts the publish it made, which is the stimulus; those
+  counters count the composite that consumed it. Verified to fail on a region
+  that is not there.
 
 Two things the hardware showed that are **not** fixed here:
 
@@ -60,12 +64,14 @@ Two things the hardware showed that are **not** fixed here:
   better, and it plausibly underlies the old "reboot instead" folklore.
 
 - **The hub's RGN OSD does not survive a venc restart.** With `open_rgn` no
-  longer unloaded the hub keeps its `/dev/rgn` handle, but the region was bound
-  to a VENC channel venc destroys and recreates: `osd_render` goes from
-  `40 rgn … drops 0` to `0 rgn … drops 42` — still painting, every push
-  dropped. A hub restart restores it (`drops 0`). Reattach belongs in
-  waybeam-hub; until it lands, restarting venc on a craft means restarting the
-  hub after it.
+  longer unloaded the hub keeps its `/dev/rgn` handle, but the region does not
+  survive our teardown: after a restart `/proc/umap/rgn` lists **no regions at
+  all** — `mpp_cleanup()`'s `ss_mpi_sys_exit()` takes the whole table with it,
+  because MPP objects are kernel state shared across processes. The hub keeps
+  painting into a handle that no longer exists: `osd_render` goes from
+  `40 rgn … drops 0` to `0 rgn … drops 42`, silently. A hub restart restores it.
+  Fixed on the hub side in waybeam-hub#213 (the region is recreated and rebound
+  after five consecutive failed publishes), which is what T2 now asserts.
 
 ## [0.65.7] - 2026-08-17
 

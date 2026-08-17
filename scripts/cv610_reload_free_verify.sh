@@ -73,6 +73,29 @@ set_size() {
 	return 0
 }
 
+# The hub's OSD region, HIRGN_HANDLE in waybeam-hub src/osd_backend_hirgn.c.
+# Fixed there so it never collides with venc's own debug OSD on handle 0.
+HUB_RGN_HANDLE=8
+
+# The compositor's job counters for that region, from /proc/umap/rgn:
+#   hdl  call_cnt  job_suc  job_fail  task_suc  task_fail  end_suc  end_fail
+# Read these, not the hub's perf line: the hub counts a publish it made, which
+# is the stimulus. These count the composite that consumed it.
+rgn_field() {
+	awk -v hdl="$HUB_RGN_HANDLE" -v col="$1" '
+		/region call vgs/      { in_tbl = 1; next }
+		in_tbl && $1 == hdl && NF >= 8 { print $col; exit }
+	' /proc/umap/rgn 2>/dev/null
+}
+rgn_jobs()  { rgn_field 2; }
+rgn_fails() { rgn_field 4; }
+
+osd_compositing() {
+	a=$(rgn_jobs); sleep 3; b=$(rgn_jobs)
+	[ -n "$a" ] && [ -n "$b" ] && [ "$b" -gt "$a" ] 2>/dev/null &&
+		[ "$(rgn_fails)" = 0 ]
+}
+
 # ---------------------------------------------------------------- preconditions
 echo "=== preconditions ==="
 cp "$CFG" "$BACKUP" || { echo "cannot back up $CFG"; exit 1; }
@@ -81,7 +104,8 @@ echo "  config backed up to $BACKUP"
 [ -n "$(hub_pid)" ]  || $HUB  start >/dev/null 2>&1
 sleep 8
 base_mods=$(mods)
-echo "  venc=$(venc_pid) hub=$(hub_pid) modules=$base_mods"
+base_rgn=$(rgn_jobs)
+echo "  venc=$(venc_pid) hub=$(hub_pid) modules=$base_mods osd_jobs=${base_rgn:-none}"
 [ -n "$(hub_pid)" ] || { echo "hub is not running -- T1/T2/T3 need it up"; exit 1; }
 
 # ------------------------------------------------------- T1: the guard still fires
@@ -106,6 +130,20 @@ chk "hub survived the restart" test -n "$(hub_pid)"
 chk "modules never unloaded ($base_mods)" test "$(mods)" = "$base_mods"
 chk "frames flowing after restart" flowing
 chk "sys_setup ran vb_set_cfg" grep -q "ss_mpi_vb_set_cfg" "$LOG"
+
+# The check this suite used to hand to a human. venc's teardown takes the whole
+# RGN table with it (mpp_cleanup -> ss_mpi_sys_exit, and MPP objects are kernel
+# state shared across processes), so the hub's OSD region does not merely go
+# stale -- it disappears, and before waybeam-hub#212 the hub kept painting into
+# nothing without saying so.
+now_rgn=$(rgn_jobs)
+echo "  OSD region $HUB_RGN_HANDLE: was $base_rgn, now ${now_rgn:-GONE}, fails=$(rgn_fails)"
+if [ -z "$base_rgn" ]; then
+	info "hub had no OSD region before the restart (built without CV610_OSD?) -- OSD survival UNVERIFIED"
+else
+	chk "hub OSD still compositing after the restart (waybeam-hub#212)" \
+		osd_compositing
+fi
 
 # ------------------------------------------- T3: restart ACROSS a mode change
 echo
@@ -216,7 +254,7 @@ sleep 8
 chk "config restored and venc restarted into it" test -n "$(venc_pid)"
 echo "  encoded size now: $(out_size)"
 echo "Config restored from $BACKUP."
-echo "Still to check by hand: the OSD still renders after T2 (the hub keeps its"
-echo "RGN regions now that open_rgn is never unloaded), and one reboot."
+echo "Still to check by hand: one reboot. (The OSD is asserted in T2 now, via"
+echo "the compositor's own job counters in /proc/umap/rgn.)"
 summary
 [ "$fail" = 0 ]
