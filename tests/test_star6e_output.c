@@ -1595,6 +1595,138 @@ static int test_star6e_output_always_sends_under_pressure(void)
 	return failures;
 }
 
+/* ── frame-ring recovery-IDR paths ─────────────────────────────────────── */
+
+static int g_test_ring_idr_calls;
+static int g_test_ring_idr_honored;
+
+static int test_ring_request_idr_stub(void *ctx)
+{
+	(void)ctx;
+	g_test_ring_idr_calls++;
+	return g_test_ring_idr_honored;
+}
+
+static void test_ring_fill_p_frame(MI_VENC_Pack_t *pack,
+	MI_VENC_Stream_t *stream, uint8_t *data, size_t len)
+{
+	memset(pack, 0, sizeof(*pack));
+	pack->data = data;
+	pack->length = (MI_U32)len;
+	pack->packNum = 1;
+	pack->packetInfo[0].offset = 0;
+	pack->packetInfo[0].length = (MI_U32)len;
+	pack->packetInfo[0].packType.h265Nalu = 1;  /* TRAIL_R: breaks chain */
+	memset(stream, 0, sizeof(*stream));
+	stream->count = 1;
+	stream->packet = pack;
+}
+
+/* Ring-full drop: the 1 s holdoff paces HONORED requests, and a request the
+ * shared 100 ms limiter swallowed rolls the anchor back so the next drop
+ * retries instead of leaving the chain unhealed. */
+static int test_star6e_output_frame_ring_idr_holdoff(void)
+{
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	MI_VENC_Pack_t pack;
+	MI_VENC_Stream_t stream;
+	uint8_t data[8] = { 0, 0, 0, 1, 0x02, 0x01, 0xAA, 0xBB };
+	int failures = 0;
+	int i;
+
+	CHECK("ring idr prepare", star6e_output_prepare(&setup,
+		"frame-shm://test_idr_holdoff", "compact", 0) == 0);
+	CHECK("ring idr init", star6e_output_init(&output, &setup) == 0);
+	output.request_idr = test_ring_request_idr_stub;
+	output.idr_ctx = NULL;
+	test_ring_fill_p_frame(&pack, &stream, data, sizeof(data));
+
+	for (i = 0; i < 8; ++i) {  /* fill all 8 slots */
+		CHECK("ring idr fill slot",
+			star6e_output_send_frame(&output, &stream, 0,
+				NULL, NULL) > 0);
+	}
+	g_test_ring_idr_calls = 0;
+	g_test_ring_idr_honored = 1;
+	CHECK("ring idr 9th drops",
+		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
+	CHECK("ring idr fired once", g_test_ring_idr_calls == 1);
+	CHECK("ring idr next drop paced",
+		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
+	CHECK("ring idr holdoff quiet", g_test_ring_idr_calls == 1);
+
+	/* Swallowed request: anchor must roll back so the next drop retries. */
+	output.drop_idr_last_us = 0;
+	g_test_ring_idr_honored = 0;
+	CHECK("ring idr swallowed drop",
+		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
+	CHECK("ring idr swallowed called", g_test_ring_idr_calls == 2);
+	CHECK("ring idr retry drop",
+		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
+	CHECK("ring idr retried immediately", g_test_ring_idr_calls == 3);
+	g_test_ring_idr_honored = 1;
+	CHECK("ring idr honored drop",
+		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
+	CHECK("ring idr honored called", g_test_ring_idr_calls == 4);
+	CHECK("ring idr paced again",
+		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
+	CHECK("ring idr paced count", g_test_ring_idr_calls == 4);
+
+	star6e_output_teardown(&output);
+	return failures;
+}
+
+/* A pack reporting more NALs than packetInfo holds must abort the frame —
+ * never ship it truncated — request recovery, and leave the ring usable. */
+static int test_star6e_output_frame_ring_truncation_abort(void)
+{
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	MI_VENC_Pack_t pack;
+	MI_VENC_Stream_t stream;
+	uint8_t data[64] = { 0 };
+	size_t sent;
+	int failures = 0;
+	unsigned int k;
+
+	CHECK("ring trunc prepare", star6e_output_prepare(&setup,
+		"frame-shm://test_trunc_abort", "compact", 0) == 0);
+	CHECK("ring trunc init", star6e_output_init(&output, &setup) == 0);
+	output.request_idr = test_ring_request_idr_stub;
+	output.idr_ctx = NULL;
+	g_test_ring_idr_calls = 0;
+	g_test_ring_idr_honored = 1;
+
+	memset(&pack, 0, sizeof(pack));
+	pack.data = data;
+	pack.length = sizeof(data);
+	pack.packNum = 9;  /* one more than the 8-entry packetInfo table */
+	for (k = 0; k < 8; ++k) {
+		pack.packetInfo[k].offset = k * 4;
+		pack.packetInfo[k].length = 4;
+		pack.packetInfo[k].packType.h265Nalu = 1;
+	}
+	memset(&stream, 0, sizeof(stream));
+	stream.count = 1;
+	stream.packet = &pack;
+
+	sent = star6e_output_send_frame(&output, &stream, 0, NULL, NULL);
+	CHECK("ring trunc aborted", sent == 0);
+	CHECK("ring trunc recovery requested", g_test_ring_idr_calls == 1);
+	CHECK("ring trunc warned once", output.trunc_warned == 1);
+	CHECK("ring trunc nothing committed",
+		output.frame_ring->stats.writes == 0);
+
+	/* The abort must leave the ring writable. */
+	test_ring_fill_p_frame(&pack, &stream, data, 8);
+	CHECK("ring trunc ring still usable",
+		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) > 0);
+
+	star6e_output_teardown(&output);
+	return failures;
+}
+
 int test_star6e_output(void)
 {
 	int failures = 0;
@@ -1631,5 +1763,7 @@ int test_star6e_output(void)
 	failures += test_star6e_output_unix_flush_is_bounded();
 	failures += test_star6e_output_unix_stall_mode_resumes_without_drops();
 	failures += test_star6e_output_always_sends_under_pressure();
+	failures += test_star6e_output_frame_ring_idr_holdoff();
+	failures += test_star6e_output_frame_ring_truncation_abort();
 	return failures;
 }

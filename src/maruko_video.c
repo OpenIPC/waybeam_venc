@@ -2,6 +2,7 @@
 
 #include "h26x_util.h"
 #include "hevc_rtp.h"
+#include "timing.h"
 #include "rtp_packetizer.h"
 #include "rtp_session.h"
 
@@ -336,8 +337,14 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 
 	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0) {
 		if (venc_frame_drop_breaks_chain(meta.flags) &&
-		    output->request_idr)
-			output->request_idr(output->idr_ctx);
+		    output->request_idr &&
+		    venc_frame_drop_idr_due(&output->drop_idr_last_us,
+					    wb_monotonic_us()) &&
+		    output->request_idr(output->idr_ctx) == 0) {
+			/* Swallowed by the shared 100 ms limiter — roll the
+			 * holdoff back so the next drop retries. */
+			output->drop_idr_last_us = 0;
+		}
 		return 0;
 	}
 
@@ -354,8 +361,28 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 			unsigned int nal_count = (unsigned int)pack->packNum;
 			unsigned int k;
 
-			if (nal_count > info_cap)
-				nal_count = info_cap;
+			if (nal_count > info_cap) {
+				/* Never ship a frame missing NALs — abort
+				 * and heal like a ring-full drop (mirrors
+				 * the star6e walker). */
+				if (!output->trunc_warned) {
+					output->trunc_warned = 1;
+					fprintf(stderr,
+						"WARN: pack has %u NALs, "
+						"packetInfo caps at %u — "
+						"frame dropped\n",
+						nal_count, info_cap);
+				}
+				venc_frame_ring_abort_write(frame_ring);
+				if (venc_frame_drop_breaks_chain(meta.flags) &&
+				    output->request_idr &&
+				    venc_frame_drop_idr_due(
+					&output->drop_idr_last_us,
+					wb_monotonic_us()) &&
+				    output->request_idr(output->idr_ctx) == 0)
+					output->drop_idr_last_us = 0;
+				return 0;
+			}
 
 			for (k = 0; k < nal_count; ++k) {
 				unsigned int length = pack->packetInfo[k].length;

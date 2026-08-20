@@ -903,8 +903,15 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 
 	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0) {
 		if (venc_frame_drop_breaks_chain(meta.flags) &&
-		    output->request_idr)
-			output->request_idr(output->idr_ctx);
+		    output->request_idr &&
+		    venc_frame_drop_idr_due(&output->drop_idr_last_us,
+					    wb_monotonic_us()) &&
+		    output->request_idr(output->idr_ctx) == 0) {
+			/* Swallowed by the shared 100 ms limiter — roll the
+			 * holdoff back so the next drop retries, instead of
+			 * pacing a request that never happened. */
+			output->drop_idr_last_us = 0;
+		}
 		return 0;
 	}
 
@@ -921,8 +928,33 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 			unsigned int nal_count = (unsigned int)pack->packNum;
 			unsigned int k;
 
-			if (nal_count > info_cap)
-				nal_count = info_cap;
+			if (nal_count > info_cap) {
+				/* A frame missing NALs (slices, with
+				 * video0.sliceCount high) must never ship —
+				 * abort and heal like a ring-full drop.
+				 * Measured 2026-08-20: no real config hits
+				 * this (parameter sets ride their own pack),
+				 * so this is the defensive path. */
+				if (!output->trunc_warned) {
+					output->trunc_warned = 1;
+					fprintf(stderr,
+						"WARN: pack has %u NALs, "
+						"packetInfo caps at %u — "
+						"frame dropped (lower "
+						"video0.sliceCount)\n",
+						nal_count, info_cap);
+				}
+				venc_frame_ring_abort_write(
+					output->frame_ring);
+				if (venc_frame_drop_breaks_chain(meta.flags) &&
+				    output->request_idr &&
+				    venc_frame_drop_idr_due(
+					&output->drop_idr_last_us,
+					wb_monotonic_us()) &&
+				    output->request_idr(output->idr_ctx) == 0)
+					output->drop_idr_last_us = 0;
+				return 0;
+			}
 
 			for (k = 0; k < nal_count; ++k) {
 				MI_U32 length = pack->packetInfo[k].length;

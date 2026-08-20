@@ -1448,6 +1448,47 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 	 * StartRecvPic, producing a flat single-layer stream. */
 	(void)star6e_pipeline_pre_start_apply_ref_pred(*chn, vcfg);
 
+	/* H.265 multi-slice split (same pre-Start window as SetRefParam).
+	 * sliceCount is what the operator asks for; the SDK field is 32-px
+	 * rows per slice, but the encoder's CTU is 64 (measured 2026-08-20:
+	 * SPS says 30x17 CTBs at 1080p), so the SDK rounds the request up to
+	 * whole CTU-64 rows.  Log the DELIVERED geometry, not the request —
+	 * at 1080p sliceCount 8 quantizes to 6 slices of 3 CTU rows. */
+	if (vcfg->video0.slice_count > 1) {
+		uint32_t rows = (height + 31) / 32;
+		uint32_t per = (rows + vcfg->video0.slice_count - 1) / vcfg->video0.slice_count;
+		uint32_t ctu_rows = (height + 63) / 64;
+		uint32_t ctu_per;
+		MI_VENC_ParamH265SliceSplit_t split;
+		MI_VENC_ParamH265SliceSplit_t rb;
+
+		if (per < 1)
+			per = 1;  /* unreachable via validated config */
+		ctu_per = (per + 1) / 2;
+		split.bSplitEnable = 1;
+		split.u32SliceRowCount = per;
+		ret = MI_VENC_SetH265SliceSplit(*chn, &split);
+		if (ret != 0) {
+			fprintf(stderr,
+				"WARN: MI_VENC_SetH265SliceSplit(%u rows/slice) "
+				"failed %d — single-slice stream\n",
+				split.u32SliceRowCount, ret);
+		} else {
+			printf("VENC: H.265 slice split ON: sliceCount %u -> "
+			       "%u slices of %u CTU-64 rows (SDK unit %u "
+			       "32-px rows)\n",
+			       vcfg->video0.slice_count,
+			       (ctu_rows + ctu_per - 1) / ctu_per,
+			       ctu_per, split.u32SliceRowCount);
+			memset(&rb, 0, sizeof(rb));
+			if (MI_VENC_GetH265SliceSplit(*chn, &rb) == 0)
+				printf("VENC: slice split readback: enable=%u "
+				       "rows=%u\n",
+				       (unsigned)rb.bSplitEnable,
+				       (unsigned)rb.u32SliceRowCount);
+		}
+	}
+
 	ret = MI_VENC_StartRecvPic(*chn);
 	if (ret != 0) {
 		fprintf(stderr, "ERROR: MI_VENC_StartRecvPic failed %d\n", ret);

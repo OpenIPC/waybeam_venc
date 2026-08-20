@@ -1974,15 +1974,17 @@ void maruko_pipeline_ref_pred_status(MarukoRefPredStatus *out)
  * just broke.  Gated by the shared per-channel IDR rate limiter so a
  * persistently full ring coalesces instead of firing keyframes into the ring
  * that is already congested.  Mirrors star6e_scene_request_idr(). */
-static void maruko_ring_request_idr(void *vctx)
+static int maruko_ring_request_idr(void *vctx)
 {
 	MarukoBackendContext *ctx = (MarukoBackendContext *)vctx;
 
 	if (!ctx)
-		return;
-	if (idr_rate_limit_allow(ctx->venc_channel))
-		maruko_mi_venc_request_idr(ctx->venc_device,
-			ctx->venc_channel, 1);
+		return 0;
+	if (!idr_rate_limit_allow(ctx->venc_channel))
+		return 0;
+	maruko_mi_venc_request_idr(ctx->venc_device,
+		ctx->venc_channel, 1);
+	return 1;
 }
 
 static int maruko_apply_ref_pred(MI_VENC_DEV dev, MI_VENC_CHN chn,

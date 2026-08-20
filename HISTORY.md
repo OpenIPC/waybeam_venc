@@ -1,5 +1,34 @@
 # History
 
+## [0.66.0] - 2026-08-19
+
+Adds H.265 multi-slice output on Star6E: `video0.sliceCount` (1..8, default
+1 = today's single-slice stream, restart-class) binds the vendor
+`MI_VENC_SetH265SliceSplit` — exported by the shipped `libmi_venc.so` all
+along, never wired — and asks for `ceil(rows/sliceCount)` CTU rows per slice
+between CreateChn and StartRecvPic, the same SDK window as refPred.
+
+The consumer is waybeam-link's new §6.3b spatial concealment: with several
+independent slices per picture, RF loss past the FEC budget costs a frozen
+region instead of the whole frame. The knob defaults off so nothing changes
+until a craft opts in.
+
+- Frame-SHM publication is untouched: still one access unit per slot, now
+  with N slice NALs inside it. RTP/recorder walkers already iterate
+  `packetInfo[]` and stay correct.
+
+- The 8-entry `packetInfo[]` clamp is the known ceiling — the field is
+  range-limited to 8, and the frame-ring walker now WARNs (once) if the SDK
+  ever reports more NALs in a pack than the table holds, instead of silently
+  shipping a truncated frame. Whether the SDK emits one pack per slice or
+  packs slices into one `packetInfo[]` still needs the on-device readout;
+  until then treat sliceCount 4 as the validated envelope (offline: 4-slice
+  1080p streams repaired and decoded clean by ffmpeg/libde265/HM-18.0).
+
+- CV610: not exposed (allowlist unchanged); the SDK headers are external and
+  its slice-split contract is unverified. Maruko: `libmi_venc.so` exports the
+  symbol, but only the Star6E pipeline applies it for now.
+
 ## [0.65.10] - 2026-08-17
 
 Removes both CV610 paths that unloaded MPP modules on a running craft: the

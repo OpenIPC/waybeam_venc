@@ -81,6 +81,7 @@ static int test_defaults(void)
 	CHECK("defaults_audio_port", cfg.outgoing.audio_port == 5601);
 	CHECK("defaults_scene_threshold_off", cfg.video0.scene_threshold == 0);
 	CHECK("defaults_scene_holdoff", cfg.video0.scene_holdoff == 2);
+	CHECK("defaults_slice_count_off", cfg.video0.slice_count == 1);
 
 	CHECK("defaults_ref_base_off", cfg.video0.ref_base == 0);
 	CHECK("defaults_ref_enhance", cfg.video0.ref_enhance == 0);
@@ -345,6 +346,59 @@ static int test_load_full_json(void)
 	CHECK("load_roi_steps", cfg.fpv.roi_steps == 2);
 	CHECK("load_noise", cfg.fpv.noise_level == 5);
 	/* scene_threshold/scene_holdoff live in video0 section */
+
+	return failures;
+}
+
+static int test_slice_count(void)
+{
+	int failures = 0;
+	const char *json =
+		"{ \"video0\": { \"sliceCount\": 4 } }";
+	char *path = write_temp_json(json);
+	VencConfig cfg;
+
+	CHECK("slice_tmpfile", path != NULL);
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	CHECK("slice_load", venc_config_load(path, &cfg) == 0);
+	CHECK("slice_count_4", cfg.video0.slice_count == 4);
+	unlink(path); free(path);
+
+	/* out-of-range values clamp to VENC_SLICE_COUNT_MAX */
+	path = write_temp_json("{ \"video0\": { \"sliceCount\": 99 } }");
+	CHECK("slice_tmpfile2", path != NULL);
+	if (!path) return failures;
+	CHECK("slice_load2", venc_config_load(path, &cfg) == 0);
+	CHECK("slice_count_clamped",
+	      cfg.video0.slice_count == VENC_SLICE_COUNT_MAX);
+	unlink(path); free(path);
+
+	/* 17 must survive the clamp: it is one slice per CTU-64 row at 1080p,
+	 * the finest the encoder can deliver, and the old ceiling of 8 made it
+	 * — and 9 — unreachable, capping the fleet at 6 delivered slices. */
+	path = write_temp_json("{ \"video0\": { \"sliceCount\": 17 } }");
+	CHECK("slice_tmpfile5", path != NULL);
+	if (!path) return failures;
+	CHECK("slice_load5", venc_config_load(path, &cfg) == 0);
+	CHECK("slice_count_17_survives", cfg.video0.slice_count == 17);
+	unlink(path); free(path);
+
+	path = write_temp_json("{ \"video0\": { \"sliceCount\": 0 } }");
+	CHECK("slice_tmpfile3", path != NULL);
+	if (!path) return failures;
+	CHECK("slice_load3", venc_config_load(path, &cfg) == 0);
+	CHECK("slice_count_floor", cfg.video0.slice_count == 1);
+	unlink(path); free(path);
+
+	/* A negative value must floor to 1, not wrap through the unsigned
+	 * store to the 8-slice maximum. */
+	path = write_temp_json("{ \"video0\": { \"sliceCount\": -1 } }");
+	CHECK("slice_tmpfile4", path != NULL);
+	if (!path) return failures;
+	CHECK("slice_load4", venc_config_load(path, &cfg) == 0);
+	CHECK("slice_count_negative_floors", cfg.video0.slice_count == 1);
+	unlink(path); free(path);
 
 	return failures;
 }
@@ -1271,6 +1325,7 @@ int test_venc_config(void)
 	failures += test_defaults();
 	failures += test_load_full_json();
 	failures += test_load_partial_json();
+	failures += test_slice_count();
 	failures += test_load_missing_file();
 	failures += test_load_bad_json();
 	failures += test_load_qp_bounds_validation();

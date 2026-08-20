@@ -472,6 +472,15 @@ static const FieldUi ui_max_qp = {
 	"Video", "Max QP", "number", 0, 51, 1, NULL,
 	"RC QP ceiling. 0 = leave the SDK default. Raising the ceiling lets the encoder compress a scene change hard enough to stay inside the frame budget instead of emitting a burst frame. Applied live."
 };
+static const FieldUi ui_slice_count = {
+	"Video", "Slices per frame", "number", 1, VENC_SLICE_COUNT_MAX, 1, NULL,
+	"Independent H.265 slices per picture (Star6E). 1 = off. Multi-slice "
+	"output lets the waybeam-link receiver conceal RF loss spatially "
+	"instead of dropping the whole frame, and the concealed area shrinks "
+	"as 1/N. The request is quantized: the SDK rounds slice height up to "
+	"whole CTU-64 rows, so 1080p delivers only 1,2,3,4,5,6,9,17 and "
+	"saturates at 17 (720p at 12). Restart-only."
+};
 static const FieldUi ui_max_i_bytes = {
 	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
@@ -630,6 +639,7 @@ static const FieldDesc g_fields[] = {
 	FIELD_UI(snapshot, height, FT_UINT, MUT_RESTART, &ui_snapshot_height),
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
+	FIELD_UI(video0, slice_count,  FT_UINT,   MUT_RESTART, &ui_slice_count),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
 	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
 	 * magnitude is part of the framing preset (derived zoom_pct), not a
@@ -758,6 +768,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.gopSize", "record.gop_size" },
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
+	{ "video0.sliceCount", "video0.slice_count" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
 	{ "video0.stabCropPct", "video0.stab_crop_pct" },
@@ -1242,6 +1253,15 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	    cfg->video0.scene_holdoff == 0 &&
 	    cfg->video0.scene_threshold > 0)
 		return "video0.scene_holdoff must be >= 1 when scene_threshold > 0";
+	if (strcmp(key, "video0.slice_count") == 0) {
+		/* 1 = split off.  The ceiling is a sanity bound, not the
+		 * delivered count — the SDK saturates a request at the
+		 * picture's CTU-64 row count.  See VENC_SLICE_COUNT_MAX for
+		 * why the old 8 was wrong. */
+		if (cfg->video0.slice_count < 1 ||
+		    cfg->video0.slice_count > VENC_SLICE_COUNT_MAX)
+			return "video0.slice_count must be 1..32";
+	}
 	if (strcmp(key, "video0.min_qp") == 0 || strcmp(key, "video0.max_qp") == 0) {
 		/* H.264/H.265 QP range; the SDK accepts min > max without
 		 * complaint and then behaves erratically (device-observed),
@@ -1315,6 +1335,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.max_qp",
 		"video0.size",
 		"video0.scene_holdoff",
+		"video0.slice_count",
 		"video0.zoom_x",
 		"video0.zoom_y",
 		"video0.framing",
