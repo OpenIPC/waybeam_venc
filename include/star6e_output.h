@@ -169,8 +169,8 @@ typedef struct {
 	void *idr_ctx;
 	uint64_t drop_idr_last_us;
 	/* One WARN per pipeline start (reset by star6e_output_reset's memset)
-	 * when a pack reports more NALs than packetInfo holds — the frame is
-	 * aborted, never shipped truncated. */
+	 * when packet metadata is incomplete or invalid — the frame is aborted,
+	 * never shipped truncated. */
 	uint8_t trunc_warned;
 	/* Ring-full drops split by whether they actually broke the chain.
 	 * A non-referenced (SVC-T) frame is droppable by construction, so
@@ -239,6 +239,16 @@ void star6e_output_observe_pressure(Star6eOutput *output);
  * mechanism that must run whether or not anyone is watching. */
 int star6e_output_frame_ring_fill(
 	const Star6eOutput *output, venc_frame_ring_fill_t *out);
+
+/** Validate that every vendor pack exposes complete, in-bounds NAL
+ * descriptors. All consumers must reject the AU when this returns zero. */
+int star6e_output_stream_packet_info_complete(
+	const MI_VENC_Stream_t *stream);
+
+/** Reject an incomplete AU before output/recording. Returns 1 when rejected,
+ * emits a one-time warning, and requests paced recovery for reference frames. */
+int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
+	const MI_VENC_Stream_t *stream);
 
 
 /** Begin accumulating RTP packets for a frame. When the transport is UDP

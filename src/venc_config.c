@@ -165,7 +165,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.scene_threshold = 0;   /* 0 = off */
 	cfg->video0.scene_holdoff = 2;
 
-	/* H.265 multi-slice split (video0, Star6E) — 1 = off */
+	/* H.265 multi-slice split (video0, all encoder backends) — 1 = off */
 	cfg->video0.slice_count = 1;
 
 	/* intra refresh (video0) — disabled by default; mode-driven */

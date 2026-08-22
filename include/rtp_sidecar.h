@@ -177,7 +177,7 @@ typedef struct {
 	uint8_t  fill_pct;          /* output queue fill: 0..100              */
 	uint8_t  in_pressure;       /* 1 = pressure hysteresis flag asserted  */
 	uint16_t throttle_permille; /* frame-shm ring-fill bitrate clamp:
-	                             * 1000 = unclamped, 250 = floor.  Carved
+	                             * 1000 = unclamped, 50 = minimum.  Carved
 	                             * from the old _pad[2] in 0.57.0, so the
 	                             * trailer is still 16 bytes and every
 	                             * later trailer keeps its offset.  A

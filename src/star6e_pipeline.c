@@ -1462,6 +1462,13 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 		MI_VENC_ParamH265SliceSplit_t split;
 		MI_VENC_ParamH265SliceSplit_t rb;
 
+		if (codec != PT_H265) {
+			fprintf(stderr, "ERROR: sliceCount=%u requires H.265\n",
+				vcfg->video0.slice_count);
+			MI_VENC_DestroyChn(*chn);
+			return -1;
+		}
+
 		if (per < 1)
 			per = 1;  /* unreachable via validated config */
 		ctu_per = (per + 1) / 2;
@@ -1470,23 +1477,30 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 		ret = MI_VENC_SetH265SliceSplit(*chn, &split);
 		if (ret != 0) {
 			fprintf(stderr,
-				"WARN: MI_VENC_SetH265SliceSplit(%u rows/slice) "
-				"failed %d — single-slice stream\n",
+				"ERROR: MI_VENC_SetH265SliceSplit(%u rows/slice) "
+				"failed %d\n",
 				split.u32SliceRowCount, ret);
-		} else {
-			printf("VENC: H.265 slice split ON: sliceCount %u -> "
-			       "%u slices of %u CTU-64 rows (SDK unit %u "
-			       "32-px rows)\n",
-			       vcfg->video0.slice_count,
-			       (ctu_rows + ctu_per - 1) / ctu_per,
-			       ctu_per, split.u32SliceRowCount);
-			memset(&rb, 0, sizeof(rb));
-			if (MI_VENC_GetH265SliceSplit(*chn, &rb) == 0)
-				printf("VENC: slice split readback: enable=%u "
-				       "rows=%u\n",
-				       (unsigned)rb.bSplitEnable,
-				       (unsigned)rb.u32SliceRowCount);
+			MI_VENC_DestroyChn(*chn);
+			return ret;
 		}
+		memset(&rb, 0, sizeof(rb));
+		ret = MI_VENC_GetH265SliceSplit(*chn, &rb);
+		if (ret != 0 || !rb.bSplitEnable ||
+		    rb.u32SliceRowCount == 0 || rb.u32SliceRowCount > rows) {
+			fprintf(stderr, "ERROR: H.265 slice split readback invalid: "
+				"ret=%d enable=%u rows=%u requested_rows=%u\n",
+				ret, (unsigned)rb.bSplitEnable,
+				(unsigned)rb.u32SliceRowCount,
+				(unsigned)split.u32SliceRowCount);
+			MI_VENC_DestroyChn(*chn);
+			return ret != 0 ? ret : -1;
+		}
+		ctu_per = (rb.u32SliceRowCount + 1) / 2;
+		printf("VENC: H.265 slice split ON: requested=%u rows32=%u "
+		       "applied_rows32=%u predicted=%u (readback verified)\n",
+		       vcfg->video0.slice_count, split.u32SliceRowCount,
+		       rb.u32SliceRowCount,
+		       (ctu_rows + ctu_per - 1) / ctu_per);
 	}
 
 	ret = MI_VENC_StartRecvPic(*chn);
@@ -2724,17 +2738,19 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	 * star6e_output_init() -> star6e_output_reset(), which memsets the
 	 * whole output struct and would otherwise zero these GDR/SVC-T
 	 * tagging fields. */
-	state->output.gdr_active =
-		(vcfg->video0.intra_refresh_mode[0] != '\0' &&
-		 strcmp(vcfg->video0.intra_refresh_mode, "off") != 0) ? 1 : 0;
-	state->output.svct_active = vcfg->video0.ref_base > 0 ? 1 : 0;
 	{
-		IntraRefreshDerived gdr_ir;
-		(void)star6e_pipeline_intra_refresh_derive(
-			vcfg, pconf.image_height, venc_fps, pconf.rc_codec,
-			&gdr_ir);
-		uint32_t clen = (gdr_ir.total_rows && gdr_ir.lines)
-			? (gdr_ir.total_rows + gdr_ir.lines - 1) / gdr_ir.lines
+		Star6eIntraRefreshStatus ir_status;
+		Star6eRefPredStatus ref_status;
+		uint32_t clen;
+
+		star6e_pipeline_intra_refresh_status(&ir_status);
+		star6e_pipeline_ref_pred_status(&ref_status);
+		state->output.gdr_active = ir_status.active && ir_status.apply_ok;
+		state->output.svct_active = ref_status.active && ref_status.apply_ok;
+		clen = (state->output.gdr_active && ir_status.total_rows &&
+			ir_status.effective_lines_per_p)
+			? (ir_status.total_rows + ir_status.effective_lines_per_p - 1) /
+				ir_status.effective_lines_per_p
 			: 0;
 		state->output.gdr_cycle_len = clen > 255 ? 255 : (uint8_t)clen;
 		state->output.gdr_counter = 0;

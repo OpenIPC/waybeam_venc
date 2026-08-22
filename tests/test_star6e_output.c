@@ -436,7 +436,9 @@ static int test_star6e_output_send_frame_rtp_dispatch(void)
 {
 	Star6eOutputSetup setup;
 	Star6eOutput output;
+	MI_VENC_Pack_t pack = {0};
 	MI_VENC_Stream_t stream = {0};
+	uint8_t data[4] = { 0 };
 	size_t expected = 1234;
 	size_t actual;
 	int failures = 0;
@@ -444,6 +446,10 @@ static int test_star6e_output_send_frame_rtp_dispatch(void)
 
 	g_test_star6e_rtp_send_called = 0;
 	g_test_star6e_rtp_send_valid = 0;
+	pack.data = data;
+	pack.length = sizeof(data);
+	stream.count = 1;
+	stream.packet = &pack;
 	ret = star6e_output_prepare(&setup, "udp://127.0.0.1:5600", "rtp", 0);
 	CHECK("star6e output send frame rtp prepare", ret == 0);
 	ret = star6e_output_init(&output, &setup);
@@ -1727,6 +1733,53 @@ static int test_star6e_output_frame_ring_truncation_abort(void)
 	return failures;
 }
 
+static int test_star6e_output_packet_info_validation(void)
+{
+	MI_VENC_Pack_t pack;
+	MI_VENC_Stream_t stream;
+	uint8_t data[16] = { 0 };
+	int failures = 0;
+
+	memset(&pack, 0, sizeof(pack));
+	memset(&stream, 0, sizeof(stream));
+	CHECK("star packetInfo null stream rejected",
+		!star6e_output_stream_packet_info_complete(NULL));
+	CHECK("star packetInfo empty stream rejected",
+		!star6e_output_stream_packet_info_complete(&stream));
+
+	stream.count = 1;
+	stream.packet = &pack;
+	CHECK("star packetInfo null data rejected",
+		!star6e_output_stream_packet_info_complete(&stream));
+	pack.data = data;
+	pack.length = sizeof(data);
+	CHECK("star packetInfo fallback accepted",
+		star6e_output_stream_packet_info_complete(&stream));
+	pack.offset = pack.length;
+	CHECK("star packetInfo empty fallback rejected",
+		!star6e_output_stream_packet_info_complete(&stream));
+
+	pack.offset = 0;
+	pack.packNum = 1;
+	pack.packetInfo[0].length = 0;
+	CHECK("star packetInfo zero descriptor rejected",
+		!star6e_output_stream_packet_info_complete(&stream));
+	pack.packetInfo[0].offset = pack.length;
+	pack.packetInfo[0].length = 1;
+	CHECK("star packetInfo offset rejected",
+		!star6e_output_stream_packet_info_complete(&stream));
+	pack.packetInfo[0].offset = 8;
+	pack.packetInfo[0].length = 9;
+	CHECK("star packetInfo overrun rejected",
+		!star6e_output_stream_packet_info_complete(&stream));
+	pack.packetInfo[0].offset = 4;
+	pack.packetInfo[0].length = 8;
+	CHECK("star packetInfo descriptor accepted",
+		star6e_output_stream_packet_info_complete(&stream));
+
+	return failures;
+}
+
 int test_star6e_output(void)
 {
 	int failures = 0;
@@ -1765,5 +1818,6 @@ int test_star6e_output(void)
 	failures += test_star6e_output_always_sends_under_pressure();
 	failures += test_star6e_output_frame_ring_idr_holdoff();
 	failures += test_star6e_output_frame_ring_truncation_abort();
+	failures += test_star6e_output_packet_info_validation();
 	return failures;
 }

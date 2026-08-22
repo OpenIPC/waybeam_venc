@@ -17,6 +17,71 @@ typedef struct {
 	venc_ring_t *ring;
 } MarukoRtpWriteContext;
 
+int maruko_video_stream_packet_info_complete(const i6c_venc_strm *stream)
+{
+	unsigned int i;
+
+	if (!stream || stream->count == 0 || !stream->packet)
+		return 0;
+
+	for (i = 0; i < stream->count; ++i) {
+		const i6c_venc_pack *pack = &stream->packet[i];
+		const unsigned int info_cap = (unsigned int)(
+			sizeof(pack->packetInfo) / sizeof(pack->packetInfo[0]));
+		unsigned int k;
+
+		if (!pack->data || pack->packNum > info_cap)
+			return 0;
+		if (pack->packNum == 0) {
+			if (pack->length <= pack->offset)
+				return 0;
+			continue;
+		}
+		for (k = 0; k < (unsigned int)pack->packNum; ++k) {
+			MI_U32 offset = pack->packetInfo[k].offset;
+			MI_U32 length = pack->packetInfo[k].length;
+
+			if (length == 0 || offset >= pack->length ||
+			    length > pack->length - offset)
+				return 0;
+		}
+	}
+
+	return 1;
+}
+
+static void maruko_recover_dropped_access_unit(const i6c_venc_strm *stream,
+	MarukoOutput *output)
+{
+	uint8_t flags = 0;
+
+	if (!stream || !output)
+		return;
+	if (output->svct_active &&
+	    stream->h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF)
+		flags |= VENC_FRAME_FLAG_ENHANCE;
+	if (venc_frame_drop_breaks_chain(flags) && output->request_idr &&
+	    venc_frame_drop_idr_due(&output->drop_idr_last_us,
+		wb_monotonic_us()) &&
+	    output->request_idr(output->idr_ctx) == 0)
+		output->drop_idr_last_us = 0;
+}
+
+int maruko_video_reject_incomplete_access_unit(const i6c_venc_strm *stream,
+	MarukoOutput *output)
+{
+	if (maruko_video_stream_packet_info_complete(stream))
+		return 0;
+	if (output && !output->trunc_warned) {
+		output->trunc_warned = 1;
+		fprintf(stderr,
+			"WARN: Maruko packetInfo table is incomplete or invalid; "
+			"dropping whole access unit\n");
+	}
+	maruko_recover_dropped_access_unit(stream, output);
+	return 1;
+}
+
 static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len, void *opaque)
@@ -88,9 +153,6 @@ static size_t maruko_send_frame_hevc(const i6c_venc_strm *stream,
 
 	for (i = 0; i < stream->count; ++i) {
 		const i6c_venc_pack *pack = &stream->packet[i];
-		const unsigned int info_cap =
-			(unsigned int)(sizeof(pack->packetInfo) /
-			sizeof(pack->packetInfo[0]));
 		unsigned int nal_count;
 		unsigned int k;
 
@@ -98,8 +160,6 @@ static size_t maruko_send_frame_hevc(const i6c_venc_strm *stream,
 			continue;
 
 		nal_count = pack->packNum > 0 ? (unsigned int)pack->packNum : 1;
-		if (pack->packNum > 0 && nal_count > info_cap)
-			nal_count = info_cap;
 
 		for (k = 0; k < nal_count; ++k) {
 			const uint8_t *data = NULL;
@@ -238,14 +298,8 @@ static size_t maruko_send_frame_compact(const i6c_venc_strm *stream,
 			continue;
 
 		if (pack->packNum > 0) {
-			const unsigned int info_cap =
-				(unsigned int)(sizeof(pack->packetInfo) /
-				sizeof(pack->packetInfo[0]));
 			unsigned int nal_count = (unsigned int)pack->packNum;
 			unsigned int k;
-
-			if (nal_count > info_cap)
-				nal_count = info_cap;
 
 			for (k = 0; k < nal_count; ++k) {
 				MI_U32 length = pack->packetInfo[k].length;
@@ -298,13 +352,8 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 	for (i = 0; i < stream->count && !is_idr; ++i) {
 		const i6c_venc_pack *pack = &stream->packet[i];
 		if (pack->packNum > 0) {
-			const unsigned int info_cap = (unsigned int)(
-				sizeof(pack->packetInfo) /
-				sizeof(pack->packetInfo[0]));
 			unsigned int nal_count = (unsigned int)pack->packNum;
 			unsigned int k;
-			if (nal_count > info_cap)
-				nal_count = info_cap;
 			for (k = 0; k < nal_count; ++k) {
 				uint8_t nt = (uint8_t)pack->packetInfo[k]
 					.packType.h265Nalu;
@@ -355,34 +404,8 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 			continue;
 
 		if (pack->packNum > 0) {
-			const unsigned int info_cap = (unsigned int)(
-				sizeof(pack->packetInfo) /
-				sizeof(pack->packetInfo[0]));
 			unsigned int nal_count = (unsigned int)pack->packNum;
 			unsigned int k;
-
-			if (nal_count > info_cap) {
-				/* Never ship a frame missing NALs — abort
-				 * and heal like a ring-full drop (mirrors
-				 * the star6e walker). */
-				if (!output->trunc_warned) {
-					output->trunc_warned = 1;
-					fprintf(stderr,
-						"WARN: pack has %u NALs, "
-						"packetInfo caps at %u — "
-						"frame dropped\n",
-						nal_count, info_cap);
-				}
-				venc_frame_ring_abort_write(frame_ring);
-				if (venc_frame_drop_breaks_chain(meta.flags) &&
-				    output->request_idr &&
-				    venc_frame_drop_idr_due(
-					&output->drop_idr_last_us,
-					wb_monotonic_us()) &&
-				    output->request_idr(output->idr_ctx) == 0)
-					output->drop_idr_last_us = 0;
-				return 0;
-			}
 
 			for (k = 0; k < nal_count; ++k) {
 				unsigned int length = pack->packetInfo[k].length;
@@ -395,6 +418,8 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 				if (venc_frame_ring_append(frame_ring,
 				    pack->data + offset, length) != 0) {
 					venc_frame_ring_abort_write(frame_ring);
+					maruko_recover_dropped_access_unit(stream,
+						output);
 					return 0;
 				}
 				total_bytes += length;
@@ -408,6 +433,7 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 			if (venc_frame_ring_append(frame_ring,
 			    pack->data + pack->offset, length) != 0) {
 				venc_frame_ring_abort_write(frame_ring);
+				maruko_recover_dropped_access_unit(stream, output);
 				return 0;
 			}
 			total_bytes += length;
@@ -425,6 +451,8 @@ size_t maruko_video_send_frame(const i6c_venc_strm *stream,
 	size_t total_bytes;
 
 	if (!stream || !output || !cfg)
+		return 0;
+	if (maruko_video_reject_incomplete_access_unit(stream, output))
 		return 0;
 
 	if (output->frame_ring)

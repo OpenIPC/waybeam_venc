@@ -3,6 +3,12 @@
 This folder is the canonical place for waybeam_venc project documentation.
 
 ## Core Docs
+- `documentation/SSC338Q_CV610_ENCODER_CAPABILITIES.md`
+  - Evidence-tiered comparison of the two encoder APIs and their current
+    Waybeam integration, including the richer CV610-only future surface.
+- `documentation/CV610_RESILIENCE_SLICES_PLAN.md`
+  - Approved phased plan and device gates for CV610 resilience, ref prediction,
+    frame metadata and whole-access-unit H.265 slicing.
 - `documentation/DUAL_BACKEND_SPLIT_PLAN.md`
   - Current architecture/implementation plan for Star6E + Maruko targeted builds.
   - Tracks only remaining implementation steps from the current stable baseline.

@@ -16,6 +16,70 @@
 #define STAR6E_RTP_HEADER_SIZE 12
 /* STAR6E_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in star6e.h. */
 
+int star6e_output_stream_packet_info_complete(
+	const MI_VENC_Stream_t *stream)
+{
+	unsigned int i;
+
+	if (!stream || stream->count == 0 || !stream->packet)
+		return 0;
+	for (i = 0; i < stream->count; ++i) {
+		const MI_VENC_Pack_t *pack = &stream->packet[i];
+		const unsigned int info_cap = (unsigned int)(
+			sizeof(pack->packetInfo) / sizeof(pack->packetInfo[0]));
+		unsigned int k;
+
+		if (!pack->data || pack->packNum > info_cap)
+			return 0;
+		if (pack->packNum == 0) {
+			if (pack->length <= pack->offset)
+				return 0;
+			continue;
+		}
+		for (k = 0; k < (unsigned int)pack->packNum; ++k) {
+			MI_U32 offset = pack->packetInfo[k].offset;
+			MI_U32 length = pack->packetInfo[k].length;
+
+			if (length == 0 || offset >= pack->length ||
+			    length > pack->length - offset)
+				return 0;
+		}
+	}
+	return 1;
+}
+
+static void star6e_output_recover_dropped_access_unit(Star6eOutput *output,
+	const MI_VENC_Stream_t *stream)
+{
+	uint8_t flags = 0;
+
+	if (!output || !stream)
+		return;
+	if (output->svct_active &&
+	    stream->h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF)
+		flags |= VENC_FRAME_FLAG_ENHANCE;
+	if (venc_frame_drop_breaks_chain(flags) && output->request_idr &&
+	    venc_frame_drop_idr_due(&output->drop_idr_last_us,
+		wb_monotonic_us()) &&
+	    output->request_idr(output->idr_ctx) == 0)
+		output->drop_idr_last_us = 0;
+}
+
+int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
+	const MI_VENC_Stream_t *stream)
+{
+	if (star6e_output_stream_packet_info_complete(stream))
+		return 0;
+	if (output && !output->trunc_warned) {
+		output->trunc_warned = 1;
+		fprintf(stderr,
+			"WARN: Star6E packetInfo table is incomplete or invalid; "
+			"dropping whole access unit\n");
+	}
+	star6e_output_recover_dropped_access_unit(output, stream);
+	return 1;
+}
+
 static uint16_t star6e_read_be16(const uint8_t *data)
 {
 	return (uint16_t)((uint16_t)data[0] << 8 | (uint16_t)data[1]);
@@ -813,13 +877,8 @@ size_t star6e_output_send_compact_frame(Star6eOutput *output,
 			continue;
 
 		if (pack->packNum > 0) {
-			const unsigned int info_cap = (unsigned int)(sizeof(pack->packetInfo) /
-				sizeof(pack->packetInfo[0]));
 			unsigned int nal_count = (unsigned int)pack->packNum;
 			unsigned int k;
-
-			if (nal_count > info_cap)
-				nal_count = info_cap;
 
 			for (k = 0; k < nal_count; ++k) {
 				MI_U32 length = pack->packetInfo[k].length;
@@ -864,13 +923,8 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 	for (i = 0; i < stream->count && !is_idr; ++i) {
 		const MI_VENC_Pack_t *pack = &stream->packet[i];
 		if (pack->packNum > 0) {
-			const unsigned int info_cap = (unsigned int)(
-				sizeof(pack->packetInfo) /
-				sizeof(pack->packetInfo[0]));
 			unsigned int nal_count = (unsigned int)pack->packNum;
 			unsigned int k;
-			if (nal_count > info_cap)
-				nal_count = info_cap;
 			for (k = 0; k < nal_count; ++k) {
 				uint8_t nt = (uint8_t)pack->packetInfo[k]
 					.packType.h265Nalu;
@@ -922,39 +976,8 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 			continue;
 
 		if (pack->packNum > 0) {
-			const unsigned int info_cap = (unsigned int)(
-				sizeof(pack->packetInfo) /
-				sizeof(pack->packetInfo[0]));
 			unsigned int nal_count = (unsigned int)pack->packNum;
 			unsigned int k;
-
-			if (nal_count > info_cap) {
-				/* A frame missing NALs (slices, with
-				 * video0.sliceCount high) must never ship —
-				 * abort and heal like a ring-full drop.
-				 * Measured 2026-08-20: no real config hits
-				 * this (parameter sets ride their own pack),
-				 * so this is the defensive path. */
-				if (!output->trunc_warned) {
-					output->trunc_warned = 1;
-					fprintf(stderr,
-						"WARN: pack has %u NALs, "
-						"packetInfo caps at %u — "
-						"frame dropped (lower "
-						"video0.sliceCount)\n",
-						nal_count, info_cap);
-				}
-				venc_frame_ring_abort_write(
-					output->frame_ring);
-				if (venc_frame_drop_breaks_chain(meta.flags) &&
-				    output->request_idr &&
-				    venc_frame_drop_idr_due(
-					&output->drop_idr_last_us,
-					wb_monotonic_us()) &&
-				    output->request_idr(output->idr_ctx) == 0)
-					output->drop_idr_last_us = 0;
-				return 0;
-			}
 
 			for (k = 0; k < nal_count; ++k) {
 				MI_U32 length = pack->packetInfo[k].length;
@@ -968,6 +991,8 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 				    pack->data + offset, length) != 0) {
 					venc_frame_ring_abort_write(
 						output->frame_ring);
+					star6e_output_recover_dropped_access_unit(
+						output, stream);
 					return 0;
 				}
 				total_bytes += length;
@@ -981,6 +1006,8 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 			if (venc_frame_ring_append(output->frame_ring,
 			    pack->data + pack->offset, length) != 0) {
 				venc_frame_ring_abort_write(output->frame_ring);
+				star6e_output_recover_dropped_access_unit(output,
+					stream);
 				return 0;
 			}
 			total_bytes += length;
@@ -998,6 +1025,8 @@ size_t star6e_output_send_frame(Star6eOutput *output,
 	size_t total;
 
 	if (!output || !stream)
+		return 0;
+	if (star6e_output_reject_incomplete_access_unit(output, stream))
 		return 0;
 
 	if (output->frame_ring)

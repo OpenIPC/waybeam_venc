@@ -3,14 +3,19 @@
  * 8-byte VencFrameMeta header, and reports frame rate, IDR cadence, frame
  * sizes, pts monotonicity, and Annex-B start-code integrity.
  *
- * Usage: frame_shm_consumer_test [ring_name] [duration_s]
+ * Usage: frame_shm_consumer_test [ring_name] [duration_s] [dump.h265]
+ *                                [expected_slices]
  *   ring_name  default "venc_frames"
  *   duration_s default 5 (0 = run until SIGINT)
+ *   dump.h265  optional raw Annex-B output for decoder validation
+ *              (use a FIFO to host storage on small embedded /tmp filesystems)
+ *   expected_slices optional exact VCL count required in every frame
  *
  * Cross-compile for Star6E (Infinity6E):
  *   toolchain/toolchain.sigmastar-infinity6e/bin/arm-openipc-linux-gnueabihf-gcc \
  *     -Os -Iinclude -D_GNU_SOURCE \
- *     tools/frame_shm_consumer_test.c src/venc_frame_ring.c -lpthread \
+ *     tools/frame_shm_consumer_test.c src/venc_frame_ring.c src/h26x_util.c \
+ *     -lpthread \
  *     -o frame_shm_consumer
  *
  * Reports frame rate, IDR cadence, frame sizes, pts monotonicity, and
@@ -25,6 +30,7 @@
 #include <signal.h>
 #include <stdint.h>
 
+#include "h26x_util.h"
 #include "venc_frame_ring.h"
 
 static volatile int running = 1;
@@ -34,6 +40,9 @@ int main(int argc, char **argv)
 {
 	const char *name = (argc > 1) ? argv[1] : "venc_frames";
 	int duration = (argc > 2) ? atoi(argv[2]) : 5;
+	const char *dump_path = (argc > 3) ? argv[3] : NULL;
+	int expected_slices = (argc > 4) ? atoi(argv[4]) : 0;
+	FILE *dump = NULL;
 
 	signal(SIGINT, sighandler);
 	signal(SIGTERM, sighandler);
@@ -43,6 +52,14 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Failed to attach to frame ring '%s'\n", name);
 		return 1;
 	}
+	if (dump_path) {
+		dump = fopen(dump_path, "wb");
+		if (!dump) {
+			perror("Failed to open H.265 dump");
+			venc_frame_ring_destroy(r);
+			return 1;
+		}
+	}
 
 	printf("Attached to frame ring '%s': %u slots x %u KB (epoch=%u, V%u, magic=0x%08X)\n",
 	       name, r->hdr->slot_count, r->hdr->slot_data_size / 1024,
@@ -50,16 +67,25 @@ int main(int argc, char **argv)
 
 	uint32_t buf_size = r->slot_data_size;
 	uint8_t *buf = malloc(buf_size);
-	if (!buf) { fprintf(stderr, "OOM\n"); venc_frame_ring_destroy(r); return 1; }
+	if (!buf) {
+		fprintf(stderr, "OOM\n");
+		if (dump)
+			fclose(dump);
+		venc_frame_ring_destroy(r);
+		return 1;
+	}
 	uint32_t out_len = 0;
 
 	unsigned long total_frames = 0, total_idr = 0, total_gdr = 0,
 		total_enhance = 0, total_bytes = 0;
 	uint32_t max_frame = 0, min_frame = 0xFFFFFFFF;
 	unsigned long bad_meta = 0, bad_startcode = 0, pts_regress = 0;
+	unsigned long total_vcl = 0, vcl_frames = 0;
+	uint32_t min_vcl = UINT32_MAX, max_vcl = 0;
 	uint32_t first_pts = 0, last_pts = 0;
 	uint8_t last_gdr_len = 0;
 	int have_first = 0;
+	int dump_started = 0;
 
 	struct timespec ts_start, ts_now, ts_report;
 	clock_gettime(CLOCK_MONOTONIC, &ts_start);
@@ -80,6 +106,10 @@ int main(int argc, char **argv)
 			int is_idr = (m.flags & VENC_FRAME_FLAG_IDR) != 0;
 			int is_gdr = (m.flags & VENC_FRAME_FLAG_GDR) != 0;
 			int is_enhance = (m.flags & VENC_FRAME_FLAG_ENHANCE) != 0;
+			size_t cursor = 0;
+			const uint8_t *nal;
+			size_t nal_len;
+			uint32_t vcl_count = 0;
 
 			total_frames++;
 			interval_frames++;
@@ -102,6 +132,18 @@ int main(int argc, char **argv)
 			    !((fd[0] == 0 && fd[1] == 0 && fd[2] == 1) ||
 			      (fd[0] == 0 && fd[1] == 0 && fd[2] == 0 && fd[3] == 1)))
 				bad_startcode++;
+			while (h26x_util_annexb_next(fd, frame_len, &cursor,
+			    &nal, &nal_len)) {
+				if (nal_len > 0 && h26x_util_hevc_nalu_type(nal,
+				    nal_len) <= 31)
+					vcl_count++;
+			}
+			if (vcl_count > 0) {
+				total_vcl += vcl_count;
+				vcl_frames++;
+				if (vcl_count < min_vcl) min_vcl = vcl_count;
+				if (vcl_count > max_vcl) max_vcl = vcl_count;
+			}
 
 			/* pts monotonicity (allow 32-bit wrap tolerance) */
 			if (have_first) {
@@ -112,6 +154,16 @@ int main(int argc, char **argv)
 				have_first = 1;
 			}
 			last_pts = m.pts;
+			/* Start raw dumps on an IDR so parameter sets and the reference
+			 * chain are self-contained for offline decoder validation. */
+			if (dump && is_idr)
+				dump_started = 1;
+			if (dump && dump_started &&
+			    fwrite(fd, 1, frame_len, dump) != frame_len) {
+				perror("Failed to write H.265 dump");
+				running = 0;
+				bad_meta++;
+			}
 		}
 
 		clock_gettime(CLOCK_MONOTONIC, &ts_now);
@@ -153,6 +205,11 @@ int main(int argc, char **argv)
 	printf("Frame size:   avg %lu  min %u  max %u bytes\n",
 	       total_frames ? total_bytes / total_frames : 0,
 	       total_frames ? min_frame : 0, max_frame);
+	printf("VCL slices:   avg %.2f  min %u  max %u (%lu frames)\n",
+	       vcl_frames ? (double)total_vcl / vcl_frames : 0.0,
+	       vcl_frames ? min_vcl : 0, max_vcl, vcl_frames);
+	if (expected_slices > 0)
+		printf("VCL expected: %d per frame\n", expected_slices);
 	printf("pts:          first=%u last=%u span=%u\n",
 	       first_pts, last_pts, last_pts - first_pts);
 	printf("Integrity:    bad_meta=%lu bad_startcode=%lu pts_regress=%lu\n",
@@ -162,8 +219,21 @@ int main(int argc, char **argv)
 		       __ATOMIC_ACQUIRE),
 	       (unsigned long)__atomic_load_n(&r->hdr->read_idx,
 		       __ATOMIC_ACQUIRE));
+	if (dump_path)
+		printf("H.265 dump:   %s\n", dump_path);
 
-	int ok = (total_frames > 0 && total_idr > 0 &&
+	int dump_ok = 1;
+	if (dump) {
+		if (fclose(dump) != 0) {
+			perror("Failed to finalize H.265 dump");
+			dump_ok = 0;
+		}
+		dump = NULL;
+	}
+	int vcl_ok = (vcl_frames == total_frames && vcl_frames > 0 &&
+		min_vcl == max_vcl &&
+		(expected_slices <= 0 || min_vcl == (uint32_t)expected_slices));
+	int ok = (total_frames > 0 && total_idr > 0 && dump_ok && vcl_ok &&
 	          bad_meta == 0 && bad_startcode == 0 && pts_regress == 0);
 	printf("VERDICT:      %s\n", ok ? "PASS" : "FAIL");
 

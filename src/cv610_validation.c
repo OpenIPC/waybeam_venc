@@ -44,8 +44,6 @@ const char *cv610_validate_config(const VencConfig *cfg)
 		return "CV610 video0.gop_size exceeds the encoder's 65536-frame limit";
 	if (strcmp(cfg->video0.rc_mode, "cbr") != 0)
 		return "CV610 phase one supports video0.rc_mode=cbr only";
-	if (strcmp(cfg->video0.resilience, "off") != 0)
-		return "CV610 phase one supports video0.resilience=off only";
 	if (strcmp(cfg->video0.framing, "off") != 0)
 		return "CV610 phase one supports video0.framing=off only";
 	if (cfg->audio.enabled &&

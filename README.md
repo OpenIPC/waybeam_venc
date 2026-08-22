@@ -260,6 +260,7 @@ omitted fields keep their compiled-in defaults.
     "bitrate": 8192, "gopSize": 1.0,
     "qpDelta": -4,
     "sceneThreshold": 0, "sceneHoldoff": 2,
+    "sliceCount": 1,
     "resilience": "off",
     "framing": "off", "zoomX": 0.5, "zoomY": 0.5
   },
@@ -309,7 +310,8 @@ omitted fields keep their compiled-in defaults.
 - **`video0`** — rate control, fps, resolution, bitrate, GOP,
   per-section QP delta. Video codec is hardcoded H.265 (HEVC).
   Scene-change-triggered IDR (`sceneThreshold`,
-  `sceneHoldoff`) is Star6E-only. Intra-refresh is on Star6E and Maruko. The
+  `sceneHoldoff`) is on Star6E and Maruko. Intra-refresh and whole-access-unit H.265
+  slicing are on Star6E, Maruko and CV610. The
   `framing` knob expands to either digital zoom (Star6E and Maruko) or image
   stabilization (`stab` HW-crop / `stab-fill` floating-image, Star6E only;
   live `pauseStab`).
@@ -383,7 +385,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"...","backend":"star6e","contract_version":"0.2.0","config_schema_version":"0.2.0"}}
+{"ok":true,"data":{"app_version":"0.67.0","backend":"star6e","contract_version":"0.18.5","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -852,10 +854,10 @@ behaviour. Requires root (silent fallback otherwise).
 A *separate* jitter source — a large I-frame whose serialization exceeds one
 frame interval on a constrained uplink (e.g. 50 Mbps on a 100 Mbps link) — is
 not a scheduling issue and is unaffected by this priority; mitigate it with a
-[resilience preset](#resilience-preset-star6e--maruko) (intra-refresh) or a
+[resilience preset](#resilience-preset-star6e--maruko--cv610) (intra-refresh) or a
 lower bitrate.
 
-#### Resilience preset (Star6E + Maruko)
+#### Resilience preset (Star6E + Maruko + CV610)
 
 A single field picks an error-resilience profile.  Intra-refresh
 (rolling GDR stripe), the SVC-T reference pyramid (refPred), and the GOP
@@ -941,32 +943,16 @@ prediction is from the previous frame either way.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.resilience` | string | **reboot** | `off` \| `rescue` \| `quality` \| `sprint` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` \| `ltr` \| `ltr:<N>` (default `off`) |
+| `video0.resilience` | string | restart | `off` \| `rescue` \| `quality` \| `sprint` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` \| `ltr` \| `ltr:<N>` (default `off`) |
 | `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience` is `"off"` or an `ltr` form; the other named presets override it.  Live-reinit applies (no reboot). |
 
-> ⚠️  **Resilience changes require a reboot on both Star6E and Maruko.**
-> Setting `video0.resilience` (or any of the derived fields
-> `intra_refresh_*` or `ref_*`) persists the new value to
-> `/etc/waybeam.json` and returns `{"reboot_required": true}`.  The
-> live encoder pipeline keeps running the previous preset until the
-> next daemon start.
->
-> The SigmaStar MI SDK kernel module does not survive a live
-> re-configure of these fields.  Empirically confirmed on both
-> backends (2026-05-15 bench testing):
->
-> - **Star6E (Infinity6E)** — fork+exec respawn for the new config
->   triggers an SoC kernel panic within 1–2 transitions; ICMP dies,
->   requires a power-cycle.
-> - **Maruko (Infinity6C)** — in-process pipeline reinit completes
->   cleanly for most transitions, but one in a sweep of 7 zombied
->   the daemon via a page fault in `MI_SYS_IMPL_FlushInputPortTasks`
->   inside the `mi` kernel module.  System stays up but waybeam dies
->   and does not respawn — reboot is required to restart it.
->
-> Different failure modes, same root cause.  Cold-boot into any
-> preset is 100 % reliable on both SigmaStar backends, so the reboot model is
-> what we ship.
+Resilience and slice-count changes are restart-required on all three encoder
+backends. The API persists the value and uses the backend's process-respawn
+handoff to build a fresh encoder graph; a hardware reboot is not part of the
+normal apply contract. SigmaStar deliberately avoids in-process MI teardown
+and reinitialization because vendor-kernel teardown has proven unsafe. Verify
+the running result through `/api/v1/resilience/status` and startup slice
+readback logs.
 
 Expansion table:
 

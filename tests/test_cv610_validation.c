@@ -1,4 +1,5 @@
 #include "cv610_modes.h"
+#include "cv610_encoder_config.h"
 #include "venc_api.h"
 #include "venc_config.h"
 
@@ -175,6 +176,75 @@ static int test_mode_select(void)
 	return failures;
 }
 
+static int test_encoder_config(void)
+{
+	VencConfig cfg;
+	Cv610EncoderConfig enc;
+	int failures = 0;
+
+	venc_config_defaults(&cfg);
+	cfg.video0.slice_count = 1;
+	failures += expect("enc_off_derives",
+		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) == 0);
+	failures += expect("enc_off_features_disabled",
+		!enc.intra.enabled && !enc.ref.enabled && !enc.slice.enabled);
+	failures += expect("enc_off_slice_defaults",
+		enc.slice.total_lcu_rows == 34 && enc.slice.split_size == 1 &&
+		enc.slice.expected_count == 1);
+
+	(void)venc_config_apply_resilience_preset("racing", &cfg.video0);
+	failures += expect("enc_racing_derives",
+		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) == 0);
+	failures += expect("enc_racing_gdr",
+		enc.intra.enabled && enc.intra.mode == 0 &&
+		enc.intra.refresh_num == 3 && enc.intra.request_i_qp == 36 &&
+		enc.intra.derived.total_rows == 34);
+	failures += expect("enc_racing_no_refpred", !enc.ref.enabled);
+
+	(void)venc_config_apply_resilience_preset("rally", &cfg.video0);
+	failures += expect("enc_rally_derives",
+		cv610_encoder_config_derive(&cfg, 1080, 60, &enc) == 0);
+	failures += expect("enc_rally_refpred",
+		enc.ref.enabled && enc.ref.base == 1 && enc.ref.enhance == 1 &&
+		enc.ref.pred == 1);
+
+	(void)venc_config_apply_resilience_preset("ltr:4", &cfg.video0);
+	failures += expect("enc_ltr_derives",
+		cv610_encoder_config_derive(&cfg, 1080, 60, &enc) == 0);
+	failures += expect("enc_ltr_refpred_without_gdr",
+		!enc.intra.enabled && enc.ref.enabled && enc.ref.base == 1 &&
+		enc.ref.enhance == 4 && enc.ref.pred == 0);
+
+	cfg.video0.slice_count = 17;
+	failures += expect("enc_slice_17_derives",
+		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) == 0);
+	failures += expect("enc_slice_17_geometry",
+		enc.slice.enabled && enc.slice.split_mode == 1 &&
+		enc.slice.split_size == 2 && enc.slice.expected_count == 17);
+	cfg.video0.slice_count = 12;
+	(void)cv610_encoder_config_derive(&cfg, 1080, 100, &enc);
+	failures += expect("enc_slice_12_geometry",
+		enc.slice.split_size == 3 && enc.slice.expected_count == 12);
+	cfg.video0.slice_count = 32;
+	(void)cv610_encoder_config_derive(&cfg, 1080, 100, &enc);
+	failures += expect("enc_slice_saturates_at_rows",
+		enc.slice.split_size == 2 && enc.slice.expected_count == 17);
+	cfg.video0.slice_count = 9;
+	(void)cv610_encoder_config_derive(&cfg, 720, 100, &enc);
+	failures += expect("enc_slice_720_quantizes",
+		enc.slice.total_lcu_rows == 23 && enc.slice.split_size == 3 &&
+		enc.slice.expected_count == 8);
+
+	cfg.video0.slice_count = 0;
+	failures += expect("enc_reject_slice_zero",
+		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) != 0);
+	cfg.video0.slice_count = VENC_SLICE_COUNT_MAX + 1;
+	failures += expect("enc_reject_slice_over_max",
+		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) != 0);
+
+	return failures;
+}
+
 int main(void)
 {
 	VencConfig cfg;
@@ -183,6 +253,7 @@ int main(void)
 
 	failures += test_mode_table();
 	failures += test_mode_select();
+	failures += test_encoder_config();
 	cv610_mode_table(&mode_count);
 
 	venc_config_defaults(&cfg);
@@ -271,6 +342,13 @@ int main(void)
 	strcpy(cfg.video0.rc_mode, "vbr");
 	failures += expect_valid("cv610_reject_vbr", &cfg, 0);
 	strcpy(cfg.video0.rc_mode, "cbr");
+	strcpy(cfg.video0.resilience, "racing");
+	(void)venc_config_apply_resilience_preset("racing", &cfg.video0);
+	cfg.video0.slice_count = 17;
+	failures += expect_valid("cv610_accept_resilience_and_slices", &cfg, 1);
+	strcpy(cfg.video0.resilience, "off");
+	(void)venc_config_apply_resilience_preset("off", &cfg.video0);
+	cfg.video0.slice_count = 1;
 	strcpy(cfg.video0.framing, "stab");
 	failures += expect_valid("cv610_reject_framing", &cfg, 0);
 	strcpy(cfg.video0.framing, "off");

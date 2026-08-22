@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.4`
+- `contract_version`: `0.18.5`
 - `status`: `active`
 
 ## Governance Rules
@@ -79,8 +79,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.1.7",
-    "contract_version": "0.12.0",
+    "app_version": "0.67.0",
+    "contract_version": "0.18.5",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -105,7 +105,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1 },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
+      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "sliceCount": 1, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "allowUnixEncoderStall": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -158,6 +158,7 @@ Response `200`:
       "video0.size": { "mutability": "restart_required", "supported": true },
       "video0.scene_threshold": { "mutability": "restart_required", "supported": true },
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
+      "video0.slice_count": { "mutability": "restart_required", "supported": true },
       "video0.resilience": { "mutability": "restart_required", "supported": true },
       "video0.zoom_x": { "mutability": "live", "supported": true },
       "video0.zoom_y": { "mutability": "live", "supported": true },
@@ -191,6 +192,13 @@ Response `200`:
   }
 }
 ```
+
+`video0.slice_count` / JSON `video0.sliceCount` requests 1–32 H.265 slices
+per picture; 1 disables splitting. Star6E, Maruko and CV610 advertise the
+field. The request is mapped to backend row geometry, so delivered counts may
+quantize or saturate; startup performs vendor Set/Get verification and fails
+an explicit multi-slice request when the backend cannot apply it. Slice NALs
+remain one whole access unit for RTP, recording and frame-SHM.
 
 `data.routes` (added 0.18.4) reports which optional routes the running
 backend actually services, so a client does not have to call an expensive
@@ -771,7 +779,9 @@ Error `501`:
 
 ### `GET /api/v1/iq`
 
-Query all ISP IQ parameter values. Always available on Star6E backend.
+Query all ISP IQ parameter values. Star6E and Maruko share the SigmaStar
+response shape shown below. CV610 also serves this route, using the
+self-describing response documented under "CV610 IQ response shape".
 
 ```bash
 curl http://<device-ip>/api/v1/iq
@@ -809,7 +819,7 @@ Multi-field example (colortrans):
 }
 ```
 
-Error `501` if backend doesn't support IQ (Maruko):
+Error `501` when the active backend does not register an IQ query callback:
 ```json
 {"ok":false,"error":{"code":"not_implemented","message":"IQ query not available"}}
 ```
@@ -1717,8 +1727,9 @@ Behavior:
 
 ### Backend Support Matrix
 
-Endpoints that behave the same on both backends are omitted.  Only feature
-divergence is listed.  As of `contract_version: 0.12.1`:
+Endpoints that behave the same on all three backends are omitted. The table
+compares the two SigmaStar implementations; CV610 differences are called out
+in Notes. As of `contract_version: 0.18.5`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1743,6 +1754,12 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.5` (additive — resilience and slices reach three-backend parity):
+  CV610 now advertises `video0.resilience` and `video0.slice_count` and serves
+  the existing intra/resilience status routes. Maruko now advertises and
+  applies `video0.slice_count`. Explicit multi-slice requests use pre-start
+  vendor Set/Get verification on all three backends; no field or response key
+  was removed.
 - `0.18.4` (additive — CV610 gains the IQ surface and RC QP bounds):
   `/api/v1/capabilities` gains `data.routes` (`iq`, `iq_import`) so a client can
   discover optional routes without calling them. `/api/v1/iq` and

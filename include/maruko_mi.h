@@ -134,6 +134,8 @@ typedef struct {
 	int (*fnGetIntraRefresh)(int dev, int chn, void *cfg);
 	int (*fnSetRefParam)(int dev, int chn, void *p);
 	int (*fnGetRefParam)(int dev, int chn, void *p);
+	int (*fnSetH265SliceSplit)(int dev, int chn, void *p);
+	int (*fnGetH265SliceSplit)(int dev, int chn, void *p);
 } maruko_venc_impl;
 
 /* MI_AI (audio input) — i6c surface differs from Star6E:

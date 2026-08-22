@@ -56,7 +56,8 @@
  * must NOT provoke a recovery IDR: that would spend the largest frame in the
  * stream to repair damage that never happened, into a ring already full.
  *
- * Shared by both backends so the policy has one definition rather than two
+ * Shared by all encoder backends so the policy has one definition rather than
+ * several
  * copies that can drift. */
 static inline int venc_frame_drop_breaks_chain(uint8_t flags)
 {
@@ -125,7 +126,7 @@ typedef struct __attribute__((aligned(64))) {
 	uint32_t futex_seq;
 	uint32_t health_magic;      /* VENC_FRAME_RING_HEALTH_MAGIC, or 0 */
 	uint64_t full_drops;        /* lifetime full-ring drops */
-	uint16_t throttle_permille; /* 1000 = unclamped, 250 = floor */
+	uint16_t throttle_permille; /* 1000 = unclamped; lower = active clamp */
 	uint8_t  _pad1[38];
 
 	/* Line 2: Consumer-owned */

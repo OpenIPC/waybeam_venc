@@ -6,6 +6,7 @@
 #include "intra_refresh.h"
 #include "pipeline_common.h"
 #if HAVE_BACKEND_CV610
+#include "cv610_runtime.h"
 #include "cv610_modes.h"
 #include "cv610_validation.h"
 #endif
@@ -474,12 +475,12 @@ static const FieldUi ui_max_qp = {
 };
 static const FieldUi ui_slice_count = {
 	"Video", "Slices per frame", "number", 1, VENC_SLICE_COUNT_MAX, 1, NULL,
-	"Independent H.265 slices per picture (Star6E). 1 = off. Multi-slice "
+	"Independent H.265 slices per picture. 1 = off. Multi-slice "
 	"output lets the waybeam-link receiver conceal RF loss spatially "
 	"instead of dropping the whole frame, and the concealed area shrinks "
-	"as 1/N. The request is quantized: the SDK rounds slice height up to "
-	"whole CTU-64 rows, so 1080p delivers only 1,2,3,4,5,6,9,17 and "
-	"saturates at 17 (720p at 12). Restart-only."
+	"as 1/N. The request is quantized to encoder row geometry; startup logs "
+	"the requested/applied mapping and validation tools report the VCL census. On Star6E, "
+	"1080p delivers only 1,2,3,4,5,6,9,17 and saturates at 17. Restart-only."
 };
 static const FieldUi ui_max_i_bytes = {
 	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
@@ -884,6 +885,7 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"isp.keep_aspect",
 			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size", "video0.qp_delta",
+			"video0.slice_count", "video0.resilience",
 			/* Read by cv610_apply_qp_bounds(), live and at startup.
 			 * CBR cannot hold its target in a noise-dominated scene
 			 * without room to raise QP. */
@@ -1254,10 +1256,9 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	    cfg->video0.scene_threshold > 0)
 		return "video0.scene_holdoff must be >= 1 when scene_threshold > 0";
 	if (strcmp(key, "video0.slice_count") == 0) {
-		/* 1 = split off.  The ceiling is a sanity bound, not the
-		 * delivered count — the SDK saturates a request at the
-		 * picture's CTU-64 row count.  See VENC_SLICE_COUNT_MAX for
-		 * why the old 8 was wrong. */
+		/* 1 = split off.  The ceiling is a cross-backend sanity bound,
+		 * not necessarily the delivered count: row-based vendor APIs
+		 * quantize or saturate requests to the picture geometry. */
 		if (cfg->video0.slice_count < 1 ||
 		    cfg->video0.slice_count > VENC_SLICE_COUNT_MAX)
 			return "video0.slice_count must be 1..32";
@@ -2930,7 +2931,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.18.4\","
+		"\"contract_version\":\"0.18.5\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -3826,7 +3827,7 @@ static int handle_idr_stats(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_json(fd, 200, buf);
 }
 
-#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO || HAVE_BACKEND_CV610
 static int handle_intra_status(int fd, const HttpRequest *req, void *ctx)
 {
 	struct {
@@ -3866,6 +3867,25 @@ static int handle_intra_status(int fd, const HttpRequest *req, void *ctx)
 	{
 		MarukoIntraRefreshStatus st;
 		maruko_pipeline_intra_refresh_status(&st);
+		snprintf(s.mode_name, sizeof(s.mode_name), "%s", st.mode_name);
+		s.active                = st.active;
+		s.mi_supported          = st.mi_supported;
+		s.apply_ok              = st.apply_ok;
+		s.target_ms             = st.target_ms;
+		s.total_rows            = st.total_rows;
+		s.requested_lines       = st.requested_lines;
+		s.effective_lines_per_p = st.effective_lines_per_p;
+		s.lines_clamped         = st.lines_clamped;
+		s.requested_qp          = st.requested_qp;
+		s.effective_qp          = st.effective_qp;
+		s.explicit_gop_sec      = st.explicit_gop_sec;
+		s.effective_gop_sec     = st.effective_gop_sec;
+		s.gop_auto              = st.gop_auto;
+	}
+#elif HAVE_BACKEND_CV610
+	{
+		Cv610IntraRefreshStatus st;
+		cv610_runtime_intra_refresh_status(&st);
 		snprintf(s.mode_name, sizeof(s.mode_name), "%s", st.mode_name);
 		s.active                = st.active;
 		s.mi_supported          = st.mi_supported;
@@ -3964,6 +3984,27 @@ static int handle_resilience_status(int fd, const HttpRequest *req, void *ctx)
 		MarukoRefPredStatus      rp;
 		maruko_pipeline_intra_refresh_status(&st);
 		maruko_pipeline_ref_pred_status(&rp);
+		snprintf(intra_mode, sizeof(intra_mode), "%s",
+			st.mode_name[0] ? st.mode_name : "off");
+		intra_active    = st.active;
+		intra_supported = st.mi_supported;
+		intra_apply_ok  = st.apply_ok;
+		intra_lines     = st.effective_lines_per_p;
+		intra_qp        = st.effective_qp;
+		gop_auto        = st.gop_auto;
+		rp_active       = rp.active;
+		rp_supported    = rp.mi_supported;
+		rp_apply_ok     = rp.apply_ok;
+		rp_base         = rp.base;
+		rp_enhance      = rp.enhance;
+		rp_pred         = rp.pred;
+	}
+#elif HAVE_BACKEND_CV610
+	{
+		Cv610IntraRefreshStatus st;
+		Cv610RefPredStatus rp;
+		cv610_runtime_intra_refresh_status(&st);
+		cv610_runtime_ref_pred_status(&rp);
 		snprintf(intra_mode, sizeof(intra_mode), "%s",
 			st.mode_name[0] ? st.mode_name : "off");
 		intra_active    = st.active;
@@ -4179,7 +4220,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/set",    handle_dual_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
-#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO || HAVE_BACKEND_CV610
 	r |= venc_httpd_route("GET", "/api/v1/intra/status", handle_intra_status, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/resilience/status",
 		handle_resilience_status, NULL);

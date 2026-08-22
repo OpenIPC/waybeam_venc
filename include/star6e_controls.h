@@ -20,7 +20,7 @@ const VencApplyCallbacks *star6e_controls_callbacks(void);
 /** Apply frame rate change to running encoder pipeline. */
 int star6e_controls_apply_fps(uint32_t fps);
 
-/** Publish the frame-shm ring-fill clamp factor (permille, 250..1000) and
+/** Publish the frame-shm ring-fill clamp factor (permille, 50..1000) and
  *  re-program the encoder from the configured bitrate scaled by it.
  *  video0.bitrate is never written — see include/venc_shm_throttle.h for
  *  why the clamp deliberately does not take ownership of the rate.

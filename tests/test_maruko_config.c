@@ -23,6 +23,7 @@ int test_maruko_config(void)
 	CHECK("maruko defaults codec", cfg.rc_codec == PT_H265);
 	CHECK("maruko defaults rc mode", cfg.rc_mode == 3);
 	CHECK("maruko defaults stream mode", cfg.stream_mode == MARUKO_STREAM_RTP);
+	CHECK("maruko defaults slice count", cfg.slice_count == 1);
 	CHECK("maruko defaults forced pad", cfg.forced_sensor_pad == (MI_SNR_PAD_ID_e)-1);
 	CHECK("maruko defaults forced mode", cfg.forced_sensor_mode == -1);
 	CHECK("maruko defaults 3dnr", cfg.vpe_level_3dnr == 1);
@@ -36,6 +37,7 @@ int test_maruko_config(void)
 	vcfg.video0.fps = 90;
 	vcfg.video0.bitrate = 6000;
 	vcfg.video0.gop_size = 1.5;
+	vcfg.video0.slice_count = 6;
 	vcfg.video0.zoom_pct = 0.5;
 	vcfg.video0.zoom_x = 0.25;
 	vcfg.video0.zoom_y = 0.75;
@@ -57,6 +59,7 @@ int test_maruko_config(void)
 	CHECK("maruko config bitrate", cfg.venc_max_rate == 6000);
 	CHECK("maruko config gop", cfg.venc_gop_size == 135);
 	CHECK("maruko config gop seconds", cfg.venc_gop_seconds == 1.5);
+	CHECK("maruko config slice count", cfg.slice_count == 6);
 	CHECK("maruko config zoom pct", cfg.zoom_pct == 0.5);
 	CHECK("maruko config zoom x", cfg.zoom_x == 0.25);
 	CHECK("maruko config zoom y", cfg.zoom_y == 0.75);

@@ -68,6 +68,8 @@ typedef struct {
 	uint8_t ref_base;
 	uint8_t ref_enhance;
 	uint8_t ref_pred;
+	/* Requested whole-access-unit H.265 slice count. 1 disables splitting. */
+	uint32_t slice_count;
 	/* Resilience preset name — mirror of video0.resilience.  Used by
 	 * the debug OSD; pipeline behaviour is fully determined by the
 	 * already-expanded intra_refresh_* / ref_* fields above. */

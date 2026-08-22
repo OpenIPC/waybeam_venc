@@ -109,8 +109,8 @@ typedef struct {
 	int (*request_idr)(void *ctx);
 	void *idr_ctx;
 	uint64_t drop_idr_last_us;
-	/* One WARN per init when a pack overflows packetInfo (frame aborted,
-	 * never shipped truncated). */
+	/* One WARN per init when packet metadata is incomplete or invalid (frame
+	 * aborted, never shipped truncated). */
 	uint8_t trunc_warned;
 } MarukoOutput;
 

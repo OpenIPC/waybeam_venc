@@ -476,12 +476,21 @@ static int test_field_support_by_backend(void)
 	CHECK("max qp unsupported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"video0.max_qp") == 0);
+	CHECK("slice count supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"video0.sliceCount") == 1);
 	CHECK("bitrate supported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"video0.bitrate") == 1);
 	CHECK("gop alias supported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"video0.gopSize") == 1);
+	CHECK("resilience supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.resilience") == 1);
+	CHECK("slice count supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.sliceCount") == 1);
 	CHECK("opus config API unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"audio.codec") == 0);

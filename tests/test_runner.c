@@ -15,6 +15,7 @@ extern int test_file_util(void);
 extern int test_h26x_util(void);
 extern int test_h26x_param_sets(void);
 extern int test_maruko_config(void);
+extern int test_maruko_video(void);
 extern int test_pipeline_common(void);
 extern int test_codec_config(void);
 extern int test_sdk_quiet(void);
@@ -80,6 +81,9 @@ int main(void)
 
 	printf("\n--- test_maruko_config ---\n");
 	failures += test_maruko_config();
+
+	printf("\n--- test_maruko_video ---\n");
+	failures += test_maruko_video();
 
 	printf("\n--- test_pipeline_common ---\n");
 	failures += test_pipeline_common();

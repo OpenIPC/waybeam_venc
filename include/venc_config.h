@@ -37,9 +37,9 @@ extern "C" {
 #define VENC_BITRATE_MAX_KBPS 200000
 
 /* Requested H.265 slices per picture.  A sanity bound, NOT the delivered
- * count: the SDK takes slice height in 32-px rows rounded up to whole CTU-64
- * rows, so a request saturates at the picture's CTU-row count (17 at 1080p,
- * 12 at 720p) and only {1,2,3,4,5,6,9,17} are reachable at 1080p.
+ * count: SigmaStar takes slice height in 32-px rows and quantizes it to
+ * whole CTU-64 rows, while CV610 uses its own 32-pixel LCU-row geometry.
+ * The delivered count therefore depends on backend and picture height.
  *
  * This was 8, on the stated grounds that the SDK's packetInfo table holds 8
  * NALs.  That table is per PACK and the output walker iterates packs
@@ -133,7 +133,7 @@ typedef struct {
 	                            * 1..VENC_SLICE_COUNT_MAX; 1 = split off.
 	                            * >1 enables spatial loss concealment on the
 	                            * link RX (waybeam-link PROTOCOL.md §6.3b).
-	                            * Star6E only. */
+	                            * Star6E, Maruko and CV610. */
 	/* Derived from `resilience` preset only.  Not part of the JSON
 	 * schema or HTTP API — written exclusively by
 	 * apply_resilience_preset() at load time.  Do not parse from JSON,

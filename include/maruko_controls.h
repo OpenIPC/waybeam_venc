@@ -22,7 +22,7 @@ const VencConfig *maruko_controls_vcfg(void);
  * thread.  The HTTP callback only posts a coherent config snapshot. */
 void maruko_controls_service_detect_reload(void);
 
-/** Publish the frame-shm ring-fill clamp factor (permille, 250..1000) and
+/** Publish the frame-shm ring-fill clamp factor (permille, 50..1000) and
  *  re-program the encoder from the configured bitrate scaled by it.  Mirrors
  *  star6e_controls_set_output_throttle; video0.bitrate is never written. */
 int maruko_controls_set_output_throttle(uint16_t permille);

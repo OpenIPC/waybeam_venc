@@ -1,5 +1,42 @@
 # History
 
+## [0.67.0] - 2026-08-22
+
+Ports the shared resilience contract and whole-access-unit H.265 slicing to
+CV610. All resilience presets now drive the HiSilicon row-intra-refresh and
+base/enhance reference controls with strict setter/getter verification;
+`video0.sliceCount` drives 32-pixel LCU-row splitting with early slice output
+kept disabled. The existing config schema and frame-SHM v1 wire layout are
+unchanged.
+
+- CV610 consumes per-frame vendor `ref_type`, marks non-reference enhancement
+  frames in frame-SHM, rewrites their copied TRAIL_R NAL headers to TRAIL_N,
+  publishes GDR cycle position/length, and rate-limits recovery IDRs when a
+  full output ring drops a reference-chain frame.
+- `/api/v1/capabilities`, intra status, and resilience status now report the
+  implemented CV610 controls. Startup fails on an encoder readback mismatch
+  instead of silently claiming resilience or slice geometry.
+- Confirmed on the IMX662 CV610 bench at 1080p30/60/100. Slice requests 1, 3,
+  4, 6, 9, 12 and 17 delivered exact VCL-NAL counts; shared ref presets matched
+  vendor cadence; frame-SHM metadata/integrity passed; and an IDR-started
+  380-frame 1080p60 stream decoded cleanly under FFmpeg `-xerror`.
+- Maruko now binds the device-aware H.265 slice Set/Get ABI and applies it in
+  the required CreateChn-before-StartRecvPic window, including stab-fill.
+  Explicit multi-slice requests fail startup if the ABI cannot be applied or
+  read back; `sliceCount=1` remains compatible with older libraries.
+- Confirmed on SSC378QE/Maruko at 1280x720@30 with `rally`: requests 1, 4 and
+  12 delivered exactly, while 17 and 32 quantized to the picture maximum of
+  12. All sampled access units retained their complete VCL census and a
+  cold-start 284-frame, 12-slice capture decoded cleanly with FFmpeg.
+- Fixed a pre-existing Maruko frame-SHM startup guard that rejected a valid
+  frame ring because it checked only socket and packet-ring transports.
+- The 0.66 eight-slice ceiling and CV610/Maruko deferrals are superseded:
+  `packetInfo[8]` is per pack, while every output path walks all packs in the
+  access unit. The shared request range is now 1..32 and device geometry sets
+  the delivered ceiling.
+- The frame-SHM consumer test can optionally dump an IDR-started Annex-B stream
+  for offline decoder validation.
+
 ## [0.66.0] - 2026-08-19
 
 Adds H.265 multi-slice output on Star6E: `video0.sliceCount` (1..8, default
