@@ -20,6 +20,17 @@
  * Only `idle` (trustworthy) and CLOCK_MONOTONIC are used; the bursty fields
  * are never read. Details: documentation/STAR6E_CPU_PROFILE.md.
  *
+ * CV610 ONLY — that idle derivation does not work there either, for the
+ * opposite reason: /proc/stat's total is exactly right on the 5.10 kernel, so
+ * idle-derived and field-derived are algebraically the same number, and it is
+ * the idle/busy SPLIT that oscillates (tick sampling beating against venc's
+ * 100 fps at HZ=100). Measured on .181: 1.9-95.3% for a box steady at ~33%.
+ * There we read /proc/schedstat rq_cpu_time instead. This stays compile-time
+ * CV610-only on purpose: on Star6E /proc/stat is sound and schedstat would be
+ * WRONG -- measured on .232, idle-derived 60.5 vs an all-task sum of 52.7, and
+ * rq_cpu_time counts only task execution, so it drops that 7.7-point
+ * IRQ/softirq remainder. Maruko ships without CONFIG_SCHEDSTATS at all.
+ *
  * Snapshot ring at 500ms cadence, span = OSD_CPU_RING * 500ms, so the readout
  * is a sliding ~2s average that still refreshes every 500ms. 2s is where
  * idle-derived busy measured stable (+/-2.5% on a constant load) while
@@ -35,7 +46,8 @@
 
 typedef struct {
 	struct {
-		unsigned long long idle; /* idle + iowait jiffies */
+		/* busy nanoseconds when use_sched, else idle+iowait jiffies */
+		unsigned long long acc;
 		struct timespec ts;      /* when this snapshot was taken */
 	} ring[OSD_CPU_RING];
 	int count;                 /* snapshots stored (saturates at RING) */
@@ -43,25 +55,56 @@ typedef struct {
 	int pct;                   /* last computed CPU% */
 	struct timespec ts;        /* last snapshot time (cadence gate) */
 	long hz;                   /* USER_HZ for /proc/stat, always 100 */
-	int ncores;                /* cpuN lines in /proc/stat, probed once */
+	int ncores;                /* cpu lines in the source */
+	int use_sched;             /* this ring holds ns, not jiffies */
 } OsdCpuSampler;
 
-static void osd_cpu_sample(OsdCpuSampler *cs)
+/* /proc/schedstat cpuN row: "cpu%d %u 0 %u %u %u %u %llu %llu %lu" -- six
+ * counters after the label, THEN rq_cpu_time in nanoseconds. That is real
+ * task-execution time off the scheduler clock, so it does not inherit the
+ * tick-sampling error that makes /proc/stat unusable on CV610: measured on
+ * .181, /proc/stat read 1.9-95.3% (stdev 22.05) for a box steady at ~33%,
+ * while schedstat read 30.1-38.3% (stdev 2.02). Returns 0 when the kernel
+ * lacks CONFIG_SCHEDSTATS, which keeps the /proc/stat path below. */
+#ifdef PLATFORM_CV610
+static int osd_read_schedstat(unsigned long long *busy_ns, int *cores)
 {
-	struct timespec now;
-	unsigned long long user, nice, sys, idle, iowait, irq, softirq;
-	unsigned long long idle_all;
 	char line[256];
-	int have = 0, cores = 0;
-	FILE *f;
+	FILE *f = fopen("/proc/schedstat", "r");
+	if (!f) return 0;
 
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	long ms = (now.tv_sec - cs->ts.tv_sec) * 1000 +
-	          (now.tv_nsec - cs->ts.tv_nsec) / 1000000;
-	if (cs->count > 0 && ms < 500) return;
+	*busy_ns = 0;
+	*cores = 0;
+	while (fgets(line, sizeof line, f)) {
+		unsigned long long ns;
+		if (strncmp(line, "cpu", 3) != 0) continue;
+		if (line[3] < '0' || line[3] > '9') continue;
+		if (sscanf(line, "cpu%*u %*u %*u %*u %*u %*u %*u %llu", &ns) != 1)
+			continue;
+		*busy_ns += ns;
+		(*cores)++;
+	}
+	fclose(f);
+	/* Insist the counter actually moved. Our fleet already spans schedstat v15
+	 * and v17; if a future revision shifts the cpuN layout, field 8 lands on
+	 * one of the leading zero counters and this would report 0% forever --
+	 * silently wrong, which is the failure this path exists to avoid.
+	 * Demanding a non-zero sum makes that self-correcting (fall back to
+	 * /proc/stat) and cannot false-trigger: init has consumed task time long
+	 * before venc starts. */
+	return *cores > 0 && *busy_ns > 0;
+}
+#endif /* PLATFORM_CV610 */
 
-	f = fopen("/proc/stat", "r");
-	if (!f) return;
+static int osd_read_procstat(unsigned long long *idle_all, int *cores)
+{
+	unsigned long long user, nice, sys, idle, iowait, irq, softirq;
+	char line[256];
+	int have = 0;
+	FILE *f = fopen("/proc/stat", "r");
+	if (!f) return 0;
+
+	*cores = 0;
 	/* The aggregate "cpu " line comes first, then one "cpuN" line per core,
 	 * then non-cpu keys. One pass gets both the idle counter and the core
 	 * count. Lines are ~110 bytes, well inside the buffer. */
@@ -73,19 +116,55 @@ static void osd_cpu_sample(OsdCpuSampler *cs)
 			           &softirq) == 7)
 				have = 1;
 		} else if (line[3] >= '0' && line[3] <= '9') {
-			cores++;
+			(*cores)++;
 		}
 	}
 	fclose(f);
-	if (!have) return;
+	if (!have) return 0;
+	*idle_all = idle + iowait;
+	return 1;
+}
+
+static void osd_cpu_sample(OsdCpuSampler *cs)
+{
+	struct timespec now;
+	unsigned long long acc = 0;
+	int cores = 0;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	long ms = (now.tv_sec - cs->ts.tv_sec) * 1000 +
+	          (now.tv_nsec - cs->ts.tv_nsec) / 1000000;
+	if (cs->count > 0 && ms < 500) return;
+
+	/* Read the accumulator. Re-decided every sample rather than latched: a
+	 * latch taken on a transient fopen failure at the first encoded frame
+	 * would pin us to the wrong source for the whole process lifetime, and
+	 * a latch that cannot fall back retries per FRAME (100 Hz) rather than
+	 * per window, because the cadence gate above is only armed by cs->ts. */
+	int used_sched = 0;
+#ifdef PLATFORM_CV610
+	used_sched = osd_read_schedstat(&acc, &cores);
+#endif
+	if (!used_sched && !osd_read_procstat(&acc, &cores)) {
+		cs->ts = now;   /* arm the gate: do not retry every frame */
+		return;
+	}
+
+	/* Nanoseconds and jiffies must never share a ring. If the source moved,
+	 * drop the window and start a fresh one rather than differencing two
+	 * different units. */
+	if (cs->count > 0 && used_sched != cs->use_sched) {
+		cs->count = 0;
+		cs->head = 0;
+		cs->ncores = 0;
+	}
+	cs->use_sched = used_sched;
 
 	if (cs->hz <= 0) {
 		cs->hz = sysconf(_SC_CLK_TCK);
 		if (cs->hz <= 0) cs->hz = 100;
 	}
 	if (cs->ncores <= 0) cs->ncores = cores > 0 ? cores : 1;
-
-	idle_all = idle + iowait;
 
 	if (cs->count > 0) {
 		/* When the ring is full, head (about to be overwritten) is the
@@ -94,15 +173,27 @@ static void osd_cpu_sample(OsdCpuSampler *cs)
 		long span_ms =
 			(now.tv_sec - cs->ring[oldest].ts.tv_sec) * 1000L +
 			(now.tv_nsec - cs->ring[oldest].ts.tv_nsec) / 1000000L;
-		if (span_ms > 0) {
-			unsigned long long avail =
-				(unsigned long long)span_ms *
-				(unsigned long long)cs->hz *
-				(unsigned long long)cs->ncores / 1000ULL;
-			unsigned long long di = idle_all - cs->ring[oldest].idle;
-			/* Clamp: idle is sampled a hair after the wall clock, so a
-			 * fully idle box can round to di slightly over avail. */
-			unsigned long long busy = (avail > di) ? avail - di : 0;
+		/* A counter that moved BACKWARDS is not a measurement -- keep the
+		 * last good value instead of inventing one. Feeding a zero delta
+		 * to either formula fabricates an opposite extreme: 0% on the
+		 * schedstat path, and 100% on the /proc/stat path (avail - 0), the
+		 * latter reading as an alarm on the overlay. Left unguarded it is
+		 * worse still: the raw subtraction wraps to a huge unsigned. */
+		if (span_ms > 0 && acc >= cs->ring[oldest].acc) {
+			unsigned long long d = acc - cs->ring[oldest].acc;
+			unsigned long long avail, busy;
+			if (cs->use_sched) {
+				avail = (unsigned long long)span_ms * 1000000ULL *
+					(unsigned long long)cs->ncores;
+				busy = d;
+			} else {
+				avail = (unsigned long long)span_ms *
+					(unsigned long long)cs->hz *
+					(unsigned long long)cs->ncores / 1000ULL;
+				/* Clamp: idle is sampled a hair after the wall clock, so
+				 * a fully idle box can round to d slightly over avail. */
+				busy = (avail > d) ? avail - d : 0;
+			}
 			if (avail > 0) {
 				cs->pct = (int)(busy * 100ULL / avail);
 				if (cs->pct > 100) cs->pct = 100;
@@ -110,7 +201,7 @@ static void osd_cpu_sample(OsdCpuSampler *cs)
 		}
 	}
 
-	cs->ring[cs->head].idle = idle_all;
+	cs->ring[cs->head].acc = acc;
 	cs->ring[cs->head].ts = now;
 	cs->head = (cs->head + 1) % OSD_CPU_RING;
 	if (cs->count < OSD_CPU_RING) cs->count++;
