@@ -147,6 +147,11 @@ static int maruko_runner_init(void *opaque)
 			ctx->vcfg.video0.max_i_bytes,
 			ctx->vcfg.video0.max_p_bytes);
 	}
+	if (ctx->vcfg.video0.max_ip_prop > 0 &&
+	    maruko_controls_callbacks()->apply_max_ip_prop) {
+		maruko_controls_callbacks()->apply_max_ip_prop(
+			ctx->vcfg.video0.max_ip_prop);
+	}
 
 	return 0;
 }

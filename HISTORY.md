@@ -1,5 +1,22 @@
 # History
 
+## [0.66.0] - 2026-08-22
+
+The I-frame size lever the Star6E firmware actually honours gets exposed.
+Contract `0.18.2` → `0.18.3`.
+
+- **`video0.maxIpProp`** (live, CBR only): exposes the RC I-to-P frame size
+  proportion cap (`u32MaxIPProp`). The byte caps (`maxIBytes`/`maxPBytes`)
+  are dead on Star6E firmware — probed live 2026-08-22, identical 42-44 KB
+  IDRs with caps at 2000, 26000, and 8 — so the proportion cap is the only
+  supported mechanism for bounding I-frame size under CBR. Range
+  `0..100`; `0` = SDK default, and the first write captures the driver
+  default so `0` can restore it live, mirroring the `minQp`/`maxQp`
+  pattern. Validated like `minQp`: out-of-range values and a non-zero
+  value under a non-CBR `rcMode` are rejected with `409` (and at config
+  load), so the backend apply never sees them. Applied at boot when
+  persisted, live via `/set` and `/live/set`, on Star6E and Maruko.
+
 ## [0.65.2] - 2026-08-15
 
 CV610 gets a scaler, one mode table instead of five copies of it, and a

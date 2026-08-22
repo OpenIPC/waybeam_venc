@@ -36,6 +36,7 @@
     "qpDelta": -4,
     "maxIBytes": 0,
     "maxPBytes": 0,
+    "maxIpProp": 0,
     "minQp": 0,
     "maxQp": 0,
     "sceneThreshold": 0,

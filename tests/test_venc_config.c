@@ -439,6 +439,44 @@ static int test_load_qp_bounds_validation(void)
 	return failures;
 }
 
+static int test_load_max_ip_prop_validation(void)
+{
+	static const struct {
+		const char *json;
+		int expected;
+	} cases[] = {
+		{ "{\"video0\":{\"maxIpProp\":2}}", 0 },
+		{ "{\"video0\":{\"maxIpProp\":100}}", 0 },
+		{ "{\"video0\":{\"maxIpProp\":101}}", -1 },
+		/* Negative wraps large through the unsigned field and must be
+		 * caught by the upper bound, same as minQp. */
+		{ "{\"video0\":{\"maxIpProp\":-1}}", -1 },
+		/* The cap is a CBR rate-control parameter; a persisted non-CBR
+		 * config carrying it must fail at load, not 500 at apply. */
+		{ "{\"video0\":{\"rcMode\":\"vbr\",\"maxIpProp\":2}}", -1 },
+		{ "{\"video0\":{\"rcMode\":\"vbr\",\"maxIpProp\":0}}", 0 },
+	};
+	int failures = 0;
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+		char *path = write_temp_json(cases[i].json);
+		VencConfig cfg;
+		int ret;
+
+		CHECK("max_ip_prop temp file", path != NULL);
+		if (!path)
+			continue;
+		venc_config_defaults(&cfg);
+		ret = venc_config_load(path, &cfg);
+		unlink(path);
+		free(path);
+		CHECK("max_ip_prop startup validation", ret == cases[i].expected);
+	}
+
+	return failures;
+}
+
 static int test_uri_parsing(void)
 {
 	int failures = 0;
@@ -1274,6 +1312,7 @@ int test_venc_config(void)
 	failures += test_load_missing_file();
 	failures += test_load_bad_json();
 	failures += test_load_qp_bounds_validation();
+	failures += test_load_max_ip_prop_validation();
 	failures += test_uri_parsing();
 	failures += test_roundtrip();
 	failures += test_overclock_clamping();

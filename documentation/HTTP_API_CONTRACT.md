@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.2`
+- `contract_version`: `0.18.3`
 - `status`: `active`
 
 ## Governance Rules
@@ -1694,9 +1694,21 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **live** | Both backends hot-swap the NPU detector on the pipeline thread without respawning video. Star6E uses VPE port 1; Maruko uses SCL port 3 and its drain-while-disable teardown. A model whose reported input geometry disagrees with the configured tap is refused and leaves detection off. |
 | `detect.net_width` / `net_height` | restart | restart | Tap geometry is fixed when the VPE/SCL detector port is created. |
 | `video0.min_qp` / `max_qp` | live | **501** | Star6E-only RC QP bounds; Maruko capabilities report these fields unsupported. |
+| `video0.max_ip_prop` | live | live | RC I/P size proportion cap, `0..100`, `0` = driver default; CBR only (non-CBR writes and out-of-range values are rejected with 409 at validation). CV610 reports it unsupported. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.3` (additive — `video0.maxIpProp`):
+  - **`video0.maxIpProp`** (canonical `video0.max_ip_prop`, live): RC cap on
+    the I-to-P frame size proportion (`u32MaxIPProp`), range `0..100`,
+    `0` = SDK default. CBR only — a non-zero value with any other
+    `video0.rc_mode`, or a value above 100, is rejected with `409` by the
+    common validator (`/set`, `/live/set`, and persisted configs at load)
+    and never reaches the backend. This is the
+    mechanism the SigmaStar CBR rate controller actually honours for
+    I-frame size; `maxIBytes`/`maxPBytes` are ignored by the Star6E RC
+    (probed 2026-08-22: identical 42-44 KB IDRs at caps 2000, 26000, 8).
+    Star6E and Maruko; CV610 reports the field unsupported.
 - `0.18.2` (additive — CV610 `video0.size` becomes a real control):
   - **`video0.size` on CV610 now accepts any geometry the mode can be scaled
     down to**, not just the capture size. VI has no scaler, so the backend

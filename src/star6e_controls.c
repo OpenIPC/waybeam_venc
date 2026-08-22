@@ -37,6 +37,14 @@ typedef struct {
 	uint32_t frame_height;
 	Star6ePipelineState *pipeline;
 	VencConfig *vcfg;
+	/* Driver-default I/P proportion, captured on the first RC-param read
+	 * before any write so a later 0 can restore it — same lifecycle
+	 * argument as g_qp_defaults: the rate mode is fixed for the process
+	 * lifetime, so one capture is enough. */
+	struct {
+		int      captured;
+		uint32_t prop;
+	} ip_prop_default;
 } Star6eControlContext;
 
 typedef struct {
@@ -486,6 +494,47 @@ static int apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
 		max_i_bytes, max_p_bytes,
 		pri == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
 			? "framebits" : "bitrate");
+	return 0;
+}
+
+static int apply_max_ip_prop(uint32_t prop)
+{
+	MI_VENC_ChnAttr_t attr = {0};
+	MI_VENC_RcParam_t param = {0};
+	uint32_t *pprop;
+
+	if (prop == 0 && !g_star6e_control_ctx.ip_prop_default.captured)
+		return 0;   /* never written — driver default already in force */
+	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
+		return -1;
+	if (MI_VENC_GetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
+		return -1;
+
+	/* CBR only: the proportion cap is how CBR bounds I-frame size; VBR/AVBR
+	 * carry the field too but bound I-frames through maxBitrate instead.
+	 * validate_field_cfg() rejects non-CBR writes with 409 before we get
+	 * here, so the default arm is a guard, not the user-facing error. */
+	switch (attr.rate.mode) {
+	case I6_VENC_RATEMODE_H265CBR:
+		pprop = &param.stParamH265Cbr.u32MaxIPProp;
+		break;
+	case I6_VENC_RATEMODE_H264CBR:
+		pprop = &param.stParamH264Cbr.u32MaxIPProp;
+		break;
+	default:
+		return -1;
+	}
+
+	if (!g_star6e_control_ctx.ip_prop_default.captured) {
+		g_star6e_control_ctx.ip_prop_default.prop = *pprop;
+		g_star6e_control_ctx.ip_prop_default.captured = 1;
+	}
+	*pprop = prop ? prop : g_star6e_control_ctx.ip_prop_default.prop;
+
+	if (MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
+		return -1;
+	printf("> maxIpProp changed to %u (0 = driver default %u)\n",
+		prop, g_star6e_control_ctx.ip_prop_default.prop);
 	return 0;
 }
 
@@ -1777,6 +1826,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_zoom = apply_zoom,
 	.apply_isp_bin = apply_isp_bin,
 	.apply_max_frame_size = apply_max_frame_size,
+	.apply_max_ip_prop = apply_max_ip_prop,
 	.apply_snapshot_quality = venc_jpeg_set_quality,
 	.apply_pause_stab = apply_pause_stab,
 	.query_attitude = query_attitude,

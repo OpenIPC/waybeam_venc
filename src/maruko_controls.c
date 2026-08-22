@@ -157,6 +157,13 @@ typedef struct {
 	MI_SYS_ChnPort_t venc_port;
 	volatile sig_atomic_t *output_enabled_ptr;
 	volatile uint32_t *stored_fps_ptr;
+	/* Driver-default I/P proportion, captured on the first RC-param read
+	 * before any write so a later 0 can restore it — see the matching
+	 * note in src/star6e_controls.c. */
+	struct {
+		int      captured;
+		uint32_t prop;
+	} ip_prop_default;
 } MarukoControlContext;
 
 enum {
@@ -384,6 +391,49 @@ static int maruko_apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_byte
 		max_i_bytes, max_p_bytes,
 		pri == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
 			? "framebits" : "bitrate");
+	return 0;
+}
+
+static int maruko_apply_max_ip_prop(uint32_t prop)
+{
+	i6c_venc_chn attr = {0};
+	MI_VENC_RcParam_t param = {0};
+	uint32_t *pprop;
+
+	if (prop == 0 && !g_ctx.ip_prop_default.captured)
+		return 0;   /* never written — driver default already in force */
+	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
+	    g_ctx.venc_chn, &attr) != 0)
+		return -1;
+	if (maruko_mi_venc_get_rc_param(g_ctx.venc_dev,
+	    g_ctx.venc_chn, &param) != 0)
+		return -1;
+
+	/* CBR only — the proportion cap is how CBR bounds I-frame size;
+	 * VBR/AVBR bound them through maxBitrate instead.  validate_field_cfg()
+	 * rejects non-CBR writes with 409 before we get here. */
+	switch (attr.rate.mode) {
+	case MARUKO_VENC_RC_H265_CBR:
+		pprop = &param.stParamH265Cbr.u32MaxIPProp;
+		break;
+	case MARUKO_VENC_RC_H264_CBR:
+		pprop = &param.stParamH264Cbr.u32MaxIPProp;
+		break;
+	default:
+		return -1;
+	}
+
+	if (!g_ctx.ip_prop_default.captured) {
+		g_ctx.ip_prop_default.prop = *pprop;
+		g_ctx.ip_prop_default.captured = 1;
+	}
+	*pprop = prop ? prop : g_ctx.ip_prop_default.prop;
+
+	if (maruko_mi_venc_set_rc_param(g_ctx.venc_dev,
+	    g_ctx.venc_chn, &param) != 0)
+		return -1;
+	printf("> maxIpProp changed to %u (0 = driver default %u)\n",
+		prop, g_ctx.ip_prop_default.prop);
 	return 0;
 }
 
@@ -1497,6 +1547,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_iq_param = maruko_iq_set,
 	.apply_max_payload_size = maruko_apply_max_payload_size,
 	.apply_max_frame_size = maruko_apply_max_frame_size,
+	.apply_max_ip_prop = maruko_apply_max_ip_prop,
 	.query_transport_status = maruko_query_transport_status,
 	.query_audio_status = maruko_query_audio_status,
 	.apply_zoom = maruko_apply_zoom,

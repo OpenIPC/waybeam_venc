@@ -111,6 +111,12 @@ typedef struct {
 	int qp_delta;              /* relative I/P QP delta, -12..12 */
 	uint32_t max_i_bytes;      /* per-frame I-frame size cap (bytes); 0=unlimited */
 	uint32_t max_p_bytes;      /* per-frame P-frame size cap (bytes); 0=unlimited */
+	/* RC I-to-P frame size proportion cap (u32MaxIPProp); 0 = driver
+	 * default.  This is the CBR mechanism the SigmaStar firmware actually
+	 * honours for I-frame size — maxIBytes/maxPBytes are dead on Star6E
+	 * (identical 42-44 KB IDRs at caps 2000, 26000, and 8, probed
+	 * 2026-08-22). */
+	uint32_t max_ip_prop;
 	uint32_t min_qp;           /* RC QP floor; 0 = leave the driver default */
 	uint32_t max_qp;           /* RC QP ceiling; 0 = leave the driver default */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */

@@ -54,6 +54,11 @@ typedef struct {
 	 * struct and set RC priority to FRAMEBITS_FIRST when either is >0.
 	 * Both values in bytes; 0 = unlimited (restores BITRATE_FIRST). */
 	int (*apply_max_frame_size)(uint32_t max_i_bytes, uint32_t max_p_bytes);
+	/* Live-update the RC I-to-P frame size proportion cap (u32MaxIPProp).
+	 * 0 restores the driver default.  Unlike the byte caps above, this is
+	 * the knob the SigmaStar CBR rate controller actually honours for
+	 * I-frame size.  NULL on backends without the RC param. */
+	int (*apply_max_ip_prop)(uint32_t prop);
 	/* Live-update the RC QP bounds (MinQp/MaxQp) in the RC param struct.
 	 * 0 leaves that bound at whatever the driver reported, so a config
 	 * that sets neither behaves exactly as before. Unlike the frame-size
