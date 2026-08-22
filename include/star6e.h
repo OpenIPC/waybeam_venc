@@ -470,6 +470,42 @@ typedef enum {
 	E_MI_VENC_RC_PRIORITY_MAX,
 } MI_VENC_RcPriority_e;
 
+/* SuperFrame policy bounds one encoded access unit. REENCODE retries an
+ * oversized I/P frame at a higher QP; the SDK discards it if it cannot fit
+ * after its internal retry limit. Thresholds are bits, not bytes. */
+typedef enum {
+	E_MI_VENC_SUPERFRM_NONE,
+	E_MI_VENC_SUPERFRM_DISCARD,
+	E_MI_VENC_SUPERFRM_REENCODE,
+	E_MI_VENC_SUPERFRM_MAX,
+} MI_VENC_SuperFrmMode_e;
+
+typedef struct {
+	MI_VENC_SuperFrmMode_e eSuperFrmMode;
+	MI_U32 u32SuperIFrmBitsThr;
+	MI_U32 u32SuperPFrmBitsThr;
+	MI_U32 u32SuperBFrmBitsThr;
+} MI_VENC_SuperFrameCfg_t;
+_Static_assert(sizeof(MI_VENC_SuperFrameCfg_t) == 16,
+	"MI_VENC_SuperFrameCfg_t layout changed — verify SDK match");
+
+/* Frame-lost policy is separate from SuperFrame. NORMAL skips encoded frames
+ * when its long-window bitrate threshold is exceeded; PSKIP is unsupported on
+ * the tested Star6E firmware and is deliberately not used. */
+typedef enum {
+	E_MI_VENC_FRMLOST_NORMAL = 0,
+	E_MI_VENC_FRMLOST_PSKIP = 1,
+} MI_VENC_FrameLostMode_e;
+
+typedef struct {
+	MI_BOOL bFrmLostOpen;
+	MI_U32 u32FrmLostBpsThr;
+	MI_VENC_FrameLostMode_e eFrmLostMode;
+	MI_U32 u32EncFrmGaps;
+} MI_VENC_ParamFrameLost_t;
+_Static_assert(sizeof(MI_VENC_ParamFrameLost_t) == 16,
+	"MI_VENC_ParamFrameLost_t layout changed — verify SDK match");
+
 /* Intra refresh (GDR-style rolling stripe) — identical layout on star6e and
  * maruko (mi_venc_datatype.h:992 for both).  Only the function arity differs
  * (maruko adds VeDev), handled by the per-backend macros below. */

@@ -151,6 +151,8 @@ enum {
 static Star6eControlContext g_star6e_control_ctx;
 
 static int apply_encoder_gop(uint32_t gop_size);
+static int apply_frame_size_limits(uint32_t rate_kbps, uint32_t fps,
+	int want_idr, int announce);
 static int request_idr(void);
 
 static uint32_t align_down(uint32_t value, uint32_t align)
@@ -209,6 +211,19 @@ static uint32_t rc_compensate_kbps(uint32_t kbps, uint32_t delivered_fps)
  * enough, it is a naturally aligned advisory scalar. */
 static uint16_t g_output_throttle_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
 
+static uint32_t effective_bitrate_kbps(uint32_t kbps)
+{
+	kbps = venc_shm_throttle_scale(
+		__atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED),
+		kbps);
+	kbps = rc_compensate_kbps(kbps, g_star6e_control_ctx.delivered_fps);
+	if (kbps > VENC_BITRATE_MAX_KBPS)
+		kbps = VENC_BITRATE_MAX_KBPS;
+	if (kbps < VENC_BITRATE_MIN_KBPS)
+		kbps = VENC_BITRATE_MIN_KBPS;
+	return kbps;
+}
+
 /* want_idr=0 is the throttle path.  apply_bitrate() normally forces an IDR
  * so the decoder resyncs against the new RC state, but the clamp re-programs
  * the encoder as often as every 200 ms while the ring is backed up, and an
@@ -225,14 +240,7 @@ static int apply_bitrate_ex(uint32_t kbps, int want_idr)
 	 * rate, then the >120 fps exact-CBR compensation, then the absolute
 	 * MIN/MAX rails last so neither correction can push the programmed
 	 * value outside what the encoder accepts. */
-	kbps = venc_shm_throttle_scale(
-		__atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED),
-		kbps);
-	kbps = rc_compensate_kbps(kbps, g_star6e_control_ctx.delivered_fps);
-	if (kbps > VENC_BITRATE_MAX_KBPS)
-		kbps = VENC_BITRATE_MAX_KBPS;
-	if (kbps < VENC_BITRATE_MIN_KBPS)
-		kbps = VENC_BITRATE_MIN_KBPS;
+	kbps = effective_bitrate_kbps(kbps);
 	bits = kbps * 1024;
 
 	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
@@ -263,6 +271,15 @@ static int apply_bitrate_ex(uint32_t kbps, int want_idr)
 
 	if (MI_VENC_SetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
 		return -1;
+	if (g_star6e_control_ctx.vcfg &&
+	    (g_star6e_control_ctx.vcfg->video0.superframe_i_frame_percent > 0 ||
+	     g_star6e_control_ctx.vcfg->video0.superframe_p_frame_percent > 0 ||
+	     g_star6e_control_ctx.vcfg->video0.superframe_loss_percent > 0 ||
+	     g_star6e_control_ctx.vcfg->video0.max_i_bytes > 0 ||
+	     g_star6e_control_ctx.vcfg->video0.max_p_bytes > 0) &&
+	    apply_frame_size_limits(kbps,
+		g_star6e_control_ctx.delivered_fps, 0, 0) != 0)
+		return -1;
 	/* Force an IDR after a bitrate change so the decoder resyncs against
 	 * the new rate-control state.  Goes through the rate-limit gate so
 	 * bitrate-storm calls can't DoS the stream.  Tight bitrate ramps
@@ -278,7 +295,7 @@ static int apply_bitrate_ex(uint32_t kbps, int want_idr)
 
 static int apply_bitrate(uint32_t kbps)
 {
-	return apply_bitrate_ex(kbps, 1);
+	return apply_bitrate_ex(kbps, 0);
 }
 
 int star6e_controls_set_output_throttle(uint16_t permille)
@@ -432,61 +449,194 @@ static int apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
 	return 0;
 }
 
-static int apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
+static int set_rc_frame_size_limits(const MI_VENC_ChnAttr_t *attr,
+	MI_VENC_RcParam_t *param, uint32_t max_i_bytes, uint32_t max_p_bytes)
 {
-	MI_VENC_ChnAttr_t attr = {0};
-	MI_VENC_RcParam_t param = {0};
-	MI_VENC_RcPriority_e pri;
-
-	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
-		return -1;
-	if (MI_VENC_GetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
+	if (!attr || !param)
 		return -1;
 
-	switch (attr.rate.mode) {
+	switch (attr->rate.mode) {
 	case I6_VENC_RATEMODE_H265CBR:
-		param.stParamH265Cbr.u32MaxISize = max_i_bytes;
-		param.stParamH265Cbr.u32MaxPSize = max_p_bytes;
+		param->stParamH265Cbr.u32MaxISize = max_i_bytes;
+		param->stParamH265Cbr.u32MaxPSize = max_p_bytes;
 		break;
 	case I6_VENC_RATEMODE_H264CBR:
-		param.stParamH264Cbr.u32MaxISize = max_i_bytes;
-		param.stParamH264Cbr.u32MaxPSize = max_p_bytes;
+		param->stParamH264Cbr.u32MaxISize = max_i_bytes;
+		param->stParamH264Cbr.u32MaxPSize = max_p_bytes;
 		break;
 	case I6_VENC_RATEMODE_H265VBR:
-		param.stParamH265Vbr.u32MaxISize = max_i_bytes;
-		param.stParamH265Vbr.u32MaxPSize = max_p_bytes;
+		param->stParamH265Vbr.u32MaxISize = max_i_bytes;
+		param->stParamH265Vbr.u32MaxPSize = max_p_bytes;
 		break;
 	case I6_VENC_RATEMODE_H264VBR:
-		param.stParamH264VBR.u32MaxISize = max_i_bytes;
-		param.stParamH264VBR.u32MaxPSize = max_p_bytes;
+		param->stParamH264VBR.u32MaxISize = max_i_bytes;
+		param->stParamH264VBR.u32MaxPSize = max_p_bytes;
 		break;
 	case I6_VENC_RATEMODE_H265AVBR:
-		param.stParamH265Avbr.u32MaxISize = max_i_bytes;
-		param.stParamH265Avbr.u32MaxPSize = max_p_bytes;
+		param->stParamH265Avbr.u32MaxISize = max_i_bytes;
+		param->stParamH265Avbr.u32MaxPSize = max_p_bytes;
 		break;
 	case I6_VENC_RATEMODE_H264AVBR:
-		param.stParamH264Avbr.u32MaxISize = max_i_bytes;
-		param.stParamH264Avbr.u32MaxPSize = max_p_bytes;
+		param->stParamH264Avbr.u32MaxISize = max_i_bytes;
+		param->stParamH264Avbr.u32MaxPSize = max_p_bytes;
 		break;
 	default:
 		return -1;
 	}
-
-	if (MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
-		return -1;
-
-	pri = (max_i_bytes > 0 || max_p_bytes > 0)
-		? E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
-		: E_MI_VENC_RC_PRIORITY_BITRATE_FIRST;
-	MI_VENC_SetRcPriority(g_star6e_control_ctx.venc_chn, pri);
-
-	if (request_idr() != 0)
-		return -1;
-	printf("> maxFrameSize changed: I=%u P=%u bytes, priority=%s\n",
-		max_i_bytes, max_p_bytes,
-		pri == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
-			? "framebits" : "bitrate");
 	return 0;
+}
+
+static uint32_t superframe_limit_bytes(uint32_t rate_kbps, uint32_t fps,
+	uint32_t percent)
+{
+	uint64_t numerator;
+	uint64_t denominator;
+
+	if (rate_kbps == 0 || fps == 0)
+		return 0;
+	numerator = (uint64_t)rate_kbps * 1024U * percent;
+	denominator = (uint64_t)fps * 100U * 8U;
+	numerator = (numerator + denominator - 1U) / denominator;
+	return numerator > UINT32_MAX ? UINT32_MAX : (uint32_t)numerator;
+}
+
+static uint32_t stricter_frame_limit(uint32_t automatic, uint32_t manual)
+{
+	if (automatic == 0)
+		return manual;
+	if (manual == 0 || automatic < manual)
+		return automatic;
+	return manual;
+}
+
+static int apply_superframe_config(uint32_t max_i_bytes,
+	uint32_t max_p_bytes, int enabled)
+{
+	MI_VENC_SuperFrameCfg_t cfg = {0};
+
+	if (!g_mi_venc.fnSetSuperFrameCfg)
+		return enabled ? -1 : 0;
+	cfg.eSuperFrmMode = enabled ? E_MI_VENC_SUPERFRM_REENCODE :
+		E_MI_VENC_SUPERFRM_NONE;
+	cfg.u32SuperIFrmBitsThr = max_i_bytes > 0 ? max_i_bytes * 8U :
+		UINT32_MAX;
+	cfg.u32SuperPFrmBitsThr = max_p_bytes > 0 ? max_p_bytes * 8U :
+		UINT32_MAX;
+	cfg.u32SuperBFrmBitsThr = UINT32_MAX;
+	return g_mi_venc.fnSetSuperFrameCfg(g_star6e_control_ctx.venc_chn,
+		&cfg);
+}
+
+static uint32_t frame_lost_threshold_bps(uint32_t rate_kbps,
+	uint32_t loss_percent)
+{
+	uint64_t threshold;
+
+	if (loss_percent == 0)
+		return UINT32_MAX;
+	threshold = (uint64_t)rate_kbps * 1024U * loss_percent / 100U;
+	return threshold > UINT32_MAX ? UINT32_MAX : (uint32_t)threshold;
+}
+
+static int apply_frame_lost_config(uint32_t rate_kbps, uint32_t loss_percent,
+	uint32_t enc_frm_gaps, int enabled)
+{
+	MI_VENC_ParamFrameLost_t cfg = {0};
+
+	if (!g_mi_venc.fnSetFrameLostStrategy)
+		return enabled ? -1 : 0;
+	if (enabled) {
+		cfg.bFrmLostOpen = true;
+		cfg.u32FrmLostBpsThr = frame_lost_threshold_bps(rate_kbps,
+			loss_percent);
+		cfg.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
+		cfg.u32EncFrmGaps = enc_frm_gaps;
+	}
+	return g_mi_venc.fnSetFrameLostStrategy(g_star6e_control_ctx.venc_chn,
+		&cfg);
+}
+
+static int apply_frame_size_limits(uint32_t rate_kbps, uint32_t fps,
+	int want_idr, int announce)
+{
+	MI_VENC_ChnAttr_t attr = {0};
+	MI_VENC_RcParam_t param = {0};
+	MI_VENC_RcPriority_e priority;
+	const VencConfigVideo *video;
+	uint32_t max_i_bytes;
+	uint32_t max_p_bytes;
+	uint32_t rc_max_i_bytes;
+	uint32_t rc_max_p_bytes;
+	uint32_t frame_lost_bps;
+	int superframe_enabled;
+	int frame_lost_enabled;
+	int limits_enabled;
+
+	if (!g_star6e_control_ctx.vcfg)
+		return -1;
+	video = &g_star6e_control_ctx.vcfg->video0;
+	superframe_enabled = video->superframe_i_frame_percent > 0 ||
+		video->superframe_p_frame_percent > 0;
+	frame_lost_enabled = superframe_enabled ||
+		video->superframe_loss_percent > 0;
+	max_i_bytes = video->superframe_i_frame_percent > 0 ?
+		superframe_limit_bytes(rate_kbps, fps,
+			video->superframe_i_frame_percent) : 0;
+	max_p_bytes = video->superframe_p_frame_percent > 0 ?
+		superframe_limit_bytes(rate_kbps, fps,
+			video->superframe_p_frame_percent) : 0;
+	max_i_bytes = stricter_frame_limit(max_i_bytes, video->max_i_bytes);
+	max_p_bytes = stricter_frame_limit(max_p_bytes, video->max_p_bytes);
+	limits_enabled = max_i_bytes > 0 || max_p_bytes > 0;
+	if (max_i_bytes > UINT32_MAX / 8U || max_p_bytes > UINT32_MAX / 8U)
+		return -1;
+	if ((superframe_enabled && !g_mi_venc.fnSetSuperFrameCfg) ||
+	    (frame_lost_enabled && !g_mi_venc.fnSetFrameLostStrategy)) {
+		fprintf(stderr, "ERROR: SuperFrame/frame-lost VENC API is unavailable\n");
+		return -1;
+	}
+
+	priority = limits_enabled ? E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST :
+		E_MI_VENC_RC_PRIORITY_BITRATE_FIRST;
+	rc_max_i_bytes = limits_enabled && max_i_bytes == 0 ? UINT32_MAX :
+		max_i_bytes;
+	rc_max_p_bytes = limits_enabled && max_p_bytes == 0 ? UINT32_MAX :
+		max_p_bytes;
+	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0 ||
+		MI_VENC_GetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0 ||
+		set_rc_frame_size_limits(&attr, &param, rc_max_i_bytes,
+			rc_max_p_bytes) != 0 ||
+		MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0 ||
+		MI_VENC_SetRcPriority(g_star6e_control_ctx.venc_chn, priority) != 0 ||
+		apply_superframe_config(max_i_bytes, max_p_bytes,
+			superframe_enabled) != 0 ||
+		apply_frame_lost_config(rate_kbps, video->superframe_loss_percent,
+			video->enc_frm_gaps, frame_lost_enabled) != 0)
+		return -1;
+	if (want_idr && request_idr() != 0)
+		return -1;
+	frame_lost_bps = frame_lost_enabled ? frame_lost_threshold_bps(rate_kbps,
+		video->superframe_loss_percent) : 0;
+	if (announce)
+		printf("> SuperFrame %s: I=%u P=%u bytes, frameLost=%s at %u bps gap=%u, priority=%s\n",
+			superframe_enabled ? "reencode" : "off",
+			max_i_bytes, max_p_bytes,
+			frame_lost_enabled ? "normal" : "off", frame_lost_bps,
+			frame_lost_enabled ? video->enc_frm_gaps : 0,
+			priority == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST ?
+			"framebits" : "bitrate");
+	return 0;
+}
+
+static int apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
+{
+	(void)max_i_bytes;
+	(void)max_p_bytes;
+	if (!g_star6e_control_ctx.vcfg)
+		return -1;
+	return apply_frame_size_limits(effective_bitrate_kbps(
+		g_star6e_control_ctx.vcfg->video0.bitrate),
+		g_star6e_control_ctx.delivered_fps, 1, 1);
 }
 
 static int apply_encoder_fps(uint32_t fps)
@@ -589,7 +739,8 @@ static int apply_fps(uint32_t fps)
 	/* Delivered rate changed — if the exact-CBR compensation factor
 	 * changed with it (either side above the RC cap), re-program the
 	 * encoder budget from the committed config so the wire rate stays
-	 * on video0.bitrate. */
+	 * on video0.bitrate. SuperFrame derives each cap from this same rate
+	 * and the delivered fps, so it also needs a refresh on every fps change. */
 	{
 		uint32_t old_delivered = g_star6e_control_ctx.delivered_fps;
 		uint32_t cfg_kbps = g_star6e_control_ctx.vcfg ?
@@ -597,8 +748,11 @@ static int apply_fps(uint32_t fps)
 
 		g_star6e_control_ctx.delivered_fps = fps;
 		if (cfg_kbps > 0 &&
-		    rc_compensate_kbps(cfg_kbps, old_delivered) !=
-		    rc_compensate_kbps(cfg_kbps, fps))
+		    (rc_compensate_kbps(cfg_kbps, old_delivered) !=
+		     rc_compensate_kbps(cfg_kbps, fps) ||
+		     (g_star6e_control_ctx.vcfg &&
+		      (g_star6e_control_ctx.vcfg->video0.superframe_i_frame_percent > 0 ||
+		       g_star6e_control_ctx.vcfg->video0.superframe_p_frame_percent > 0))))
 			(void)apply_bitrate(cfg_kbps);
 	}
 

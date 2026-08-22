@@ -57,6 +57,13 @@ static int test_defaults(void)
 	CHECK("defaults_bitrate", cfg.video0.bitrate == 8192);
 	CHECK("defaults_gop_size", cfg.video0.gop_size == 1.0);
 	CHECK("defaults_qp_delta", cfg.video0.qp_delta == -4);
+	CHECK("defaults_superframe_i_percent",
+		cfg.video0.superframe_i_frame_percent == 0);
+	CHECK("defaults_superframe_p_percent",
+		cfg.video0.superframe_p_frame_percent == 0);
+	CHECK("defaults_superframe_loss_percent",
+		cfg.video0.superframe_loss_percent == 0);
+	CHECK("defaults_superframe_gap", cfg.video0.enc_frm_gaps == 1);
 	CHECK("defaults_zoom_off", cfg.video0.zoom_pct == 0.0);
 	CHECK("defaults_zoom_x", cfg.video0.zoom_x == 0.5);
 	CHECK("defaults_zoom_y", cfg.video0.zoom_y == 0.5);
@@ -329,6 +336,13 @@ static int test_load_full_json(void)
 	CHECK("load_bitrate", cfg.video0.bitrate == 4096);
 	CHECK("load_gop", cfg.video0.gop_size == 1);
 	CHECK("load_qp_delta", cfg.video0.qp_delta == -7);
+	CHECK("load_superframe_i_percent",
+		cfg.video0.superframe_i_frame_percent == 0);
+	CHECK("load_superframe_p_percent",
+		cfg.video0.superframe_p_frame_percent == 0);
+	CHECK("load_superframe_loss_percent",
+		cfg.video0.superframe_loss_percent == 0);
+	CHECK("load_superframe_gap", cfg.video0.enc_frm_gaps == 1);
 	CHECK("load_framing_zoom2x", strcmp(cfg.video0.framing, "zoom-2x") == 0);
 	CHECK("load_framing_zoom_pct", cfg.video0.zoom_pct == 0.5);
 	CHECK("load_zoom_x", cfg.video0.zoom_x == 0.25);
@@ -504,6 +518,10 @@ static int test_roundtrip(void)
 	cfg.video0.fps = 90;
 	cfg.video0.bitrate = 12000;
 	cfg.video0.qp_delta = 6;
+	cfg.video0.superframe_i_frame_percent = 150;
+	cfg.video0.superframe_p_frame_percent = 110;
+	cfg.video0.superframe_loss_percent = 150;
+	cfg.video0.enc_frm_gaps = 0;
 	cfg.system.verbose = true;
 	cfg.video0.scene_threshold = 150;
 	strcpy(cfg.video0.framing, "zoom-2x");  /* zoom_pct derived on reload */
@@ -530,6 +548,13 @@ static int test_roundtrip(void)
 	CHECK("roundtrip_fps", cfg2.video0.fps == 90);
 	CHECK("roundtrip_bitrate", cfg2.video0.bitrate == 12000);
 	CHECK("roundtrip_qp_delta", cfg2.video0.qp_delta == 6);
+	CHECK("roundtrip_superframe_i_percent",
+		cfg2.video0.superframe_i_frame_percent == 150);
+	CHECK("roundtrip_superframe_p_percent",
+		cfg2.video0.superframe_p_frame_percent == 110);
+	CHECK("roundtrip_superframe_loss_percent",
+		cfg2.video0.superframe_loss_percent == 150);
+	CHECK("roundtrip_superframe_gap", cfg2.video0.enc_frm_gaps == 0);
 	CHECK("roundtrip_verbose", cfg2.system.verbose == true);
 	CHECK("roundtrip_scene_threshold", cfg2.video0.scene_threshold == 150);
 	CHECK("roundtrip_framing", strcmp(cfg2.video0.framing, "zoom-2x") == 0);
