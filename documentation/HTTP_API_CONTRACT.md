@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.2`
+- `contract_version`: `0.18.3`
 - `status`: `active`
 
 ## Governance Rules
@@ -1697,6 +1697,18 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.3` (behavioral — `video0.bitrate` writes no longer force an IDR):
+  - **`video0.bitrate` writes (both `/set` and `/live/set`) no longer
+    request an IDR** on Star6E and Maruko. The rate controller absorbs a
+    rate change mid-GOP without decoder resync — the frame-shm throttle
+    clamp has re-programmed the encoder as often as every 200 ms on that
+    basis since it shipped. The forced IDR made every adaptive-ladder or
+    congestion write that cleared the 100 ms IDR gate emit a full-size IDR
+    (~42 KB at 10 Mbps, the largest frame the encoder can produce), which
+    on the bench link was the dominant latency-spike source. A writer that
+    wants a resync point calls `/api/v1/idr` (or `/request/idr`)
+    explicitly. CV610 never IDR'd on bitrate; `/api/v1/dual/set` is
+    unchanged.
 - `0.18.2` (additive — CV610 `video0.size` becomes a real control):
   - **`video0.size` on CV610 now accepts any geometry the mode can be scaled
     down to**, not just the capture size. VI has no scaler, so the backend

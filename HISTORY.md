@@ -1,5 +1,22 @@
 # History
 
+## [0.65.3] - 2026-08-22
+
+Bitrate writes stop IDR-ing the link. Contract `0.18.2` → `0.18.3`.
+
+- **No more forced IDR on bitrate writes.** `apply_bitrate()` requested an
+  IDR after every rate change "so the decoder resyncs" — but the rate
+  controller absorbs mid-GOP rate changes without resync (the shm-throttle
+  clamp has re-programmed the encoder every 200 ms on that assumption since
+  it shipped). The IDR was pure cost, and the dominant latency-spike source:
+  an IDR is the largest frame the encoder can emit (~42 KB at 10 Mbps,
+  measured on the bench link 2026-08-22), so adaptive-ladder and congestion
+  writes turned into IDR trains — one full-size burst per write that cleared
+  the 100 ms IDR gate. This also explains the long-standing E0 capture
+  anomaly of IDR bursts every ~19 pictures (two gate windows at 90 fps).
+  Star6E and Maruko; CV610 never IDR'd on bitrate. Writers that need a
+  resync point request one explicitly via `/api/v1/idr`.
+
 ## [0.65.2] - 2026-08-15
 
 CV610 gets a scaler, one mode table instead of five copies of it, and a
