@@ -214,16 +214,31 @@ PipelinePrecropRect pipeline_common_compute_precrop(uint32_t sensor_w,
 	sensor_ar = (uint64_t)sensor_w * image_h;
 	image_ar = (uint64_t)image_w * sensor_h;
 
+	/* The VIF/VPE capture window needs aligned geometry; an unaligned
+	 * crop is accepted by every MI_* call and then VPE silently emits
+	 * nothing.  Observed 2026-08-22 on Star6E, imx415 1472x816: the
+	 * 2-px-aligned 1450x816@x=10 crop for 1280x720 left VENC waiting
+	 * forever, while 1280x704 (1472x808@y=4 — full width, x=0) streamed.
+	 * The stab crop path (star6e_framing_stab.c) has always used
+	 * width & ~7 with x & ~15 and is known good; 16 on every size and
+	 * offset is a superset of that and of the working case, and
+	 * 1440x816@x=16 for 1280x720 is device-verified.
+	 *
+	 * Flooring to 16 changes the crop aspect by at most 16/size — under
+	 * 1.2 % at 1280-class output, 0.74 % in the case above — which the
+	 * downstream scaler absorbs invisibly.  Rounding to nearest would
+	 * halve that but replace a hardware-verified geometry with an
+	 * unverified one. */
 	if (sensor_ar > image_ar) {
 		rect.h = (uint16_t)sensor_h;
-		rect.w = (uint16_t)((sensor_h * image_w / image_h) & ~1u);
-		rect.x = (uint16_t)(((sensor_w - rect.w) / 2) & ~1u);
+		rect.w = (uint16_t)((sensor_h * image_w / image_h) & ~15u);
+		rect.x = (uint16_t)(((sensor_w - rect.w) / 2) & ~15u);
 		rect.y = 0;
 	} else if (sensor_ar < image_ar) {
 		rect.w = (uint16_t)sensor_w;
-		rect.h = (uint16_t)((sensor_w * image_h / image_w) & ~1u);
+		rect.h = (uint16_t)((sensor_w * image_h / image_w) & ~15u);
 		rect.x = 0;
-		rect.y = (uint16_t)(((sensor_h - rect.h) / 2) & ~1u);
+		rect.y = (uint16_t)(((sensor_h - rect.h) / 2) & ~15u);
 	}
 
 	return rect;

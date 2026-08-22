@@ -59,6 +59,29 @@ int test_pipeline_common(void)
 	CHECK("precrop matched-AR x", rect.x == 0);
 	CHECK("precrop matched-AR y", rect.y == 0);
 
+	/* compute_precrop: sizes and offsets must be 16-px aligned.  imx415
+	 * 1472x816 -> 1280x720 is the case that stalled VENC on Star6E: the
+	 * ideal 1450x816@x=10 crop is accepted by every MI_* call and then
+	 * VPE emits nothing.  1440x816@x=16 is the device-verified result. */
+	rect = pipeline_common_compute_precrop(1472, 816, 1280, 720, true);
+	CHECK("precrop 1472x816->16:9 w", rect.w == 1440);
+	CHECK("precrop 1472x816->16:9 h", rect.h == 816);
+	CHECK("precrop 1472x816->16:9 x", rect.x == 16);
+	CHECK("precrop 1472x816->16:9 y", rect.y == 0);
+	CHECK("precrop 1472x816->16:9 w aligned", (rect.w & 15) == 0);
+	CHECK("precrop 1472x816->16:9 x aligned", (rect.x & 15) == 0);
+	CHECK("precrop 1472x816->16:9 fits", rect.x + rect.w <= 1472);
+
+	/* Same constraint on the letterbox axis: 1472x816 -> 1280x704.
+	 * Flooring h to 800 and y to 0 leaves the window 8 px above centre,
+	 * the cost of 16-px offsets. */
+	rect = pipeline_common_compute_precrop(1472, 816, 1280, 704, true);
+	CHECK("precrop 1472x816->1280x704 w", rect.w == 1472);
+	CHECK("precrop 1472x816->1280x704 h", rect.h == 800);
+	CHECK("precrop 1472x816->1280x704 x", rect.x == 0);
+	CHECK("precrop 1472x816->1280x704 y", rect.y == 0);
+	CHECK("precrop 1472x816->1280x704 fits", rect.y + rect.h <= 816);
+
 	/* compute_precrop: keep_aspect=false short-circuits to full sensor
 	 * regardless of image_w/image_h.  This is what isp.keepAspect=false
 	 * gives us. */

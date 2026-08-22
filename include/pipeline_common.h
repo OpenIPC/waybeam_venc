@@ -39,7 +39,10 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps,
 
 /** Compute crop rectangle for the VIF/SCL stage.
  * keep_aspect = true  → center-crop the sensor to the aspect ratio of
- *                       image_w x image_h with 2-pixel alignment.
+ *                       image_w x image_h.  Sizes and offsets are floored
+ *                       to 16 px (VIF/VPE silently produce nothing for an
+ *                       unaligned window), so the crop aspect may differ
+ *                       from the target by up to 16/size.
  * keep_aspect = false → return the full sensor area; image_w/image_h are
  *                       ignored and the downstream scaler will stretch. */
 PipelinePrecropRect pipeline_common_compute_precrop(uint32_t sensor_w,

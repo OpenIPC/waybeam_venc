@@ -1,5 +1,20 @@
 # History
 
+## [0.65.3] - 2026-08-22
+
+`video0.size` with a non-native aspect no longer stalls VENC on Star6E.
+
+- **Keep-aspect precrop is now 16-px aligned.**
+  `pipeline_common_compute_precrop()` aligned the keep-aspect crop to 2 px;
+  the VIF/VPE capture window needs aligned geometry, and an unaligned crop
+  is accepted by every MI_* call and then VPE silently emits nothing — the
+  daemon sat at "waiting for encoder data" forever. Reproduced on Star6E
+  with imx415 1472x816@120 -> 1280x720 (crop 1450x816@x=10); 1280x704
+  (crop 1472x808@y=4, full width) streamed immediately. Sizes and offsets
+  are now floored to 16 px, a superset of the stab crop path's width/8 +
+  x/16 rule; the crop aspect can differ from the target by at most
+  16/size (0.74 % in the case above), which the scaler absorbs.
+
 ## [0.65.2] - 2026-08-15
 
 CV610 gets a scaler, one mode table instead of five copies of it, and a
