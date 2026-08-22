@@ -566,6 +566,10 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
 	FIELD_UI(video0, max_i_bytes,  FT_UINT,   MUT_LIVE, &ui_max_i_bytes),
 	FIELD_UI(video0, max_p_bytes,  FT_UINT,   MUT_LIVE, &ui_max_p_bytes),
+	FIELD(video0, superframe_i_frame_percent, FT_UINT, MUT_LIVE),
+	FIELD(video0, superframe_p_frame_percent, FT_UINT, MUT_LIVE),
+	FIELD(video0, superframe_loss_percent,    FT_UINT, MUT_LIVE),
+	FIELD(video0, enc_frm_gaps,                FT_UINT, MUT_LIVE),
 	FIELD_UI(video0, min_qp,       FT_UINT,   MUT_LIVE, &ui_min_qp),
 	FIELD_UI(video0, max_qp,       FT_UINT,   MUT_LIVE, &ui_max_qp),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
@@ -731,6 +735,10 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.gopSize", "video0.gop_size" },
 	{ "video0.qpDelta", "video0.qp_delta" },
 	{ "video0.maxIBytes", "video0.max_i_bytes" },
+	{ "video0.superframeIFramePercent", "video0.superframe_i_frame_percent" },
+	{ "video0.superframePFramePercent", "video0.superframe_p_frame_percent" },
+	{ "video0.superframeLossPercent", "video0.superframe_loss_percent" },
+	{ "video0.encFrmGaps", "video0.enc_frm_gaps" },
 	{ "video0.minQp", "video0.min_qp" },
 	{ "video0.maxQp", "video0.max_qp" },
 	{ "video0.maxPBytes", "video0.max_p_bytes" },
@@ -895,7 +903,11 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
 	    (strncmp(canonical_key, "qr.", 3) == 0 ||
 	     strcmp(canonical_key, "video0.min_qp") == 0 ||
-	     strcmp(canonical_key, "video0.max_qp") == 0))
+	     strcmp(canonical_key, "video0.max_qp") == 0 ||
+	     strcmp(canonical_key, "video0.superframe_i_frame_percent") == 0 ||
+	     strcmp(canonical_key, "video0.superframe_p_frame_percent") == 0 ||
+	     strcmp(canonical_key, "video0.superframe_loss_percent") == 0 ||
+	     strcmp(canonical_key, "video0.enc_frm_gaps") == 0))
 		return 0;
 
 	/* isp.awb_fps paces the Star6E userspace AWB loop (src/star6e_awb.c),
@@ -1642,7 +1654,11 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	if (strcmp(canonical_key, "video0.pause_stab") == 0)
 		return LIVE_GROUP_PAUSE_STAB;
 	if (strcmp(canonical_key, "video0.max_i_bytes") == 0 ||
-	    strcmp(canonical_key, "video0.max_p_bytes") == 0)
+	    strcmp(canonical_key, "video0.max_p_bytes") == 0 ||
+	    strcmp(canonical_key, "video0.superframe_i_frame_percent") == 0 ||
+	    strcmp(canonical_key, "video0.superframe_p_frame_percent") == 0 ||
+	    strcmp(canonical_key, "video0.superframe_loss_percent") == 0 ||
+	    strcmp(canonical_key, "video0.enc_frm_gaps") == 0)
 		return LIVE_GROUP_MAX_FRAME_SIZE;
 	if (strcmp(canonical_key, "video0.min_qp") == 0 ||
 	    strcmp(canonical_key, "video0.max_qp") == 0)
@@ -1699,7 +1715,7 @@ static const char *live_group_name(LiveApplyGroup group)
 	case LIVE_GROUP_PAUSE_STAB:
 		return "video0.pauseStab";
 	case LIVE_GROUP_MAX_FRAME_SIZE:
-		return "video0.maxIBytes/maxPBytes";
+		return "video0.maxIBytes/maxPBytes/superframe*";
 	case LIVE_GROUP_QP_BOUNDS:
 		return "video0.minQp/maxQp";
 	case LIVE_GROUP_DETECT:
@@ -1986,6 +2002,13 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		dst->video0.max_i_bytes = src->video0.max_i_bytes;
 		dst->video0.max_p_bytes = src->video0.max_p_bytes;
+		dst->video0.superframe_i_frame_percent =
+		src->video0.superframe_i_frame_percent;
+		dst->video0.superframe_p_frame_percent =
+		src->video0.superframe_p_frame_percent;
+		dst->video0.superframe_loss_percent =
+		src->video0.superframe_loss_percent;
+		dst->video0.enc_frm_gaps = src->video0.enc_frm_gaps;
 		break;
 	case LIVE_GROUP_QP_BOUNDS:
 		dst->video0.min_qp = src->video0.min_qp;
@@ -2878,7 +2901,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.18.2\","
+		"\"contract_version\":\"0.18.3\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);

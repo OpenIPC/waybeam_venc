@@ -95,6 +95,8 @@ typedef struct {
 	int (*fnGetChnDevid)(int chn, uint32_t *dev_id);
 	/* Optional — may be NULL on older libmi_venc.so builds. */
 	int (*fnSetRcPriority)(int chn, void *priority); /* MI_VENC_RcPriority_e * */
+	int (*fnSetSuperFrameCfg)(int chn, void *cfg);
+	int (*fnSetFrameLostStrategy)(int chn, void *cfg);
 	int (*fnSetIntraRefresh)(int chn, void *cfg);
 	int (*fnGetIntraRefresh)(int chn, void *cfg);
 	int (*fnSetRefParam)(int chn, void *p);

@@ -476,6 +476,21 @@ static int test_field_support_by_backend(void)
 	CHECK("max qp unsupported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"video0.max_qp") == 0);
+	CHECK("superframe I percent supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"video0.superframeIFramePercent") == 1);
+	CHECK("superframe P percent supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"video0.superframePFramePercent") == 1);
+	CHECK("superframe loss percent supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"video0.superframeLossPercent") == 1);
+	CHECK("superframe gap supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"video0.encFrmGaps") == 1);
+	CHECK("superframe P percent unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"video0.superframe_p_frame_percent") == 0);
 	CHECK("bitrate supported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"video0.bitrate") == 1);

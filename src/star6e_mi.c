@@ -294,6 +294,10 @@ static int i6e_venc_load(star6e_venc_impl *venc)
 	 * to the priority enum, not the value (mi_venc.h). */
 	LOAD_SYM(venc, "libmi_venc.so", fnSetRcPriority,
 		int (*)(int, void *), "MI_VENC_SetRcPriority");
+	LOAD_SYM(venc, "libmi_venc.so", fnSetSuperFrameCfg,
+		int (*)(int, void *), "MI_VENC_SetSuperFrameCfg");
+	LOAD_SYM(venc, "libmi_venc.so", fnSetFrameLostStrategy,
+		int (*)(int, void *), "MI_VENC_SetFrameLostStrategy");
 	LOAD_SYM(venc, "libmi_venc.so", fnSetIntraRefresh,
 		int (*)(int, void *), "MI_VENC_SetIntraRefresh");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetIntraRefresh,

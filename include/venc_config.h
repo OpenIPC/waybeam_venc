@@ -111,6 +111,10 @@ typedef struct {
 	int qp_delta;              /* relative I/P QP delta, -12..12 */
 	uint32_t max_i_bytes;      /* per-frame I-frame size cap (bytes); 0=unlimited */
 	uint32_t max_p_bytes;      /* per-frame P-frame size cap (bytes); 0=unlimited */
+	uint32_t superframe_i_frame_percent; /* 0 = no automatic I-frame cap */
+	uint32_t superframe_p_frame_percent; /* 0 = no automatic P-frame cap */
+	uint32_t superframe_loss_percent;    /* 0 = no derived frame-lost threshold */
+	uint32_t enc_frm_gaps;                /* default 1; explicit 0 passes through */
 	uint32_t min_qp;           /* RC QP floor; 0 = leave the driver default */
 	uint32_t max_qp;           /* RC QP ceiling; 0 = leave the driver default */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */

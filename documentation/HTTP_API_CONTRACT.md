@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.2`
+- `contract_version`: `0.18.3`
 - `status`: `active`
 
 ## Governance Rules
@@ -105,7 +105,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1 },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
+      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "superframeIFramePercent": 0, "superframePFramePercent": 0, "superframeLossPercent": 0, "encFrmGaps": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "allowUnixEncoderStall": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -155,6 +155,10 @@ Response `200`:
       "video0.fps": { "mutability": "live", "supported": true },
       "video0.gop_size": { "mutability": "live", "supported": true },
       "video0.qp_delta": { "mutability": "live", "supported": true },
+      "video0.superframe_i_frame_percent": { "mutability": "live", "supported": true },
+      "video0.superframe_p_frame_percent": { "mutability": "live", "supported": true },
+      "video0.superframe_loss_percent": { "mutability": "live", "supported": true },
+      "video0.enc_frm_gaps": { "mutability": "live", "supported": true },
       "video0.size": { "mutability": "restart_required", "supported": true },
       "video0.scene_threshold": { "mutability": "restart_required", "supported": true },
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
@@ -265,6 +269,8 @@ including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `fpv.noiseLevel`, `isp.sensorBin`, `isp.awbMode`, `isp.awbCt`,
 `isp.keepAspect`, `isp.shutterRule180`,
 `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
+`video0.superframeIFramePercent`, `video0.superframePFramePercent`,
+`video0.superframeLossPercent`, `video0.encFrmGaps`,
 `video0.sceneThreshold`, `video0.sceneHoldoff`,
 `video0.intraRefreshMode`, `video0.intraRefreshLines`,
 `video0.intraRefreshQp`, `video0.zoomX`, `video0.zoomY`, `video0.framing`,
@@ -283,6 +289,9 @@ curl "http://<device-ip>/api/v1/set?video0.bitrate=4096"
 
 # Change FPS
 curl "http://<device-ip>/api/v1/set?video0.fps=60"
+
+# Bound encoder frame bursts (Star6E only)
+curl "http://<device-ip>/api/v1/set?video0.superframeIFramePercent=150&video0.superframePFramePercent=110&video0.superframeLossPercent=150"
 
 # Swap ISP tuning bin (empty = auto-detect /etc/sensors/<sensor>.bin)
 curl "http://<device-ip>/api/v1/set?isp.sensorBin=/etc/sensors/imx415_fpv.bin"
@@ -431,6 +440,30 @@ Semantics:
 - Mutability: `live`
 - Alias: `video0.qpDelta`
 - Semantics: adjusts I-frame QP relative to P-frame; negative values lower I-frame QP (higher quality keyframes), positive values raise it.
+
+### `video0.superframe_i_frame_percent`, `video0.superframe_p_frame_percent`, `video0.superframe_loss_percent`, `video0.enc_frm_gaps`
+
+- Type: unsigned integer; Mutability: `live`; aliases: respectively
+  `video0.superframeIFramePercent`, `video0.superframePFramePercent`,
+  `video0.superframeLossPercent`, and `video0.encFrmGaps`.
+- Support: Star6E only; Maruko returns `501 not_implemented`.
+- The non-zero I/P percentages derive byte ceilings as
+  `ceil(percent * effective bitrate / delivered FPS / 8)`. A zero percentage
+  leaves that frame type at `UINT32_MAX`; P-only configuration therefore keeps
+  I-frames unlimited. The effective bitrate includes frame-SHM throttling and
+  high-FPS CBR compensation, so the limits refresh with live bitrate, FPS, and
+  throttle changes.
+- Either non-zero I/P percentage enables SuperFrame `REENCODE` and RC
+  `FRAMEBITS_FIRST`. Existing `maxIBytes` / `maxPBytes` remain stricter manual
+  RC overrides. With all four SuperFrame settings at zero, SuperFrame and
+  frame-lost are disabled; manual byte caps still use `FRAMEBITS_FIRST`.
+- `superframeLossPercent` derives NORMAL frame-lost's bitrate threshold. An
+  omitted `encFrmGaps` defaults to one encoded frame; an explicit zero is
+  passed to the SDK unchanged. `superframeLossPercent=0` maps to `UINT32_MAX`, avoiding
+  bitrate-triggered drops. PSKIP is never selected.
+- REENCODE raises QP and retries an oversized access unit. If the SDK cannot
+  make it fit within its retry limit, it may discard that frame; monitor
+  `ReEncCnt`, `DropCnt`, encode latency, and output FPS when tuning.
 
 ### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_kalman_q`, `video0.stab_kalman_r`, `video0.stab_recenter_speed`
 
