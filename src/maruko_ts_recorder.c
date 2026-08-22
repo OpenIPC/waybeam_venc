@@ -1,4 +1,5 @@
 #include "maruko_ts_recorder.h"
+#include "maruko_video.h"
 #include "ts_mux.h"
 
 #include <stdio.h>
@@ -8,6 +9,7 @@
 int maruko_ts_recorder_write_stream(Star6eTsRecorderState *state,
 	const i6c_venc_strm *stream)
 {
+	static int incomplete_warned;
 	uint8_t nal_buf[512 * 1024];  /* matches Star6E adapter — ~50 Mbps IDR */
 	size_t nal_len = 0;
 	int is_idr = 0;
@@ -16,6 +18,15 @@ int maruko_ts_recorder_write_stream(Star6eTsRecorderState *state,
 
 	if (!state || state->fd < 0 || !stream || !stream->packet)
 		return 0;
+	if (!maruko_video_stream_packet_info_complete(stream)) {
+		if (!incomplete_warned) {
+			incomplete_warned = 1;
+			fprintf(stderr,
+				"[maruko_ts] incomplete packetInfo table; "
+				"dropping whole access unit\n");
+		}
+		return 0;
+	}
 
 	for (unsigned int i = 0; i < stream->count; ++i) {
 		const i6c_venc_pack *pack = &stream->packet[i];
@@ -23,12 +34,7 @@ int maruko_ts_recorder_write_stream(Star6eTsRecorderState *state,
 			continue;
 
 		if (pack->packNum > 0) {
-			const unsigned int info_cap = (unsigned int)(
-				sizeof(pack->packetInfo) /
-				sizeof(pack->packetInfo[0]));
 			unsigned int nal_count = (unsigned int)pack->packNum;
-			if (nal_count > info_cap)
-				nal_count = info_cap;
 
 			for (unsigned int k = 0; k < nal_count; ++k) {
 				unsigned int off = pack->packetInfo[k].offset;
@@ -46,9 +52,9 @@ int maruko_ts_recorder_write_stream(Star6eTsRecorderState *state,
 				if (nal_len + len > sizeof(nal_buf)) {
 					fprintf(stderr,
 						"[maruko_ts] frame too large "
-						"(%zu + %u > %zu), truncated\n",
+						"(%zu + %u > %zu), access unit dropped\n",
 						nal_len, len, sizeof(nal_buf));
-					break;
+					return 0;
 				}
 				memcpy(nal_buf + nal_len,
 					pack->data + off, len);
@@ -61,9 +67,9 @@ int maruko_ts_recorder_write_stream(Star6eTsRecorderState *state,
 			if (nal_len + len > sizeof(nal_buf)) {
 				fprintf(stderr,
 					"[maruko_ts] frame too large "
-					"(%zu + %u > %zu), truncated\n",
+					"(%zu + %u > %zu), access unit dropped\n",
 					nal_len, len, sizeof(nal_buf));
-				break;
+				return 0;
 			}
 			memcpy(nal_buf + nal_len,
 				pack->data + pack->offset, len);

@@ -378,7 +378,7 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s)
 	if (!s || !s->packet) return 0;
 	for (i = 0; i < s->count; i++) {
 		const MI_VENC_Pack_t *p = &s->packet[i];
-		unsigned int k, n = p->packNum > 8 ? 8 : p->packNum;
+		unsigned int k, n = p->packNum;
 		if (n > 0) {
 			for (k = 0; k < n; k++) {
 				if (p->packetInfo[k].packType.h265Nalu == 19)
@@ -391,11 +391,22 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s)
 	return 0;
 }
 
-static void star6e_scene_request_idr(void *ctx)
+/* Ring-full recovery form: reports whether the shared 100 ms limiter let
+ * the IDR through, so the frame-ring holdoff can retry a swallowed request
+ * on the next drop instead of pacing a no-op (Star6eOutput.request_idr). */
+static int star6e_ring_request_idr(void *ctx)
 {
 	int venc_chn = *(const int *)ctx;
-	if (idr_rate_limit_allow(venc_chn))
-		MI_VENC_RequestIdr(venc_chn, 1);
+	if (!idr_rate_limit_allow(venc_chn))
+		return 0;
+	MI_VENC_RequestIdr(venc_chn, 1);
+	return 1;
+}
+
+/* Scene-detector form (SceneRequestIdrFn is void). */
+static void star6e_scene_request_idr(void *ctx)
+{
+	(void)star6e_ring_request_idr(ctx);
 }
 
 /* ── Runner context ────────────────────────────────────────────────────── */
@@ -728,6 +739,23 @@ static void *dual_rec_thread_fn(void *arg)
 				usleep(1000);
 			continue;
 		}
+		if (!star6e_output_stream_packet_info_complete(&stream)) {
+			static int incomplete_warned;
+			if (!incomplete_warned) {
+				incomplete_warned = 1;
+				fprintf(stderr, "WARN: [dual] invalid packetInfo; "
+					"dropping whole access unit\n");
+			}
+			if (!(d->output.svct_active &&
+			    stream.h265Info.refType ==
+				STAR6E_REFTYPE_ENHANCE_P_NOTFORREF) &&
+			    venc_frame_drop_idr_due(&d->output.drop_idr_last_us,
+				wb_monotonic_us()) &&
+			    star6e_ring_request_idr(&d->channel) == 0)
+				d->output.drop_idr_last_us = 0;
+			MI_VENC_ReleaseStream(d->channel, &stream);
+			continue;
+		}
 
 			/* Skip slow SD writes during shutdown — keep draining
 			 * to prevent VPE backpressure while pipeline tears down. */
@@ -866,7 +894,7 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	 * both producers of forced IDRs coalesce through one 100 ms window.
 	 * Set here rather than in the pipeline because the callback is
 	 * runtime-local; safe against pipeline restarts, which re-run this. */
-	ps->output.request_idr = star6e_scene_request_idr;
+	ps->output.request_idr = star6e_ring_request_idr;
 	ps->output.idr_ctx = &ps->venc_channel;
 
 	star6e_recorder_init(&ps->recorder);
@@ -1195,6 +1223,11 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		fprintf(stderr, "ERROR: MI_VENC_GetStream failed %d\n", ret);
 		return ret;
 	}
+	if (star6e_output_reject_incomplete_access_unit(&ps->output,
+	    &stream)) {
+		MI_VENC_ReleaseStream(ps->venc_channel, &stream);
+		return 0;
+	}
 
 	/* refPred error-resilience marking — rewrite TRAIL_R → TRAIL_N for
 	 * frames the SDK marked as ENHANCE_P_NOTFORREF.  The encoder's own
@@ -1202,9 +1235,9 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * just propagate that designation into the bitstream so generic
 	 * receivers can safely drop those NALs without cascade.
 	 *
-	 * Only active when refPred is enabled (ref_base > 0) — otherwise the
-	 * encoder produces a flat single-ref stream and every frame matters. */
-	if (vcfg->video0.ref_base > 0 &&
+	 * Only active when refPred was successfully applied — otherwise the encoder
+	 * produces a flat single-ref stream and every frame matters. */
+	if (ps->output.svct_active &&
 	    stream.h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF) {
 		star6e_patch_stream_to_trail_n(&stream);
 	}

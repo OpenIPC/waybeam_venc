@@ -16,6 +16,12 @@ CFLAGS += -fPIC -Wall -Wextra -Werror -O2 \
 
 SRCS := imx662_cmos.c imx662_sensor_ctl.c $(COMMON)/sensor_common.c
 OBJS := imx662_cmos.o imx662_sensor_ctl.o sensor_common.o
+DEPS := $(OBJS:.o=.d)
+
+# The tuning tables and the register sequence live in headers, so without
+# generated dependencies a header-only edit relinks the old objects and ships
+# a binary that does not contain the change.
+CFLAGS += -MMD -MP
 
 .PHONY: all clean
 
@@ -27,8 +33,10 @@ all: $(LIB_NAME).so
 sensor_common.o: $(COMMON)/sensor_common.c
 	$(CV610_CC) $(CFLAGS) -c $< -o $@
 
+-include $(DEPS)
+
 $(LIB_NAME).so: $(OBJS)
 	$(CV610_CC) -shared -o $@ $(OBJS)
 
 clean:
-	rm -f $(OBJS) $(LIB_NAME).so
+	rm -f $(OBJS) $(DEPS) $(LIB_NAME).so

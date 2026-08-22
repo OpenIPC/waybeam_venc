@@ -56,11 +56,17 @@ extern "C" {
 #define IMX662_REG_HMAX_H      0x302D
 #define IMX662_REG_FDG_SEL0    0x3030  /* conversion gain HCG/LCG select       */
 #define IMX662_REG_LANEMODE    0x3040  /* 0x01 = 2-lane, 0x03 = 4-lane         */ /* VERIFY */
-#define IMX662_REG_SHR0_L      0x3050  /* SHR0 [23:0] exposure                 */
+#define IMX662_REG_SHR0_L      0x3050  /* SHR0 [19:0] exposure                 */
 #define IMX662_REG_SHR0_M      0x3051
 #define IMX662_REG_SHR0_H      0x3052
-#define IMX662_REG_GAIN_L      0x306C  /* analog gain [15:0], 0.3 dB / LSB     */
-#define IMX662_REG_GAIN_H      0x306D
+/* GAIN[10:0], 0.3 dB / LSB, 0.0..72 dB.  Sony's register list (IMX662
+ * Register.xlsx, and SRM Rev3.0) puts GAIN at 3070h/3071h and jumps straight
+ * from 3069h to 3070h -- 306Ch/306Dh are not registers at all, so the gain
+ * writes landed nowhere and analog gain never actuated.  The vendor's own
+ * reference driver carries the same wrong pair; do not "restore" it.
+ * 3072h/3073h and 3074h/3075h are GAIN_1/GAIN_2 (DOL per-frame), not this. */
+#define IMX662_REG_GAIN_L      0x3070
+#define IMX662_REG_GAIN_H      0x3071
 #define IMX662_REG_BLKLEVEL_L  0x30DC  /* black level (OFFSET), default 0x32=50 */
 #define IMX662_REG_BLKLEVEL_H  0x30DD
 #define IMX662_REG_DIG_CLAMP   0x3458  /* digital clamp                        */ /* VERIFY */
@@ -84,9 +90,58 @@ extern "C" {
 #define IMX662_MIN_SHR0_HDR          10u      /* min shutter (Clear-HDR)        */
 
 #define IMX662_AGAIN_MIN             1024u                  /* 1x  (0 dB)        */
-#define IMX662_AGAIN_MAX             (1024u * 3981u / 10u)  /* ~72 dB, VERIFY    */
+/* 398x = 52 dB, NOT the ~72 dB the old comment claimed -- the /10 makes it a
+ * factor of 10 (20 dB) smaller than 10^(72/20).  Left at 52 dB deliberately:
+ * IMX662_GAIN_REG_MAX (240 codes x 0.3 dB) does allow 72 dB, but the measured
+ * complaint on this bench is too much gain, not too little.  Raise this only
+ * together with the ISP-digital cap below, and A/B it -- the two together set
+ * the total ceiling. */
+#define IMX662_AGAIN_MAX             (1024u * 3981u / 10u)  /* 398x = 52 dB     */
 #define IMX662_GAIN_STEP_MDB         30       /* 0.3 dB, in milli-dB            */
 #define IMX662_GAIN_REG_MAX          240u     /* 72 dB / 0.3 dB                 */
+
+/* Dual conversion gain.
+ *
+ * HCG is NOT brightness-neutral.  The GAIN register is PGA gain applied after
+ * the conversion gain, so the two multiply: asserting FDG_SEL0=1 at an
+ * unchanged code brightens the frame by the conversion-efficiency ratio.  The
+ * datasheet gives that ratio directly -- Rcg (HCG/LCG) min 5.6, typ 5.8, max
+ * 6.0, corroborated by the electro-optical table's G sensitivity, HCG 18383 vs
+ * LCG 3166 Digit/lx/s = 5.81x.  5.8x is 15.3 dB, and at 0.3 dB per code that
+ * is IMX662_HCG_GAIN_OFFSET below.
+ *
+ * Sony's 22h (34-code) floor is NOT the conversion gain -- that reading would
+ * require a 51-code floor.  It is a saturation constraint: Vsat is 3895 digits
+ * in LCG against 1204 in HCG, a ratio of 3.235, and 34 codes x 0.3 dB = 10.2 dB
+ * = 3.236x.  The floor exists so HCG's clip level refills the ADC to LCG's.
+ *
+ * So a write must subtract the offset while HCG is selected, and the thresholds
+ * must sit where the compensated code still clears the floor: a stable HCG
+ * solution needs (requested - 51) >= 34, i.e. requested >= 85.  Latching on
+ * below that has no fixed point -- AE brightens 5.8x, slams the code down past
+ * the floor, HCG drops out, the frame goes dark, and it limit-cycles.  That
+ * band is ordinary dim-indoor light, between the daylight and dark-room cases
+ * that are easy to test. */
+#define IMX662_HCG_GAIN_OFFSET       51u      /* 15.3 dB / 0.3 dB per code      */
+#define IMX662_HCG_GAIN_REG_MIN      34u      /* 10.2 dB; SRM lower bound       */
+#define IMX662_HCG_ON_REG            91u      /* requested; writes 40           */
+#define IMX662_HCG_OFF_REG           85u      /* requested; writes 34 = floor   */
+#define IMX662_FDG_LCG               0x00u
+#define IMX662_FDG_HCG               0x01u
+
+/* The floor is held by the OFF threshold, not by the clamp in
+ * cmos_gains_update(); keep them consistent if either is ever retuned. */
+/* Signed: all three macros are u-suffixed, so an unsigned subtraction wraps and
+ * the assert passes clean for exactly the retune that breaks it (OFF_REG below
+ * OFFSET).  Lowering OFF_REG is the natural response to "HCG drops out too
+ * eagerly", and it re-enters the unstable band the block above warns about. */
+typedef char imx662_hcg_off_clears_floor[
+	((int)IMX662_HCG_OFF_REG - (int)IMX662_HCG_GAIN_OFFSET >=
+		(int)IMX662_HCG_GAIN_REG_MIN) ? 1 : -1];
+/* An inverted pair would toggle conversion gain every frame -- a visible 5.8x
+ * flicker at frame rate -- and nothing else rejects it. */
+typedef char imx662_hcg_hysteresis_ordered[
+	(IMX662_HCG_ON_REG > IMX662_HCG_OFF_REG) ? 1 : -1];
 
 /* ---- resolution modes -----------------------------------------------------
  * Bring linear up first. Add Clear-HDR (2-frame) as a second mode later.

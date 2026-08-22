@@ -1,6 +1,8 @@
 #include "cv610_runtime.h"
 
 #include "cv610_audio.h"
+#include "cv610_encoder_config.h"
+#include "cv610_iq.h"
 #include "cv610_modes.h"
 #include "cv610_pipeline.h"
 #include "debug_osd.h"
@@ -10,6 +12,7 @@
 #include "idr_rate_limit.h"
 #include "output_socket.h"
 #include "rtp_session.h"
+#include "timing.h"
 #include "venc_frame_ring.h"
 #include "venc_ring.h"
 #include "venc_api.h"
@@ -17,6 +20,7 @@
 #include "venc_respawn.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -61,6 +65,17 @@ typedef struct {
 	uint64_t bytes;
 	uint64_t output_drops;
 	uint64_t packets_sent;
+	uint64_t drop_idr_last_us;
+	uint8_t gdr_active;
+	uint8_t gdr_cycle_len;
+	uint8_t gdr_counter;
+	uint8_t svct_active;
+	uint8_t delivered_slice_count;
+	uint8_t slice_census_done;
+	uint32_t requested_slice_count;
+	uint32_t ref_census_frames;
+	uint32_t ref_type_counts[OT_VENC_P_SLICE_BUTT];
+	uint32_t trail_n_patched;
 	int venc_created;
 	int venc_started;
 	int venc_bound;
@@ -71,6 +86,40 @@ typedef struct {
  * Star6E and Maruko runtimes—the live-control wrappers refer to the one active
  * runner. It is published before HTTP starts and cleared after HTTP joins. */
 static Cv610RunnerContext *g_cv610_runner;
+
+static Cv610IntraRefreshStatus g_cv610_intra_status;
+static Cv610RefPredStatus g_cv610_ref_status;
+static pthread_mutex_t g_cv610_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void cv610_runtime_intra_refresh_status(Cv610IntraRefreshStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_cv610_status_mutex);
+	*out = g_cv610_intra_status;
+	pthread_mutex_unlock(&g_cv610_status_mutex);
+}
+
+void cv610_runtime_ref_pred_status(Cv610RefPredStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_cv610_status_mutex);
+	*out = g_cv610_ref_status;
+	pthread_mutex_unlock(&g_cv610_status_mutex);
+}
+
+static void cv610_publish_encoder_status(
+	const Cv610IntraRefreshStatus *intra,
+	const Cv610RefPredStatus *ref)
+{
+	pthread_mutex_lock(&g_cv610_status_mutex);
+	if (intra)
+		g_cv610_intra_status = *intra;
+	if (ref)
+		g_cv610_ref_status = *ref;
+	pthread_mutex_unlock(&g_cv610_status_mutex);
+}
 
 static int cv610_update_venc_attr(uint32_t bitrate, uint32_t gop,
 	int qp_delta, unsigned int fields)
@@ -112,6 +161,87 @@ static int cv610_apply_qp_delta(int delta)
 	return cv610_update_venc_attr(0, 0, delta, 4u);
 }
 
+/* Captured on the first write so that 0 restores the driver's own default
+ * rather than pinning whatever happened to be in force at the time. */
+static struct {
+	td_u32 max_qp, min_qp, max_i_qp, min_i_qp;
+	int captured;
+} g_cv610_qp_defaults;
+
+/* CBR can only hold its target by raising QP.  In a high-gain, noise-dominated
+ * scene the QP the encoder needs can exceed the driver's default ceiling, and
+ * once it saturates the bitrate overshoots with the rate controller powerless
+ * — measured at 3-7x target on the .181 bench with the lights off.  This is
+ * the knob that lets it squeeze; it does not make the picture better, it stops
+ * the overshoot.  0 on either bound leaves/restores the driver default. */
+static int cv610_apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
+{
+	ot_venc_chn_attr attr;
+	ot_venc_rc_param param;
+	td_s32 ret;
+
+	if (min_qp == 0 && max_qp == 0 && !g_cv610_qp_defaults.captured)
+		return 0;   /* never written — driver defaults already in force */
+
+	memset(&attr, 0, sizeof(attr));
+	if (ss_mpi_venc_get_chn_attr(CV610_VENC_CHN, &attr) != TD_SUCCESS)
+		return -1;
+	/* Only CBR carries these bounds; the backend configures nothing else,
+	 * but a future mode change must not write through the wrong union arm. */
+	if (attr.rc_attr.rc_mode != OT_VENC_RC_MODE_H265_CBR)
+		return -1;
+
+	memset(&param, 0, sizeof(param));
+	if (ss_mpi_venc_get_rc_param(CV610_VENC_CHN, &param) != TD_SUCCESS)
+		return -1;
+
+	if (!g_cv610_qp_defaults.captured) {
+		g_cv610_qp_defaults.max_qp   = param.h265_cbr_param.max_qp;
+		g_cv610_qp_defaults.min_qp   = param.h265_cbr_param.min_qp;
+		g_cv610_qp_defaults.max_i_qp = param.h265_cbr_param.max_i_qp;
+		g_cv610_qp_defaults.min_i_qp = param.h265_cbr_param.min_i_qp;
+		g_cv610_qp_defaults.captured = 1;
+	}
+
+	param.h265_cbr_param.max_qp = max_qp ? max_qp : g_cv610_qp_defaults.max_qp;
+	param.h265_cbr_param.min_qp = min_qp ? min_qp : g_cv610_qp_defaults.min_qp;
+	/* I-frames get the same CEILING -- raising only the P bound leaves the
+	 * I-frame free to blow the budget on its own, which in a noisy scene is
+	 * where the biggest frames come from.  Their FLOOR is deliberately left
+	 * alone: video0.qp_delta biases I-frames below the P QP (this craft ships
+	 * -4), and an I-frame floor would silently cancel it.  Star6E's
+	 * apply_qp_bounds() touches only the P bounds for the same reason. */
+	param.h265_cbr_param.max_i_qp = max_qp ? max_qp : g_cv610_qp_defaults.max_i_qp;
+
+	/* The API validator only compares min against max when BOTH are non-zero,
+	 * so a half-specified pair can still resolve to min > max against the
+	 * driver default.  The SDK takes that without complaint and then behaves
+	 * erratically, so reject it here rather than write it. */
+	if (param.h265_cbr_param.min_qp > param.h265_cbr_param.max_qp ||
+		param.h265_cbr_param.min_i_qp > param.h265_cbr_param.max_i_qp) {
+		fprintf(stderr, "ERROR: qpBounds min>max after resolving defaults "
+			"(p %u/%u, i %u/%u)\n",
+			(unsigned)param.h265_cbr_param.min_qp,
+			(unsigned)param.h265_cbr_param.max_qp,
+			(unsigned)param.h265_cbr_param.min_i_qp,
+			(unsigned)param.h265_cbr_param.max_i_qp);
+		return -1;
+	}
+
+	ret = ss_mpi_venc_set_rc_param(CV610_VENC_CHN, &param);
+	if (ret != TD_SUCCESS) {
+		fprintf(stderr, "ERROR: ss_mpi_venc_set_rc_param=0x%x\n",
+			(unsigned)ret);
+		return -1;
+	}
+	printf("> qpBounds: min=%u max=%u (0 = driver default %u/%u)\n",
+		(unsigned)param.h265_cbr_param.min_qp,
+		(unsigned)param.h265_cbr_param.max_qp,
+		(unsigned)g_cv610_qp_defaults.min_qp,
+		(unsigned)g_cv610_qp_defaults.max_qp);
+	return 0;
+}
+
 static int cv610_apply_verbose(bool on)
 {
 	if (!g_cv610_runner)
@@ -137,6 +267,17 @@ static int cv610_request_idr(void)
 		return 0;
 	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
 		? 0 : -1;
+}
+
+/* Ring-drop recovery form: unlike the public callback, report whether the
+ * request actually passed the shared limiter so the one-second holdoff can
+ * retry a coalesced request on the next chain-breaking drop. */
+static int cv610_ring_request_idr(void)
+{
+	if (!idr_rate_limit_allow(CV610_VENC_CHN))
+		return 0;
+	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
+		? 1 : 0;
 }
 
 static uint32_t cv610_query_live_fps(void)
@@ -249,6 +390,9 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.apply_max_payload_size = cv610_apply_max_payload_size,
 	.query_transport_status = cv610_query_transport_status,
 	.query_audio_status = cv610_query_audio_status,
+	.query_iq_info = cv610_iq_query,
+	.apply_iq_param = cv610_iq_set,
+	.apply_qp_bounds = cv610_apply_qp_bounds,
 };
 
 static void cv610_signal_handler(int signo)
@@ -289,6 +433,20 @@ static int cv610_frame_is_idr(const uint8_t *frame, size_t len)
 			return 1;
 	}
 	return 0;
+}
+
+static uint32_t cv610_frame_vcl_nal_count(const uint8_t *frame, size_t len)
+{
+	size_t cursor = 0;
+	const uint8_t *nal;
+	size_t nal_len;
+	uint32_t count = 0;
+
+	while (h26x_util_annexb_next(frame, len, &cursor, &nal, &nal_len)) {
+		if (h26x_util_hevc_nalu_type(nal, nal_len) <= 31)
+			count++;
+	}
+	return count;
 }
 
 static int cv610_send_rtp_frame(Cv610RunnerContext *ctx,
@@ -366,8 +524,229 @@ static int cv610_copy_stream(const ot_venc_stream *stream, uint8_t **out,
 	return 0;
 }
 
+static int cv610_apply_encoder_config(Cv610RunnerContext *ctx,
+	const Cv610EncoderConfig *enc)
+{
+	Cv610IntraRefreshStatus intra_status;
+	Cv610RefPredStatus ref_status;
+	ot_venc_intra_refresh intra;
+	ot_venc_intra_refresh intra_rb;
+	ot_venc_ref_param ref;
+	ot_venc_ref_param ref_rb;
+	ot_venc_slice_split split;
+	ot_venc_slice_split split_rb;
+	uint32_t delivered_slices = 1;
+	uint32_t cycle_len = 0;
+	td_s32 ret;
+
+	if (!ctx || !enc)
+		return -1;
+
+	memset(&intra_status, 0, sizeof(intra_status));
+	memset(&ref_status, 0, sizeof(ref_status));
+	snprintf(intra_status.mode_name, sizeof(intra_status.mode_name), "%s",
+		intra_refresh_mode_name(enc->intra.derived.mode));
+	intra_status.mi_supported = 1;
+	intra_status.target_ms = enc->intra.derived.target_ms;
+	intra_status.total_rows = enc->intra.derived.total_rows;
+	intra_status.requested_lines = ctx->config.video0.intra_refresh_lines;
+	intra_status.effective_lines_per_p = enc->intra.refresh_num;
+	intra_status.lines_clamped = enc->intra.derived.lines_clamped;
+	intra_status.requested_qp = ctx->config.video0.intra_refresh_qp;
+	intra_status.effective_qp = enc->intra.request_i_qp;
+	intra_status.explicit_gop_sec = ctx->config.video0.gop_size;
+	intra_status.effective_gop_sec = enc->intra.derived.gop_overridden
+		? ctx->config.video0.gop_size : enc->intra.derived.gop_sec;
+	intra_status.gop_auto = enc->intra.derived.gop_overridden
+		? 0 : enc->intra.derived.gop_sec > 0.0;
+
+	ref_status.mi_supported = 1;
+	ref_status.base = enc->ref.base;
+	ref_status.enhance = enc->ref.enhance;
+	ref_status.pred = enc->ref.pred ? 1 : 0;
+
+	ctx->gdr_active = 0;
+	ctx->gdr_cycle_len = 0;
+	ctx->gdr_counter = 0;
+	ctx->svct_active = 0;
+	ctx->delivered_slice_count = 1;
+	ctx->slice_census_done = 0;
+	ctx->requested_slice_count = enc->slice.requested_count;
+	ctx->ref_census_frames = 0;
+	memset(ctx->ref_type_counts, 0, sizeof(ctx->ref_type_counts));
+	ctx->trail_n_patched = 0;
+
+	/* Fresh channels default intra refresh off, but always write the enable
+	 * bit so restart behavior does not depend on a future firmware default.
+	 * Preserve the driver's inactive refresh/QP values when disabling because
+	 * zero is outside some vendor revisions' accepted range. */
+	memset(&intra, 0, sizeof(intra));
+	ret = ss_mpi_venc_get_intra_refresh(CV610_VENC_CHN, &intra);
+	if (ret != TD_SUCCESS) {
+		fprintf(stderr, "ERROR: ss_mpi_venc_get_intra_refresh=0x%x\n",
+			(unsigned)ret);
+		goto fail;
+	}
+	intra.enable = enc->intra.enabled ? TD_TRUE : TD_FALSE;
+	intra.mode = OT_VENC_INTRA_REFRESH_ROW;
+	if (enc->intra.enabled) {
+		intra.refresh_num = enc->intra.refresh_num;
+		intra.request_i_qp = enc->intra.request_i_qp;
+	}
+	ret = ss_mpi_venc_set_intra_refresh(CV610_VENC_CHN, &intra);
+	if (ret != TD_SUCCESS) {
+		fprintf(stderr, "ERROR: ss_mpi_venc_set_intra_refresh=0x%x "
+			"enable=%u rows=%u qp=%u\n", (unsigned)ret,
+			(unsigned)intra.enable, (unsigned)intra.refresh_num,
+			(unsigned)intra.request_i_qp);
+		goto fail;
+	}
+	memset(&intra_rb, 0, sizeof(intra_rb));
+	ret = ss_mpi_venc_get_intra_refresh(CV610_VENC_CHN, &intra_rb);
+	if (ret != TD_SUCCESS || intra_rb.enable != intra.enable ||
+	    (enc->intra.enabled &&
+	     (intra_rb.mode != intra.mode ||
+	      intra_rb.refresh_num != intra.refresh_num ||
+	      intra_rb.request_i_qp != intra.request_i_qp))) {
+		fprintf(stderr, "ERROR: CV610 intra-refresh readback mismatch "
+			"ret=0x%x want=%u/%u/%u/%u got=%u/%u/%u/%u\n",
+			(unsigned)ret, (unsigned)intra.enable, (unsigned)intra.mode,
+			(unsigned)intra.refresh_num, (unsigned)intra.request_i_qp,
+			(unsigned)intra_rb.enable, (unsigned)intra_rb.mode,
+			(unsigned)intra_rb.refresh_num,
+			(unsigned)intra_rb.request_i_qp);
+		goto fail;
+	}
+	intra_status.apply_ok = 1;
+	intra_status.active = enc->intra.enabled ? 1 : 0;
+	intra_status.effective_lines_per_p = enc->intra.enabled
+		? intra_rb.refresh_num : 0;
+	intra_status.effective_qp = enc->intra.enabled
+		? intra_rb.request_i_qp : 0;
+	if (enc->intra.enabled && intra_rb.refresh_num > 0) {
+		cycle_len = (enc->intra.derived.total_rows +
+			intra_rb.refresh_num - 1u) / intra_rb.refresh_num;
+		ctx->gdr_active = 1;
+		ctx->gdr_cycle_len = cycle_len > 255u ? 255u : (uint8_t)cycle_len;
+	}
+
+	/* The disabled state is the fresh-channel default. Only program the
+	 * reference cadence when a preset requested it, avoiding an invented
+	 * "off" tuple for an API whose base field must be greater than zero. */
+	memset(&ref_rb, 0, sizeof(ref_rb));
+	ret = ss_mpi_venc_get_ref_param(CV610_VENC_CHN, &ref_rb);
+	if (ret != TD_SUCCESS) {
+		fprintf(stderr, "ERROR: ss_mpi_venc_get_ref_param=0x%x\n",
+			(unsigned)ret);
+		goto fail;
+	}
+	if (enc->ref.enabled) {
+		memset(&ref, 0, sizeof(ref));
+		ref.base = enc->ref.base;
+		ref.enhance = enc->ref.enhance;
+		ref.pred_en = enc->ref.pred ? TD_TRUE : TD_FALSE;
+		ref.base_qp_delta_en = TD_FALSE;
+		ref.base_qp_delta = 0;
+		ret = ss_mpi_venc_set_ref_param(CV610_VENC_CHN, &ref);
+		if (ret != TD_SUCCESS) {
+			fprintf(stderr, "ERROR: ss_mpi_venc_set_ref_param=0x%x "
+				"base=%u enhance=%u pred=%u\n", (unsigned)ret,
+				(unsigned)ref.base, (unsigned)ref.enhance,
+				(unsigned)ref.pred_en);
+			goto fail;
+		}
+		memset(&ref_rb, 0, sizeof(ref_rb));
+		ret = ss_mpi_venc_get_ref_param(CV610_VENC_CHN, &ref_rb);
+		if (ret != TD_SUCCESS || ref_rb.base != ref.base ||
+		    ref_rb.enhance != ref.enhance ||
+		    ref_rb.pred_en != ref.pred_en ||
+		    ref_rb.base_qp_delta_en != ref.base_qp_delta_en ||
+		    ref_rb.base_qp_delta != ref.base_qp_delta) {
+			fprintf(stderr, "ERROR: CV610 ref-param readback mismatch "
+				"ret=0x%x want=%u/%u/%u/%u/%d "
+				"got=%u/%u/%u/%u/%d\n",
+				(unsigned)ret, (unsigned)ref.base,
+				(unsigned)ref.enhance, (unsigned)ref.pred_en,
+				(unsigned)ref.base_qp_delta_en,
+				(int)ref.base_qp_delta,
+				(unsigned)ref_rb.base, (unsigned)ref_rb.enhance,
+				(unsigned)ref_rb.pred_en,
+				(unsigned)ref_rb.base_qp_delta_en,
+				(int)ref_rb.base_qp_delta);
+			goto fail;
+		}
+		ref_status.active = 1;
+		ctx->svct_active = 1;
+	}
+	ref_status.apply_ok = 1;
+
+	/* split_mode=1 is the live firmware's row-split default. Early slice
+	 * output remains off: this runtime publishes one whole access unit per
+	 * GetStream result to both frame-SHM and RTP. */
+	memset(&split, 0, sizeof(split));
+	ret = ss_mpi_venc_get_slice_split(CV610_VENC_CHN, &split);
+	if (ret != TD_SUCCESS) {
+		fprintf(stderr, "ERROR: ss_mpi_venc_get_slice_split=0x%x\n",
+			(unsigned)ret);
+		goto fail;
+	}
+	split.enable = enc->slice.enabled ? TD_TRUE : TD_FALSE;
+	split.slice_output_en = TD_FALSE;
+	if (enc->slice.enabled) {
+		split.split_mode = enc->slice.split_mode;
+		split.split_size = enc->slice.split_size;
+	}
+	ret = ss_mpi_venc_set_slice_split(CV610_VENC_CHN, &split);
+	if (ret != TD_SUCCESS) {
+		fprintf(stderr, "ERROR: ss_mpi_venc_set_slice_split=0x%x "
+			"enable=%u mode=%u size=%u\n", (unsigned)ret,
+			(unsigned)split.enable, (unsigned)split.split_mode,
+			(unsigned)split.split_size);
+		goto fail;
+	}
+	memset(&split_rb, 0, sizeof(split_rb));
+	ret = ss_mpi_venc_get_slice_split(CV610_VENC_CHN, &split_rb);
+	if (ret != TD_SUCCESS || split_rb.enable != split.enable ||
+	    split_rb.slice_output_en != TD_FALSE ||
+	    (enc->slice.enabled &&
+	     (split_rb.split_mode != split.split_mode ||
+	      split_rb.split_size != split.split_size))) {
+		fprintf(stderr, "ERROR: CV610 slice readback mismatch "
+			"ret=0x%x want=%u/%u/%u/0 got=%u/%u/%u/%u\n",
+			(unsigned)ret, (unsigned)split.enable,
+			(unsigned)split.split_mode, (unsigned)split.split_size,
+			(unsigned)split_rb.enable, (unsigned)split_rb.split_mode,
+			(unsigned)split_rb.split_size,
+			(unsigned)split_rb.slice_output_en);
+		goto fail;
+	}
+	if (enc->slice.enabled && split_rb.split_size > 0)
+		delivered_slices = (enc->slice.total_lcu_rows +
+			split_rb.split_size - 1u) / split_rb.split_size;
+	ctx->delivered_slice_count = delivered_slices > 255u
+		? 255u : (uint8_t)delivered_slices;
+
+	cv610_publish_encoder_status(&intra_status, &ref_status);
+	fprintf(stderr, "[waybeam] CV610 resilience: intra=%s rows=%u qp=%u "
+		"cycle=%u ref=%u/%u pred=%u\n", intra_status.mode_name,
+		(unsigned)intra_status.effective_lines_per_p,
+		(unsigned)intra_status.effective_qp, (unsigned)cycle_len,
+		(unsigned)ref_status.base, (unsigned)ref_status.enhance,
+		(unsigned)ref_status.pred);
+	fprintf(stderr, "[waybeam] CV610 slices: requested=%u delivered=%u "
+		"mode=%u lcu_rows_per_slice=%u early_output=0\n",
+		(unsigned)enc->slice.requested_count, (unsigned)delivered_slices,
+		(unsigned)split_rb.split_mode, (unsigned)split_rb.split_size);
+	return 0;
+
+fail:
+	cv610_publish_encoder_status(&intra_status, &ref_status);
+	return -1;
+}
+
 static int cv610_venc_start(Cv610RunnerContext *ctx)
 {
+	Cv610EncoderConfig enc;
 	ot_venc_chn_attr attr;
 	ot_venc_h265_vui vui;
 	ot_venc_start_param start;
@@ -376,8 +755,16 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	uint32_t gop;
 	td_s32 ret;
 
+	if (cv610_encoder_config_derive(&ctx->config, ctx->pipeline.out_height,
+		ctx->pipeline.fps, &enc) != 0) {
+		fprintf(stderr, "ERROR: invalid CV610 encoder resilience/slice config\n");
+		return -1;
+	}
 	gop = ctx->config.video0.gop_size <= 0.0 ? 1u :
 		(uint32_t)(ctx->config.video0.gop_size * ctx->pipeline.fps + 0.5);
+	if (enc.intra.enabled && !enc.intra.derived.gop_overridden &&
+	    enc.intra.derived.gop_frames > 0)
+		gop = enc.intra.derived.gop_frames;
 	if (gop == 0)
 		gop = 1;
 	memset(&attr, 0, sizeof(attr));
@@ -407,6 +794,21 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 		return -1;
 	}
 	ctx->venc_created = 1;
+	if (cv610_apply_encoder_config(ctx, &enc) != 0)
+		return -1;
+	/* video0.minQp/maxQp are MUT_LIVE, but they also have to take effect on
+	 * a cold boot -- the config is read before the channel exists, so the
+	 * live path never runs for a value that was already in the file. */
+	if (ctx->config.video0.min_qp || ctx->config.video0.max_qp) {
+		/* Not (void): a rejected cold-boot apply would otherwise leave the
+		 * operator booting with no QP bound and no indication. */
+		if (cv610_apply_qp_bounds(ctx->config.video0.min_qp,
+				ctx->config.video0.max_qp) != 0)
+			fprintf(stderr, "WARN: qpBounds from config not applied "
+				"(min=%u max=%u)\n",
+				(unsigned)ctx->config.video0.min_qp,
+				(unsigned)ctx->config.video0.max_qp);
+	}
 	memset(&vui, 0, sizeof(vui));
 	ret = ss_mpi_venc_get_h265_vui(CV610_VENC_CHN, &vui);
 	if (ret != TD_SUCCESS)
@@ -517,22 +919,35 @@ static int cv610_prepare(void *opaque)
 	Cv610RunnerContext *ctx = opaque;
 	VencConfig *cfg = &ctx->config;
 	const Cv610SensorMode *mode;
+	int mode_index = -1;
 
 	setvbuf(stdout, NULL, _IONBF, 0);
 	/* Config loading and every staged HTTP mutation run the same lookup
 	 * through cv610_validate_config(), so reaching this is a config file
 	 * edited behind the daemon's back. */
-	mode = cv610_mode_for_fps(cfg->video0.fps);
+	mode = cv610_mode_select(cfg->sensor.mode, cfg->video0.fps, &mode_index);
 	if (mode == NULL || cv610_mode_check_output(mode, cfg->video0.width,
 			cfg->video0.height) != NULL) {
 		fprintf(stderr, "ERROR: CV610 cannot encode %ux%u @ %u fps\n",
 			cfg->video0.width, cfg->video0.height, cfg->video0.fps);
 		return 1;
 	}
+	/* The sensor runs at the MODE's rate.  Say so when that is not what was
+	 * asked for — a forced sensor.mode and a substituted target both land
+	 * here, and silence would leave every status endpoint reporting a rate
+	 * the operator never chose. */
+	if (mode->fps != cfg->video0.fps)
+		printf("> Requested %u fps, using %u fps (sensor mode %d: %s)\n",
+			cfg->video0.fps, mode->fps, mode_index, mode->desc);
+	/* Publish what was actually selected, so /api/v1/modes reports the
+	 * achieved mode rather than recomputing the configured one — the same
+	 * contract star6e_pipeline.c fulfils after sensor_select(). */
+	venc_api_set_sensor_info(0, mode_index, cfg->sensor.index);
 	ctx->pipeline.width = mode->width;
 	ctx->pipeline.height = mode->height;
 	cv610_mode_resolve_output(mode, cfg->video0.width, cfg->video0.height,
 		&ctx->pipeline.out_width, &ctx->pipeline.out_height);
+	ctx->pipeline.keep_aspect = cfg->isp.keep_aspect ? 1 : 0;
 	ctx->pipeline.fps = mode->fps;
 	ctx->pipeline.lanes = 4;
 	ctx->pipeline.data_rate_x2 = 0;
@@ -587,10 +1002,15 @@ static int cv610_init(void *opaque)
 		 * config toggle must not be able to take video down with it.
 		 * /api/v1/audio/status reports the running state, not the flag. */
 		ctx->audio = cv610_audio_start(&ctx->config, &ctx->output_uri);
+		/* No cause is guessed here. This line used to assert "needs
+		 * CV610_AUDIO=1 at module load" for every failure, which sent the
+		 * operator after the module set while the real cause was a
+		 * predecessor's stale AI claim. Each failure point in
+		 * cv610_audio_start() names itself, including the module-absent one. */
 		if (!ctx->audio)
 			fprintf(stderr,
 				"WARNING: CV610 audio did not start; continuing without it "
-				"(needs CV610_AUDIO=1 at module load)\n");
+				"(cause reported above)\n");
 	}
 	g_cv610_runner = ctx;
 	if (venc_api_register(&ctx->config, "cv610",
@@ -692,19 +1112,82 @@ static int cv610_run(void *opaque)
 			continue;
 		}
 		if (cv610_copy_stream(&stream, &frame, &frame_len) == 0) {
-			int is_idr = cv610_frame_is_idr(frame, frame_len);
+			int is_enhance = ctx->svct_active &&
+				stream.h265_info.ref_type ==
+					OT_VENC_ENHANCE_P_SLICE_NOT_FOR_REF;
+			int is_idr;
+			size_t patched = 0;
+
+			if (is_enhance)
+				patched = h26x_util_hevc_patch_trail_r_to_n(frame, frame_len);
+			if (ctx->svct_active && ctx->ref_census_frames < 64u) {
+				unsigned int ref_type = (unsigned int)stream.h265_info.ref_type;
+
+				if (ref_type < OT_VENC_P_SLICE_BUTT)
+					ctx->ref_type_counts[ref_type]++;
+				ctx->trail_n_patched += (uint32_t)patched;
+				ctx->ref_census_frames++;
+				if (ctx->ref_census_frames == 64u) {
+					fprintf(stderr, "[waybeam] CV610 ref census: frames=64 "
+						"types=%u,%u,%u,%u,%u,%u trail_n_patched=%u\n",
+						(unsigned)ctx->ref_type_counts[0],
+						(unsigned)ctx->ref_type_counts[1],
+						(unsigned)ctx->ref_type_counts[2],
+						(unsigned)ctx->ref_type_counts[3],
+						(unsigned)ctx->ref_type_counts[4],
+						(unsigned)ctx->ref_type_counts[5],
+						(unsigned)ctx->trail_n_patched);
+				}
+			}
+			is_idr = cv610_frame_is_idr(frame, frame_len);
+			if (!ctx->slice_census_done &&
+			    ctx->requested_slice_count > 1) {
+				uint32_t vcl_nals = cv610_frame_vcl_nal_count(frame,
+					frame_len);
+
+				if (vcl_nals > 0) {
+					fprintf(stderr, "[waybeam] CV610 slice census: "
+						"requested=%u expected=%u actual_vcl_nals=%u\n",
+						(unsigned)ctx->requested_slice_count,
+						(unsigned)ctx->delivered_slice_count,
+						(unsigned)vcl_nals);
+					ctx->delivered_slice_count = vcl_nals > 255u
+						? 255u : (uint8_t)vcl_nals;
+					ctx->slice_census_done = 1;
+				}
+			}
 
 			if (ctx->frame_ring) {
 				VencFrameMeta meta;
+				int write_ret;
 
 				memset(&meta, 0, sizeof(meta));
 				meta.pts = stream.pack_cnt ? (uint32_t)stream.pack[0].pts : 0;
 				meta.codec = VENC_FRAME_CODEC_H265;
 				meta.flags = is_idr ? VENC_FRAME_FLAG_IDR : 0;
-				if (venc_frame_ring_write(ctx->frame_ring, &meta,
-					frame, (uint32_t)frame_len) != 0)
+				if (is_enhance)
+					meta.flags |= VENC_FRAME_FLAG_ENHANCE;
+				if (is_idr) {
+					ctx->gdr_counter = 0;
+				} else if (ctx->gdr_active && ctx->gdr_cycle_len > 0) {
+					meta.flags |= VENC_FRAME_FLAG_GDR;
+					meta.gdr_pos = ctx->gdr_counter;
+					meta.gdr_len = ctx->gdr_cycle_len;
+					ctx->gdr_counter++;
+					if (ctx->gdr_counter >= ctx->gdr_cycle_len)
+						ctx->gdr_counter = 0;
+				}
+				write_ret = venc_frame_ring_write(ctx->frame_ring, &meta,
+					frame, (uint32_t)frame_len);
+				if (write_ret != 0) {
 					__atomic_add_fetch(&ctx->output_drops, 1,
 						__ATOMIC_RELAXED);
+					if (venc_frame_drop_breaks_chain(meta.flags) &&
+					    venc_frame_drop_idr_due(&ctx->drop_idr_last_us,
+						wb_monotonic_us()) &&
+					    cv610_ring_request_idr() == 0)
+						ctx->drop_idr_last_us = 0;
+				}
 			} else if (ctx->socket_handle >= 0) {
 				/* cv610_output_write owns per-datagram drop accounting. */
 				(void)cv610_send_rtp_frame(ctx, frame, frame_len);

@@ -16,6 +16,11 @@ large control surface.
   (see "Sensor modes" below — the table in `src/cv610_modes.c` is the only
   place they are written down).
 - H.265 CBR, GOP, and I/P QP delta come from the existing `VencConfig` fields.
+- Shared resilience presets drive row GDR and reference cadence with strict
+  vendor readback; frame-SHM carries GDR/ENHANCE metadata and copied droppable
+  NALs are marked TRAIL_N.
+- `video0.sliceCount` enables whole-access-unit H.265 slicing. CV610 uses
+  32-pixel LCU-row units and keeps early per-slice output disabled.
 - UDP and abstract UNIX outputs use the shared HEVC RTP packetizer.
 - `frame-shm://` publishes the existing VFRM v1 whole-frame contract.
 - The shared HTTP/WebUI API advertises a CV610-specific capability mask and
@@ -34,6 +39,26 @@ large control surface.
 The graph uses VI-online mode, matching the standalone streamer's production
 path. The module loader must provide a clean SYS/VB lifecycle; the backend
 verifies the requested mode by reading it back before creating the VI pipe.
+
+## Encoder capability delta
+
+CV610 has a substantially broader vendor encoder surface than the current
+backend exposes: nine declared RC families, multiple P/CRR GOP structures,
+intra refresh, reference prediction, SVC, hierarchical QP, native frame-loss
+and super-frame policies, ROI/QP maps, VUI/user data, and slice/low-delay
+controls. SSC338Q currently has the broader device-proven Waybeam integration.
+
+The evidence levels, live-device readback, exact comparison and deliberately
+deferred controls are documented in
+`documentation/SSC338Q_CV610_ENCODER_CAPABILITIES.md`. The resilience and
+whole-access-unit slice port is tracked in
+`documentation/CV610_RESILIENCE_SLICES_PLAN.md`.
+
+The port is confirmed on device at 1080p30/60/100. Requests for 1, 3, 4, 6, 9,
+12 and 17 slices delivered the requested VCL NAL census, reference cadences and
+TRAIL_N counts matched, and an IDR-started 1080p60 capture decoded cleanly
+under FFmpeg `-xerror`. Native SVC, extra RC/GOP modes and encoder-side loss
+policies remain deliberately deferred.
 
 ## Build
 
@@ -66,9 +91,24 @@ chmod +x /etc/init.d/S95waybeam /usr/bin/load-cv610-online
 ```
 
 The init script invokes the staged `/usr/bin/load-cv610-online` module
-loader before starting the daemon and unloads the MPP stack after graceful
-termination. Only one service may own the graph; disable the standalone
+loader before starting the daemon. It does **not** unload the MPP stack on
+stop: the HiSilicon drivers take no module reference for an open fd, so an
+`rmmod` under a live consumer (typically `waybeam_hub` holding `/dev/rgn`)
+frees file operations still in use and wedges the SoC hard enough to need a
+physical power cycle. Unloading is done only by an explicit
+`load-cv610-online stop`, which refuses while any consumer holds an MPP
+device. Only one service may own the graph; disable the standalone
 `S95cv610-streamer` service when enabling `S95waybeam`.
+
+Three operator rules follow from that:
+
+- **Recovery after an abnormal exit is a plain `S95waybeam start`.** The
+  modules are still loaded and the daemon re-initialises against them; there
+  is no `reload` action and no module rollback on a failed start.
+- **Changing `CV610_AUDIO` or `CV610_SENSOR_PROFILE` needs a reboot.** The
+  loader refuses to re-load a differing module set over a live one.
+- **A boot that has seen a hard kill cannot be unloaded cleanly.** Reboot
+  rather than fighting it.
 
 `CV610_SENSOR_PROFILE` picks the sensor clock the modules load with. It is
 now only a fallback: the daemon sets the clock for the selected mode during
@@ -80,8 +120,8 @@ Audio is opt-in in both layers: set `CV610_AUDIO=1` in
 `open_aenc`, and `open_acodec`, then set `audio.enabled=true`, 48000 Hz, mono,
 Opus, and a non-negative `outgoing.audioPort` in `/etc/waybeam.json`. The
 daemon refuses other CV610 audio formats. The init script tracks the daemon
-across API-driven process respawns and will not unload modules while any
-Waybeam process still owns the graph. `audio.enabled` and `audio.mute` are
+across API-driven process respawns; module unloading is guarded separately in
+`load-cv610-online`, which refuses while any process holds an MPP device. `audio.enabled` and `audio.mute` are
 restart-required HTTP controls; the rest of the audio group is hardcoded and
 advertised unsupported. Enabling audio from a video-only boot still needs
 kernel modules that a daemon respawn cannot load, so the daemon warns and
@@ -153,21 +193,22 @@ and continues on the boot-time clock.
 
 ## Deferred phases
 
-1. Device smoke-test frame-SHM, repeated restart cycles, and a bounded soak.
+1. Run a longer-duration soak beyond the bounded device matrices already
+   completed.
 2. Add live output redirection and encoder output-FPS control.
 3. Add frame-SHM pressure metrics/throttling and sidecar parity.
-4. Port advanced features selectively: IQ controls and recording, and only
-   then consider dual VENC or stabilization. Add live audio gain/mute only
-   after the analog control path can be operator-verified.
+4. Port recording selectively, and only then consider dual VENC or
+   stabilization. Add live audio gain/mute only after the analog control path
+   can be operator-verified.
 
 Unsupported SigmaStar-only fields remain in the common configuration schema
 but are marked unsupported in `/api/v1/capabilities` and rejected before
 mutation. This keeps the shared dashboard honest while the CV610 control
 surface grows feature by feature.
 
-The pull-request CI cross-builds this experimental backend, but the production
-release workflow remains limited to Star6E and Maruko until the integrated
-binary passes the phase-1 device gate above.
+Pull-request verification cross-builds this backend. Release promotion remains
+gated on the CV610 build plus the focused device matrix documented in
+`documentation/CV610_RESILIENCE_SLICES_PLAN.md`.
 
 ## Hardware verification
 
@@ -185,9 +226,12 @@ The integrated audio path initialized on the same target, resolved the known
 ACODEC power-up race after its expected 100 ms retry, and produced about 100
 Opus access units/s with zero reported send drops. A host receiver checked 12
 consecutive RTP v2/PT98 packets: sequence deltas were 1 and 48 kHz timestamp
-deltas were 480, exactly 10 ms. No microphone was connected, so acoustic
-content is explicitly not operator-verified. A later service-stop hang was
-localized to stale pidfile handling after an API respawn, not audio teardown;
-the init-script fix requires a power-cycle and device retest. See
-`documentation/CRASH_LOG.md`. Frame-SHM and long-duration soak verification
-remain pending.
+deltas were 960, exactly 20 ms (`CV610_AUDIO_POINT_NUM` 960; the 480/10 ms
+figure predates the Opus frame-size parity fix). No microphone was connected, so acoustic
+content is explicitly not operator-verified.
+
+On 2026-08-22 the resilience/slice branch was also confirmed through
+frame-SHM at 1080p30/60/100. Slice requests 1, 3, 4, 6, 9, 12 and 17 produced
+the requested VCL census; a 380-frame IDR-started 1080p60 capture decoded
+cleanly with FFmpeg `-xerror`; and GDR/ENHANCE metadata, TRAIL_N rewriting and
+one-second loss recovery passed. Only a longer-duration soak remains pending.

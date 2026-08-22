@@ -41,6 +41,8 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	output->connected_udp = 0;
 	output->allow_unix_encoder_stall = allow_unix_encoder_stall ? 1 : 0;
 	output->send_errors = 0;
+	output->drop_idr_last_us = 0;
+	output->trunc_warned = 0;
 	memset(&output->send_queue, 0, sizeof(output->send_queue));
 	__atomic_store_n(&output->socket_drops, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&output->socket_writes, 0, __ATOMIC_RELAXED);
@@ -74,6 +76,8 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 	output->connected_udp = 0;
 	output->allow_unix_encoder_stall = 0;
 	output->send_errors = 0;
+	output->drop_idr_last_us = 0;
+	output->trunc_warned = 0;
 	memset(&output->send_queue, 0, sizeof(output->send_queue));
 	__atomic_store_n(&output->socket_drops, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&output->socket_writes, 0, __ATOMIC_RELAXED);
@@ -112,6 +116,8 @@ int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name)
 	output->connected_udp = 0;
 	output->allow_unix_encoder_stall = 0;
 	output->send_errors = 0;
+	output->drop_idr_last_us = 0;
+	output->trunc_warned = 0;
 	memset(&output->send_queue, 0, sizeof(output->send_queue));
 	__atomic_store_n(&output->socket_drops, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&output->socket_writes, 0, __ATOMIC_RELAXED);

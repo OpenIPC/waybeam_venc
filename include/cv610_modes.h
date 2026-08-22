@@ -33,6 +33,29 @@ const Cv610SensorMode *cv610_mode_table(size_t *count);
  * different capture. */
 const Cv610SensorMode *cv610_mode_for_fps(uint32_t fps);
 
+/* Resolve sensor.mode + video0.fps to one mode, the way SigmaStar's
+ * sensor_select() resolves sensor.mode + video0.fps against MI_SNR_GetRes():
+ * an explicit index wins and must exist, otherwise the frame rate is a TARGET
+ * rather than a command and the closest usable mode is chosen.
+ *
+ *   forced_mode >= 0   that index, or NULL when the table has no such index
+ *   forced_mode <  0   exact rate if the table has it; else the slowest mode
+ *                      still faster than the target; else the fastest mode
+ *   target_fps == 0    NULL — nothing to select against
+ *
+ * The last auto case is a deliberate divergence.  SigmaStar's tie-break
+ * (sensor_select.c sensor_mode_cost) scores fps_excess at 0 for every mode
+ * BELOW the target, so a target above them all falls back to table order —
+ * the slowest mode.  That rarely fires there because its modes carry min-max
+ * fps ranges; on this point-fps table it would fire constantly, and answering
+ * "100" to a request for "120" is what the operator meant.
+ *
+ * *out_index (optional) receives the table index, or -1 when NULL is returned.
+ * A caller that acts on the result must report a substituted rate: the sensor
+ * runs at the MODE's rate, not the requested one. */
+const Cv610SensorMode *cv610_mode_select(int forced_mode, uint32_t target_fps,
+	int *out_index);
+
 /* Whether an encoded geometry can be produced from this mode.  Returns NULL
  * when it can, or a static reason string.  A zero width AND height mean
  * "the mode's own size" and always pass. */

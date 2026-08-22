@@ -28,13 +28,9 @@ size_t star6e_hevc_rtp_send_frame(const MI_VENC_Stream_t *stream,
 
 	for (unsigned int i = 0; i < stream->count; ++i) {
 		const MI_VENC_Pack_t *pack = &stream->packet[i];
-		const unsigned int info_cap = (unsigned int)(sizeof(pack->packetInfo) /
-			sizeof(pack->packetInfo[0]));
 		unsigned int nal_count = (pack->packNum > 0) ?
 			(unsigned int)pack->packNum : 1;
 
-		if (pack->packNum > 0 && nal_count > info_cap)
-			nal_count = info_cap;
 		if (!pack->data)
 			continue;
 

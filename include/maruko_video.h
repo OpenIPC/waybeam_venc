@@ -23,6 +23,17 @@ typedef RtpSessionState MarukoRtpState;
 void maruko_video_init_rtp_state(MarukoRtpState *rtp,
 	PAYLOAD_TYPE_E codec, uint32_t sensor_fps);
 
+/** Return non-zero when every vendor pack exposes descriptors for all of its
+ * NAL units.  The i6c ABI has a fixed-size packetInfo table; callers must drop
+ * the whole access unit rather than silently emit only the table prefix. */
+int maruko_video_stream_packet_info_complete(const i6c_venc_strm *stream);
+
+/** Reject an incomplete access unit before any consumer sees it. Returns 1
+ * when rejected, emits a one-time warning, and requests paced recovery when
+ * the dropped picture participates in the reference chain. */
+int maruko_video_reject_incomplete_access_unit(const i6c_venc_strm *stream,
+	MarukoOutput *output);
+
 /** Packetize and send one encoder frame over RTP.
  *  If stats is non-NULL and the stream is H.265 in RTP mode, per-frame
  *  packetizer counters are accumulated into *stats. */

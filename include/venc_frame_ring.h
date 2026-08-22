@@ -56,11 +56,34 @@
  * must NOT provoke a recovery IDR: that would spend the largest frame in the
  * stream to repair damage that never happened, into a ring already full.
  *
- * Shared by both backends so the policy has one definition rather than two
+ * Shared by all encoder backends so the policy has one definition rather than
+ * several
  * copies that can drift. */
 static inline int venc_frame_drop_breaks_chain(uint8_t flags)
 {
 	return (flags & VENC_FRAME_FLAG_ENHANCE) ? 0 : 1;
+}
+
+/* Holdoff between ring-full recovery IDRs.  The shared per-channel IDR
+ * limiter (100 ms) exists for scene changes, where speed matters; through
+ * it a ring with NO consumer draining it — every frame dropping — still
+ * degrades the stream into an IDR every ~7 frames with GDR suppressed
+ * (measured on star6e, 2026-08-20).  A chain break only needs ONE IDR to
+ * heal, and a consumer-less ring needs none at all, so pace this path at
+ * one request per second: a live consumer that missed a frame resyncs
+ * exactly within 1 s (GDR already covers it approximately in one refresh
+ * cycle), and the worst case costs ~one extra I-frame per second. */
+#define VENC_FRAME_DROP_IDR_HOLDOFF_US (1000u * 1000u)
+
+/* Pure so tests can drive the clock: *last_us is caller-owned state (zero
+ * = never fired), now_us is CLOCK_MONOTONIC microseconds. */
+static inline int venc_frame_drop_idr_due(uint64_t *last_us, uint64_t now_us)
+{
+	if (*last_us != 0 &&
+	    now_us - *last_us < VENC_FRAME_DROP_IDR_HOLDOFF_US)
+		return 0;
+	*last_us = now_us;
+	return 1;
 }
 
 typedef struct {
@@ -103,7 +126,7 @@ typedef struct __attribute__((aligned(64))) {
 	uint32_t futex_seq;
 	uint32_t health_magic;      /* VENC_FRAME_RING_HEALTH_MAGIC, or 0 */
 	uint64_t full_drops;        /* lifetime full-ring drops */
-	uint16_t throttle_permille; /* 1000 = unclamped, 250 = floor */
+	uint16_t throttle_permille; /* 1000 = unclamped; lower = active clamp */
 	uint8_t  _pad1[38];
 
 	/* Line 2: Consumer-owned */

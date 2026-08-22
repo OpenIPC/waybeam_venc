@@ -302,6 +302,10 @@ static int i6e_venc_load(star6e_venc_impl *venc)
 		int (*)(int, void *), "MI_VENC_SetRefParam");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetRefParam,
 		int (*)(int, void *), "MI_VENC_GetRefParam");
+	LOAD_SYM(venc, "libmi_venc.so", fnSetH265SliceSplit,
+		int (*)(int, void *), "MI_VENC_SetH265SliceSplit");
+	LOAD_SYM(venc, "libmi_venc.so", fnGetH265SliceSplit,
+		int (*)(int, void *), "MI_VENC_GetH265SliceSplit");
 
 	if (!venc->fnCreateChn || !venc->fnDestroyChn ||
 	    !venc->fnStartRecvPic || !venc->fnStopRecvPic ||

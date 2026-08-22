@@ -43,6 +43,63 @@ const Cv610SensorMode *cv610_mode_for_fps(uint32_t fps)
 	return NULL;
 }
 
+const Cv610SensorMode *cv610_mode_select(int forced_mode, uint32_t target_fps,
+	int *out_index)
+{
+	const Cv610SensorMode *pick;
+	size_t pick_i = 0;
+	size_t i;
+
+	if (out_index)
+		*out_index = -1;
+
+	/* A forced index is the whole answer: it exists or the config is wrong.
+	 * Parity with find_best_mode(), which fails bring-up rather than
+	 * quietly running a mode the operator did not ask for. */
+	if (forced_mode >= 0) {
+		if ((size_t)forced_mode >= CV610_MODE_COUNT)
+			return NULL;
+		if (out_index)
+			*out_index = forced_mode;
+		return &g_cv610_modes[forced_mode];
+	}
+	/* Nothing to select against.  Rejecting keeps the behaviour this
+	 * function replaced — a bare cv610_mode_for_fps(0) returned NULL too —
+	 * rather than inventing a rate for a config that names none. */
+	if (target_fps == 0)
+		return NULL;
+
+	pick = cv610_mode_for_fps(target_fps);
+	if (pick != NULL) {
+		if (out_index)
+			*out_index = (int)(pick - g_cv610_modes);
+		return pick;
+	}
+
+	/* Slowest mode still faster than the target: never deliver fewer frames
+	 * than asked for while a mode that can keep up exists. */
+	for (i = 0; i < CV610_MODE_COUNT; ++i) {
+		const Cv610SensorMode *m = &g_cv610_modes[i];
+
+		if (m->fps > target_fps && (pick == NULL || m->fps < pick->fps)) {
+			pick = m;
+			pick_i = i;
+		}
+	}
+	/* Target above every mode: clamp to the fastest. */
+	if (pick == NULL) {
+		for (i = 0; i < CV610_MODE_COUNT; ++i) {
+			if (pick == NULL || g_cv610_modes[i].fps > pick->fps) {
+				pick = &g_cv610_modes[i];
+				pick_i = i;
+			}
+		}
+	}
+	if (out_index)
+		*out_index = (int)pick_i;
+	return pick;
+}
+
 const char *cv610_mode_check_output(const Cv610SensorMode *mode,
 	uint32_t width, uint32_t height)
 {

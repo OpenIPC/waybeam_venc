@@ -6,6 +6,7 @@
 #include "intra_refresh.h"
 #include "pipeline_common.h"
 #if HAVE_BACKEND_CV610
+#include "cv610_runtime.h"
 #include "cv610_modes.h"
 #include "cv610_validation.h"
 #endif
@@ -472,6 +473,15 @@ static const FieldUi ui_max_qp = {
 	"Video", "Max QP", "number", 0, 51, 1, NULL,
 	"RC QP ceiling. 0 = leave the SDK default. Raising the ceiling lets the encoder compress a scene change hard enough to stay inside the frame budget instead of emitting a burst frame. Applied live."
 };
+static const FieldUi ui_slice_count = {
+	"Video", "Slices per frame", "number", 1, VENC_SLICE_COUNT_MAX, 1, NULL,
+	"Independent H.265 slices per picture. 1 = off. Multi-slice "
+	"output lets the waybeam-link receiver conceal RF loss spatially "
+	"instead of dropping the whole frame, and the concealed area shrinks "
+	"as 1/N. The request is quantized to encoder row geometry; startup logs "
+	"the requested/applied mapping and validation tools report the VCL census. On Star6E, "
+	"1080p delivers only 1,2,3,4,5,6,9,17 and saturates at 17. Restart-only."
+};
 static const FieldUi ui_max_i_bytes = {
 	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
@@ -630,6 +640,7 @@ static const FieldDesc g_fields[] = {
 	FIELD_UI(snapshot, height, FT_UINT, MUT_RESTART, &ui_snapshot_height),
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
+	FIELD_UI(video0, slice_count,  FT_UINT,   MUT_RESTART, &ui_slice_count),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
 	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
 	 * magnitude is part of the framing preset (derived zoom_pct), not a
@@ -758,6 +769,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.gopSize", "record.gop_size" },
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
+	{ "video0.sliceCount", "video0.slice_count" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
 	{ "video0.stabCropPct", "video0.stab_crop_pct" },
@@ -869,8 +881,15 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	if (backend_name && strcmp(backend_name, "cv610") == 0) {
 		static const char *const supported[] = {
 			"system.web_port", "system.verbose",
+			"sensor.index", "sensor.mode",
+			"isp.keep_aspect",
 			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size", "video0.qp_delta",
+			"video0.slice_count", "video0.resilience",
+			/* Read by cv610_apply_qp_bounds(), live and at startup.
+			 * CBR cannot hold its target in a noise-dominated scene
+			 * without room to raise QP. */
+			"video0.min_qp", "video0.max_qp",
 			"outgoing.enabled", "outgoing.server",
 			"outgoing.max_payload_size", "outgoing.audio_port",
 			"outgoing.connected_udp",
@@ -1236,6 +1255,14 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	    cfg->video0.scene_holdoff == 0 &&
 	    cfg->video0.scene_threshold > 0)
 		return "video0.scene_holdoff must be >= 1 when scene_threshold > 0";
+	if (strcmp(key, "video0.slice_count") == 0) {
+		/* 1 = split off.  The ceiling is a cross-backend sanity bound,
+		 * not necessarily the delivered count: row-based vendor APIs
+		 * quantize or saturate requests to the picture geometry. */
+		if (cfg->video0.slice_count < 1 ||
+		    cfg->video0.slice_count > VENC_SLICE_COUNT_MAX)
+			return "video0.slice_count must be 1..32";
+	}
 	if (strcmp(key, "video0.min_qp") == 0 || strcmp(key, "video0.max_qp") == 0) {
 		/* H.264/H.265 QP range; the SDK accepts min > max without
 		 * complaint and then behaves erratically (device-observed),
@@ -1298,9 +1325,6 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 
 const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 {
-#if HAVE_BACKEND_CV610
-	return cv610_validate_config(cfg);
-#else
 	/* Keys with rules in validate_field_cfg().  Backend-coupled checks
 	 * (validate_backend_config) intentionally excluded — g_backend is
 	 * registered after config load, so they cannot run here. */
@@ -1312,6 +1336,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.max_qp",
 		"video0.size",
 		"video0.scene_holdoff",
+		"video0.slice_count",
 		"video0.zoom_x",
 		"video0.zoom_y",
 		"video0.framing",
@@ -1332,6 +1357,20 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		if (err)
 			return err;
 	}
+#if HAVE_BACKEND_CV610
+	/* CV610's rules run AFTER the shared sweep, not instead of it.  This
+	 * branch used to return cv610_validate_config() directly, so CV610 was
+	 * the one backend that never ran validate_field_cfg() at all — it
+	 * re-implemented video0.size's >=128 and multiple-of-8 gates inside
+	 * cv610_mode_check_output() and silently skipped every other shared
+	 * rule.  Two copies of one HEVC constraint is a drift risk; missing the
+	 * rest is a parity hole, and it also meant the same bad value produced
+	 * different error text on CV610 than on Star6E.  CV610 keeps its own
+	 * copy of the size gates as a pipeline-boundary guard, because
+	 * cv610_prepare() calls cv610_mode_check_output() directly against a
+	 * config file edited behind the daemon's back. */
+	return cv610_validate_config(cfg);
+#else
 	return NULL;
 #endif
 }
@@ -1407,18 +1446,32 @@ static int parse_first_query_param(const char *query, char *key, size_t key_sz,
 	const char *amp = strchr(query, '&');
 	if (eq) {
 		size_t klen = (size_t)(eq - query);
-		if (klen >= key_sz) klen = key_sz - 1;
+		if (klen >= key_sz) {
+			if (error_message) *error_message = "parameter name too long";
+			return -1;
+		}
 		memcpy(key, query, klen);
 		key[klen] = '\0';
 		const char *vstart = eq + 1;
 		size_t vlen = amp ? (size_t)(amp - vstart) : strlen(vstart);
-		if (vlen >= val_sz) vlen = val_sz - 1;
+		/* Reject rather than truncate.  A silently shortened value can still
+		 * satisfy a caller's own validation -- an array setter counting
+		 * comma-separated elements sees the right count with its last element
+		 * cut mid-token -- and then writes something the operator never asked
+		 * for.  No legitimate request approaches this length. */
+		if (vlen >= val_sz) {
+			if (error_message) *error_message = "parameter value too long";
+			return -1;
+		}
 		memcpy(val, vstart, vlen);
 		val[vlen] = '\0';
 	} else {
 		/* key only, no value (used by GET) */
 		size_t klen = amp ? (size_t)(amp - query) : strlen(query);
-		if (klen >= key_sz) klen = key_sz - 1;
+		if (klen >= key_sz) {
+			if (error_message) *error_message = "parameter name too long";
+			return -1;
+		}
 		memcpy(key, query, klen);
 		key[klen] = '\0';
 		val[0] = '\0';
@@ -2878,7 +2931,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.18.2\","
+		"\"contract_version\":\"0.18.6\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2950,6 +3003,20 @@ static int handle_capabilities(int fd, const HttpRequest *req, void *ctx)
 	cJSON *root = cJSON_CreateObject();
 	cJSON_AddBoolToObject(root, "ok", 1);
 	cJSON *data = cJSON_AddObjectToObject(root, "data");
+
+	/* Which optional routes this backend actually services.  The dashboard
+	 * already fetches this at init, so it can decide whether to show the IQ
+	 * tab from a pointer test here instead of firing a full ISP sweep at
+	 * /api/v1/iq on every page load just to find out. */
+	cJSON *routes = cJSON_AddObjectToObject(data, "routes");
+	cJSON_AddBoolToObject(routes, "iq",
+		(g_cb && g_cb->query_iq_info && g_cb->apply_iq_param) ? 1 : 0);
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
+	cJSON_AddBoolToObject(routes, "iq_import", 1);
+#else
+	cJSON_AddBoolToObject(routes, "iq_import", 0);
+#endif
+
 	cJSON *fields = cJSON_AddObjectToObject(data, "fields");
 	for (size_t i = 0; i < FIELD_COUNT; i++) {
 		cJSON *entry = cJSON_AddObjectToObject(fields, g_fields[i].key);
@@ -3760,7 +3827,7 @@ static int handle_idr_stats(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_json(fd, 200, buf);
 }
 
-#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO || HAVE_BACKEND_CV610
 static int handle_intra_status(int fd, const HttpRequest *req, void *ctx)
 {
 	struct {
@@ -3800,6 +3867,25 @@ static int handle_intra_status(int fd, const HttpRequest *req, void *ctx)
 	{
 		MarukoIntraRefreshStatus st;
 		maruko_pipeline_intra_refresh_status(&st);
+		snprintf(s.mode_name, sizeof(s.mode_name), "%s", st.mode_name);
+		s.active                = st.active;
+		s.mi_supported          = st.mi_supported;
+		s.apply_ok              = st.apply_ok;
+		s.target_ms             = st.target_ms;
+		s.total_rows            = st.total_rows;
+		s.requested_lines       = st.requested_lines;
+		s.effective_lines_per_p = st.effective_lines_per_p;
+		s.lines_clamped         = st.lines_clamped;
+		s.requested_qp          = st.requested_qp;
+		s.effective_qp          = st.effective_qp;
+		s.explicit_gop_sec      = st.explicit_gop_sec;
+		s.effective_gop_sec     = st.effective_gop_sec;
+		s.gop_auto              = st.gop_auto;
+	}
+#elif HAVE_BACKEND_CV610
+	{
+		Cv610IntraRefreshStatus st;
+		cv610_runtime_intra_refresh_status(&st);
 		snprintf(s.mode_name, sizeof(s.mode_name), "%s", st.mode_name);
 		s.active                = st.active;
 		s.mi_supported          = st.mi_supported;
@@ -3913,6 +3999,27 @@ static int handle_resilience_status(int fd, const HttpRequest *req, void *ctx)
 		rp_enhance      = rp.enhance;
 		rp_pred         = rp.pred;
 	}
+#elif HAVE_BACKEND_CV610
+	{
+		Cv610IntraRefreshStatus st;
+		Cv610RefPredStatus rp;
+		cv610_runtime_intra_refresh_status(&st);
+		cv610_runtime_ref_pred_status(&rp);
+		snprintf(intra_mode, sizeof(intra_mode), "%s",
+			st.mode_name[0] ? st.mode_name : "off");
+		intra_active    = st.active;
+		intra_supported = st.mi_supported;
+		intra_apply_ok  = st.apply_ok;
+		intra_lines     = st.effective_lines_per_p;
+		intra_qp        = st.effective_qp;
+		gop_auto        = st.gop_auto;
+		rp_active       = rp.active;
+		rp_supported    = rp.mi_supported;
+		rp_apply_ok     = rp.apply_ok;
+		rp_base         = rp.base;
+		rp_enhance      = rp.enhance;
+		rp_pred         = rp.pred;
+	}
 #endif
 
 	snprintf(buf, sizeof(buf),
@@ -3988,28 +4095,28 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 	size_t count = 0;
 	size_t i;
 	const Cv610SensorMode *modes = cv610_mode_table(&count);
-	const Cv610SensorMode *selected;
-	uint32_t fps = 0;
+	int selected, selected_pad;
 	cJSON *root, *data, *pads, *pad, *arr;
 	char *str;
 	int rc;
 
+	/* What the backend actually brought up, published by cv610_prepare()
+	 * through the same venc_api_set_sensor_info() star6e_pipeline.c uses.
+	 * Recomputing it from video0.fps here would report the CONFIGURED mode
+	 * even when a forced sensor.mode, a substituted rate, or a failed
+	 * bring-up means something else is running.  -1 until bring-up runs. */
 	pthread_mutex_lock(&g_cfg_mutex);
-	if (g_cfg)
-		fps = g_cfg->video0.fps;
+	selected = g_sensor_mode;
+	selected_pad = g_sensor_pad;
 	pthread_mutex_unlock(&g_cfg_mutex);
-	/* The listed geometry is what the sensor captures.  video0.size is the
-	 * encoded size VPSS scales that to, so the frame rate alone selects. */
-	selected = cv610_mode_for_fps(fps);
 
 	root = cJSON_CreateObject();
 	if (!root)
 		return httpd_send_error(fd, 500, "internal_error", "out of memory");
 	cJSON_AddBoolToObject(root, "ok", 1);
 	data = cJSON_AddObjectToObject(root, "data");
-	cJSON_AddNumberToObject(data, "selected_pad", 0);
-	cJSON_AddNumberToObject(data, "selected_mode",
-		selected ? (double)(selected - modes) : -1);
+	cJSON_AddNumberToObject(data, "selected_pad", selected_pad);
+	cJSON_AddNumberToObject(data, "selected_mode", selected);
 	pads = cJSON_AddArrayToObject(data, "pads");
 	pad = cJSON_CreateObject();
 	cJSON_AddItemToArray(pads, pad);
@@ -4025,7 +4132,7 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 		cJSON_AddNumberToObject(m, "min_fps", modes[i].fps);
 		cJSON_AddNumberToObject(m, "max_fps", modes[i].fps);
 		cJSON_AddStringToObject(m, "desc", modes[i].desc);
-		cJSON_AddBoolToObject(m, "selected", &modes[i] == selected);
+		cJSON_AddBoolToObject(m, "selected", (int)i == selected);
 	}
 	str = cJSON_PrintUnformatted(root);
 	cJSON_Delete(root);
@@ -4113,7 +4220,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/set",    handle_dual_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
-#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO || HAVE_BACKEND_CV610
 	r |= venc_httpd_route("GET", "/api/v1/intra/status", handle_intra_status, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/resilience/status",
 		handle_resilience_status, NULL);

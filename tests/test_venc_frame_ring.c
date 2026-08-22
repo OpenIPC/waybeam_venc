@@ -978,6 +978,36 @@ static int test_fr_drop_breaks_chain(void)
 		}
 	}
 
+	/* The recovery-IDR holdoff: a consumer-less ring drops EVERY frame,
+	 * and unpaced requests degraded the stream to an IDR every ~7 frames
+	 * with GDR suppressed (measured on star6e, 2026-08-20).  One request
+	 * per second heals a live consumer's transient drop; a storm of
+	 * drops within the window coalesces to that one. */
+	{
+		uint64_t last = 0;
+
+		CHECK("fr_idr_first_drop_fires",
+			venc_frame_drop_idr_due(&last, 5000000) == 1);
+		CHECK("fr_idr_within_holdoff_quiet",
+			venc_frame_drop_idr_due(&last, 5000001) == 0);
+		CHECK("fr_idr_just_under_holdoff_quiet",
+			venc_frame_drop_idr_due(&last,
+				5000000 + VENC_FRAME_DROP_IDR_HOLDOFF_US -
+				1) == 0);
+		CHECK("fr_idr_at_holdoff_fires",
+			venc_frame_drop_idr_due(&last,
+				5000000 + VENC_FRAME_DROP_IDR_HOLDOFF_US)
+				== 1);
+		/* A quiet probe must not advance the window. */
+		CHECK("fr_idr_quiet_probe_keeps_anchor",
+			venc_frame_drop_idr_due(&last,
+				6000000 + VENC_FRAME_DROP_IDR_HOLDOFF_US -
+				1) == 0 &&
+			venc_frame_drop_idr_due(&last,
+				6000000 + VENC_FRAME_DROP_IDR_HOLDOFF_US)
+				== 1);
+	}
+
 	return failures;
 }
 

@@ -4,6 +4,8 @@
  * the public lifecycle is the small cv610_pipeline_* interface below.
  */
 #include "cv610_pipeline.h"
+
+#include "pipeline_common.h"
 /* Minimal Hi3516CV610 + IMX662 MIPI/VI/ISP graph. The target's MPP module
  * loader and sensor-clock prerequisites are documented in
  * docs/CV610_BACKEND.md. VENC and output ownership stay in cv610_runtime.c. */
@@ -89,6 +91,7 @@ typedef struct {
 	uint32_t     sensor_clock_hz; /* MCLK this mode's line timing assumes */
 	unsigned int out_width;    /* VPSS output = encoded size */
 	unsigned int out_height;
+	int          keep_aspect;  /* isp.keepAspect: crop before scaling */
 	int          vi_online;    /* VI -> ISP online/realtime mode */
 } Cv610PipelineRuntimeConfig;
 
@@ -228,12 +231,31 @@ static int mipi_setup(const Cv610PipelineRuntimeConfig *c)
 
 /* --------------------------------------------------------------- VB / SYS -- */
 
+/* Two configs match when they would hand out the same buffers. Only the pools
+ * actually in use are compared; the rest of the struct is zero-filled padding
+ * and an mmz_name this backend never sets. */
+static int vb_cfg_equal(const ot_vb_cfg *a, const ot_vb_cfg *b)
+{
+	unsigned int i;
+
+	if (a->max_pool_cnt != b->max_pool_cnt) {
+		return 0;
+	}
+	for (i = 0; i < a->max_pool_cnt && i < OT_VB_MAX_COMMON_POOLS; i++) {
+		if (a->common_pool[i].blk_size != b->common_pool[i].blk_size ||
+			a->common_pool[i].blk_cnt != b->common_pool[i].blk_cnt) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
 static int sys_setup(const Cv610PipelineRuntimeConfig *c)
 {
 	ot_vb_cfg vb;
 	ot_vi_vpss_mode vi_vpss_mode;
 	td_u64 raw_blk, yuv_blk, out_blk;
-	td_s32 sys_ret, vb_ret;
+	td_s32 sys_ret, vb_ret, set_ret, isp_ret;
 	unsigned int i;
 
 	/* RAW12 is stored 16bpp in the pipe buffers; be generous, this is a probe. */
@@ -260,14 +282,23 @@ static int sys_setup(const Cv610PipelineRuntimeConfig *c)
 	/* VB/SYS state lives in the kernel and survives the process that created
 	 * it, and only the creating process may tear it down — so after a crashed
 	 * run vb_exit returns NOT_PERM and the config below cannot be replaced.
-	 * BUSY is therefore acceptable for the normal offline restart path. For
-	 * online mode it is not: selecting VI-online must happen after a complete,
+	 * A clean exit runs mpp_cleanup()'s vb_exit, so this pre-clean normally
+	 * finds nothing to do and the set_cfg below simply takes. For online mode
+	 * BUSY is not acceptable: selecting VI-online must happen after a complete,
 	 * successful SYS init and before any VI pipe exists. */
 	/* C does not define function-argument evaluation order. Keep the vendor
 	 * API's SYS-then-VB shutdown order explicit and make each result legible. */
+	/* ISP mem-init is the one piece of graph state a hard kill leaves behind:
+	 * measured on the .181 bench, SIGKILL releases VB (set_cfg then succeeds)
+	 * but leaves ISP[0] inited, so the next run dies at ss_mpi_isp_mem_init
+	 * with 0xa01c800c "already inited". Clear it here, with the other
+	 * pre-cleans and before anything of ours is registered, so a crash does
+	 * not need a module reload to recover. */
+	isp_ret = ss_mpi_isp_exit(VI_PIPE);
 	sys_ret = ss_mpi_sys_exit();
 	vb_ret = ss_mpi_vb_exit();
-	printf("  pre-clean: sys_exit=0x%x vb_exit=0x%x\n", sys_ret, vb_ret);
+	printf("  pre-clean: isp_exit=0x%x sys_exit=0x%x vb_exit=0x%x\n",
+		   isp_ret, sys_ret, vb_ret);
 
 	memset(&vi_vpss_mode, 0, sizeof(vi_vpss_mode));
 	for (i = 0; i < OT_VI_MAX_PIPE_NUM; i++) {
@@ -277,7 +308,35 @@ static int sys_setup(const Cv610PipelineRuntimeConfig *c)
 		vi_vpss_mode.mode[VI_PIPE] = OT_VI_ONLINE_VPSS_OFFLINE;
 	}
 
-	CV610_CHECK_OR_BUSY(ss_mpi_vb_set_cfg(&vb));
+	set_ret = ss_mpi_vb_set_cfg(&vb);
+	if (set_ret != TD_SUCCESS) {
+		ot_vb_cfg live;
+
+		if (cv610_error_id(set_ret) != OT_ERR_BUSY) {
+			fprintf(stderr, "FAIL ss_mpi_vb_set_cfg = 0x%x\n", set_ret);
+			return -1;
+		}
+		/* VB is still held by an owner that never tore it down — a crashed
+		 * run, since a clean exit calls vb_exit from mpp_cleanup(). Adopting
+		 * it is only safe when the live pool layout is the one this mode was
+		 * about to ask for. Tolerating BUSY blindly would leave every block
+		 * the wrong size, and that surfaces far downstream as corruption
+		 * rather than as a failed init. */
+		memset(&live, 0, sizeof(live));
+		if (ss_mpi_vb_get_cfg(&live) != TD_SUCCESS ||
+			!vb_cfg_equal(&live, &vb)) {
+			/* Points at a reboot, not a module reload. This fires only after
+			 * a predecessor died abnormally, which is exactly the boot state
+			 * where an unload cannot be undone: the modules will not load
+			 * back, and on a video-only craft the attempt resets the SoC. */
+			fprintf(stderr, "FAIL VB is held by a dead owner and its layout "
+					"differs from this mode; reboot to clear it\n");
+			return -1;
+		}
+		printf("  ok  ss_mpi_vb_set_cfg  (adopted identical live config)\n");
+	} else {
+		printf("  ok  ss_mpi_vb_set_cfg\n");
+	}
 	CV610_CHECK_OR_BUSY(ss_mpi_vb_init());
 	if (c->vi_online) {
 		/* Online mode can only be selected after a complete SYS init. Do not
@@ -528,6 +587,41 @@ static int vpss_setup(const Cv610PipelineRuntimeConfig *c)
 	grp_attr.frame_rate.dst_frame_rate = -1;
 	CV610_CHECK(ss_mpi_vpss_create_grp(VPSS_GRP, &grp_attr));
 
+	/* Aspect: the channel below scales whatever the group hands it, so
+	 * without this a 4:3 video0.size out of a 16:9 capture is squashed
+	 * rather than framed.  Crop the group's input to the encoded aspect
+	 * first — the same centre-crop rule Star6E and Maruko apply through
+	 * pipeline_common_compute_precrop(), from the same shared function so
+	 * the three backends cannot drift.
+	 *
+	 * Written UNCONDITIONALLY, including the disable.  MPP objects are
+	 * kernel state on this SoC and a group that outlives a teardown keeps
+	 * whatever crop it was last given, so "skip the call when no crop is
+	 * needed" would inherit a stale rectangle from the previous run's
+	 * geometry.  vpss_teardown() destroys the group precisely so that
+	 * cannot happen today — this keeps it true without depending on it. */
+	{
+		PipelinePrecropRect precrop = pipeline_common_compute_precrop(
+			c->width, c->height, c->out_width, c->out_height,
+			c->keep_aspect ? true : false);
+		int cropping = (precrop.w != c->width || precrop.h != c->height);
+		ot_vpss_crop_info crop;
+
+		memset(&crop, 0, sizeof(crop));
+		crop.enable = cropping ? TD_TRUE : TD_FALSE;
+		crop.crop_mode = OT_COORD_ABS;
+		crop.crop_rect.x = precrop.x;
+		crop.crop_rect.y = precrop.y;
+		crop.crop_rect.width = precrop.w;
+		crop.crop_rect.height = precrop.h;
+		CV610_CHECK(ss_mpi_vpss_set_grp_crop(VPSS_GRP, &crop));
+		if (cropping)
+			printf("  ok  aspect crop %ux%u+%u+%u of %ux%u -> %ux%u\n",
+				(unsigned)precrop.w, (unsigned)precrop.h,
+				(unsigned)precrop.x, (unsigned)precrop.y,
+				c->width, c->height, c->out_width, c->out_height);
+	}
+
 	memset(&chn_attr, 0, sizeof(chn_attr));
 	chn_attr.width         = c->out_width;
 	chn_attr.height        = c->out_height;
@@ -637,6 +731,7 @@ int cv610_pipeline_start(const Cv610PipelineConfig *config)
 	c.sensor_clock_hz = config->sensor_clock_hz;
 	c.out_width = config->out_width;
 	c.out_height = config->out_height;
+	c.keep_aspect = config->keep_aspect;
 	c.vi_online = config->vi_online;
 	g_stop = 0;
 
@@ -670,6 +765,11 @@ int cv610_pipeline_start(const Cv610PipelineConfig *config)
 		return -1;
 	}
 	return 0;
+}
+
+int cv610_pipeline_isp_ready(void)
+{
+	return g_isp_thread_ok;
 }
 
 void cv610_pipeline_stop(void)

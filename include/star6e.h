@@ -492,6 +492,19 @@ typedef struct {
 _Static_assert(sizeof(MI_VENC_ParamRef_t) == 12,
 	"MI_VENC_ParamRef_t layout changed — verify SDK match");
 
+/* H.265 multi-slice split (mi_venc_datatype.h:558) — u32SliceRowCount is
+ * 32-px rows PER SLICE, not a slice count, and NOT CTU rows: the encoder's
+ * CTU is 64 (measured 2026-08-20, SPS 30x17 CTBs at 1080p) and the SDK
+ * rounds the request up to whole CTU-64 rows.  Symbol is exported by both
+ * star6e and maruko libmi_venc.so; Maruko adds VeDev and therefore binds it
+ * through its backend-specific loader. */
+typedef struct {
+	MI_BOOL bSplitEnable;
+	MI_U32  u32SliceRowCount;
+} MI_VENC_ParamH265SliceSplit_t;
+_Static_assert(sizeof(MI_VENC_ParamH265SliceSplit_t) == 8,
+	"MI_VENC_ParamH265SliceSplit_t layout changed — verify SDK match");
+
 /* MI_VENC ----------------------------------------------------------------- */
 #if defined(PLATFORM_MARUKO)
 #define MI_VENC_CreateChn(chn, attr)  g_mi_venc.fnCreateChn(0, (chn), (attr))
@@ -548,6 +561,12 @@ _Static_assert(sizeof(MI_VENC_ParamRef_t) == 12,
 #define MI_VENC_GetRefParam(chn, p) \
 	(g_mi_venc.fnGetRefParam ? \
 		g_mi_venc.fnGetRefParam((chn), (p)) : -1)
+#define MI_VENC_SetH265SliceSplit(chn, p) \
+	(g_mi_venc.fnSetH265SliceSplit ? \
+		g_mi_venc.fnSetH265SliceSplit((chn), (p)) : -1)
+#define MI_VENC_GetH265SliceSplit(chn, p) \
+	(g_mi_venc.fnGetH265SliceSplit ? \
+		g_mi_venc.fnGetH265SliceSplit((chn), (p)) : -1)
 #else
 MI_S32 MI_VENC_CreateChn(MI_VENC_CHN chn, MI_VENC_ChnAttr_t* attr);
 MI_S32 MI_VENC_DestroyChn(MI_VENC_CHN chn);

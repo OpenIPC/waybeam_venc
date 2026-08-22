@@ -1,4 +1,5 @@
 #include "cv610_modes.h"
+#include "cv610_encoder_config.h"
 #include "venc_api.h"
 #include "venc_config.h"
 
@@ -97,12 +98,163 @@ static int test_mode_table(void)
 	return failures;
 }
 
+/* Every row asserts the index contract too: out_index must address the very
+ * entry that was returned, because /api/v1/modes publishes that index and the
+ * ground's mode catalog addresses modes by it. */
+static int select_ok(const char *name, int forced, uint32_t fps,
+	uint32_t want_fps)
+{
+	const Cv610SensorMode *table = cv610_mode_table(NULL);
+	int idx = 999;
+	const Cv610SensorMode *m = cv610_mode_select(forced, fps, &idx);
+
+	return expect(name, m != NULL && m->fps == want_fps &&
+		idx >= 0 && m == &table[idx]);
+}
+
+/* Derived rather than hardcoded so the tests below keep meaning what they say
+ * if the table is ever reordered or extended. */
+static int fastest_mode_index(void)
+{
+	const Cv610SensorMode *table = cv610_mode_table(NULL);
+	size_t count = 0;
+	size_t i;
+	int best = 0;
+
+	cv610_mode_table(&count);
+	for (i = 1; i < count; i++)
+		if (table[i].fps > table[best].fps)
+			best = (int)i;
+	return best;
+}
+
+static int select_rejects(const char *name, int forced, uint32_t fps)
+{
+	int idx = 999;
+	const Cv610SensorMode *m = cv610_mode_select(forced, fps, &idx);
+
+	return expect(name, m == NULL && idx == -1);
+}
+
+/* sensor.mode and video0.fps resolve to one mode the way SigmaStar's
+ * sensor_select() resolves them: a forced index wins and must exist, else the
+ * rate is a target rather than a command.  One row diverges deliberately —
+ * see cv610_mode_select(). */
+static int test_mode_select(void)
+{
+	const Cv610SensorMode *table = cv610_mode_table(NULL);
+	size_t count = 0;
+	int failures = 0;
+
+	cv610_mode_table(&count);
+
+	/* A forced index beats the requested rate outright. */
+	failures += select_ok("select_forced_beats_fps", 1, 100, table[1].fps);
+	failures += select_ok("select_forced_last", (int)count - 1, 30,
+		table[count - 1].fps);
+	/* Past the table it is an error, not a fallback to something plausible. */
+	failures += select_rejects("select_forced_out_of_range", (int)count, 100);
+
+	/* Any negative index means auto, as forced_pad/forced_mode do on
+	 * SigmaStar — only >= 0 is a command. */
+	failures += select_ok("select_negative_is_auto", -5, 60, 60);
+
+	failures += select_ok("select_auto_exact", -1, 90, 90);
+	/* Between modes rounds UP: never deliver fewer frames than asked while a
+	 * mode that can keep up exists. */
+	failures += select_ok("select_auto_rounds_up", -1, 45, 60);
+	failures += select_ok("select_auto_just_below_top", -1, 99, 100);
+	failures += select_ok("select_auto_below_all", -1, 1, 30);
+	/* Above every mode clamps to the FASTEST.  A literal port of SigmaStar's
+	 * sensor_mode_cost tie-break would answer 30 here, which is the wart this
+	 * table exists to pin down. */
+	failures += select_ok("select_auto_clamps_to_fastest", -1, 120, 100);
+	failures += select_ok("select_auto_clamps_far_above", -1, 100000, 100);
+	/* No target at all: reject rather than invent a rate. */
+	failures += select_rejects("select_auto_zero_fps", -1, 0);
+
+	return failures;
+}
+
+static int test_encoder_config(void)
+{
+	VencConfig cfg;
+	Cv610EncoderConfig enc;
+	int failures = 0;
+
+	venc_config_defaults(&cfg);
+	cfg.video0.slice_count = 1;
+	failures += expect("enc_off_derives",
+		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) == 0);
+	failures += expect("enc_off_features_disabled",
+		!enc.intra.enabled && !enc.ref.enabled && !enc.slice.enabled);
+	failures += expect("enc_off_slice_defaults",
+		enc.slice.total_lcu_rows == 34 && enc.slice.split_size == 1 &&
+		enc.slice.expected_count == 1);
+
+	(void)venc_config_apply_resilience_preset("racing", &cfg.video0);
+	failures += expect("enc_racing_derives",
+		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) == 0);
+	failures += expect("enc_racing_gdr",
+		enc.intra.enabled && enc.intra.mode == 0 &&
+		enc.intra.refresh_num == 3 && enc.intra.request_i_qp == 36 &&
+		enc.intra.derived.total_rows == 34);
+	failures += expect("enc_racing_no_refpred", !enc.ref.enabled);
+
+	(void)venc_config_apply_resilience_preset("rally", &cfg.video0);
+	failures += expect("enc_rally_derives",
+		cv610_encoder_config_derive(&cfg, 1080, 60, &enc) == 0);
+	failures += expect("enc_rally_refpred",
+		enc.ref.enabled && enc.ref.base == 1 && enc.ref.enhance == 1 &&
+		enc.ref.pred == 1);
+
+	(void)venc_config_apply_resilience_preset("ltr:4", &cfg.video0);
+	failures += expect("enc_ltr_derives",
+		cv610_encoder_config_derive(&cfg, 1080, 60, &enc) == 0);
+	failures += expect("enc_ltr_refpred_without_gdr",
+		!enc.intra.enabled && enc.ref.enabled && enc.ref.base == 1 &&
+		enc.ref.enhance == 4 && enc.ref.pred == 0);
+
+	cfg.video0.slice_count = 17;
+	failures += expect("enc_slice_17_derives",
+		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) == 0);
+	failures += expect("enc_slice_17_geometry",
+		enc.slice.enabled && enc.slice.split_mode == 1 &&
+		enc.slice.split_size == 2 && enc.slice.expected_count == 17);
+	cfg.video0.slice_count = 12;
+	(void)cv610_encoder_config_derive(&cfg, 1080, 100, &enc);
+	failures += expect("enc_slice_12_geometry",
+		enc.slice.split_size == 3 && enc.slice.expected_count == 12);
+	cfg.video0.slice_count = 32;
+	(void)cv610_encoder_config_derive(&cfg, 1080, 100, &enc);
+	failures += expect("enc_slice_saturates_at_rows",
+		enc.slice.split_size == 2 && enc.slice.expected_count == 17);
+	cfg.video0.slice_count = 9;
+	(void)cv610_encoder_config_derive(&cfg, 720, 100, &enc);
+	failures += expect("enc_slice_720_quantizes",
+		enc.slice.total_lcu_rows == 23 && enc.slice.split_size == 3 &&
+		enc.slice.expected_count == 8);
+
+	cfg.video0.slice_count = 0;
+	failures += expect("enc_reject_slice_zero",
+		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) != 0);
+	cfg.video0.slice_count = VENC_SLICE_COUNT_MAX + 1;
+	failures += expect("enc_reject_slice_over_max",
+		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) != 0);
+
+	return failures;
+}
+
 int main(void)
 {
 	VencConfig cfg;
+	size_t mode_count = 0;
 	int failures = 0;
 
 	failures += test_mode_table();
+	failures += test_mode_select();
+	failures += test_encoder_config();
+	cv610_mode_table(&mode_count);
 
 	venc_config_defaults(&cfg);
 	failures += expect_valid("cv610_defaults", &cfg, 1);
@@ -117,13 +269,27 @@ int main(void)
 	failures += expect("cv610_default_is_1280x720",
 		cfg.video0.width == 1280 && cfg.video0.height == 720);
 	failures += expect("cv610_default_is_100fps", cfg.video0.fps == 100);
-	failures += expect("cv610_default_is_8000kbps", cfg.video0.bitrate == 8000);
+	/* The shipped bitrate is a BOOT SEED, not an operating point: waybeam-link
+	 * is the single rate controller and actuates within seconds of the link
+	 * coming up.  What the seed has to survive is the worst rung — landing at
+	 * the MCS0 no-feedback floor while offering 8 Mbps floods the air, and on
+	 * this fleet an over-offered craft has already been measured demoting a
+	 * SECOND craft's link on the same channel.  So this pins low on purpose;
+	 * it asserted 8000 until that was understood. */
+	failures += expect("cv610_default_bitrate_survives_mcs0",
+		cfg.video0.bitrate == 2600);
 	/* And that it names a real sensor mode rather than only passing the
 	 * generic range checks. */
 	failures += expect("cv610_default_names_a_mode",
 		cv610_mode_for_fps(cfg.video0.fps) != NULL);
+	/* A rate above every mode is no longer a config error — it selects the
+	 * fastest mode.  (This asserted rejection until the selector landed; the
+	 * substitution is what replaced it, not the removal of a check.) */
 	cfg.video0.fps = 120;
-	failures += expect_valid("cv610_reject_fps", &cfg, 0);
+	failures += expect_valid("cv610_accept_fps_above_table", &cfg, 1);
+	/* But a config that names no rate at all still is. */
+	cfg.video0.fps = 0;
+	failures += expect_valid("cv610_reject_fps_zero", &cfg, 0);
 	cfg.video0.fps = 60;
 	cfg.video0.width = 1280;
 	cfg.video0.height = 720;
@@ -131,13 +297,37 @@ int main(void)
 	cfg.video0.width = 1936;
 	cfg.video0.height = 1080;
 	failures += expect_valid("cv610_reject_upscale", &cfg, 0);
-	/* A size the sensor can produce, at a rate it cannot. */
+	/* A size the sensor can produce, at a rate between two modes: accepted
+	 * now, and the 60 fps mode is what runs.  Geometry is then checked
+	 * against THAT mode, not against the requested rate. */
 	cfg.video0.width = 1920;
 	cfg.video0.height = 1080;
 	cfg.video0.fps = 45;
-	failures += expect_valid("cv610_reject_size_ok_fps_bad", &cfg, 0);
-	/* Half-set geometry must not widen into the default mode. */
+	failures += expect_valid("cv610_accept_size_ok_fps_between", &cfg, 1);
+	/* sensor.index: one pad, so 0 and auto are the only answers. */
 	cfg.video0.fps = 60;
+	cfg.sensor.index = 0;
+	failures += expect_valid("cv610_accept_sensor_pad_zero", &cfg, 1);
+	cfg.sensor.index = 1;
+	failures += expect_valid("cv610_reject_sensor_pad", &cfg, 0);
+	cfg.sensor.index = -1;
+	/* sensor.mode: an index into the advertised table, or auto. */
+	cfg.sensor.mode = 0;
+	failures += expect_valid("cv610_accept_sensor_mode", &cfg, 1);
+	cfg.sensor.mode = (int)mode_count;
+	failures += expect_valid("cv610_reject_sensor_mode_past_end", &cfg, 0);
+	/* A forced mode drives the GOP limit, because it drives the encoder's
+	 * frame rate.  gop_size 700 s passes at 60 fps (42000 frames) and fails
+	 * at the forced 100 fps mode (70000) — video0.fps alone cannot tell
+	 * these apart, which is the bug this check exists to catch. */
+	cfg.sensor.mode = -1;
+	cfg.video0.gop_size = 700.0;
+	failures += expect_valid("cv610_gop_ok_at_requested_rate", &cfg, 1);
+	cfg.sensor.mode = fastest_mode_index();
+	failures += expect_valid("cv610_gop_uses_forced_mode_rate", &cfg, 0);
+	cfg.sensor.mode = -1;
+	cfg.video0.gop_size = 3.0;
+	/* Half-set geometry must not widen into the default mode. */
 	cfg.video0.height = 0;
 	failures += expect_valid("cv610_reject_half_set_size", &cfg, 0);
 	/* Control: video0.size=auto is still accepted. */
@@ -152,6 +342,13 @@ int main(void)
 	strcpy(cfg.video0.rc_mode, "vbr");
 	failures += expect_valid("cv610_reject_vbr", &cfg, 0);
 	strcpy(cfg.video0.rc_mode, "cbr");
+	strcpy(cfg.video0.resilience, "racing");
+	(void)venc_config_apply_resilience_preset("racing", &cfg.video0);
+	cfg.video0.slice_count = 17;
+	failures += expect_valid("cv610_accept_resilience_and_slices", &cfg, 1);
+	strcpy(cfg.video0.resilience, "off");
+	(void)venc_config_apply_resilience_preset("off", &cfg.video0);
+	cfg.video0.slice_count = 1;
 	strcpy(cfg.video0.framing, "stab");
 	failures += expect_valid("cv610_reject_framing", &cfg, 0);
 	strcpy(cfg.video0.framing, "off");

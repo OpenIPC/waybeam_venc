@@ -40,6 +40,7 @@
     "maxQp": 0,
     "sceneThreshold": 0,
     "sceneHoldoff": 2,
+    "sliceCount": 1,
     "resilience": "off",
     "zoomX": 0.5,
     "zoomY": 0.5,

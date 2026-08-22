@@ -77,6 +77,29 @@ int test_h26x_util(void)
 			consecutive_codes, sizeof(consecutive_codes), &cursor,
 			&nal, &nal_len) == 0);
 	}
+	{
+		uint8_t access_unit[] = {
+			0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0xaa, /* VPS */
+			0x00, 0x00, 0x01, 0x02, 0x01, 0xbb,       /* TRAIL_R */
+			0x00, 0x00, 0x01, 0x00, 0x01, 0xcc,       /* TRAIL_N */
+			0x00, 0x00, 0x01, 0x03, 0x01, 0xdd,       /* layer-id msb set */
+			0x00, 0x00, 0x01, 0x02, 0x09, 0xee        /* layer-id low bit set */
+		};
+
+		CHECK("h26x_patch_trail_count",
+			h26x_util_hevc_patch_trail_r_to_n(access_unit,
+				sizeof(access_unit)) == 1);
+		CHECK("h26x_patch_trail_header", access_unit[10] == 0x00);
+		CHECK("h26x_patch_trail_keeps_vps", access_unit[4] == 0x40);
+		CHECK("h26x_patch_trail_keeps_existing_n", access_unit[16] == 0x00);
+		CHECK("h26x_patch_trail_keeps_layered", access_unit[22] == 0x03);
+		CHECK("h26x_patch_trail_keeps_low_layer_id", access_unit[28] == 0x02);
+		CHECK("h26x_patch_trail_idempotent",
+			h26x_util_hevc_patch_trail_r_to_n(access_unit,
+				sizeof(access_unit)) == 0);
+		CHECK("h26x_patch_trail_null",
+			h26x_util_hevc_patch_trail_r_to_n(NULL, 0) == 0);
+	}
 
 	return failures;
 }

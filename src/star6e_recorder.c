@@ -1,4 +1,7 @@
 #include "star6e_recorder.h"
+#ifndef PLATFORM_MARUKO
+#include "star6e_output.h"
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -56,16 +59,48 @@ static int build_recording_path(char *path, size_t path_size, const char *dir)
 	return 0;
 }
 
-static ssize_t writev_retry(int fd, const struct iovec *iov, int iov_count)
+#ifndef PLATFORM_MARUKO
+static ssize_t writev_all(int fd, const struct iovec *iov, int iov_count)
 {
-	ssize_t ret;
+	struct iovec pending[16];
+	ssize_t total = 0;
+	int first = 0;
 
-	do {
-		ret = writev(fd, iov, iov_count);
-	} while (ret < 0 && errno == EINTR);
+	if (!iov || iov_count <= 0 || iov_count > 16) {
+		errno = EINVAL;
+		return -1;
+	}
+	memcpy(pending, iov, (size_t)iov_count * sizeof(pending[0]));
+	while (first < iov_count) {
+		ssize_t ret;
+		ssize_t consumed;
 
-	return ret;
+		do {
+			ret = writev(fd, &pending[first], iov_count - first);
+		} while (ret < 0 && errno == EINTR);
+		if (ret < 0)
+			return -1;
+		if (ret == 0) {
+			errno = EIO;
+			return -1;
+		}
+		total += ret;
+		consumed = ret;
+		while (first < iov_count &&
+		    consumed >= (ssize_t)pending[first].iov_len) {
+			consumed -= (ssize_t)pending[first].iov_len;
+			first++;
+		}
+		if (first < iov_count && consumed > 0) {
+			pending[first].iov_base =
+				(char *)pending[first].iov_base + consumed;
+			pending[first].iov_len -= (size_t)consumed;
+		}
+	}
+
+	return total;
 }
+#endif
 
 static const char *stop_reason_str(Star6eRecorderStopReason reason)
 {
@@ -159,20 +194,32 @@ static int check_disk_space(Star6eRecorderState *state)
 	return 0;
 }
 
+#ifndef PLATFORM_MARUKO
 int star6e_recorder_write_frame(Star6eRecorderState *state,
 	const MI_VENC_Stream_t *stream)
 {
+	static int incomplete_warned;
 	struct iovec iov[16];
 	int iov_count = 0;
 	ssize_t written;
 	size_t total = 0;
+	off_t frame_start;
 
 	if (!state || state->fd < 0 || !stream || !stream->packet)
 		return 0;
+	if (!star6e_output_stream_packet_info_complete(stream)) {
+		if (!incomplete_warned) {
+			incomplete_warned = 1;
+			fprintf(stderr, "[recorder] invalid packetInfo; "
+				"dropping whole access unit\n");
+		}
+		return 0;
+	}
 
 	/* Periodic disk space check */
 	if (check_disk_space(state) != 0)
 		return 0;
+	frame_start = lseek(state->fd, 0, SEEK_CUR);
 
 	for (unsigned int i = 0; i < stream->count; ++i) {
 		const MI_VENC_Pack_t *pack = &stream->packet[i];
@@ -181,13 +228,7 @@ int star6e_recorder_write_frame(Star6eRecorderState *state,
 			continue;
 
 		if (pack->packNum > 0) {
-			const unsigned int info_cap = (unsigned int)(
-				sizeof(pack->packetInfo) /
-				sizeof(pack->packetInfo[0]));
 			unsigned int nal_count = (unsigned int)pack->packNum;
-
-			if (nal_count > info_cap)
-				nal_count = info_cap;
 
 			for (unsigned int k = 0; k < nal_count; ++k) {
 				MI_U32 offset = pack->packetInfo[k].offset;
@@ -198,7 +239,7 @@ int star6e_recorder_write_frame(Star6eRecorderState *state,
 					continue;
 
 				if (iov_count >= 16) {
-					written = writev_retry(state->fd,
+					written = writev_all(state->fd,
 						iov, iov_count);
 					if (written < 0)
 						goto write_error;
@@ -216,7 +257,7 @@ int star6e_recorder_write_frame(Star6eRecorderState *state,
 				continue;
 
 			if (iov_count >= 16) {
-				written = writev_retry(state->fd, iov, iov_count);
+				written = writev_all(state->fd, iov, iov_count);
 				if (written < 0)
 					goto write_error;
 				total += (size_t)written;
@@ -232,7 +273,7 @@ int star6e_recorder_write_frame(Star6eRecorderState *state,
 	}
 
 	if (iov_count > 0) {
-		written = writev_retry(state->fd, iov, iov_count);
+		written = writev_all(state->fd, iov, iov_count);
 		if (written < 0)
 			goto write_error;
 		total += (size_t)written;
@@ -254,6 +295,15 @@ int star6e_recorder_write_frame(Star6eRecorderState *state,
 	return (int)total;
 
 write_error:
+	{
+		int saved_errno = errno;
+
+		/* A failure may follow a short successful write. Roll the regular
+		 * file back to its frame boundary so it never retains half an AU. */
+		if (frame_start >= 0)
+			(void)ftruncate(state->fd, frame_start);
+		errno = saved_errno;
+	}
 	if (errno == ENOSPC) {
 		fprintf(stderr, "[recorder] disk full (ENOSPC)\n");
 		stop_with_reason(state, RECORDER_STOP_DISK_FULL);
@@ -264,6 +314,7 @@ write_error:
 	}
 	return -1;
 }
+#endif
 
 void star6e_recorder_stop(Star6eRecorderState *state)
 {

@@ -1,5 +1,645 @@
 # History
 
+## [0.67.1] - 2026-08-22
+
+Pre-upstream review pass over 0.65.3..0.67.0. Three defects introduced by that
+range, one long-standing sensor-register error, and the documentation the
+range changed but did not update. No wire format, config schema or frame-SHM
+layout changes.
+
+- **Star6E dual-VENC crashed at startup.** `star6e_pipeline_start_venc()`
+  accepts `vcfg == NULL` — `star6e_pipeline_start_dual()` passes it for ch1 —
+  but 0.66.0's slice block dereferenced it unguarded. Any craft with
+  `record.mode=dual`/`dual-stream` segfaulted during startup controls,
+  independent of `sliceCount`, because the fault is the *read* of
+  `slice_count`. `record.mode` is gated on mode alone, not `record.enabled`.
+  Host tests could not see it: `star6e_pipeline.c` is not in the test library.
+- `MI_VENC_ParamH265SliceSplit_t` was passed to the vendor with its padding
+  uninitialised; both sibling structs in the same function are memset.
+- A `libmi_venc.so` without the optional `MI_VENC_SetH265SliceSplit` export
+  failed startup with a message that read as a driver rejection. The failure
+  stays fatal — delivering one slice while the API advertises N would lie to
+  the receiver's spatial concealment — but now names the missing symbol.
+- **The CV610 partial-load rollback could still wedge the SoC.** `stop_modules()`
+  refuses to unload while a consumer holds an MPP device, and its comment
+  claimed every unload path was covered; `cleanup_partial()`, armed as an EXIT
+  trap across the whole load sequence, was not. A consumer can claim a device
+  created earlier in that same sequence — `waybeam_hub` rebinds `/dev/rgn`
+  within ~1 s of `open_rgn` appearing — so a later insmod failure unloaded it
+  underneath a live holder. It now carries the same guard and leaves the
+  modules loaded, which is recoverable; a wedged SoC is not.
+- **The IMX662 analog gain register was never written.** Sony's register list
+  puts `GAIN[10:0]` at `3070h`/`3071h` and jumps straight from `3069h` to
+  `3070h` — `306Ch`/`306Dh` are not registers. Every AE gain update went to a
+  dead address, so analog gain never actuated, all gain was ISP digital, and
+  the HCG conversion-gain compensation never landed, making each HCG engage an
+  uncompensated ~5.8x brightness step. The vendor's own reference driver
+  carries the same pair. **This changes low-light behaviour materially and the
+  gain/ISO tuning in 0.65.6 was measured against the dead register — the
+  low-light path needs re-verification on hardware.**
+- The HCG band's compile-time guard could not fire in the dangerous direction:
+  all three operands are `u`-suffixed, so lowering `HCG_OFF_REG` below
+  `HCG_GAIN_OFFSET` wrapped and passed clean. Now evaluated signed, with a
+  second assert rejecting an inverted ON/OFF pair. Both mutation-tested.
+- `make stage SOC_BUILD=cv610` returned 0 when the sensor plugin failed to
+  build, because the recipe chains with `;` and the last `cp` succeeded. CI
+  caught it only via its explicit `test -f` on the `.so`.
+- `data.routes.iq` claimed `/api/v1/iq` *and* `/api/v1/iq/set` were serviced
+  while testing only `query_iq_info`; `/iq/set` gates on `apply_iq_param`. Now
+  requires both. Every shipped backend registers both, so no response changes.
+  The test that asserted the old pairing gained the missing arm.
+- Docs: `docs/CV610_BACKEND.md` said the init script unloads the MPP stack on
+  stop and guards unloading itself — both untrue since 0.65.8/0.65.10 — and
+  recorded none of the operator rules those releases established. Its audio
+  timestamp note still claimed 10 ms against `CV610_AUDIO_POINT_NUM` 960.
+  `/api/v1/intra/status` and `/api/v1/resilience/status` are documented for the
+  first time. An orphaned code fence in the capabilities section rendered ~25
+  lines of prose as a code block.
+
+## [0.67.0] - 2026-08-22
+
+Ports the shared resilience contract and whole-access-unit H.265 slicing to
+CV610. All resilience presets now drive the HiSilicon row-intra-refresh and
+base/enhance reference controls with strict setter/getter verification;
+`video0.sliceCount` drives 32-pixel LCU-row splitting with early slice output
+kept disabled. The existing config schema and frame-SHM v1 wire layout are
+unchanged.
+
+- CV610 consumes per-frame vendor `ref_type`, marks non-reference enhancement
+  frames in frame-SHM, rewrites their copied TRAIL_R NAL headers to TRAIL_N,
+  publishes GDR cycle position/length, and rate-limits recovery IDRs when a
+  full output ring drops a reference-chain frame.
+- `/api/v1/capabilities`, intra status, and resilience status now report the
+  implemented CV610 controls. Startup fails on an encoder readback mismatch
+  instead of silently claiming resilience or slice geometry.
+- Confirmed on the IMX662 CV610 bench at 1080p30/60/100. Slice requests 1, 3,
+  4, 6, 9, 12 and 17 delivered exact VCL-NAL counts; shared ref presets matched
+  vendor cadence; frame-SHM metadata/integrity passed; and an IDR-started
+  380-frame 1080p60 stream decoded cleanly under FFmpeg `-xerror`.
+- Maruko now binds the device-aware H.265 slice Set/Get ABI and applies it in
+  the required CreateChn-before-StartRecvPic window, including stab-fill.
+  Explicit multi-slice requests fail startup if the ABI cannot be applied or
+  read back; `sliceCount=1` remains compatible with older libraries.
+- Confirmed on SSC378QE/Maruko at 1280x720@30 with `rally`: requests 1, 4 and
+  12 delivered exactly, while 17 and 32 quantized to the picture maximum of
+  12. All sampled access units retained their complete VCL census and a
+  cold-start 284-frame, 12-slice capture decoded cleanly with FFmpeg.
+- Fixed a pre-existing Maruko frame-SHM startup guard that rejected a valid
+  frame ring because it checked only socket and packet-ring transports.
+- The 0.66 eight-slice ceiling and CV610/Maruko deferrals are superseded:
+  `packetInfo[8]` is per pack, while every output path walks all packs in the
+  access unit. The shared request range is now 1..32 and device geometry sets
+  the delivered ceiling.
+- The frame-SHM consumer test can optionally dump an IDR-started Annex-B stream
+  for offline decoder validation.
+
+## [0.66.0] - 2026-08-19
+
+Adds H.265 multi-slice output on Star6E: `video0.sliceCount` (1..8, default
+1 = today's single-slice stream, restart-class) binds the vendor
+`MI_VENC_SetH265SliceSplit` — exported by the shipped `libmi_venc.so` all
+along, never wired — and asks for `ceil(rows/sliceCount)` CTU rows per slice
+between CreateChn and StartRecvPic, the same SDK window as refPred.
+
+The consumer is waybeam-link's new §6.3b spatial concealment: with several
+independent slices per picture, RF loss past the FEC budget costs a frozen
+region instead of the whole frame. The knob defaults off so nothing changes
+until a craft opts in.
+
+- Frame-SHM publication is untouched: still one access unit per slot, now
+  with N slice NALs inside it. RTP/recorder walkers already iterate
+  `packetInfo[]` and stay correct.
+
+- The 8-entry `packetInfo[]` clamp is the known ceiling — the field is
+  range-limited to 8, and the frame-ring walker now WARNs (once) if the SDK
+  ever reports more NALs in a pack than the table holds, instead of silently
+  shipping a truncated frame. Whether the SDK emits one pack per slice or
+  packs slices into one `packetInfo[]` still needs the on-device readout;
+  until then treat sliceCount 4 as the validated envelope (offline: 4-slice
+  1080p streams repaired and decoded clean by ffmpeg/libde265/HM-18.0).
+
+- CV610: not exposed (allowlist unchanged); the SDK headers are external and
+  its slice-split contract is unverified. Maruko: `libmi_venc.so` exports the
+  symbol, but only the Star6E pipeline applies it for now.
+
+## [0.65.10] - 2026-08-17
+
+Removes both CV610 paths that unloaded MPP modules on a running craft: the
+`S95waybeam reload` action, and `start()`'s module rollback on a failed daemon
+start. `reload` was dead code built on a premise the hardware disproved in the
+release that added it; the rollback was reachable on the post-crash start this
+release prescribes as the recovery.
+
+- **Nothing in production called it** — the hub uses `restart`
+  (`mod_venc.c:687`), venc never did, and the crash test does not. Only the
+  suite's own T5 exercised it, to test the action itself.
+
+- **Its premise was already falsified.** Its comment claimed VB is left held by a
+  dead owner after a crash and reload is "the way out". 0.65.8's own notes say
+  the opposite — *"ISP, not VB, is what a crash leaves behind… VB is released"* —
+  and the suite prints `VB was released when the process died` on every run. What
+  a crash actually leaves (ISP, and since 0.65.9 the AI device claim) venc
+  pre-cleans itself, so a hard-killed venc recovers from a plain `start`, video
+  and audio both.
+
+- **Unloading is not free.** A hard kill poisons module reloading for the rest of
+  the boot (`no sys ko!` → `load vpp.ko ...FAILURE!`), so a reload issued
+  afterwards leaves the craft with no modules at all — and on a video-only craft
+  it resets the SoC outright (measured). The underlying defect is in the vendor
+  modules and is unchanged.
+
+  `reload` was not the only unload on that path, which an adversarial review
+  caught before this merged: `start()` rolled back with `"$LOADER" stop` on a
+  failed daemon start, and since 0.65.8 made the loader's start idempotent
+  ("MPP modules already loaded" → success) that rollback tore down a set the
+  invocation had not created — on exactly the post-crash start this release
+  prescribes as the recovery. That rollback is removed too. Leaving the modules
+  up after a failed start costs nothing, because the next start re-inits against
+  them.
+
+- The loader's audio-mismatch hint pointed at `S95waybeam reload`; it now says
+  reboot, which is what actually applies a `CV610_AUDIO` or sensor-profile
+  change. `load-cv610-online restart` remains for a dirty or partial module set,
+  but run **bare** it reloads with the loader's defaults (video-only, imx662
+  clock) rather than the craft's profile — a caveat that used to live inside
+  `reload()` and is now recorded where it survives it. `load-cv610-online stop`
+  followed by `S95waybeam start` is the safer form; that passes the profile.
+
+- The suite loses T5 (it tested `reload`) and, with it, the contaminated-boot
+  precondition T5 needed. The suite no longer *performs* an unload: T1 still
+  attempts one, but only to assert the loader refuses it while the hub holds
+  `/dev/rgn`. It also no longer stops the hub anywhere, so T6 now always runs
+  with a holder present.
+
+## [0.65.9] - 2026-08-17
+
+CV610 audio now survives an abnormal venc exit. Investigating the "aenc MMB
+leak" reported in 0.65.8 showed it is **not a leak** — and that it was masking a
+real regression.
+
+- **The MMB LEAK lines are the kernel reclaiming, not losing.** Measured on
+  `.181`: a hard kill prints `MMB LEAK(pid=N) 'aenc(0)_strm'`/`'aenc(0)_cir'`,
+  and the two blocks are gone from `/proc/umap/media-mem` immediately after.
+  Across **five** kill cycles the pool returned to its exact baseline —
+  `34 blocks / 38332 KB` before and after. Nothing accumulates.
+
+- **What actually broke: audio, silently.** MPP objects are kernel state, so a
+  killed venc leaves the AI device claimed by the dead pid. Every AI call from
+  the successor is then refused with `OT_ERR_AI_NOT_PERM` (`0xa015800d`) —
+  including `ss_mpi_ai_disable()`, so the successor could not even clean up.
+  `ss_mpi_ai_set_pub_attr()` failed, audio never started, and venc reported
+  *"needs CV610_AUDIO=1 at module load"* — which is not what happened. Video
+  streamed normally, so nothing looked wrong. Deterministic, 2 of 2.
+
+  This was masked until 0.65.8: the module reload that release removed also
+  wiped the AI claim. So the hard-kill path regressed there, and `reload` is not
+  a way out — a hard kill also poisons module reloading for the rest of the boot.
+
+- **Fix: cycle the audio module before bring-up.** `cv610_audio_start()` now
+  calls `ss_mpi_audio_exit()` + `ss_mpi_audio_init()`, then `ss_mpi_ai_disable()`,
+  before configuring anything. The module cycle is what clears the dead owner's
+  claim — it is precisely why a *second* graceful restart used to recover audio
+  where the first did not, and this folds that cycle into the first start. Same
+  shape as `sys_setup()`'s `isp_exit`/`sys_exit`/`vb_exit` pre-clean.
+
+  Releasing the objects one by one does **not** work and is not attempted: the
+  SDK tracks `sys_unbind`, `aenc_destroy_chn`, `opus_deinit` and
+  `ai_disable_chn` process-locally, so a successor cannot release a dead
+  predecessor's copies. Only `ss_mpi_ai_disable()` reaches kernel state, and it
+  is the only one whose return code ever differed between the broken and healthy
+  cases. `opus_deinit` was additionally printing `illegal handle(-1)!` to stderr
+  on every clean start.
+
+  Verified on `.181`: kill a venc with healthy audio, start, audio back — **2 of
+  2**, `aenc` blocks 0 → 2, `ai_disable` `0xa015800d` → `0x0`. It also recovered
+  a craft already stuck in the broken state with no reboot, and a graceful
+  restart is unchanged.
+
+- **The audio warning no longer guesses a cause.** It asserted *"needs
+  CV610_AUDIO=1 at module load"* for every failure — the misreport above. The
+  module hint moved to `ss_mpi_audio_init()`, which is where an absent module set
+  actually lands (it opens `/dev/ab`, created by `open_aio`, which the loader
+  stages only under `CV610_AUDIO=1` — a switch independent of `audio.enabled`).
+  The `/dev/acodec` open is *not* that path.
+
+- The verify suite's T6 asserted *video* streaming, which is why this went
+  unnoticed — it passed with audio dead. It now asserts the aenc block count and
+  the absence of an audio-start failure, and skips explicitly (not silently) on
+  a video-only craft. T5 refuses to run on a boot where a hard kill already
+  happened, instead of failing for a reason that predates the run.
+
+## [0.65.8] - 2026-08-17
+
+CV610 venc restarts no longer reload the MPP kernel modules — the same model
+star6e and maruko have always used, where the init script never touches
+`insmod`/`rmmod` at all.
+
+- **The reload was bring-up scaffolding.** Both cv610 init scripts have been
+  unchanged since the initial backend commit. `mpp_cleanup()` is already a
+  complete teardown and, critically, calls `ss_mpi_vb_exit()` *from the process
+  that created VB* — the only process permitted to. So after a graceful stop
+  there is nothing for a module reload to clean up, and the next start can
+  re-init the graph against the modules already loaded.
+
+- **What the reload was actually protecting.** A venc that dies without running
+  `mpp_cleanup()` leaves VB held by a dead owner; `vb_set_cfg` then returns
+  BUSY. That was tolerated blindly, which is only harmless while the modules
+  are reloaded every time. Without the reload it would mean running on the
+  previous mode's pool sizes.
+
+  `sys_setup()` now reads the live config back with `ss_mpi_vb_get_cfg()` and
+  compares the pools it was about to request. Identical layout is adopted and
+  says so; a different layout is a hard failure naming the way out
+  (`load-cv610-online restart`) instead of silently handing out wrong-sized
+  blocks that surface later as corruption.
+
+- `load-cv610-online start` is idempotent when the full set is up (`open_user`
+  is the last module loaded, so its presence means a completed sequence); a
+  *partial* set is still refused as dirty. `S95waybeam stop` leaves the modules
+  loaded, and a new `S95waybeam reload` is the recovery path after a crash —
+  it unloads, so the holder guard applies and the hub must be stopped first.
+
+- **ISP, not VB, is what a crash leaves behind.** Measured on `.181`: after
+  `kill -9`, VB *is* released (set_cfg succeeds) but ISP[0] stays inited and the
+  next run dies at `ss_mpi_isp_mem_init` with `0xa01c800c` "already inited".
+  `sys_setup()` now pre-cleans with `ss_mpi_isp_exit(VI_PIPE)` alongside the
+  existing `sys_exit`/`vb_exit`, before anything of ours is registered, so a
+  hard kill recovers without a module reload.
+
+- `S95waybeam reload` passes `CV610_SENSOR_PROFILE`/`CV610_AUDIO` through to the
+  loader. A bare `$LOADER restart` reloads with the loader's own defaults —
+  video-only, imx662 clock — and `start()` then correctly refuses the audio
+  mismatch, leaving the craft with no daemon at all.
+
+- Device verification on `.181`, `scripts/cv610_reload_free_verify.sh`:
+  **23 passed, 0 failed**. T3 restarts across a real mode change and asserts the
+  *encoded geometry* moved (1920x1080 → 640x360) from venc's own VPSS line,
+  because asserting the config key instead let an earlier revision report a mode
+  change that never happened. T2 asserts the hub's OSD survived, from the
+  compositor's VGS job counters in `/proc/umap/rgn` rather than the hub's own
+  perf line — the hub counts the publish it made, which is the stimulus; those
+  counters count the composite that consumed it. Verified to fail on a region
+  that is not there. T3 asserts it too, across the mode change, because the hub
+  rebinds at its old window size and only its own source poll re-anchors it: an
+  oversized region sits on the smaller channel for a few seconds. Measured
+  benign — 30 s at 640x360 with `job_fail` 0 and venc streaming.
+
+Two things the hardware showed that are **not** fixed here:
+
+- **A SIGKILL leaks two `aenc` MMB blocks** (`aenc(0)_strm`, `aenc(0)_cir`,
+  16 KB each) and after that the next module unload/reload fails at sys.ko init
+  — `no sys ko!` then `load vpp.ko ...FAILURE!` — for the rest of the boot, so
+  even a fresh load from zero modules fails. Graceful stops leak nothing. This
+  makes `reload` the wrong recovery after a hard kill; reboot is. It is also an
+  independent argument for this change: the fewer module reload cycles, the
+  better, and it plausibly underlies the old "reboot instead" folklore.
+
+- **The hub's RGN OSD does not survive a venc restart.** With `open_rgn` no
+  longer unloaded the hub keeps its `/dev/rgn` handle, but the region does not
+  survive our teardown: after a restart `/proc/umap/rgn` lists **no regions at
+  all** — `mpp_cleanup()`'s `ss_mpi_sys_exit()` takes the whole table with it,
+  because MPP objects are kernel state shared across processes. The hub keeps
+  painting into a handle that no longer exists: `osd_render` goes from
+  `40 rgn … drops 0` to `0 rgn … drops 42`, silently. A hub restart restores it.
+  Fixed on the hub side in waybeam-hub#213 (the region is recreated and rebound
+  after five consecutive failed publishes), which is what T2 now asserts.
+
+## [0.65.7] - 2026-08-17
+
+CV610 SoC wedge on `stop`. On the `.181` bench, `S95waybeam stop` while
+`waybeam_hub` was running killed the SoC outright — no network, ARP
+incomplete, physical power cycle required. It had been misfiled as an
+intermittent "reboot sometimes hangs" for weeks.
+
+- **Root cause: the MPP modules were unloaded under a live consumer.**
+  `stop()` waits only for `waybeam`/`waybeam-resp`/`waybeam-wd` and then calls
+  `load-cv610-online stop`, which rmmods the whole stack. `waybeam_hub` holds
+  `/dev/rgn` for the CV610 RGN OSD and `/dev/mmz_userdev`, and the MPP drivers
+  do not set `.owner` on their file operations — `/proc/modules` reports
+  `open_rgn used=0` while the hub has `/dev/rgn` open. `rmmod` therefore
+  succeeds and frees the file operations out from under a live consumer.
+
+  The script already carried the right invariant in a comment — *"Never unload
+  the MPP stack while any of them still owns the graph"* — it just never
+  counted the hub as an owner.
+
+- **Measured, with controls.** 10/10 monitored `reboot` cycles clean (ping gap
+  12.6–15.8 s, back 18–20.5 s). 20/20 venc stop/start cycles clean with the hub
+  stopped, 2100 frames and 0 output drops afterwards. First stop/start with the
+  hub running: dead. Then 5/5 clean again once the hub was released first.
+
+  Reboot was never safe for the reason everyone assumed. `rcK` iterates
+  `ls -r /etc/init.d/S??*`, so `S97waybeam-hub` stops *before* `S95waybeam`.
+  That accident is the entire difference, and it retro-explains the standing
+  "never stop/start venc on cv610, reboot instead" rule.
+
+- **Fix.** The guard lives in `load-cv610-online stop_modules()`, next to the
+  `rmmod` it protects, so it covers every path that unloads — `S95waybeam
+  stop`, the start-failure rollback that also calls `$LOADER stop`, and a
+  hand-run `load-cv610-online stop`. It scans `/proc/*/fd` and refuses, naming
+  the holders.
+
+  `S95waybeam stop` additionally asks up front, via `load-cv610-online holders`
+  ignoring its own pids, so it can refuse *before* killing anything: refusing
+  after the kill would leave venc dead with the modules still loaded, which
+  `load-cv610-online start` then rejects as dirty state.
+
+  `rcK` and `reboot` are unaffected because the hub is already gone by then; a
+  manual `S95waybeam stop`/`restart` on a live craft now fails with a message
+  instead of wedging the SoC. `/api/v1/restart` is untouched — it re-execs the
+  daemon without unloading modules.
+
+## [0.65.6] - 2026-08-16
+
+Low-light bitrate. On the `.181` bench with the room lights off, a 9.26 Mbps
+CBR target produced 29-65 Mbps. In good light the same build holds target
+(measured 9.98 vs 9.26), so this was specific to high sensor gain.
+
+- **The borrowed sharpen table was the cause — 88% of it.** Measured by
+  A/B with interleaved controls: turning sharpen off dropped the stream
+  65.4 -> 7.8 Mbps, *below* the target. Pinning sharpen strength to a constant
+  gave 0 -> 11.8, 40 -> 36.5, 80 -> 62.7, 150 -> 91.5 Mbps. Nothing else came
+  close: saturation -7.3%, CSC satu -4.5%, CA +1.7%, LDCI +2.2% (inside drift,
+  no effect). Disabling bayer NR *raised* the bitrate 15.7%, so NR was already
+  earning its keep and is untouched.
+
+  Sharpening is a high-pass filter, so at high gain it amplifies precisely the
+  noise that inter prediction cannot code. `g_cmos_yuv_sharpen` runs in AUTO,
+  and its sc450ai-derived `[32 gain][16 ISO]` tables *rise* along the ISO axis
+  — `texture_strength` to 310 where the low-ISO value is 216, `edge_strength`
+  195 -> 500. They sharpen harder the darker it gets. Defensible for sc450ai's
+  noise model and NR softening; backwards on IMX662.
+
+  Both tables are now tapered along ISO only, to 0 by bucket 9, with the rule
+  the original breaks: sharpening never increases with gain. Verified by four
+  invariants — ISO buckets 0-3 byte-identical, ISO 9-15 zero, monotonic
+  non-increasing from bucket 3, and no value anywhere raised.
+
+- **QP bounds are wired on CV610** (`apply_qp_bounds`, `video0.minQp/maxQp`,
+  live and at startup). The config fields, mutability and WebUI metadata
+  already existed; only the backend callback was missing.
+
+  This is **not** the low-light fix, and the measurement says so: the driver
+  default is `min=10 max=51`, already the H.265 maximum. The rate controller
+  always had full authority and still emitted 29-65 Mbps, so QP saturation was
+  never the cause. At 100 fps even maximum-QP frames of a noise-dominated
+  image exceed 10 Mbps. The knob is worth having to *cap* quality or raise the
+  floor; it cannot rescue a scene the encoder is already coding as coarsely as
+  the standard allows.
+
+- **AE is exposed as an `exposure` IQ group** — the gain ceilings and exposure
+  window that decide how much noise is created in the first place. Before this
+  release the bench ran `a_gain_max` 407654 (398x, matching
+  `IMX662_AGAIN_MAX`), `ispd_gain_max` 32768 (32x) and `sys_gain_max` 13044928
+  — **12739x total, about 82 dB**, which is why a dark room ended up as
+  amplified noise. Those ceilings are now readable and settable at runtime
+  instead of being compile-time constants, and the digital one is lowered
+  below.
+
+- **Saturation tapers harder above daylight.** Chroma noise is the ugliest
+  high-gain artifact and colour is least trustworthy exactly where gain is
+  highest; dropping chroma measured -7.3%. The first four buckets are
+  unchanged, the top drops from 90 to 32.
+
+- **ISP digital gain is capped 32x -> 4x.** It is the worst gain in the chain:
+  it amplifies noise and quantisation equally and buys no SNR, where analog
+  gain and HCG act ahead of the ADC. The shipped total ceiling moves from
+  12739x (~82 dB) to **398 x 4 = 1592x (64.0 dB)**, inside the range an
+  operator preferred on the bench, and AE now exhausts analog before reaching
+  for digital. Tunable live at
+  `/api/v1/iq/set?exposure.auto.ispd_gain_max=<n>` (1024 = 1x), because
+  darker-but-cleaner is an operator trade rather than a constant.
+  `IMX662_AGAIN_MAX`'s comment claimed ~72 dB while the value gives 52; the
+  comment is corrected and the value deliberately left alone.
+
+- **IMX662 HCG conversion gain is selected at high analog gain.** `FDG_SEL0`
+  (0x3030) was defined and never written, so the sensor sat at its 0h reset —
+  low conversion gain — and every dark frame was amplified through the noisier
+  path. It is now a ninth fast-update register, chosen per frame from the gain
+  code with hysteresis.
+
+  HCG is **not** brightness-neutral: the GAIN register is PGA gain applied
+  after the conversion gain, so the two multiply. The datasheet gives the ratio
+  (Rcg typ 5.8, corroborated by G sensitivity HCG 18383 vs LCG 3166
+  Digit/lx/s), which is 15.3 dB — so the written code has the offset
+  subtracted while HCG is on, and the thresholds sit where the compensated code
+  still clears Sony's 34-code floor (on at 91, off below 85). Without that
+  there is no fixed point between 12 dB and 25.5 dB: AE brightens 5.8x, slams
+  the code down past the floor, HCG drops out, and it limit-cycles — a band
+  that neither daylight nor a dark room enters, which is why an uncompensated
+  first cut measured clean in both.
+
+  Sony's 34-code floor is a saturation constraint, not the conversion gain:
+  Vsat is 3895 digits in LCG against 1204 in HCG, a ratio of 3.235, and 34
+  codes x 0.3 dB = 10.2 dB = 3.236x — the floor exists so HCG's clip level
+  refills the ADC to LCG's.
+
+- **`nr.md_en` and `nr.coring_ratio` are exposed.** The intended fix here was a
+  re-fit of `g_cmos_noise_calibration`, which is sc450ai's photon-transfer
+  curve — 16 doubles measured from different silicon. That is a lab
+  calibration, not a code change, and inventing coefficients would be strictly
+  worse than keeping a real fit while looking identical in review. The knobs
+  that fit drives are exposed instead, so the borrowed model can be corrected
+  by eye until someone measures the real one. `md_en` reads back 1 — CV610's
+  motion-detect temporal NR was already on.
+
+The IQ field table is now 64-bit internally: the AE gain and exposure fields
+are `td_u32`, and a driver default of 0xFFFFFFFF would have read back as -1.
+
+`/api/v1/capabilities` gains `data.routes` and `contract_version` moves to
+`0.18.4`; the CV610 IQ response shape is documented in
+`documentation/HTTP_API_CONTRACT.md`.
+
+A pre-merge adversarial review pass also corrected this release's own record
+and three defects in it: the WebUI IQ tab no longer starts hidden (that made
+visibility depend on `init()` completing, so any failed init fetch latched the
+tab off permanently on star6e and maruko); a chip click no longer prefills the
+actuator (on star6e's legacy path even an identical value forces `enable=1`
+and `op_type=manual`); the per-set full-ISP re-query is gone; the shared query
+parser rejects an over-long value instead of truncating it mid-token; and the
+QP-bounds path leaves the I-frame FLOOR alone so `video0.qp_delta` still
+biases I-frames. The 0.65.5 entry above was revised where this stack
+invalidated it.
+
+Verified on `.181`: the sharpen taper was confirmed by the operator on the
+live stream (dark room holds target) with daylight unchanged at 10.09 Mbps
+against 9.26 and the encoder nominal at 100.20 fps. The gain-chain and HCG
+changes landed after that arm and were re-verified separately — see the
+per-commit evidence — and `make verify` is green with lint clean on all three
+backends.
+
+## [0.65.5] - 2026-08-16
+
+0.65.4 seeded the CV610 ISP well but froze every value into the sensor plugin,
+which the ISP reads once at pipe start — correcting one meant a cross-compile,
+a plugin deploy and a reboot. This makes those blocks live knobs. No contract
+change; `/api/v1/iq` and `/api/v1/iq/set` are existing routes that answered
+`501` on this backend only because it supplied no callbacks.
+
+- **`cv610_iq.c` exposes 11 ISP groups, 59 fields.** saturation, color_tone,
+  csc, ccm, wb, sharpen, nr, drc, ldci, dehaze and ca, wired into
+  `g_cv610_apply_callbacks`. Unlike `star6e_iq.c` there is no `dlopen` and no
+  hand-computed struct offsets: the backend links `ss_mpi` directly, so every
+  field is an `offsetof()` into the SDK's own type and every range is the
+  header's documented one. Values are read back from the ISP rather than
+  cached, and a value outside its declared range is REJECTED rather than
+  clamped, so the value echoed by `/api/v1/iq/set` is the value applied.
+- **Writing a field selects the half of the block it lives in.** A value under
+  `manual_attr` is inert while the block runs its auto curve and vice versa,
+  and an ignored write is indistinguishable from a broken setter — so the
+  write selects that `op_type`. The schema reports each field's `domain`
+  (`direct` | `manual` | `auto`) and the WebUI marks both kinds on the chip.
+- **DRC and dehaze are registered but bypassed**, measured through the new
+  surface: `drc.enable` and `dehaze.enable` both read 0, and
+  `ss_mpi_isp_get_module_ctrl()` confirms the hardware bypasses both. Toggling
+  `drc.enable` clears and restores that bypass bit, so the two agree. 0.65.4's
+  note that the algorithm blocks were "enabled" over-stated it for these two;
+  that entry is corrected. Their sc450ai-derived tables ship `enable = 0`, so
+  DRC has never contributed to a CV610 image and remains unevaluated.
+- **The WebUI IQ tab is capability-driven.** It was hidden by a hardcoded
+  `backendName === 'cv610'` test; visibility now comes from
+  `/api/v1/capabilities`' `data.routes.iq`, and the knob list is rendered from
+  the `_schema` the backend describes itself with, so the field table stays in
+  one place instead of being copied into the page. Backends with no schema keep
+  the existing hardcoded list.
+
+Verified on the `.181` bench, cold-booted onto a build of this change
+(`/proc/PID/exe` confirmed not `(deleted)`; the binary was rebuilt again for
+0.65.6, so the hash is not quoted here): all 11 groups
+return `ret=0`; a mutation sweep wrote and read back one field per group with
+11/11 agreeing and the device diffing clean against its boot state afterwards;
+saturation 60 → 220 → 60 moved mean chroma 4.84 → 22.95 → 4.81, the repeat of
+the first arm landing within 0.6% so the change is the knob and not the scene;
+arrays of the wrong length in either direction and unknown names are
+rejected; encoder rate stayed nominal at 100.10 fps with `pressureDrops`
+frozen at 0.
+
+`/api/v1/capabilities` advertises `routes.iq_import:false` because
+`handle_iq_import()` is compiled only for Star6E and Maruko; the WebUI hides
+the control rather than offer a button that 501s. (An earlier `_caps` block in
+the IQ payload was replaced by this before release — one fact, one place.)
+
+## [0.65.4] - 2026-08-16
+
+The CV610 IMX662 plugin was a scaffold in two places its comments admitted to,
+and both were costing image quality. It wrote 26 of the sensor's 131 power-on
+registers, and it handed the ISP a zeroed `ot_isp_cmos_default`, which switches
+every algorithm block off. No HTTP behaviour changes; contract stays `0.18.3`.
+
+- **The power-on register sequence is written.** `imx662_sensor_ctl.c` carried a
+  TODO naming the range it was missing, `0x301C..0x4549`. Sony's sequence for
+  that range is 131 entries — the reserved analog/ADC trim, the MIPI TX timing,
+  the readout window and the HDR context linear mode needs parked — and it now
+  lives in `imx662_cfg.h`. The table runs first, in standby, so the per-mode
+  writes that follow win where the two overlap; that ordering is load-bearing
+  for `0x3A50/51/52`, which keys off ADBIT rather than output depth, so the
+  table holds the 12-bit form and the RAW10 modes overwrite it. Measured on
+  hardware: 94 entries differ from the module's power-on state, the
+  readout-window group already matched bit for bit, and a RAW10-vs-RAW12 dump
+  of the whole range differs in only 8 registers — none of them in the reserved
+  blocks, which is what made writing the table wholesale safe.
+- **The ISP algorithm blocks are enabled.** `cmos_get_isp_default()` memset the
+  struct and returned, leaving demosaic, gamma, CLUT, LDCI, CAC,
+  anti-false-colour, dehaze, CA, sharpen, DRC and bayer NR all off. That, not
+  the sensor, was the flat and hazy image. Tables are ported from the in-tree
+  `smart_sc450ai` driver, which targets this same ISP silicon. The blocks that
+  describe ISP behaviour transfer on principle; the noise-fitted ones are
+  borrowed from a 4 MP sensor and are kept on a hardware A/B rather than a
+  calibration. Two of them are registered but not switched on: `g_cmos_drc`
+  and `g_cmos_dehaze` carry `enable = 0`, inherited from sc450ai's linear-mode
+  defaults, so the ISP bypasses both at runtime. See 0.65.5, which measured
+  that on hardware.
+- **Saturation is configured at all.** `cmos_get_awb_default()` left
+  `agc_tbl.valid` at 0 with every `saturation[]` entry 0, so the ISP was never
+  told what saturation to run — the washed-out colour. The shipped curve is
+  scaled up at the low-ISO end from sc450ai's and keeps its taper at high gain,
+  where chroma noise scales. Measured +41% mean chroma with sharpness flat.
+- **`sns_mode` is populated.** `sns_id` was 0, disagreeing with
+  `cv610_pipeline.c`'s `IMX662_SNS_ID` — which that file already documents as
+  having to match, and which would misbind a future PQ `.bin`, since those are
+  chip- and sensor-locked. `sns_mode` was never set.
+- **The sensor plugin Makefile generates header dependencies.** A bare
+  `%.o: %.c` rule meant a header-only edit relinked stale objects and shipped a
+  binary without the change, while `make` exited 0. Both the register sequence
+  and every tuning table live in headers. Found when two plugins built from
+  different saturation tables came out byte-identical.
+- **`tools/cv610_i2c_dump.c`** reads sensor registers over `/dev/i2c` from a
+  second process while the pipeline runs. `imx662_read_register()` is a stub —
+  the ISP only ever writes — so nothing could previously confirm an init landed.
+
+Verified on the Hi3516CV610 bench at 192.168.2.181, cold boot per arm:
+1080p30 30.03 fps, 1080p60 60.03, 1080p90 90.03, 1080p100 100.06 — all nominal
+and matching the pre-change baseline — with a 1222-register readback at zero
+I2C errors and every reference entry matching silicon.
+
+## [0.65.3] - 2026-08-16
+
+CV610 sensor-mode selection reaches parity with SigmaStar, so one client can
+render one set of sensor controls against all three backends. Contract
+`0.18.2` → `0.18.3`.
+
+- **`sensor.index` and `sensor.mode` select on CV610 now.** Both parsed and
+  both sat in the config file, but the backend read neither and the capability
+  set advertised neither, so `/api/v1/set` answered `409` for a field the
+  daemon carried. `video0.fps` was the selector instead, through an
+  exact-match lookup — a request for 45 fps was a hard config error where
+  SigmaStar substitutes a mode and says so. The two knobs now mean what
+  `sensor_select()` makes them mean: a forced `sensor.mode` wins over the
+  requested rate and must exist, otherwise the rate is a target.
+- **One case diverges from SigmaStar deliberately.** Its `sensor_mode_cost()`
+  tie-break scores fps-excess at zero for every mode *below* the target, so a
+  target above them all falls back to table order — the slowest mode. That
+  rarely fires there because its modes carry min–max fps ranges; on CV610's
+  four point-rate modes it would fire constantly, so a target above every mode
+  clamps to the fastest instead. Verified on the bench: `video0.fps=120`
+  selects 1080p100, and `45` selects 1080p60.
+- **`/api/v1/modes` reports what is running, not what is configured.**
+  `selected_pad` / `selected_mode` were recomputed from `video0.fps` on every
+  request, so they described the configured mode even when bring-up had chosen
+  another or failed outright. They are now published by the backend once the
+  pipeline resolves, through the same `venc_api_set_sensor_info()` Star6E uses.
+- **`video0.gopSize` is checked against the selected mode's rate.** The
+  encoder has always derived its GOP length from that rate rather than from
+  `video0.fps`; the two were identical only while selection was exact-match.
+  A forced mode or a substituted target separates them, and the old check
+  would have passed a `gopSize` that then exceeded the encoder's 65536-frame
+  limit.
+- A substituted rate is announced (`Requested 45 fps, using 60 fps (sensor
+  mode 1: 1080p60 RAW12)`) and shows up over HTTP as `/api/v1/fps/live`
+  disagreeing with `/api/v1/fps/config`. Neither measures anything — the
+  sensor clock follows the mode automatically, but a client that needs the
+  delivered rate must still measure it downstream.
+- **`isp.keepAspect` works on CV610 now; a 4:3 `video0.size` was silently
+  squashed.** The field sat in the config defaulting `true`, but CV610
+  advertised no `isp.*` field and read none — a knob that did nothing, which
+  is worse than one that is absent. `1440x1080` validated, then VPSS stretched
+  the whole 1920x1080 capture into it. The backend now takes a centred crop
+  first, through the same `pipeline_common_compute_precrop()` Star6E and
+  Maruko call, so the rule cannot drift between the three: `1440x1080` uses a
+  1440x1080 window at x=240 and scales 1:1. `isp.keepAspect=false` restores
+  stretch-to-fit. Verified both directions on the bench.
+- **The CV610 default bitrate drops 8000 → 2600 kbps.** waybeam-link is the
+  single rate controller and actuates within seconds, so the config value is
+  a **boot seed**, not an operating point — and what a seed has to survive is
+  the worst rung, not the expected one. Landing at the §9.8 MCS0 no-feedback
+  floor while offering 8 Mbps floods the air, and on this fleet an
+  over-offered craft has already been measured demoting a *second* craft's
+  link on the same channel within a minute. Pinning the seed low costs
+  nothing once the controller takes over.
+- **CV610 was skipping the shared config validation entirely.**
+  `venc_api_validate_loaded_config()` dispatched to the CV610 backend
+  validator *instead of* the shared `validate_field_cfg()` sweep, so sixteen
+  shared rules never ran there — and CV610 re-implemented two of them
+  (`video0.size`'s >=128 and multiple-of-8 gates) inside
+  `cv610_mode_check_output()`, which is the drift risk that made the gap
+  visible. The `/api/v1/set` path always ran the shared rules, so the same
+  value was accepted from the config file at boot and rejected with `409`
+  over HTTP. The sweep now runs first and the backend rules after.
+- The CV610 Opus banner said `10.0 ms frames` for a whole release after
+  `CV610_AUDIO_POINT_NUM` went 480 → 960. Behaviour was right at 20 ms; only
+  the one line a reader could check the packet rate against was wrong. It is
+  now derived from the constants rather than spelled out.
+
 ## [0.65.2] - 2026-08-15
 
 CV610 gets a scaler, one mode table instead of five copies of it, and a

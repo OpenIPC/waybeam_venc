@@ -99,6 +99,8 @@ typedef struct {
 	int (*fnGetIntraRefresh)(int chn, void *cfg);
 	int (*fnSetRefParam)(int chn, void *p);
 	int (*fnGetRefParam)(int chn, void *p);
+	int (*fnSetH265SliceSplit)(int chn, void *p);
+	int (*fnGetH265SliceSplit)(int chn, void *p);
 } star6e_venc_impl;
 
 /* Global instances — defined in star6e_mi.c.

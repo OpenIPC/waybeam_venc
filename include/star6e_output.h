@@ -155,12 +155,23 @@ typedef struct {
 	 * RecoveryRequest arriving over RF, which is a full round trip and is
 	 * off by default (venc.recovery_enabled).
 	 *
-	 * Wired to star6e_scene_request_idr(), so it inherits the shared
-	 * per-channel IDR rate limiter (100 ms) — a persistently full ring
-	 * coalesces into at most ~10 IDRs/s instead of a keyframe storm into
-	 * the very ring that is already congested. */
-	void (*request_idr)(void *ctx);
+	 * Wired to star6e_ring_request_idr(), so it inherits the shared
+	 * per-channel IDR rate limiter (100 ms) — but 10 IDRs/s into an
+	 * already-congested ring is still a storm (measured: a consumer-less
+	 * ring degraded the stream to an IDR every ~7 frames with GDR
+	 * suppressed), so this path adds its own holdoff on top:
+	 * venc_frame_drop_idr_due(), one request per second, state in
+	 * drop_idr_last_us.  Returns 1 when the IDR was actually issued, 0
+	 * when the shared limiter swallowed it — the caller then rolls the
+	 * holdoff anchor back so the next drop retries instead of leaving
+	 * the chain unhealed for up to a second. */
+	int (*request_idr)(void *ctx);
 	void *idr_ctx;
+	uint64_t drop_idr_last_us;
+	/* One WARN per pipeline start (reset by star6e_output_reset's memset)
+	 * when packet metadata is incomplete or invalid — the frame is aborted,
+	 * never shipped truncated. */
+	uint8_t trunc_warned;
 	/* Ring-full drops split by whether they actually broke the chain.
 	 * A non-referenced (SVC-T) frame is droppable by construction, so
 	 * those cost exactly one frame and must NOT trigger an IDR. */
@@ -228,6 +239,16 @@ void star6e_output_observe_pressure(Star6eOutput *output);
  * mechanism that must run whether or not anyone is watching. */
 int star6e_output_frame_ring_fill(
 	const Star6eOutput *output, venc_frame_ring_fill_t *out);
+
+/** Validate that every vendor pack exposes complete, in-bounds NAL
+ * descriptors. All consumers must reject the AU when this returns zero. */
+int star6e_output_stream_packet_info_complete(
+	const MI_VENC_Stream_t *stream);
+
+/** Reject an incomplete AU before output/recording. Returns 1 when rejected,
+ * emits a one-time warning, and requests paced recovery for reference frames. */
+int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
+	const MI_VENC_Stream_t *stream);
 
 
 /** Begin accumulating RTP packets for a frame. When the transport is UDP

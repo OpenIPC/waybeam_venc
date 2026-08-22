@@ -11,6 +11,10 @@ typedef struct {
 	 * the capture size unless video0.size asks for something smaller. */
 	uint32_t out_width;
 	uint32_t out_height;
+	/* isp.keepAspect: centre-crop the capture to the encoded aspect ratio
+	 * before scaling, so a 4:3 video0.size out of a 16:9 sensor is framed
+	 * rather than squashed.  Same rule Star6E and Maruko apply. */
+	int keep_aspect;
 	uint32_t fps;
 	int lanes;
 	int data_rate_x2;
@@ -32,5 +36,10 @@ void cv610_pipeline_stop(void);
 /* Signal-safe stop flag used by the backend's SIGINT/SIGTERM handler. */
 void cv610_pipeline_request_stop(void);
 int cv610_pipeline_stop_requested(void);
+
+/* Nonzero once ss_mpi_isp_run() is up, so callers outside this file know the
+ * ISP will answer an ss_mpi_isp_* attribute call.  Used by cv610_iq.c to
+ * refuse rather than fire MPI ioctls at an ISP that was never inited. */
+int cv610_pipeline_isp_ready(void);
 
 #endif /* CV610_PIPELINE_H */

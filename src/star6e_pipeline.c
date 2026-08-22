@@ -1448,6 +1448,78 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 	 * StartRecvPic, producing a flat single-layer stream. */
 	(void)star6e_pipeline_pre_start_apply_ref_pred(*chn, vcfg);
 
+	/* H.265 multi-slice split (same pre-Start window as SetRefParam).
+	 * sliceCount is what the operator asks for; the SDK field is 32-px
+	 * rows per slice, but the encoder's CTU is 64 (measured 2026-08-20:
+	 * SPS says 30x17 CTBs at 1080p), so the SDK rounds the request up to
+	 * whole CTU-64 rows.  Log the DELIVERED geometry, not the request —
+	 * at 1080p sliceCount 8 quantizes to 6 slices of 3 CTU rows.
+	 * vcfg is optional on this path: star6e_pipeline_start_dual()
+	 * passes NULL for ch1, so guard before reading slice_count. */
+	if (vcfg && vcfg->video0.slice_count > 1) {
+		uint32_t rows = (height + 31) / 32;
+		uint32_t per = (rows + vcfg->video0.slice_count - 1) / vcfg->video0.slice_count;
+		uint32_t ctu_rows = (height + 63) / 64;
+		uint32_t ctu_per;
+		MI_VENC_ParamH265SliceSplit_t split;
+		MI_VENC_ParamH265SliceSplit_t rb;
+
+		if (codec != PT_H265) {
+			fprintf(stderr, "ERROR: sliceCount=%u requires H.265\n",
+				vcfg->video0.slice_count);
+			MI_VENC_DestroyChn(*chn);
+			return -1;
+		}
+
+		/* Optional export: some libmi_venc.so revisions omit it and the
+		 * macro then returns -1, which reads as a driver rejection and
+		 * sends the operator hunting geometry.  Stay fatal -- delivering
+		 * one slice while the API advertises N would lie to the
+		 * receiver's spatial concealment -- but say why. */
+		if (!g_mi_venc.fnSetH265SliceSplit ||
+		    !g_mi_venc.fnGetH265SliceSplit) {
+			fprintf(stderr, "ERROR: sliceCount=%u requested but "
+				"libmi_venc.so does not export "
+				"MI_VENC_SetH265SliceSplit/GetH265SliceSplit\n",
+				vcfg->video0.slice_count);
+			MI_VENC_DestroyChn(*chn);
+			return -1;
+		}
+
+		/* B3: the vendor reads all 8 bytes; leaving the pad
+		 * uninitialised puts stack garbage across the ABI. */
+		memset(&split, 0, sizeof(split));
+		split.bSplitEnable = 1;
+		split.u32SliceRowCount = per;
+		ret = MI_VENC_SetH265SliceSplit(*chn, &split);
+		if (ret != 0) {
+			fprintf(stderr,
+				"ERROR: MI_VENC_SetH265SliceSplit(%u rows/slice) "
+				"failed %d\n",
+				split.u32SliceRowCount, ret);
+			MI_VENC_DestroyChn(*chn);
+			return ret;
+		}
+		memset(&rb, 0, sizeof(rb));
+		ret = MI_VENC_GetH265SliceSplit(*chn, &rb);
+		if (ret != 0 || !rb.bSplitEnable ||
+		    rb.u32SliceRowCount == 0 || rb.u32SliceRowCount > rows) {
+			fprintf(stderr, "ERROR: H.265 slice split readback invalid: "
+				"ret=%d enable=%u rows=%u requested_rows=%u\n",
+				ret, (unsigned)rb.bSplitEnable,
+				(unsigned)rb.u32SliceRowCount,
+				(unsigned)split.u32SliceRowCount);
+			MI_VENC_DestroyChn(*chn);
+			return ret != 0 ? ret : -1;
+		}
+		ctu_per = (rb.u32SliceRowCount + 1) / 2;
+		printf("VENC: H.265 slice split ON: requested=%u rows32=%u "
+		       "applied_rows32=%u predicted=%u (readback verified)\n",
+		       vcfg->video0.slice_count, split.u32SliceRowCount,
+		       rb.u32SliceRowCount,
+		       (ctu_rows + ctu_per - 1) / ctu_per);
+	}
+
 	ret = MI_VENC_StartRecvPic(*chn);
 	if (ret != 0) {
 		fprintf(stderr, "ERROR: MI_VENC_StartRecvPic failed %d\n", ret);
@@ -2683,17 +2755,19 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	 * star6e_output_init() -> star6e_output_reset(), which memsets the
 	 * whole output struct and would otherwise zero these GDR/SVC-T
 	 * tagging fields. */
-	state->output.gdr_active =
-		(vcfg->video0.intra_refresh_mode[0] != '\0' &&
-		 strcmp(vcfg->video0.intra_refresh_mode, "off") != 0) ? 1 : 0;
-	state->output.svct_active = vcfg->video0.ref_base > 0 ? 1 : 0;
 	{
-		IntraRefreshDerived gdr_ir;
-		(void)star6e_pipeline_intra_refresh_derive(
-			vcfg, pconf.image_height, venc_fps, pconf.rc_codec,
-			&gdr_ir);
-		uint32_t clen = (gdr_ir.total_rows && gdr_ir.lines)
-			? (gdr_ir.total_rows + gdr_ir.lines - 1) / gdr_ir.lines
+		Star6eIntraRefreshStatus ir_status;
+		Star6eRefPredStatus ref_status;
+		uint32_t clen;
+
+		star6e_pipeline_intra_refresh_status(&ir_status);
+		star6e_pipeline_ref_pred_status(&ref_status);
+		state->output.gdr_active = ir_status.active && ir_status.apply_ok;
+		state->output.svct_active = ref_status.active && ref_status.apply_ok;
+		clen = (state->output.gdr_active && ir_status.total_rows &&
+			ir_status.effective_lines_per_p)
+			? (ir_status.total_rows + ir_status.effective_lines_per_p - 1) /
+				ir_status.effective_lines_per_p
 			: 0;
 		state->output.gdr_cycle_len = clen > 255 ? 255 : (uint8_t)clen;
 		state->output.gdr_counter = 0;

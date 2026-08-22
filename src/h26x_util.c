@@ -101,3 +101,24 @@ int h26x_util_annexb_next(const uint8_t *data, size_t len, size_t *cursor,
 	*cursor = len;
 	return 0;
 }
+
+size_t h26x_util_hevc_patch_trail_r_to_n(uint8_t *data, size_t len)
+{
+	size_t cursor = 0;
+	size_t changed = 0;
+	const uint8_t *nal;
+	size_t nal_len;
+
+	if (!data)
+		return 0;
+	while (h26x_util_annexb_next(data, len, &cursor, &nal, &nal_len)) {
+		/* Byte 0 is forbidden_zero | nal_unit_type | layer_id_msb;
+		 * byte 1 starts with the other five layer-id bits.  Only rewrite
+		 * layer zero: 0x02 is TRAIL_R and 0x00 is TRAIL_N there. */
+		if (nal_len > 1 && nal[0] == 0x02 && (nal[1] & 0xf8u) == 0) {
+			data[nal - data] = 0x00;
+			changed++;
+		}
+	}
+	return changed;
+}

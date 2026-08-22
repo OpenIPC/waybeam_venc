@@ -86,6 +86,10 @@ typedef int (*maruko_isp_disable_userspace3a_fn_t)(MI_U32 dev_id, MI_U32 channel
   g_mi_venc.fnSetRefParam((dev), (chn), (p))
 #define maruko_mi_venc_get_ref_param(dev, chn, p) \
   g_mi_venc.fnGetRefParam((dev), (chn), (p))
+#define maruko_mi_venc_set_h265_slice_split(dev, chn, p) \
+  g_mi_venc.fnSetH265SliceSplit((dev), (chn), (p))
+#define maruko_mi_venc_get_h265_slice_split(dev, chn, p) \
+  g_mi_venc.fnGetH265SliceSplit((dev), (chn), (p))
 #define maruko_mi_sys_config_private_pool(soc, cfg) \
   g_mi_sys.fnConfigPrivateMMAPool((soc), (cfg))
 

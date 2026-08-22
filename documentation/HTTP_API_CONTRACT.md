@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.2`
+- `contract_version`: `0.18.6`
 - `status`: `active`
 
 ## Governance Rules
@@ -79,8 +79,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.1.7",
-    "contract_version": "0.12.0",
+    "app_version": "0.67.0",
+    "contract_version": "0.18.6",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -105,7 +105,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1 },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
+      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "sliceCount": 1, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "allowUnixEncoderStall": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -158,6 +158,7 @@ Response `200`:
       "video0.size": { "mutability": "restart_required", "supported": true },
       "video0.scene_threshold": { "mutability": "restart_required", "supported": true },
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
+      "video0.slice_count": { "mutability": "restart_required", "supported": true },
       "video0.resilience": { "mutability": "restart_required", "supported": true },
       "video0.zoom_x": { "mutability": "live", "supported": true },
       "video0.zoom_y": { "mutability": "live", "supported": true },
@@ -192,6 +193,29 @@ Response `200`:
 }
 ```
 (truncated — all fields listed in actual response)
+
+`video0.slice_count` / JSON `video0.sliceCount` requests 1–32 H.265 slices
+per picture; 1 disables splitting. Star6E, Maruko and CV610 advertise the
+field. The request is mapped to backend row geometry, so delivered counts may
+quantize or saturate; startup performs vendor Set/Get verification and fails
+an explicit multi-slice request when the backend cannot apply it. Slice NALs
+remain one whole access unit for RTP, recording and frame-SHM.
+
+`data.routes` (added 0.18.4) reports which optional routes the running
+backend actually services, so a client does not have to call an expensive
+endpoint just to discover whether it exists:
+
+```json
+{"ok":true,"data":{"routes":{"iq":true,"iq_import":false},"fields":{ ... }}}
+```
+
+| key | meaning |
+|---|---|
+| `iq` | `/api/v1/iq` and `/api/v1/iq/set` are serviced (the backend registers **both** `query_iq_info` and `apply_iq_param`). |
+| `iq_import` | `/api/v1/iq/import` is compiled in (Star6E/Maruko only). |
+
+Absent `routes` means an older build: treat every route as possibly present
+and fall back to calling it.
 
 `supported` is backend-specific. Current Star6E and Maruko builds both expose
 scene detection, intra refresh, and digital zoom fields.
@@ -754,7 +778,9 @@ Error `501`:
 
 ### `GET /api/v1/iq`
 
-Query all ISP IQ parameter values. Always available on Star6E backend.
+Query all ISP IQ parameter values. Star6E and Maruko share the SigmaStar
+response shape shown below. CV610 also serves this route, using the
+self-describing response documented under "CV610 IQ response shape".
 
 ```bash
 curl http://<device-ip>/api/v1/iq
@@ -792,7 +818,7 @@ Multi-field example (colortrans):
 }
 ```
 
-Error `501` if backend doesn't support IQ (Maruko):
+Error `501` when the active backend does not register an IQ query callback:
 ```json
 {"ok":false,"error":{"code":"not_implemented","message":"IQ query not available"}}
 ```
@@ -1216,6 +1242,72 @@ Error `409 record_active` — file is currently being written; stop
 recording first.
 Error `500 delete_failed` — filesystem error.
 
+### `GET /api/v1/intra/status`
+
+Report the intra-refresh (GDR) state the encoder actually applied, as opposed
+to what was requested. Served by Star6E, Maruko and CV610.
+
+```bash
+curl http://<device-ip>/api/v1/intra/status
+```
+
+```json
+{"ok":true,"data":{
+  "mode":"gdr","active":true,"mi_supported":true,"apply_ok":true,
+  "target_ms":500,"total_rows":34,
+  "lines":{"requested":0,"effective":2,"clamped":false},
+  "qp":{"requested":0,"effective":0},
+  "gop":{"explicit_sec":0.000,"effective_sec":2.000,"auto":true}}}
+```
+
+| field | meaning |
+|---|---|
+| `mode` | resolved refresh mode name (`off`, `gdr`, …). |
+| `active` | the encoder is refreshing now. |
+| `mi_supported` | the vendor library exports the refresh setter. |
+| `apply_ok` | the setter was called **and** read back clean. `active` with `apply_ok:false` means requested-but-not-delivered. |
+| `target_ms` | intended full-refresh cycle duration. |
+| `total_rows` | picture height in refresh rows. |
+| `lines.requested` / `.effective` | rows per P-frame asked for vs applied; `clamped` when geometry forced a change. |
+| `qp.requested` / `.effective` | refresh QP offset asked for vs applied. |
+| `gop.explicit_sec` / `.effective_sec` | configured GOP vs the one in force; `auto` when derived rather than configured. |
+
+Always `200`. A backend with no intra-refresh support reports `mode:"off"`,
+`active:false`, `mi_supported:false`.
+
+### `GET /api/v1/resilience/status`
+
+Report the resolved `video0.resilience` preset and both mechanisms it drives.
+Served by Star6E, Maruko and CV610.
+
+```bash
+curl http://<device-ip>/api/v1/resilience/status
+```
+
+```json
+{"ok":true,"data":{
+  "preset":"rally",
+  "intra":{"mode":"gdr","active":true,"mi_supported":true,"apply_ok":true,
+           "effective_lines":2,"effective_qp":0},
+  "refPred":{"active":true,"mi_supported":true,"apply_ok":true,
+             "base":1,"enhance":3,"pred":true},
+  "gop":{"effective_sec":2.000,"auto":true}}}
+```
+
+| field | meaning |
+|---|---|
+| `preset` | resolved `video0.resilience` value. |
+| `intra.*` | the intra-refresh subset of `/api/v1/intra/status`. |
+| `refPred.active` | base/enhance reference structure is in force. |
+| `refPred.mi_supported` | the vendor library exports the reference-parameter setter. |
+| `refPred.apply_ok` | the setter was called and read back clean. |
+| `refPred.base` / `.enhance` | applied base layer and enhancement period. |
+| `refPred.pred` | non-reference enhancement frames are being marked. |
+| `gop.effective_sec` / `.auto` | GOP in force, and whether it was derived. |
+
+Always `200`. Read `apply_ok` on both mechanisms before trusting `preset`: a
+preset names an intent, and only `apply_ok` says the encoder took it.
+
 ### `GET /request/idr`
 
 Request an IDR (keyframe) from the encoder.
@@ -1496,13 +1588,42 @@ Every other mode then runs at the wrong rate, scaled by the clock ratio
 CV610 preserves the same envelope and `selected_pad` / `selected_mode` /
 `pads[].modes[]` shape. Its initial IMX662 backend reports one synthetic pad
 containing the four supported fixed-rate modes (1080p30/60 RAW12 and
-1080p90/100 RAW10); each entry has equal `min_fps` and `max_fps`, and the entry
-matching `video0.fps` is marked selected.
+1080p90/100 RAW10); each entry has equal `min_fps` and `max_fps`.
+
+`selected_pad` / `selected_mode` are what bring-up **actually selected**, not
+what the config asks for — the backend publishes them once the pipeline is
+resolved, so a forced `sensor.mode`, a substituted rate and a failed bring-up
+are all reported honestly. Both read `-1` until bring-up completes, which in a
+healthy daemon is never observable: the HTTP server starts after the backend
+prepares.
 
 The `width` / `height` of a CV610 entry is what the **sensor captures**, not
-what is encoded. `video0.fps` alone selects the mode — every entry captures
-1920x1080 — and `video0.size` is the encoded geometry VPSS scales that capture
-down to. A client must not read a mode's `width` / `height` as the stream
+what is encoded. Every entry captures 1920x1080, and `video0.size` is the
+encoded geometry VPSS scales that capture down to.
+
+**Aspect ratio is preserved by cropping, gated on `isp.keepAspect`** (default
+`true`), the same rule and the same shared code Star6E and Maruko use. A
+`video0.size` whose aspect differs from the capture takes a centred crop of
+the capture first, then scales: `1440x1080` out of `1920x1080` uses a
+1440x1080 window at x=240 and scales 1:1, so 4:3 is framed rather than
+squashed. A matching aspect crops nothing. Setting `isp.keepAspect=false`
+restores the plain stretch-to-fit.
+
+**Selecting a CV610 mode uses the same two knobs as SigmaStar.** An explicit
+`sensor.mode` is an index into this list and wins outright; the mode's rate
+becomes the pipeline rate and `video0.fps` is left as written. With
+`sensor.mode` at `-1` (or any negative value, meaning auto) `video0.fps` is a
+**target** rather than a command: an exact match is used, otherwise the
+slowest mode still faster than the target, and a target above every mode
+clamps to the fastest. `sensor.index` accepts only `-1` or `0` — one synthetic
+pad — and anything else is `409`, as is a `sensor.mode` past the end of the
+list.
+
+A substituted rate is announced on the daemon's log
+(`Requested 45 fps, using 60 fps (sensor mode 1: 1080p60 RAW12)`) and is
+visible over HTTP as `/api/v1/fps/live` disagreeing with
+`/api/v1/fps/config`. Neither endpoint measures anything, so that pair states
+the *intended* rate, not the delivered one. A client must not read a mode's `width` / `height` as the stream
 resolution — `video0.size` in `/api/v1/config` is the encoded size, and
 `auto` there means the mode's capture geometry.
 
@@ -1671,8 +1792,9 @@ Behavior:
 
 ### Backend Support Matrix
 
-Endpoints that behave the same on both backends are omitted.  Only feature
-divergence is listed.  As of `contract_version: 0.12.1`:
+Endpoints that behave the same on all three backends are omitted. The table
+compares the two SigmaStar implementations; CV610 differences are called out
+in Notes. As of `contract_version: 0.18.6`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1683,8 +1805,8 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `/api/v1/audio/status` | yes | yes | Both backends register `query_audio_status`. |
 | `/api/v1/dual/status`, `/dual/idr` | yes | yes | `/dual/status` always 200 (`active:false` when off, `active:true,channel,bitrate,fps,gop` when on).  `/dual/idr` returns 200 when active, 404 when not. Maruko HTTP registration landed in 0.10.4 — earlier Maruko builds returned 404 from these even when `record.mode=dual` was running. |
 | `/api/v1/dual/set` | yes | **501** | Star6E-only: the underlying `MI_VENC_*ChnAttr` write path binds to `i6_venc_chn`, but Maruko's venc library expects `i6c_venc_chn` (different layout). Maruko returns 501 until the call path is ported. |
-| `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Both backends use the same IQ table schema. |
-| `/api/v1/awb` | live | live | Both backends register `query_awb_info`. |
+| `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Star6E/Maruko share one IQ table schema. **CV610 also serves these from 0.18.4, in a DIFFERENT shape** — see "CV610 IQ response shape" below. `/api/v1/iq/import` stays Star6E/Maruko-only and 501s on CV610 (advertised as `routes.iq_import:false`). |
+| `/api/v1/awb` | live | live | Both backends register `query_awb_info`. CV610: **501**. |
 | `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
 | `/api/v1/transport/status` | yes | yes | SHM-ring fields are shown when `outgoing.server=shm://`; otherwise the UDP/Unix subset. |
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
@@ -1693,10 +1815,71 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
 | `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **live** | Both backends hot-swap the NPU detector on the pipeline thread without respawning video. Star6E uses VPE port 1; Maruko uses SCL port 3 and its drain-while-disable teardown. A model whose reported input geometry disagrees with the configured tap is refused and leaves detection off. |
 | `detect.net_width` / `net_height` | restart | restart | Tap geometry is fixed when the VPE/SCL detector port is created. |
-| `video0.min_qp` / `max_qp` | live | **501** | Star6E-only RC QP bounds; Maruko capabilities report these fields unsupported. |
+| `video0.min_qp` / `max_qp` | live | **501** | RC QP bounds. Star6E live; Maruko reports unsupported. **CV610 live from 0.18.4** (`cv610_apply_qp_bounds`, applied live and at startup); it sets the P bounds and the I-frame ceiling, leaving the I-frame floor to `video0.qp_delta`. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.6` (documentation + correctness; no shipped response changes):
+  `GET /api/v1/intra/status` and `GET /api/v1/resilience/status` are now
+  documented — both have been served for several releases and the CV610
+  branch added in 0.18.5 made them report live device state, but neither had
+  a contract entry. `data.routes.iq` now requires the backend to register
+  **both** `query_iq_info` and `apply_iq_param`, matching its documented
+  meaning that `/api/v1/iq` *and* `/api/v1/iq/set` are serviced; every
+  shipped backend registers both, so no response changes.
+- `0.18.5` (additive — resilience and slices reach three-backend parity):
+  CV610 now advertises `video0.resilience` and `video0.slice_count` and serves
+  the existing intra/resilience status routes. Maruko now advertises and
+  applies `video0.slice_count`. Explicit multi-slice requests use pre-start
+  vendor Set/Get verification on all three backends; no field or response key
+  was removed.
+- `0.18.4` (additive — CV610 gains the IQ surface and RC QP bounds):
+  `/api/v1/capabilities` gains `data.routes` (`iq`, `iq_import`) so a client can
+  discover optional routes without calling them. `/api/v1/iq` and
+  `/api/v1/iq/set` go from 501 to live on CV610, in a second response shape
+  documented under "CV610 IQ response shape" — group-keyed, self-describing via
+  `_schema`, and rejecting out-of-range values rather than clamping.
+  `video0.min_qp` / `video0.max_qp` become live on CV610. No field was removed
+  and no existing response key changed, so 0.18.3 clients keep working.
+- `0.18.3` (additive — CV610 sensor-mode selection reaches SigmaStar parity):
+  - **`sensor.index` and `sensor.mode` are now supported on CV610**, both
+    `restart_required`, the same `mutability` the shared table gives them on
+    Star6E and Maruko. They parsed before but were read by nothing, so
+    `/api/v1/set` answered `409` for a field the config file carried. A
+    client that renders sensor controls from `/api/v1/capabilities` now gets
+    the same surface on all three backends.
+  - **`video0.fps` is a target on CV610, not a command.** With `sensor.mode`
+    auto, an exact match is used, otherwise the slowest mode still faster
+    than the target, and a target above every mode clamps to the fastest.
+    Rates that are not in the table were `409` before and are now honoured
+    with a substitution — see `/api/v1/modes`. `video0.fps=0` remains `409`.
+  - **`/api/v1/modes` reports the achieved selection.** `selected_pad` /
+    `selected_mode` were recomputed from `video0.fps` per request, so they
+    described the configured mode even when another one was running. They are
+    now published by the backend at bring-up, and read `-1` before it
+    completes. Shape unchanged.
+  - **`isp.keepAspect` is now supported on CV610** (`restart_required`), and
+    a non-native `video0.size` is centre-cropped before scaling instead of
+    stretched. The field was in the config file and defaulted `true`, but
+    CV610 advertised no `isp.*` field and read none, so it was a knob that
+    did nothing — `1440x1080` validated and then squashed 16:9 into 4:3.
+    CV610 now calls the same `pipeline_common_compute_precrop()` Star6E and
+    Maruko use. No shape changed and no request that used to succeed now
+    fails; the pixels are different.
+  - **CV610 now runs the shared field validation at config load**, which it
+    had been skipping entirely: `venc_api_validate_loaded_config()` dispatched
+    to the CV610 backend validator *instead of* the shared
+    `validate_field_cfg()` sweep, so sixteen shared rules never ran on that
+    backend. The HTTP `/api/v1/set` path always applied them, so the same
+    value was accepted from `/etc/waybeam.json` at boot and rejected with
+    `409` over HTTP. A CV610 config carrying e.g. `isp.awbMode:"bogus"` used
+    to load and now fails with the same message Star6E gives. Configs that
+    were valid on Star6E are unaffected.
+  - `video0.gopSize` is validated against the **selected** mode's rate. The
+    encoder has always derived its GOP length from that rate; the check used
+    `video0.fps`, which the two knobs above can now separate from it. A
+    `gopSize` that was accepted and then exceeded the encoder's 65536-frame
+    limit is now rejected at `409`.
 - `0.18.2` (additive — CV610 `video0.size` becomes a real control):
   - **`video0.size` on CV610 now accepts any geometry the mode can be scaled
     down to**, not just the capture size. VI has no scaler, so the backend
@@ -2056,3 +2239,34 @@ divergence is listed.  As of `contract_version: 0.12.1`:
   - Updated examples to use `video.capture_resolution` restart semantics.
 - `0.1.0`:
   - Initial draft contract and endpoint definitions.
+
+
+## CV610 IQ response shape (0.18.4)
+
+`/api/v1/iq` on CV610 is a **second, structurally different form** from the
+Star6E/Maruko one documented above.  A client written against that shape reads
+`data["contrast"].value` and gets `undefined` on CV610 — branch on
+`data._schema` being present, not on backend name.
+
+```json
+{"ok":true,"data":{
+  "_schema":[{"name":"saturation","fields":[
+      {"name":"manual.saturation","count":1,"min":0,"max":255,"domain":"manual"}]}],
+  "saturation":{"ret":0,"fields":{"op_type":0,"manual.saturation":128}},
+  "module_ctrl":{"ret":0,"bypass":{"drc":1,"dehaze":1}}}}
+```
+
+- Keyed by ISP **group**, not by parameter. Each group has `ret` (the MPI
+  return, 0 on success) and `fields`, whose keys are dotted field names.
+- No `value`, `enabled`, `op_type` or `available` at group level, and no
+  `_diag` block.
+- `_schema` describes the whole surface — name, element `count`, `min`/`max`,
+  and `domain` (`direct` | `manual` | `auto`).  The WebUI renders from it, so
+  the field table lives only in the backend.
+- `domain` is load-bearing: writing a `manual.*` or `auto.*` field also selects
+  that `op_type`, because a value in the other half is ignored by the ISP and
+  an ignored write is indistinguishable from a broken setter.
+- `module_ctrl` is read-only and reports which ISP blocks the hardware is
+  bypassing.
+- Values out of a field's declared range are **rejected**, not clamped, so the
+  value echoed by `/api/v1/iq/set` is the value applied.

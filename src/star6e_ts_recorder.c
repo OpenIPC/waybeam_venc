@@ -1,4 +1,7 @@
 #include "star6e_ts_recorder.h"
+#ifndef PLATFORM_MARUKO
+#include "star6e_output.h"
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -334,9 +337,11 @@ int star6e_ts_recorder_is_active(const Star6eTsRecorderState *state)
 	return state && state->fd >= 0;
 }
 
+#ifndef PLATFORM_MARUKO
 int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 	const MI_VENC_Stream_t *stream)
 {
+	static int incomplete_warned;
 	uint8_t nal_buf[512 * 1024];  /* 512KB — supports up to ~50 Mbps IDR frames */
 	size_t nal_len = 0;
 	int is_idr = 0;
@@ -345,6 +350,14 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 
 	if (!state || state->fd < 0 || !stream || !stream->packet)
 		return 0;
+	if (!star6e_output_stream_packet_info_complete(stream)) {
+		if (!incomplete_warned) {
+			incomplete_warned = 1;
+			fprintf(stderr, "[ts_recorder] invalid packetInfo; "
+				"dropping whole access unit\n");
+		}
+		return 0;
+	}
 
 	/* Extract all NAL data from stream packs */
 	for (unsigned int i = 0; i < stream->count; ++i) {
@@ -353,12 +366,7 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 			continue;
 
 		if (pack->packNum > 0) {
-			const unsigned int info_cap = (unsigned int)(
-				sizeof(pack->packetInfo) /
-				sizeof(pack->packetInfo[0]));
 			unsigned int nal_count = (unsigned int)pack->packNum;
-			if (nal_count > info_cap)
-				nal_count = info_cap;
 
 			for (unsigned int k = 0; k < nal_count; ++k) {
 				MI_U32 off = pack->packetInfo[k].offset;
@@ -377,9 +385,9 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 				if (nal_len + len > sizeof(nal_buf)) {
 					fprintf(stderr,
 						"[ts_recorder] frame too large "
-						"(%zu + %u > %zu), truncated\n",
+						"(%zu + %u > %zu), access unit dropped\n",
 						nal_len, len, sizeof(nal_buf));
-					break;
+					return 0;
 				}
 				memcpy(nal_buf + nal_len,
 					pack->data + off, len);
@@ -392,9 +400,9 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 			if (nal_len + len > sizeof(nal_buf)) {
 				fprintf(stderr,
 					"[ts_recorder] frame too large "
-					"(%zu + %u > %zu), truncated\n",
+					"(%zu + %u > %zu), access unit dropped\n",
 					nal_len, len, sizeof(nal_buf));
-				break;
+				return 0;
 			}
 			memcpy(nal_buf + nal_len,
 				pack->data + pack->offset, len);
@@ -412,6 +420,7 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 	return star6e_ts_recorder_write_video(state,
 		nal_buf, nal_len, pts, is_idr);
 }
+#endif
 
 void star6e_ts_recorder_status(const Star6eTsRecorderState *state,
 	uint64_t *bytes_written, uint32_t *frames_written,

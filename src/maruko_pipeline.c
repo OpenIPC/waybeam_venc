@@ -6,6 +6,7 @@
 #include "debug_osd.h"
 #include "detect_wire.h"
 #include "hevc_rtp.h"
+#include "h26x_util.h"
 #include "idr_rate_limit.h"
 #include "intra_refresh.h"
 #include "isp_runtime.h"
@@ -1974,15 +1975,17 @@ void maruko_pipeline_ref_pred_status(MarukoRefPredStatus *out)
  * just broke.  Gated by the shared per-channel IDR rate limiter so a
  * persistently full ring coalesces instead of firing keyframes into the ring
  * that is already congested.  Mirrors star6e_scene_request_idr(). */
-static void maruko_ring_request_idr(void *vctx)
+static int maruko_ring_request_idr(void *vctx)
 {
 	MarukoBackendContext *ctx = (MarukoBackendContext *)vctx;
 
 	if (!ctx)
-		return;
-	if (idr_rate_limit_allow(ctx->venc_channel))
-		maruko_mi_venc_request_idr(ctx->venc_device,
-			ctx->venc_channel, 1);
+		return 0;
+	if (!idr_rate_limit_allow(ctx->venc_channel))
+		return 0;
+	maruko_mi_venc_request_idr(ctx->venc_device,
+		ctx->venc_channel, 1);
+	return 1;
 }
 
 static int maruko_apply_ref_pred(MI_VENC_DEV dev, MI_VENC_CHN chn,
@@ -2029,6 +2032,67 @@ publish:
 	g_ref_pred_status = snap;
 	pthread_mutex_unlock(&g_ref_pred_status_mutex);
 	return snap.active ? 0 : (cfg && cfg->ref_base > 0 ? -1 : 0);
+}
+
+static int maruko_apply_slice_split(MI_VENC_DEV dev, MI_VENC_CHN chn,
+	const MarukoBackendConfig *cfg, uint32_t height)
+{
+	MI_VENC_ParamH265SliceSplit_t requested;
+	MI_VENC_ParamH265SliceSplit_t actual;
+	uint32_t rows32;
+	uint32_t rows_per_slice;
+	uint32_t ctu_rows;
+	uint32_t ctu_per_slice;
+	uint32_t predicted;
+
+	if (!cfg || cfg->slice_count <= 1)
+		return 0;
+	if (cfg->rc_codec != PT_H265) {
+		fprintf(stderr, "ERROR: [maruko] sliceCount=%u requires H.265\n",
+			cfg->slice_count);
+		return -1;
+	}
+	if (!g_mi_venc.fnSetH265SliceSplit ||
+	    !g_mi_venc.fnGetH265SliceSplit) {
+		fprintf(stderr, "ERROR: [maruko] sliceCount=%u requested but "
+			"libmi_venc.so lacks H.265 slice split Set/Get\n",
+			cfg->slice_count);
+		return -1;
+	}
+
+	rows32 = (height + 31U) / 32U;
+	rows_per_slice = (rows32 + cfg->slice_count - 1U) /
+		cfg->slice_count;
+	memset(&requested, 0, sizeof(requested));
+	requested.bSplitEnable = 1;
+	requested.u32SliceRowCount = rows_per_slice;
+	if (maruko_mi_venc_set_h265_slice_split(dev, chn, &requested) != 0) {
+		fprintf(stderr, "ERROR: [maruko] MI_VENC_SetH265SliceSplit"
+			"(dev=%d, chn=%d, rows=%u) failed\n",
+			dev, chn, rows_per_slice);
+		return -1;
+	}
+
+	memset(&actual, 0, sizeof(actual));
+	if (maruko_mi_venc_get_h265_slice_split(dev, chn, &actual) != 0 ||
+	    !actual.bSplitEnable ||
+	    actual.u32SliceRowCount == 0 ||
+	    actual.u32SliceRowCount > rows32) {
+		fprintf(stderr, "ERROR: [maruko] H.265 slice split readback "
+			"invalid: enable=%u rows=%u requested_rows=%u\n",
+			(unsigned int)actual.bSplitEnable,
+			actual.u32SliceRowCount, rows_per_slice);
+		return -1;
+	}
+
+	ctu_rows = (height + 63U) / 64U;
+	ctu_per_slice = (actual.u32SliceRowCount + 1U) / 2U;
+	predicted = (ctu_rows + ctu_per_slice - 1U) / ctu_per_slice;
+	fprintf(stderr, "[waybeam] sliceSplit: dev=%d chn=%d requested=%u "
+		"requested_rows32=%u applied_rows32=%u predicted=%u "
+		"(readback verified)\n", dev, chn, cfg->slice_count,
+		rows_per_slice, actual.u32SliceRowCount, predicted);
+	return 0;
 }
 
 static int maruko_start_venc(const MarukoBackendConfig *cfg,
@@ -2094,6 +2158,15 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	if (ret != 0) {
 		fprintf(stderr,
 			"ERROR: [maruko] MI_VENC_CreateChn failed %d\n", ret);
+		if (dev_created && *dev_created) {
+			(void)maruko_mi_venc_destroy_dev(venc_dev);
+			*dev_created = 0;
+		}
+		return ret;
+	}
+	ret = maruko_apply_slice_split(venc_dev, *chn, cfg, height);
+	if (ret != 0) {
+		(void)maruko_mi_venc_destroy_chn(venc_dev, *chn);
 		if (dev_created && *dev_created) {
 			(void)maruko_mi_venc_destroy_dev(venc_dev);
 			*dev_created = 0;
@@ -2407,6 +2480,27 @@ static void assign_maruko_ports(MarukoBackendContext *ctx,
 	};
 }
 
+static void maruko_update_output_resilience_flags(MarukoBackendContext *ctx)
+{
+	MarukoIntraRefreshStatus ir_status;
+	MarukoRefPredStatus ref_status;
+	uint32_t clen;
+
+	if (!ctx)
+		return;
+	maruko_pipeline_intra_refresh_status(&ir_status);
+	maruko_pipeline_ref_pred_status(&ref_status);
+	ctx->output.gdr_active = ir_status.active && ir_status.apply_ok;
+	ctx->output.svct_active = ref_status.active && ref_status.apply_ok;
+	clen = (ctx->output.gdr_active && ir_status.total_rows &&
+		ir_status.effective_lines_per_p)
+		? (ir_status.total_rows + ir_status.effective_lines_per_p - 1) /
+			ir_status.effective_lines_per_p
+		: 0;
+	ctx->output.gdr_cycle_len = clen > 255 ? 255 : (uint8_t)clen;
+	ctx->output.gdr_counter = 0;
+}
+
 /* stab-fill: finish the manual-feed VENC bring-up.  The fill module pushes the
  * composed frames straight into the (NORMAL_FRMBASE, unbound) VENC input port
  * — device-proven at 50 fps.  Phase 5a's "the i6c VENC cannot be manually
@@ -2428,6 +2522,7 @@ static int maruko_setup_stabfill_venc(MarukoBackendContext *ctx)
 	(void)maruko_apply_intra_refresh(ctx->venc_device, ctx->venc_channel,
 		&ctx->cfg, ctx->cfg.image_height, ctx->sensor.fps,
 		ctx->cfg.rc_codec);
+	maruko_update_output_resilience_flags(ctx);
 
 	printf("> [maruko] stab-fill: VENC(%d,%d) NORMAL_FRMBASE manual-feed "
 		"@ %ux%u (port0 RAW unbound -> compose -> push)\n",
@@ -2448,23 +2543,9 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		return -1;
 	ctx->venc_started = 1;
 
-	ctx->output.gdr_active =
-		(ctx->cfg.intra_refresh_mode[0] != '\0' &&
-		 strcmp(ctx->cfg.intra_refresh_mode, "off") != 0) ? 1 : 0;
-	ctx->output.svct_active = ctx->cfg.ref_base > 0 ? 1 : 0;
 	ctx->output.request_idr = maruko_ring_request_idr;
 	ctx->output.idr_ctx = ctx;
-	{
-		IntraRefreshDerived gdr_ir;
-		(void)maruko_intra_refresh_derive(&ctx->cfg,
-			ctx->cfg.image_height, ctx->sensor.fps,
-			ctx->cfg.rc_codec, &gdr_ir);
-		uint32_t clen = (gdr_ir.total_rows && gdr_ir.lines)
-			? (gdr_ir.total_rows + gdr_ir.lines - 1) / gdr_ir.lines
-			: 0;
-		ctx->output.gdr_cycle_len = clen > 255 ? 255 : (uint8_t)clen;
-		ctx->output.gdr_counter = 0;
-	}
+	maruko_update_output_resilience_flags(ctx);
 
 	MI_U32 venc_device = (MI_U32)ctx->venc_device;
 	assign_maruko_ports(ctx, venc_device);
@@ -2965,6 +3046,28 @@ static void *maruko_dual_stream_thread(void *arg)
 		if (ret != 0) {
 			if (ret == -EAGAIN || ret == EAGAIN)
 				usleep(1000);
+			continue;
+		}
+		if (!maruko_video_stream_packet_info_complete(&stream)) {
+			static int incomplete_warned;
+			if (!incomplete_warned) {
+				incomplete_warned = 1;
+				fprintf(stderr, "WARN: [maruko][dual] invalid packetInfo; "
+					"dropping whole access unit\n");
+			}
+			if (!(d->output.svct_active &&
+			    stream.h265Info.refType ==
+				MARUKO_REFTYPE_ENHANCE_P_NOTFORREF) &&
+			    venc_frame_drop_idr_due(&d->output.drop_idr_last_us,
+				wb_monotonic_us())) {
+				if (idr_rate_limit_allow(d->channel))
+					(void)maruko_mi_venc_request_idr(
+						ctx->venc_device, d->channel, 1);
+				else
+					d->output.drop_idr_last_us = 0;
+			}
+			(void)maruko_mi_venc_release_stream(ctx->venc_device,
+				d->channel, &stream);
 			continue;
 		}
 
@@ -3654,12 +3757,38 @@ static uint8_t maruko_scene_is_idr(const i6c_venc_strm *s, int codec)
 	if (!s || !s->packet) return 0;
 	for (i = 0; i < s->count; i++) {
 		const i6c_venc_pack *p = &s->packet[i];
-		unsigned int k, n = p->packNum > 8 ? 8 : p->packNum;
+		const unsigned int info_cap = (unsigned int)(
+			sizeof(p->packetInfo) / sizeof(p->packetInfo[0]));
+		unsigned int k, n = p->packNum;
+		if (n > info_cap) {
+			if (p->data && p->length > p->offset) {
+				size_t cursor = 0;
+				const uint8_t *nal;
+				size_t nal_len;
+
+				while (h26x_util_annexb_next(p->data + p->offset,
+				    p->length - p->offset, &cursor, &nal,
+				    &nal_len)) {
+					uint8_t type = codec == 0
+						? h26x_util_h264_nalu_type(nal,
+							nal_len)
+						: h26x_util_hevc_nalu_type(nal,
+							nal_len);
+					if ((codec == 0 && type == 5) ||
+					    (codec != 0 &&
+					     (type == 19 || type == 20)))
+						return 1;
+				}
+			}
+			continue;
+		}
 		if (n > 0) {
 			for (k = 0; k < n; k++) {
 				if (codec == 0 && p->packetInfo[k].packType.h264Nalu == 5)
 					return 1;
-				if (codec != 0 && p->packetInfo[k].packType.h265Nalu == 19)
+				if (codec != 0 &&
+				    (p->packetInfo[k].packType.h265Nalu == 19 ||
+				     p->packetInfo[k].packType.h265Nalu == 20))
 					return 1;
 			}
 		} else {
@@ -3885,8 +4014,15 @@ static void maruko_patch_pack_to_trail_n(i6c_venc_pack *pack)
 	if (pack->packNum > 0) {
 		const unsigned int info_cap = (unsigned int)(sizeof(pack->packetInfo) /
 			sizeof(pack->packetInfo[0]));
-		unsigned int n = pack->packNum > info_cap ? info_cap : pack->packNum;
+		unsigned int n = pack->packNum;
 		unsigned int k;
+		if (n > info_cap) {
+			unsigned int off = pack->offset;
+			if (off < pack->length)
+				(void)h26x_util_hevc_patch_trail_r_to_n(
+					pack->data + off, pack->length - off);
+			return;
+		}
 		for (k = 0; k < n; ++k) {
 			unsigned int off = pack->packetInfo[k].offset;
 			unsigned int nlen = pack->packetInfo[k].length;
@@ -4049,6 +4185,12 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			"ERROR: [maruko] MI_VENC_GetStream failed %d\n", ret);
 		return -1;
 	}
+	if (maruko_video_reject_incomplete_access_unit(&stream,
+	    &ctx->output)) {
+		(void)maruko_mi_venc_release_stream(ctx->venc_device,
+			ctx->venc_channel, &stream);
+		return 0;
+	}
 
 	/* refPred error-resilience marking — rewrite TRAIL_R → TRAIL_N for
 	 * frames the SDK marked as ENHANCE_P_NOTFORREF.  i6c shares this
@@ -4056,7 +4198,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	 * correct internally but every NAL is emitted as TRAIL_R, leaving
 	 * generic decoders unable to identify non-reference frames.  See
 	 * star6e_runtime.c for the matching helper. */
-	if (ctx->cfg.ref_base > 0 &&
+	if (ctx->output.svct_active &&
 	    stream.h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF) {
 		maruko_patch_stream_to_trail_n(&stream);
 	}
@@ -4463,7 +4605,8 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 	MarukoStreamRuntime rt;
 	int result = -1;
 
-	if (!ctx || (ctx->output.socket_handle < 0 && !ctx->output.ring))
+	if (!ctx || (ctx->output.socket_handle < 0 && !ctx->output.ring &&
+	    !ctx->output.frame_ring))
 		return -1;
 
 	if (ctx->cfg.stream_mode == MARUKO_STREAM_RTP &&

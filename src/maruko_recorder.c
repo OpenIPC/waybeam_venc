@@ -1,4 +1,5 @@
 #include "maruko_recorder.h"
+#include "maruko_video.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -14,15 +15,45 @@
  * difference does not have to be juggled with #ifdefs in
  * star6e_recorder.c. */
 
-static ssize_t writev_retry(int fd, const struct iovec *iov, int iov_count)
+static ssize_t writev_all(int fd, const struct iovec *iov, int iov_count)
 {
-	ssize_t ret;
+	struct iovec pending[16];
+	ssize_t total = 0;
+	int first = 0;
 
-	do {
-		ret = writev(fd, iov, iov_count);
-	} while (ret < 0 && errno == EINTR);
+	if (!iov || iov_count <= 0 || iov_count > 16) {
+		errno = EINVAL;
+		return -1;
+	}
+	memcpy(pending, iov, (size_t)iov_count * sizeof(pending[0]));
+	while (first < iov_count) {
+		ssize_t ret;
+		ssize_t consumed;
 
-	return ret;
+		do {
+			ret = writev(fd, &pending[first], iov_count - first);
+		} while (ret < 0 && errno == EINTR);
+		if (ret < 0)
+			return -1;
+		if (ret == 0) {
+			errno = EIO;
+			return -1;
+		}
+		total += ret;
+		consumed = ret;
+		while (first < iov_count &&
+		    consumed >= (ssize_t)pending[first].iov_len) {
+			consumed -= (ssize_t)pending[first].iov_len;
+			first++;
+		}
+		if (first < iov_count && consumed > 0) {
+			pending[first].iov_base =
+				(char *)pending[first].iov_base + consumed;
+			pending[first].iov_len -= (size_t)consumed;
+		}
+	}
+
+	return total;
 }
 
 static int check_disk_space(Star6eRecorderState *state)
@@ -71,16 +102,28 @@ static void stop_with_error(Star6eRecorderState *state, int err)
 int maruko_recorder_write_frame(Star6eRecorderState *state,
 	const i6c_venc_strm *stream)
 {
+	static int incomplete_warned;
 	struct iovec iov[16];
 	int iov_count = 0;
 	ssize_t written;
 	size_t total = 0;
+	off_t frame_start;
 
 	if (!state || state->fd < 0 || !stream || !stream->packet)
 		return 0;
+	if (!maruko_video_stream_packet_info_complete(stream)) {
+		if (!incomplete_warned) {
+			incomplete_warned = 1;
+			fprintf(stderr,
+				"[maruko_recorder] incomplete packetInfo table; "
+				"dropping whole access unit\n");
+		}
+		return 0;
+	}
 
 	if (check_disk_space(state) != 0)
 		return 0;
+	frame_start = lseek(state->fd, 0, SEEK_CUR);
 
 	for (unsigned int i = 0; i < stream->count; ++i) {
 		const i6c_venc_pack *pack = &stream->packet[i];
@@ -89,13 +132,7 @@ int maruko_recorder_write_frame(Star6eRecorderState *state,
 			continue;
 
 		if (pack->packNum > 0) {
-			const unsigned int info_cap = (unsigned int)(
-				sizeof(pack->packetInfo) /
-				sizeof(pack->packetInfo[0]));
 			unsigned int nal_count = (unsigned int)pack->packNum;
-
-			if (nal_count > info_cap)
-				nal_count = info_cap;
 
 			for (unsigned int k = 0; k < nal_count; ++k) {
 				unsigned int off = pack->packetInfo[k].offset;
@@ -106,7 +143,7 @@ int maruko_recorder_write_frame(Star6eRecorderState *state,
 					continue;
 
 				if (iov_count >= 16) {
-					written = writev_retry(state->fd,
+					written = writev_all(state->fd,
 						iov, iov_count);
 					if (written < 0)
 						goto write_error;
@@ -124,7 +161,7 @@ int maruko_recorder_write_frame(Star6eRecorderState *state,
 				continue;
 
 			if (iov_count >= 16) {
-				written = writev_retry(state->fd, iov,
+				written = writev_all(state->fd, iov,
 					iov_count);
 				if (written < 0)
 					goto write_error;
@@ -141,7 +178,7 @@ int maruko_recorder_write_frame(Star6eRecorderState *state,
 	}
 
 	if (iov_count > 0) {
-		written = writev_retry(state->fd, iov, iov_count);
+		written = writev_all(state->fd, iov, iov_count);
 		if (written < 0)
 			goto write_error;
 		total += (size_t)written;
@@ -160,6 +197,13 @@ int maruko_recorder_write_frame(Star6eRecorderState *state,
 	return (int)total;
 
 write_error:
-	stop_with_error(state, errno);
+	{
+		int saved_errno = errno;
+	/* A failure may follow a short successful write. Roll the regular file
+	 * back to its frame boundary so recording never retains half an AU. */
+		if (frame_start >= 0)
+			(void)ftruncate(state->fd, frame_start);
+		stop_with_error(state, saved_errno);
+	}
 	return -1;
 }
