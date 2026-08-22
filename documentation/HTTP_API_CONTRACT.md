@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.5`
+- `contract_version`: `0.18.6`
 - `status`: `active`
 
 ## Governance Rules
@@ -80,7 +80,7 @@ Response `200`:
   "ok": true,
   "data": {
     "app_version": "0.67.0",
-    "contract_version": "0.18.5",
+    "contract_version": "0.18.6",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -192,6 +192,7 @@ Response `200`:
   }
 }
 ```
+(truncated — all fields listed in actual response)
 
 `video0.slice_count` / JSON `video0.sliceCount` requests 1–32 H.265 slices
 per picture; 1 disables splitting. Star6E, Maruko and CV610 advertise the
@@ -210,13 +211,11 @@ endpoint just to discover whether it exists:
 
 | key | meaning |
 |---|---|
-| `iq` | `/api/v1/iq` and `/api/v1/iq/set` are serviced (the backend registers `query_iq_info`). |
+| `iq` | `/api/v1/iq` and `/api/v1/iq/set` are serviced (the backend registers **both** `query_iq_info` and `apply_iq_param`). |
 | `iq_import` | `/api/v1/iq/import` is compiled in (Star6E/Maruko only). |
 
 Absent `routes` means an older build: treat every route as possibly present
 and fall back to calling it.
-```
-(truncated — all fields listed in actual response)
 
 `supported` is backend-specific. Current Star6E and Maruko builds both expose
 scene detection, intra refresh, and digital zoom fields.
@@ -1243,6 +1242,72 @@ Error `409 record_active` — file is currently being written; stop
 recording first.
 Error `500 delete_failed` — filesystem error.
 
+### `GET /api/v1/intra/status`
+
+Report the intra-refresh (GDR) state the encoder actually applied, as opposed
+to what was requested. Served by Star6E, Maruko and CV610.
+
+```bash
+curl http://<device-ip>/api/v1/intra/status
+```
+
+```json
+{"ok":true,"data":{
+  "mode":"gdr","active":true,"mi_supported":true,"apply_ok":true,
+  "target_ms":500,"total_rows":34,
+  "lines":{"requested":0,"effective":2,"clamped":false},
+  "qp":{"requested":0,"effective":0},
+  "gop":{"explicit_sec":0.000,"effective_sec":2.000,"auto":true}}}
+```
+
+| field | meaning |
+|---|---|
+| `mode` | resolved refresh mode name (`off`, `gdr`, …). |
+| `active` | the encoder is refreshing now. |
+| `mi_supported` | the vendor library exports the refresh setter. |
+| `apply_ok` | the setter was called **and** read back clean. `active` with `apply_ok:false` means requested-but-not-delivered. |
+| `target_ms` | intended full-refresh cycle duration. |
+| `total_rows` | picture height in refresh rows. |
+| `lines.requested` / `.effective` | rows per P-frame asked for vs applied; `clamped` when geometry forced a change. |
+| `qp.requested` / `.effective` | refresh QP offset asked for vs applied. |
+| `gop.explicit_sec` / `.effective_sec` | configured GOP vs the one in force; `auto` when derived rather than configured. |
+
+Always `200`. A backend with no intra-refresh support reports `mode:"off"`,
+`active:false`, `mi_supported:false`.
+
+### `GET /api/v1/resilience/status`
+
+Report the resolved `video0.resilience` preset and both mechanisms it drives.
+Served by Star6E, Maruko and CV610.
+
+```bash
+curl http://<device-ip>/api/v1/resilience/status
+```
+
+```json
+{"ok":true,"data":{
+  "preset":"rally",
+  "intra":{"mode":"gdr","active":true,"mi_supported":true,"apply_ok":true,
+           "effective_lines":2,"effective_qp":0},
+  "refPred":{"active":true,"mi_supported":true,"apply_ok":true,
+             "base":1,"enhance":3,"pred":true},
+  "gop":{"effective_sec":2.000,"auto":true}}}
+```
+
+| field | meaning |
+|---|---|
+| `preset` | resolved `video0.resilience` value. |
+| `intra.*` | the intra-refresh subset of `/api/v1/intra/status`. |
+| `refPred.active` | base/enhance reference structure is in force. |
+| `refPred.mi_supported` | the vendor library exports the reference-parameter setter. |
+| `refPred.apply_ok` | the setter was called and read back clean. |
+| `refPred.base` / `.enhance` | applied base layer and enhancement period. |
+| `refPred.pred` | non-reference enhancement frames are being marked. |
+| `gop.effective_sec` / `.auto` | GOP in force, and whether it was derived. |
+
+Always `200`. Read `apply_ok` on both mechanisms before trusting `preset`: a
+preset names an intent, and only `apply_ok` says the encoder took it.
+
 ### `GET /request/idr`
 
 Request an IDR (keyframe) from the encoder.
@@ -1729,7 +1794,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.18.5`:
+in Notes. As of `contract_version: 0.18.6`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1754,6 +1819,14 @@ in Notes. As of `contract_version: 0.18.5`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.6` (documentation + correctness; no shipped response changes):
+  `GET /api/v1/intra/status` and `GET /api/v1/resilience/status` are now
+  documented — both have been served for several releases and the CV610
+  branch added in 0.18.5 made them report live device state, but neither had
+  a contract entry. `data.routes.iq` now requires the backend to register
+  **both** `query_iq_info` and `apply_iq_param`, matching its documented
+  meaning that `/api/v1/iq` *and* `/api/v1/iq/set` are serviced; every
+  shipped backend registers both, so no response changes.
 - `0.18.5` (additive — resilience and slices reach three-backend parity):
   CV610 now advertises `video0.resilience` and `video0.slice_count` and serves
   the existing intra/resilience status routes. Maruko now advertises and

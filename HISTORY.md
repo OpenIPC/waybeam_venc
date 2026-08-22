@@ -1,5 +1,61 @@
 # History
 
+## [0.67.1] - 2026-08-22
+
+Pre-upstream review pass over 0.65.3..0.67.0. Three defects introduced by that
+range, one long-standing sensor-register error, and the documentation the
+range changed but did not update. No wire format, config schema or frame-SHM
+layout changes.
+
+- **Star6E dual-VENC crashed at startup.** `star6e_pipeline_start_venc()`
+  accepts `vcfg == NULL` — `star6e_pipeline_start_dual()` passes it for ch1 —
+  but 0.66.0's slice block dereferenced it unguarded. Any craft with
+  `record.mode=dual`/`dual-stream` segfaulted during startup controls,
+  independent of `sliceCount`, because the fault is the *read* of
+  `slice_count`. `record.mode` is gated on mode alone, not `record.enabled`.
+  Host tests could not see it: `star6e_pipeline.c` is not in the test library.
+- `MI_VENC_ParamH265SliceSplit_t` was passed to the vendor with its padding
+  uninitialised; both sibling structs in the same function are memset.
+- A `libmi_venc.so` without the optional `MI_VENC_SetH265SliceSplit` export
+  failed startup with a message that read as a driver rejection. The failure
+  stays fatal — delivering one slice while the API advertises N would lie to
+  the receiver's spatial concealment — but now names the missing symbol.
+- **The CV610 partial-load rollback could still wedge the SoC.** `stop_modules()`
+  refuses to unload while a consumer holds an MPP device, and its comment
+  claimed every unload path was covered; `cleanup_partial()`, armed as an EXIT
+  trap across the whole load sequence, was not. A consumer can claim a device
+  created earlier in that same sequence — `waybeam_hub` rebinds `/dev/rgn`
+  within ~1 s of `open_rgn` appearing — so a later insmod failure unloaded it
+  underneath a live holder. It now carries the same guard and leaves the
+  modules loaded, which is recoverable; a wedged SoC is not.
+- **The IMX662 analog gain register was never written.** Sony's register list
+  puts `GAIN[10:0]` at `3070h`/`3071h` and jumps straight from `3069h` to
+  `3070h` — `306Ch`/`306Dh` are not registers. Every AE gain update went to a
+  dead address, so analog gain never actuated, all gain was ISP digital, and
+  the HCG conversion-gain compensation never landed, making each HCG engage an
+  uncompensated ~5.8x brightness step. The vendor's own reference driver
+  carries the same pair. **This changes low-light behaviour materially and the
+  gain/ISO tuning in 0.65.6 was measured against the dead register — the
+  low-light path needs re-verification on hardware.**
+- The HCG band's compile-time guard could not fire in the dangerous direction:
+  all three operands are `u`-suffixed, so lowering `HCG_OFF_REG` below
+  `HCG_GAIN_OFFSET` wrapped and passed clean. Now evaluated signed, with a
+  second assert rejecting an inverted ON/OFF pair. Both mutation-tested.
+- `make stage SOC_BUILD=cv610` returned 0 when the sensor plugin failed to
+  build, because the recipe chains with `;` and the last `cp` succeeded. CI
+  caught it only via its explicit `test -f` on the `.so`.
+- `data.routes.iq` claimed `/api/v1/iq` *and* `/api/v1/iq/set` were serviced
+  while testing only `query_iq_info`; `/iq/set` gates on `apply_iq_param`. Now
+  requires both. Every shipped backend registers both, so no response changes.
+  The test that asserted the old pairing gained the missing arm.
+- Docs: `docs/CV610_BACKEND.md` said the init script unloads the MPP stack on
+  stop and guards unloading itself — both untrue since 0.65.8/0.65.10 — and
+  recorded none of the operator rules those releases established. Its audio
+  timestamp note still claimed 10 ms against `CV610_AUDIO_POINT_NUM` 960.
+  `/api/v1/intra/status` and `/api/v1/resilience/status` are documented for the
+  first time. An orphaned code fence in the capabilities section rendered ~25
+  lines of prose as a code block.
+
 ## [0.67.0] - 2026-08-22
 
 Ports the shared resilience contract and whole-access-unit H.265 slicing to

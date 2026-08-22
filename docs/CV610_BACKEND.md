@@ -91,9 +91,24 @@ chmod +x /etc/init.d/S95waybeam /usr/bin/load-cv610-online
 ```
 
 The init script invokes the staged `/usr/bin/load-cv610-online` module
-loader before starting the daemon and unloads the MPP stack after graceful
-termination. Only one service may own the graph; disable the standalone
+loader before starting the daemon. It does **not** unload the MPP stack on
+stop: the HiSilicon drivers take no module reference for an open fd, so an
+`rmmod` under a live consumer (typically `waybeam_hub` holding `/dev/rgn`)
+frees file operations still in use and wedges the SoC hard enough to need a
+physical power cycle. Unloading is done only by an explicit
+`load-cv610-online stop`, which refuses while any consumer holds an MPP
+device. Only one service may own the graph; disable the standalone
 `S95cv610-streamer` service when enabling `S95waybeam`.
+
+Three operator rules follow from that:
+
+- **Recovery after an abnormal exit is a plain `S95waybeam start`.** The
+  modules are still loaded and the daemon re-initialises against them; there
+  is no `reload` action and no module rollback on a failed start.
+- **Changing `CV610_AUDIO` or `CV610_SENSOR_PROFILE` needs a reboot.** The
+  loader refuses to re-load a differing module set over a live one.
+- **A boot that has seen a hard kill cannot be unloaded cleanly.** Reboot
+  rather than fighting it.
 
 `CV610_SENSOR_PROFILE` picks the sensor clock the modules load with. It is
 now only a fallback: the daemon sets the clock for the selected mode during
@@ -105,8 +120,8 @@ Audio is opt-in in both layers: set `CV610_AUDIO=1` in
 `open_aenc`, and `open_acodec`, then set `audio.enabled=true`, 48000 Hz, mono,
 Opus, and a non-negative `outgoing.audioPort` in `/etc/waybeam.json`. The
 daemon refuses other CV610 audio formats. The init script tracks the daemon
-across API-driven process respawns and will not unload modules while any
-Waybeam process still owns the graph. `audio.enabled` and `audio.mute` are
+across API-driven process respawns; module unloading is guarded separately in
+`load-cv610-online`, which refuses while any process holds an MPP device. `audio.enabled` and `audio.mute` are
 restart-required HTTP controls; the rest of the audio group is hardcoded and
 advertised unsupported. Enabling audio from a video-only boot still needs
 kernel modules that a daemon respawn cannot load, so the daemon warns and
@@ -211,7 +226,8 @@ The integrated audio path initialized on the same target, resolved the known
 ACODEC power-up race after its expected 100 ms retry, and produced about 100
 Opus access units/s with zero reported send drops. A host receiver checked 12
 consecutive RTP v2/PT98 packets: sequence deltas were 1 and 48 kHz timestamp
-deltas were 480, exactly 10 ms. No microphone was connected, so acoustic
+deltas were 960, exactly 20 ms (`CV610_AUDIO_POINT_NUM` 960; the 480/10 ms
+figure predates the Opus frame-size parity fix). No microphone was connected, so acoustic
 content is explicitly not operator-verified.
 
 On 2026-08-22 the resilience/slice branch was also confirmed through

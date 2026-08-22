@@ -2931,7 +2931,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.18.5\","
+		"\"contract_version\":\"0.18.6\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -3010,7 +3010,7 @@ static int handle_capabilities(int fd, const HttpRequest *req, void *ctx)
 	 * /api/v1/iq on every page load just to find out. */
 	cJSON *routes = cJSON_AddObjectToObject(data, "routes");
 	cJSON_AddBoolToObject(routes, "iq",
-		(g_cb && g_cb->query_iq_info) ? 1 : 0);
+		(g_cb && g_cb->query_iq_info && g_cb->apply_iq_param) ? 1 : 0);
 #if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
 	cJSON_AddBoolToObject(routes, "iq_import", 1);
 #else

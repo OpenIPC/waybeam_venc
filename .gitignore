@@ -42,3 +42,6 @@ a-*.d
 
 # Serena LSP tooling config — local developer machine only, not shipped
 /.serena/
+
+# CI-pinned SDK checkouts (.github/workflows/main.yml lint-build-cv610)
+.deps/

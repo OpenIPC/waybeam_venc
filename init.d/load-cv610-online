@@ -68,9 +68,21 @@ load_stock()
 	loaded="$name $loaded"
 }
 
+# Rollback for a load sequence that failed part way through.  Carries the same
+# guard as stop_modules(): a consumer can grab a device created EARLIER in this
+# very sequence -- waybeam_hub rebinds /dev/rgn within ~1s of open_rgn appearing,
+# and the sequence runs for seconds afterwards -- and unloading under it wedges
+# the SoC hard enough to need a physical power cycle.  Leaving the modules loaded
+# is recoverable; a wedged SoC is not.
 cleanup_partial()
 {
 	set +e
+	holders=$(mpp_holders)
+	if [ -n "$holders" ]; then
+		echo "partial load failed; NOT unloading -- MPP devices open by $holders" >&2
+		echo "stop those consumers, then run '$0 stop' to clear the partial state" >&2
+		return 0
+	fi
 	for name in $loaded; do
 		rmmod "$name" 2>/dev/null
 	done
@@ -162,9 +174,9 @@ start_modules()
 
 stop_modules()
 {
-	# Guard the rmmod itself, not its callers: every path that unloads --
-	# S95waybeam stop, the start-failure rollback, a hand-run stop -- is
-	# equally fatal with a consumer still attached.
+	# Guard the rmmod itself, not its callers: any unload is fatal with a
+	# consumer still attached.  The partial-load rollback carries the same
+	# guard (see cleanup_partial); a hand-run stop is the only other caller.
 	holders=$(mpp_holders)
 	if [ -n "$holders" ]; then
 		echo "refusing to unload: MPP devices still open by $holders" >&2

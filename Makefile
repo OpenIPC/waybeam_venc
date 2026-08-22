@@ -360,7 +360,7 @@ stage: build qr-decode
 			mkdir -p $(OUT_DIR)/isp-bins; cp -f iq-profiles/maruko-bin/*.bin $(OUT_DIR)/isp-bins/; \
 		fi; \
 	fi
-	@if [ "$(SOC_BUILD)" = "cv610" ]; then \
+	@set -e; if [ "$(SOC_BUILD)" = "cv610" ]; then \
 		$(MAKE) sensor-cv610 SOC_BUILD=cv610 \
 			CV610_CC="$(CV610_CC)" CV610_SDK_INC="$(CV610_SDK_INC)"; \
 		mkdir -p $(OUT_DIR)/sensors; \

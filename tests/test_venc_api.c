@@ -1746,6 +1746,12 @@ static char *api_test_stub_query_iq(void)
 	return strdup("{\"ok\":true,\"data\":{}}");
 }
 
+static int api_test_stub_apply_iq(const char *param, const char *value)
+{
+	(void)param; (void)value;
+	return 0;
+}
+
 /* /api/v1/capabilities advertises which optional routes the running backend
  * actually services, so the dashboard can decide whether to draw the Image
  * Quality tab without paying for a whole ISP sweep on /api/v1/iq.  The value
@@ -1764,13 +1770,18 @@ static int test_capabilities_routes_track_callbacks(void)
 	size_t sent, req_len = strlen(request);
 	int pass;
 
-	/* Two arms: without query_iq_info, then with it.  Only the pointer
-	 * changes, so a difference in the response can only come from it. */
-	for (pass = 0; pass < 2; pass++) {
+	/* Three arms: neither callback, query_iq_info alone, then both.  Only
+	 * the pointers change, so a difference in the response can only come
+	 * from them.  The middle arm is the one that matters: routes.iq claims
+	 * BOTH /api/v1/iq and /api/v1/iq/set are serviced, and with only
+	 * query_iq_info registered the advertised /iq/set answers 501. */
+	for (pass = 0; pass < 3; pass++) {
 		venc_config_defaults(&cfg);
 		memset(&cb, 0, sizeof(cb));
-		if (pass == 1)
+		if (pass >= 1)
 			cb.query_iq_info = api_test_stub_query_iq;
+		if (pass == 2)
+			cb.apply_iq_param = api_test_stub_apply_iq;
 
 		if (venc_api_register(&cfg, "star6e", &cb, NULL) != 0) {
 			CHECK("routes register", 0);
@@ -1802,10 +1813,13 @@ static int test_capabilities_routes_track_callbacks(void)
 		CHECK("routes status", status == 200);
 		CHECK("routes block present", strstr(response, "\"routes\"") != NULL);
 		if (pass == 0) {
-			CHECK("routes.iq false without query_iq_info",
+			CHECK("routes.iq false without either callback",
+				strstr(response, "\"iq\":false") != NULL);
+		} else if (pass == 1) {
+			CHECK("routes.iq false with query_iq_info alone",
 				strstr(response, "\"iq\":false") != NULL);
 		} else {
-			CHECK("routes.iq true with query_iq_info",
+			CHECK("routes.iq true with both callbacks",
 				strstr(response, "\"iq\":true") != NULL);
 		}
 	}

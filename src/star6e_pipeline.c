@@ -1453,8 +1453,10 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 	 * rows per slice, but the encoder's CTU is 64 (measured 2026-08-20:
 	 * SPS says 30x17 CTBs at 1080p), so the SDK rounds the request up to
 	 * whole CTU-64 rows.  Log the DELIVERED geometry, not the request —
-	 * at 1080p sliceCount 8 quantizes to 6 slices of 3 CTU rows. */
-	if (vcfg->video0.slice_count > 1) {
+	 * at 1080p sliceCount 8 quantizes to 6 slices of 3 CTU rows.
+	 * vcfg is optional on this path: star6e_pipeline_start_dual()
+	 * passes NULL for ch1, so guard before reading slice_count. */
+	if (vcfg && vcfg->video0.slice_count > 1) {
 		uint32_t rows = (height + 31) / 32;
 		uint32_t per = (rows + vcfg->video0.slice_count - 1) / vcfg->video0.slice_count;
 		uint32_t ctu_rows = (height + 63) / 64;
@@ -1469,9 +1471,24 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 			return -1;
 		}
 
-		if (per < 1)
-			per = 1;  /* unreachable via validated config */
-		ctu_per = (per + 1) / 2;
+		/* Optional export: some libmi_venc.so revisions omit it and the
+		 * macro then returns -1, which reads as a driver rejection and
+		 * sends the operator hunting geometry.  Stay fatal -- delivering
+		 * one slice while the API advertises N would lie to the
+		 * receiver's spatial concealment -- but say why. */
+		if (!g_mi_venc.fnSetH265SliceSplit ||
+		    !g_mi_venc.fnGetH265SliceSplit) {
+			fprintf(stderr, "ERROR: sliceCount=%u requested but "
+				"libmi_venc.so does not export "
+				"MI_VENC_SetH265SliceSplit/GetH265SliceSplit\n",
+				vcfg->video0.slice_count);
+			MI_VENC_DestroyChn(*chn);
+			return -1;
+		}
+
+		/* B3: the vendor reads all 8 bytes; leaving the pad
+		 * uninitialised puts stack garbage across the ABI. */
+		memset(&split, 0, sizeof(split));
 		split.bSplitEnable = 1;
 		split.u32SliceRowCount = per;
 		ret = MI_VENC_SetH265SliceSplit(*chn, &split);
