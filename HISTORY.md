@@ -1,5 +1,30 @@
 # History
 
+## [0.68.1] - 2026-08-23
+
+Header only. Bit 3 of the frame-SHM metadata flags is reserved for the
+receiver-set SALVAGED flag. No encoder path changes and nothing venc emits
+is different.
+
+- **`VENC_FRAME_FLAG_SALVAGED` (0x08) is reserved in
+  `include/venc_frame_ring.h`.** waybeam-link sets the bit on a frame it
+  rebuilt from an unrecoverable FEC block — synthesized skip slices over the
+  lost region, or a whole-picture freeze (its `PROTOCOL.md` §6.3b) — and
+  waybeam-hub reads it to keep a repaired picture out of the recording as a
+  seek point and out of the parameter-set cache. venc never sets it, but this
+  header is the canonical definition of the format
+  (`protocols/frame-shm.md`), and a future encoder-side flag claiming 0x08
+  would have been read downstream as damage on every frame carrying it. Both
+  consumers already carry the bit (waybeam-link `cde72f7`, waybeam-hub
+  `a214f7a`); this is the third and last definition of the flag set.
+  radeon-vrx's `frame_shm_format.h` defines only `IDR` and tests that bit
+  alone, so it needs nothing and is unaffected.
+- **`venc_frame_drop_breaks_chain()` is deliberately unchanged.** A salvaged
+  frame is still a reference frame, so the ring-full drop policy keeps
+  keying off `ENHANCE` alone. `tests/test_venc_frame_ring.c` asserts that,
+  and that the four defined flag bits stay disjoint — the guard that fails
+  if a later flag claims bit 3.
+
 ## [0.68.0] - 2026-08-23
 
 CV610 only. No wire format or config schema change, but see the frame-SHM

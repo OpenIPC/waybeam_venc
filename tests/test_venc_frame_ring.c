@@ -951,6 +951,23 @@ static int test_fr_drop_breaks_chain(void)
 	CHECK("fr_chain_unknown_bits_break",
 		venc_frame_drop_breaks_chain(0x80) == 1);
 
+	/* Bit 3 belongs to the receiver-set SALVAGED flag, and venc never sets
+	 * it.  A future encoder flag that claimed 0x08 would be read downstream
+	 * as damage on every frame carrying it, so assert the four defined bits
+	 * stay disjoint: the sum equals the OR only while none of them collide.
+	 * A salvaged frame is still a reference frame — the drop policy must
+	 * keep keying off ENHANCE alone. */
+	CHECK("fr_flag_bits_disjoint",
+		(VENC_FRAME_FLAG_IDR + VENC_FRAME_FLAG_GDR +
+		 VENC_FRAME_FLAG_ENHANCE + VENC_FRAME_FLAG_SALVAGED) ==
+		(VENC_FRAME_FLAG_IDR | VENC_FRAME_FLAG_GDR |
+		 VENC_FRAME_FLAG_ENHANCE | VENC_FRAME_FLAG_SALVAGED));
+	CHECK("fr_chain_salvaged_breaks",
+		venc_frame_drop_breaks_chain(VENC_FRAME_FLAG_SALVAGED) == 1);
+	CHECK("fr_chain_salvaged_enhance_safe",
+		venc_frame_drop_breaks_chain(
+			VENC_FRAME_FLAG_SALVAGED | VENC_FRAME_FLAG_ENHANCE) == 0);
+
 	/* End-to-end: a full ring must actually reject, which is the event
 	 * the policy hangs off.  8 slots, 9th write fails. */
 	{
