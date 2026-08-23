@@ -2,6 +2,7 @@
 
 #include "cv610_audio.h"
 #include "cv610_encoder_config.h"
+#include "pipeline_common.h"
 #include "cv610_iq.h"
 #include "cv610_modes.h"
 #include "cv610_pipeline.h"
@@ -73,6 +74,8 @@ typedef struct {
 	uint8_t delivered_slice_count;
 	uint8_t slice_census_done;
 	uint32_t requested_slice_count;
+	uint32_t intra_refresh_active;
+	uint32_t applied_gop_frames;
 	uint32_t ref_census_frames;
 	uint32_t ref_type_counts[OT_VENC_P_SLICE_BUTT];
 	uint32_t trail_n_patched;
@@ -151,9 +154,51 @@ static int cv610_apply_bitrate(uint32_t kbps)
 	return ret;
 }
 
+/* The CV610 encoder cannot take a GOP change while intra refresh is running.
+ * Measured on .181 2026-08-23: writing attr.rc_attr.h265_cbr.gop resets the
+ * channel's intra-refresh state, converting a GDR stream (recovery_point SEI,
+ * no IRAP) into an IDR stream for the rest of this venc lifetime -- and writing
+ * the old value back does not undo it, only a restart does.  Re-asserting intra
+ * refresh right after the write does restore GDR, but the recovery period stays
+ * where it was (identical at gop 0.5/1.0/2.0/4.0) while the CBR window still
+ * moves, swinging the achieved rate 2.7..11.2 Mbps against a fixed 9.26 Mbps
+ * target.  The write can therefore be neither honoured nor made harmless, so
+ * refuse it and leave the encoder untouched.
+ *
+ * This is not a general venc rule: with resilience "off" intra refresh is
+ * inactive, video0.gop_size is the operator's to set (venc_config.c: a named
+ * preset owns gop_size, only "off" preserves the user's value) and the write
+ * proceeds normally.  Star6E is unaffected and keeps live GOP control
+ * (device-verified on .232: cadence moved 120 -> 60 frames, GDR intact). */
 static int cv610_apply_gop(uint32_t frames)
 {
-	return cv610_update_venc_attr(0, frames, 0, 2u);
+	Cv610RunnerContext *ctx = g_cv610_runner;
+	int ret;
+
+	/* No runner means no channel to write to. Refuse rather than fall through
+	 * to the write, matching cv610_apply_verbose()/cv610_apply_max_payload_size();
+	 * falling through would perform exactly the write this function exists to
+	 * prevent. */
+	if (!ctx)
+		return -1;
+
+	if (ctx->intra_refresh_active) {
+		/* Accept a write that asks for what is already in force.  When a
+		 * later group in the same request fails, the API replays the
+		 * previous value of every applied group as a rollback step;
+		 * refusing that replay would report "rollback incomplete" against
+		 * a channel nothing had touched, which reads as damage. */
+		if (frames == ctx->applied_gop_frames)
+			return 0;
+		fprintf(stderr, "WARNING: CV610 refusing live gop=%u: the GOP is "
+			"owned by intra refresh (resilience preset); applying it "
+			"would drop the stream out of GDR\n", (unsigned)frames);
+		return -1;
+	}
+	ret = cv610_update_venc_attr(0, frames, 0, 2u);
+	if (ret == 0)
+		ctx->applied_gop_frames = frames;
+	return ret;
 }
 
 static int cv610_apply_qp_delta(int delta)
@@ -572,6 +617,7 @@ static int cv610_apply_encoder_config(Cv610RunnerContext *ctx,
 	ctx->delivered_slice_count = 1;
 	ctx->slice_census_done = 0;
 	ctx->requested_slice_count = enc->slice.requested_count;
+	ctx->intra_refresh_active = enc->intra.enabled ? 1u : 0u;
 	ctx->ref_census_frames = 0;
 	memset(ctx->ref_type_counts, 0, sizeof(ctx->ref_type_counts));
 	ctx->trail_n_patched = 0;
@@ -794,6 +840,16 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 		return -1;
 	}
 	ctx->venc_created = 1;
+	/* Seed from the API's own seconds->frames arithmetic — deliberately NOT the
+	 * local `gop` above, and not a driver readback. This value exists only so
+	 * cv610_apply_gop() can recognise the API replaying the value it believes is
+	 * already in force (its rollback step) and accept it as a no-op, so it has
+	 * to be computed the way the API computes it. `gop` above can diverge: it
+	 * takes the intra-derived auto-GOP whenever a config enables intra refresh
+	 * without pinning gop_size, and then the replay would be refused and report
+	 * "rollback incomplete" against a channel nothing had touched. */
+	ctx->applied_gop_frames = pipeline_common_gop_frames(
+		ctx->config.video0.gop_size, ctx->pipeline.fps);
 	if (cv610_apply_encoder_config(ctx, &enc) != 0)
 		return -1;
 	/* video0.minQp/maxQp are MUT_LIVE, but they also have to take effect on
