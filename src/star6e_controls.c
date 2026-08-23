@@ -209,14 +209,16 @@ static uint32_t rc_compensate_kbps(uint32_t kbps, uint32_t delivered_fps)
  * enough, it is a naturally aligned advisory scalar. */
 static uint16_t g_output_throttle_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
 
-/* want_idr=0 is the throttle path.  apply_bitrate() normally forces an IDR
- * so the decoder resyncs against the new RC state, but the clamp re-programs
- * the encoder as often as every 200 ms while the ring is backed up, and an
- * IDR is the largest frame the encoder can emit — IDR-ing our way through
- * congestion would feed the exact queue we are trying to drain.  Small
- * between-IDR rate changes are absorbed by the rate controller anyway, which
- * is the same reasoning the rate-limit gate below already relies on. */
-static int apply_bitrate_ex(uint32_t kbps, int want_idr)
+/* No IDR on bitrate writes.  The decoder needs no resync — the rate
+ * controller absorbs rate changes mid-GOP, which the shm-throttle clamp
+ * (re-programming as often as every 200 ms) has always relied on.  The
+ * forced IDR this path used to request was itself the dominant latency-spike
+ * source: an IDR is the largest frame the encoder can emit (~42 KB at
+ * 10 Mbps, measured 2026-08-22), so every adaptive-link ladder or congestion
+ * write that cleared the 100 ms IDR gate turned rate control into IDR
+ * trains.  A controller that wants a resync point calls request_idr()
+ * explicitly. */
+static int apply_bitrate(uint32_t kbps)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bits;
@@ -263,22 +265,7 @@ static int apply_bitrate_ex(uint32_t kbps, int want_idr)
 
 	if (MI_VENC_SetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
 		return -1;
-	/* Force an IDR after a bitrate change so the decoder resyncs against
-	 * the new rate-control state.  Goes through the rate-limit gate so
-	 * bitrate-storm calls can't DoS the stream.  Tight bitrate ramps
-	 * (e.g. 100-step adaptive-link ladders inside the gate's min-spacing
-	 * window, default 100 ms) will only IDR on the first step and again
-	 * after the window expires — acceptable because the encoder rate
-	 * controller absorbs small between-IDR changes without decoder
-	 * resync. */
-	if (want_idr && idr_rate_limit_allow(g_star6e_control_ctx.venc_chn))
-		(void)MI_VENC_RequestIdr(g_star6e_control_ctx.venc_chn, 1);
 	return 0;
-}
-
-static int apply_bitrate(uint32_t kbps)
-{
-	return apply_bitrate_ex(kbps, 1);
 }
 
 int star6e_controls_set_output_throttle(uint16_t permille)
@@ -297,7 +284,7 @@ int star6e_controls_set_output_throttle(uint16_t permille)
 		return -1;  /* config transaction in flight; retry next window */
 	cfg_kbps = g_star6e_control_ctx.vcfg
 		? g_star6e_control_ctx.vcfg->video0.bitrate : 0;
-	rc = cfg_kbps > 0 ? apply_bitrate_ex(cfg_kbps, 0) : 0;
+	rc = cfg_kbps > 0 ? apply_bitrate(cfg_kbps) : 0;
 	venc_api_cfg_unlock();
 	return rc;
 }

@@ -209,10 +209,11 @@ static int maruko_apply_rc_qp_delta(const i6c_venc_chn *attr, MI_VENC_RcParam_t 
  * same ring geometry, same control law, same authority rules. */
 static uint16_t g_output_throttle_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
 
-/* want_idr=0 is the throttle path — see the matching note in
- * src/star6e_controls.c apply_bitrate_ex(): IDR-ing every 200 ms while the
- * ring backs up would feed the queue we are draining. */
-static int maruko_apply_bitrate_ex(uint32_t kbps, int want_idr)
+/* No IDR on bitrate writes — see the matching note in
+ * src/star6e_controls.c apply_bitrate(): the rate controller absorbs rate
+ * changes without decoder resync, and the forced IDR was the dominant
+ * latency-spike source under adaptive-link ladder activity. */
+static int maruko_apply_bitrate(uint32_t kbps)
 {
 	i6c_venc_chn attr = {0};
 	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
@@ -247,18 +248,7 @@ static int maruko_apply_bitrate_ex(uint32_t kbps, int want_idr)
 	if (maruko_mi_venc_set_chn_attr(g_ctx.venc_dev,
 	    g_ctx.venc_chn, &attr) != 0)
 		return -1;
-	/* Force an IDR after a bitrate change so the decoder resyncs against
-	 * the new rate-control state.  Rate-limit gated to coalesce storms;
-	 * see the matching note in src/star6e_controls.c apply_bitrate(). */
-	if (want_idr && idr_rate_limit_allow(g_ctx.venc_chn))
-		maruko_mi_venc_request_idr(g_ctx.venc_dev,
-			g_ctx.venc_chn, 1);
 	return 0;
-}
-
-static int maruko_apply_bitrate(uint32_t kbps)
-{
-	return maruko_apply_bitrate_ex(kbps, 1);
 }
 
 int maruko_controls_set_output_throttle(uint16_t permille)
@@ -272,7 +262,7 @@ int maruko_controls_set_output_throttle(uint16_t permille)
 	if (!venc_api_cfg_trylock())
 		return -1;  /* config transaction in flight; retry next window */
 	cfg_kbps = g_ctx.vcfg ? g_ctx.vcfg->video0.bitrate : 0;
-	rc = cfg_kbps > 0 ? maruko_apply_bitrate_ex(cfg_kbps, 0) : 0;
+	rc = cfg_kbps > 0 ? maruko_apply_bitrate(cfg_kbps) : 0;
 	venc_api_cfg_unlock();
 	return rc;
 }
