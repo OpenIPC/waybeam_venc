@@ -1,5 +1,37 @@
 # History
 
+## [0.67.4] - 2026-08-23
+
+CV610 only. No wire format, config schema, frame-SHM layout or HTTP contract
+changes.
+
+- **A live `video0.gop_size` change silently dropped the CV610 stream out of
+  GDR.** Writing `attr.rc_attr.h265_cbr.gop` resets the channel's intra-refresh
+  state, so one slider drag converted a GDR stream (`recovery_point` SEI, no
+  IRAP) into an IDR stream for the rest of the venc lifetime — and writing the
+  old value back did not undo it, only a restart did. `/api/v1/intra/status`
+  kept reporting intra refresh active throughout, because it serves a snapshot
+  published once at startup. Measured on .181 by RTP capture at each step.
+  `cv610_apply_gop()` now refuses the write while intra refresh is active and
+  leaves the encoder untouched.
+
+  Re-asserting intra refresh after the write was tried first and rejected: it
+  restores GDR, but the recovery period stays where it was (identical at gop
+  0.5/1.0/2.0/4.0) while the CBR window still moves, swinging the achieved rate
+  2.7–11.2 Mbps against a fixed 9.26 Mbps target.
+
+  Scoped to intra-refresh-active: with `resilience: "off"` the write proceeds
+  unchanged, and that is the only configuration where `video0.gop_size` is the
+  operator's value at all — a named preset already owns it. A live **bitrate**
+  write goes through the same `set_chn_attr` path with the gop member unchanged
+  and is unaffected. Star6E and Maruko keep live GOP control.
+
+  **Known limitation:** `/api/v1/capabilities` still reports
+  `video0.gop_size` as `mutability: live, supported: true` on CV610. The
+  backend gate is key-based and cannot express "live only while `resilience`
+  is off". The write now fails loudly instead of silently destroying GDR, but
+  the capability surface does not yet tell the operator why.
+
 ## [0.67.3] - 2026-08-23
 
 Follow-up to 0.67.2 from the upstream review. No wire format, config schema,

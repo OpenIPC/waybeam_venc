@@ -2,6 +2,7 @@
 
 #include "cv610_audio.h"
 #include "cv610_encoder_config.h"
+#include "pipeline_common.h"
 #include "cv610_iq.h"
 #include "cv610_modes.h"
 #include "cv610_pipeline.h"
@@ -174,7 +175,14 @@ static int cv610_apply_gop(uint32_t frames)
 	Cv610RunnerContext *ctx = g_cv610_runner;
 	int ret;
 
-	if (ctx && ctx->intra_refresh_active) {
+	/* No runner means no channel to write to. Refuse rather than fall through
+	 * to the write, matching cv610_apply_verbose()/cv610_apply_max_payload_size();
+	 * falling through would perform exactly the write this function exists to
+	 * prevent. */
+	if (!ctx)
+		return -1;
+
+	if (ctx->intra_refresh_active) {
 		/* Accept a write that asks for what is already in force.  When a
 		 * later group in the same request fails, the API replays the
 		 * previous value of every applied group as a rollback step;
@@ -188,7 +196,7 @@ static int cv610_apply_gop(uint32_t frames)
 		return -1;
 	}
 	ret = cv610_update_venc_attr(0, frames, 0, 2u);
-	if (ret == 0 && ctx)
+	if (ret == 0)
 		ctx->applied_gop_frames = frames;
 	return ret;
 }
@@ -832,7 +840,16 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 		return -1;
 	}
 	ctx->venc_created = 1;
-	ctx->applied_gop_frames = gop;
+	/* Seed from the API's own seconds->frames arithmetic — deliberately NOT the
+	 * local `gop` above, and not a driver readback. This value exists only so
+	 * cv610_apply_gop() can recognise the API replaying the value it believes is
+	 * already in force (its rollback step) and accept it as a no-op, so it has
+	 * to be computed the way the API computes it. `gop` above can diverge: it
+	 * takes the intra-derived auto-GOP whenever a config enables intra refresh
+	 * without pinning gop_size, and then the replay would be refused and report
+	 * "rollback incomplete" against a channel nothing had touched. */
+	ctx->applied_gop_frames = pipeline_common_gop_frames(
+		ctx->config.video0.gop_size, ctx->pipeline.fps);
 	if (cv610_apply_encoder_config(ctx, &enc) != 0)
 		return -1;
 	/* video0.minQp/maxQp are MUT_LIVE, but they also have to take effect on
