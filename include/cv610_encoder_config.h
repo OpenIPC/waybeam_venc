@@ -14,7 +14,12 @@
 typedef struct {
 	IntraRefreshDerived derived;
 	uint32_t enabled;
-	uint32_t mode;          /* 0 = OT_VENC_INTRA_REFRESH_ROW */
+	/* Vendor sweep DIRECTION (ot_venc_intra_refresh_mode): 1 = COLUMN.
+	 * Named refresh_dir, not mode, because `derived.mode` right above is an
+	 * unrelated enum (IntraRefreshMode, where 1 == INTRA_MODE_FAST). Both read
+	 * 1 in the racing preset, so two adjacent fields spelled `mode` would make
+	 * a mix-up silent. */
+	uint32_t refresh_dir;
 	uint32_t refresh_num;
 	uint32_t request_i_qp;
 } Cv610IntraConfig;
@@ -44,7 +49,10 @@ typedef struct {
 /* Pure mapping from the shared config to CV610 encoder concepts. Vendor
  * structs are intentionally filled in cv610_runtime.c so this logic remains
  * host-testable without the external OpenHisilicon headers. */
-int cv610_encoder_config_derive(const VencConfig *cfg, uint32_t height,
-	uint32_t fps, Cv610EncoderConfig *out);
+/* `width` feeds the intra-refresh sweep (CV610 refreshes by COLUMN, so the
+ * refresh axis is horizontal); `height` feeds the slice split, which is always
+ * a row split. Both are picture dimensions in pixels. */
+int cv610_encoder_config_derive(const VencConfig *cfg, uint32_t width,
+	uint32_t height, uint32_t fps, Cv610EncoderConfig *out);
 
 #endif /* CV610_ENCODER_CONFIG_H */

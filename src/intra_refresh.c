@@ -49,7 +49,7 @@ const char *intra_refresh_mode_name(IntraRefreshMode m)
 
 void intra_refresh_compute(
 	IntraRefreshMode mode,
-	uint32_t height, uint32_t fps,
+	uint32_t extent, uint32_t fps,
 	uint32_t override_lines,
 	uint32_t override_qp,
 	double   explicit_gop_sec,
@@ -59,13 +59,13 @@ void intra_refresh_compute(
 	memset(out, 0, sizeof(*out));
 	out->mode = mode;
 
-	if (mode == INTRA_MODE_OFF || height == 0 || fps == 0) {
+	if (mode == INTRA_MODE_OFF || extent == 0 || fps == 0) {
 		out->mode = INTRA_MODE_OFF;
 		return;
 	}
 
 	/* H.265 CTU is 32×32. */
-	uint32_t total_rows   = (height + 31u) / 32u;
+	uint32_t total_rows   = (extent + 31u) / 32u;
 	if (total_rows == 0) total_rows = 1;
 	uint32_t target_ms    = mode_target_ms(mode);
 
