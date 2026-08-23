@@ -150,10 +150,14 @@ static void osd_cpu_sample(OsdCpuSampler *cs)
 		return;
 	}
 
-	/* Nanoseconds and jiffies must never share a ring. If the source moved,
-	 * drop the window and start a fresh one rather than differencing two
-	 * different units. */
-	if (cs->count > 0 && used_sched != cs->use_sched) {
+	/* Drop the window when the source OR the core count moves.
+	 * Source: nanoseconds and jiffies must never share a ring.
+	 * Core count: schedstat rows cover only ONLINE cpus, so hotplug changes
+	 * the denominator. ncores is latched, so without this a stale value
+	 * would mis-scale every later sample -- persistently, long after the
+	 * backwards-accumulator guard below stops firing. */
+	if (cs->count > 0 && (used_sched != cs->use_sched ||
+	                      (cores > 0 && cores != cs->ncores))) {
 		cs->count = 0;
 		cs->head = 0;
 		cs->ncores = 0;

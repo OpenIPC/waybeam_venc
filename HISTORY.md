@@ -1,5 +1,20 @@
 # History
 
+## [0.67.3] - 2026-08-23
+
+Follow-up to 0.67.2 from the upstream review. No wire format, config schema,
+frame-SHM layout or HTTP contract changes.
+
+- **The debug-OSD CPU% denominator went stale after CPU hotplug.**
+  `OsdCpuSampler` latches `ncores` on first use, but the schedstat path counts
+  only *online* CPUs, so a core going offline or coming back changes the
+  correct denominator. 0.67.2 dropped the sampling window when the *source*
+  changed but not when the *core count* did, so `avail` kept using the old
+  value and every subsequent reading was mis-scaled — persistently, long after
+  the backwards-accumulator guard stopped firing. The window is now dropped on
+  either change. Not reachable on CV610, whose second core is not hotpluggable,
+  but the sampler should not depend on that.
+
 ## [0.67.2] - 2026-08-22
 
 Debug-OSD `cpu NN%` reads honestly on CV610. No wire format, config schema,
