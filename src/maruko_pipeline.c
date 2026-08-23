@@ -4074,7 +4074,6 @@ static VencShmThrottle g_shm_throttle;
 static int g_shm_throttle_ready;
 /* Last factor successfully programmed into the encoder. */
 static uint16_t g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
-static int g_throttle_retry;   /* last clamp apply failed; bypass the deadband once */
 
 static void maruko_service_shm_throttle(MarukoOutput *output,
 	const VencConfig *vcfg)
@@ -4115,13 +4114,13 @@ static void maruko_service_shm_throttle(MarukoOutput *output,
 	want = venc_shm_throttle_permille(&g_shm_throttle);
 	/* Deadband the apply — Star6E parity, see star6e_service_shm_throttle()
 	 * and venc_shm_throttle_should_apply(). */
-	if ((g_throttle_retry ||
-	     venc_shm_throttle_should_apply(want, g_applied_permille))) {
+	if (g_shm_throttle.apply_retry ||
+	    venc_shm_throttle_should_apply(want, g_applied_permille)) {
 		if (maruko_controls_set_output_throttle(want) == 0) {
 			g_applied_permille = want;
-			g_throttle_retry = 0;
+			g_shm_throttle.apply_retry = 0;
 		} else {
-			g_throttle_retry = 1;
+			g_shm_throttle.apply_retry = 1;
 		}
 	}
 	output->throttle_permille = want;

@@ -379,6 +379,18 @@ int test_venc_shm_throttle(void)
 		venc_shm_throttle_should_apply(VENC_SHM_THROTTLE_FULL_PERMILLE,
 			VENC_SHM_THROTTLE_FULL_PERMILLE - 50));
 
+	/* apply_retry is applier state carried in the throttle struct, so a
+	 * reset (transport switch away from frame-shm and back) clears it —
+	 * a fresh window has nothing outstanding to retry. */
+	{
+		VencShmThrottle t;
+		venc_shm_throttle_reset(&t, 0);
+		CHECK("thr_apply_retry_starts_clear", t.apply_retry == 0);
+		t.apply_retry = 1;
+		venc_shm_throttle_reset(&t, 0);
+		CHECK("thr_apply_retry_cleared_by_reset", t.apply_retry == 0);
+	}
+
 	/* Reach, descent: a law walking down in sub-deadband steps still
 	 * arrives at the floor, because the comparison is against the last
 	 * APPLIED value so suppressed movement accumulates. */

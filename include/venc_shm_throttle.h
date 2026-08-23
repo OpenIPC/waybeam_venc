@@ -195,6 +195,13 @@ typedef struct {
 	uint8_t  drop_charged;       /* drop MD already applied this window */
 	uint8_t  at_floor;           /* edge state for _floor_edge */
 	uint8_t  floor_edge_pending; /* 1 = entered, 2 = left */
+	/* Applier state, not control-law state: set when a programming
+	 * attempt failed, so the next window bypasses the deadband once.
+	 * Without it a failed apply leaves the caller's "last applied" value
+	 * stale while the law keeps moving, and the next want can sit inside
+	 * the deadband and never retry.  Lives here rather than beside the
+	 * caller's applied value so no new global state is introduced. */
+	uint8_t  apply_retry;
 } VencShmThrottle;
 
 /* Zero state, permille = 1000, enabled.  Safe to call at any time; a
