@@ -463,6 +463,15 @@ static int maruko_apply_verbose(bool on)
 
 static int maruko_request_idr(void)
 {
+	/* Through the shared per-channel gate, as Star6E's request_idr() and
+	 * CV610's cv610_request_idr() already are.  Without it this endpoint
+	 * was neither coalesced against an IDR storm nor visible in
+	 * /api/v1/idr/stats, so the contract's claim that IDR sources are
+	 * paced and counted equivalently on both SigmaStar backends was not
+	 * true for Maruko.  A coalesced request is not an error: the caller
+	 * asked for a resync point and one is already in flight. */
+	if (!idr_rate_limit_allow(g_ctx.venc_chn))
+		return 0;
 	return maruko_mi_venc_request_idr(g_ctx.venc_dev,
 		g_ctx.venc_chn, 1) == 0 ? 0 : -1;
 }
