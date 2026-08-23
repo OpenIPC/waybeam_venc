@@ -45,6 +45,18 @@
 #define VENC_FRAME_FLAG_IDR     0x01
 #define VENC_FRAME_FLAG_GDR     0x02  /* GDR rolling intra stripe active */
 #define VENC_FRAME_FLAG_ENHANCE 0x04  /* SVC-T enhance layer (droppable) */
+/* Bit 3 is set by a RECEIVER, never by venc.  waybeam-link stamps it on a
+ * frame it rebuilt from an unrecoverable FEC block — synthesized skip slices
+ * over the lost region, or a whole-picture freeze (its PROTOCOL.md §6.3b) —
+ * so a downstream consumer can tell a repaired picture from an intact one and
+ * refuse to trust what it carries (waybeam-hub declines to advertise such an
+ * access unit as a seek point, or to learn parameter sets from it).
+ *
+ * It is reserved here because this header is the canonical definition of the
+ * format (protocols/frame-shm.md): a future encoder-side flag claiming 0x08
+ * would be read downstream as damage on every frame that set it.  Absence is
+ * not a guarantee of integrity -- only its presence is a positive statement. */
+#define VENC_FRAME_FLAG_SALVAGED 0x08
 
 /* Would discarding a frame with these meta flags break the decoder's
  * reference chain?
@@ -89,7 +101,7 @@ static inline int venc_frame_drop_idr_due(uint64_t *last_us, uint64_t now_us)
 typedef struct {
 	uint32_t pts;        /* capture timestamp (µs, truncated to 32 bits) */
 	uint8_t  codec;      /* VENC_FRAME_CODEC_H265 */
-	uint8_t  flags;      /* VENC_FRAME_FLAG_{IDR,GDR,ENHANCE} */
+	uint8_t  flags;      /* VENC_FRAME_FLAG_*; venc sets IDR/GDR/ENHANCE */
 	uint8_t  gdr_pos;    /* 0-based position in GDR cycle (0 when inactive) */
 	uint8_t  gdr_len;    /* GDR cycle length in frames (0 when inactive) */
 } VencFrameMeta;
