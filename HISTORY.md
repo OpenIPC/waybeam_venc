@@ -2,8 +2,9 @@
 
 ## [0.68.1] - 2026-08-23
 
-Rate-control writes stop requesting an IDR. Contract `0.18.6` -> `0.18.7`.
-No wire format, config schema or frame-SHM layout changes.
+venc stops injecting IDRs of its own accord. Contract `0.18.6` -> `0.18.7`.
+One new config field (`outgoing.shmRecoveryIdr`); no wire format or
+frame-SHM layout changes.
 
 Version numbering: `0.67.4` and `0.68.0` are already taken on the
 snokvist fork and are pending sync, so this lands at `0.68.1` rather than
@@ -56,6 +57,54 @@ renumbering again when that bundle arrives.
   channel attribute and never has. The `/api/v1/idr/stats` example reported
   `min_spacing_us: 250000` against a compile-time
   `IDR_RATE_LIMIT_MIN_SPACING_US` of `100000`.
+
+- **The frame-shm ring-full recovery IDR is now opt-in**
+  (`outgoing.shmRecoveryIdr`, default `false`, all three backends). A drop
+  told venc its ring overflowed, not that any decoder lost sync — that is
+  the consumer's to know, and it can say so with `/request/idr`. Answering
+  congestion with the largest frame the encoder makes, pushed into a ring
+  that is by definition already full, was also the wrong direction.
+
+  Device-measured on a SSC338Q with the ring consumer stopped for 12 s
+  (ring pinned at 100%, 8/8 slots, ~900 drops):
+
+  | | IRAP access units |
+  |---|---:|
+  | before | 13 |
+  | after (default) | **1** |
+  | after, `shmRecoveryIdr=true` | 13 |
+
+  The 13 land at identical access-unit positions in the before and opt-in
+  captures, so the field restores the previous behaviour exactly. This is a
+  behavioural change for anyone who relied on venc healing the chain by
+  itself; what is lost is at most one IDR/s, since the path has been paced
+  by a 1 s holdoff since 0.66.0.
+
+- **The ring-fill clamp deadbands its own writes.** It re-programmed the
+  encoder on every permille change, as often as every 200 ms — and each
+  programmed rate change costs an IDR, so a clamp chasing an oscillating
+  fill signal keyframed the link it was trying to unclog. Movement below
+  100 permille (10%) no longer re-programs. Reach is preserved in both
+  directions: both rails are exempt, and the comparison is against the last
+  *applied* value so suppressed movement accumulates. Device-confirmed —
+  with the consumer stopped the clamp still walked to its floor (permille
+  50, 1909 kbps).
+
+- **The fps-rebind IDR has one owner instead of three.** Output enable
+  emitted two back-to-back requests (its own plus `apply_fps`'s, coalesced
+  only by luck of the 100 ms gate — and coalescing the *recovery* IDR
+  behind an unrelated one is exactly what that gate should not do); output
+  disable emitted one *after* the output was already off; the startup idle
+  transition emitted one with no consumer at all. Only the live
+  `video0.fps` write needs one, because the rebind re-creates the encoder
+  channel, so that is where it now lives. Enable emits exactly one,
+  disable none.
+
+- **Every Maruko IDR source is now paced and counted.**
+  `maruko_request_idr()` called the vendor request directly, and the
+  output-enable and server-change paths bypassed the gate too, so Maruko's
+  `/request/idr` was the only IDR source on any backend that was neither
+  rate-limited nor visible in `/api/v1/idr/stats`.
 
 ## [0.67.3] - 2026-08-23
 

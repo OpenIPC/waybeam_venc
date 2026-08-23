@@ -1527,9 +1527,22 @@ unexpected pressure is a shallow `net.unix.max_dgram_qlen` — see the
 `unix://` notes in the README.
 
 A `throttlePermille` below `1000` means the consumer is not draining the ring
-fast enough for the configured bitrate.  Pinned at `250` the clamp has spent
-all its authority and drops may resume — that case is also logged once on
-entry and once on exit.  Disable with `outgoing.shmThrottle=false` (live).
+fast enough for the configured bitrate.  Pinned at the floor the clamp has
+spent all its authority and drops may resume — that case is also logged once
+on entry and once on exit.  Disable with `outgoing.shmThrottle=false` (live).
+
+**When to disable it.** The clamp is a *second* rate controller. If something
+upstream already owns `video0.bitrate` — an adaptive-link controller, a
+congestion-control loop — two loops with different time constants are acting
+on the same actuator, and on SigmaStar every actuation costs an IDR because
+`MI_VENC_SetChnAttr` keyframes whenever the programmed rate changes (0.18.7).
+Turning the clamp off leaves ring-full drops as the backpressure signal, which
+the consumer can read directly from the ring header (`full_drops`,
+`throttle_permille`) and which a GDR stream heals within one refresh cycle.
+Measured 2026-08-23 on a SSC338Q with the consumer stopped entirely: the clamp
+walked all the way to its floor and the ring still sat at 100% with ~75
+drops/s, so in that regime it averted no drops at all and only spent rate
+changes. It earns its keep when the consumer is *slow*, not when it is gone.
 
 Error `501` — backend has no transport observability hook.
 
@@ -1819,7 +1832,38 @@ in Notes. As of `contract_version: 0.18.7`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
-- `0.18.7` (behavioral — rate-control writes no longer request an IDR):
+- `0.18.7` (behavioral — venc stops injecting IDRs of its own accord):
+  New field `outgoing.shm_recovery_idr` (boolean, **default `false`**,
+  `MUT_RESTART`, alias `outgoing.shmRecoveryIdr`, all three backends).  A
+  `frame-shm://` ring-full drop no longer asks the encoder for a recovery
+  IDR unless this is set.  venc only knows its ring overflowed; whether a
+  decoder actually lost sync is the consumer's to know, and the consumer
+  can say so with `/request/idr`.  **Behavioural change**: a pipeline that
+  relied on venc healing the reference chain by itself must either set this
+  true or request IDRs itself.  What is lost is at most one IDR per second
+  (the path has been paced by a 1 s holdoff since 0.66.0), not a storm.
+  Device-measured with the ring consumer stopped for 12 s: 13 IRAP access
+  units before, 1 after (the recorder's own), and 13 again with the field
+  set true — at identical access-unit positions.
+
+  The `frame-shm` ring-fill clamp now deadbands its own writes: movement
+  below 100 permille (10%) does not re-program the encoder.  Both rails are
+  exempt and the comparison is against the last *applied* value, so the
+  floor and full release are always reachable — device-confirmed, the clamp
+  still walked to its floor with the consumer stopped.
+
+  The fps-rebind IDR moved to the one caller that wants it.  Output enable
+  emitted two back-to-back requests (its own plus `apply_fps`'s) and output
+  disable emitted one *after* the output was already off; enable now emits
+  exactly one and disable none.  A live `video0.fps` write still emits one,
+  because the rebind re-creates the encoder channel.
+
+  Maruko's `/request/idr`, output-enable and server-change IDRs now go
+  through the shared per-channel gate, so every Maruko IDR source is paced
+  and counted in `/api/v1/idr/stats` — previously none of these were, which
+  is why the parity statement below did not hold.
+
+  Rate-control writes no longer request an IDR:
   `video0.bitrate`, `video0.qpDelta` and `video0.maxIBytes`/`maxPBytes` no
   longer request an IDR after applying, on Star6E and Maruko. A controller
   that wants a resync point calls `/request/idr` (ch0) or
