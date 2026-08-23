@@ -1,5 +1,62 @@
 # History
 
+## [0.68.1] - 2026-08-23
+
+Rate-control writes stop requesting an IDR. Contract `0.18.6` -> `0.18.7`.
+No wire format, config schema or frame-SHM layout changes.
+
+Version numbering: `0.67.4` and `0.68.0` are already taken on the
+snokvist fork and are pending sync, so this lands at `0.68.1` rather than
+renumbering again when that bundle arrives.
+
+- **`video0.bitrate`, `video0.qpDelta` and `video0.maxIBytes`/`maxPBytes` no
+  longer request an IDR after applying** (Star6E and Maruko). These are all
+  decoder-neutral rate-control state, absorbed mid-GOP by the rate
+  controller; the frame-shm throttle clamp has relied on exactly that since
+  it shipped. A controller that wants a resync point calls `/request/idr`
+  explicitly. CV610 never IDR'd on these paths.
+
+  Device-measured on a SSC338Q (IMX335 1920x1080@60, H.265 CBR, GDR via the
+  `racing` preset) using the venc recorder as a bitstream tap, ten live
+  writes spaced 300 ms, counting IRAP access units:
+
+  | field | before | after |
+  |---|---:|---:|
+  | `video0.qpDelta` | 11 | 1 |
+  | `video0.maxIBytes` | 11 | 1 |
+  | `video0.bitrate` | 11 | **11** |
+
+  The residual 1 is the recorder's own start IDR — a do-nothing control arm
+  on each binary recorded exactly that one and nothing else, and with the
+  `racing` preset the stream is GDR, so there are no periodic IDRs to
+  confound the count.
+
+- **The bitrate row above is a no-op on the wire, deliberately kept.**
+  `MI_VENC_SetChnAttr` emits an IDR by itself on Star6E, and
+  `MI_VENC_RcParam_t` carries no bitrate field on either SigmaStar backend,
+  so there is no rate-only actuator to switch to and the keyframe survives.
+  Two real defects are still fixed by removing the request: it consumed a
+  slot in the shared 100 ms IDR gate, so a genuine recovery request (a
+  ring-full drop, or `/request/idr` from waybeam-link) landing within
+  100 ms of a bitrate write was silently swallowed; and it inflated
+  `/api/v1/idr/stats` with one honored IDR per bitrate write that the write
+  did not cause, which is what made the counters read as though bitrate
+  writes were the IDR source. Calling `SetChnAttr` less often is left as a
+  follow-up.
+
+- **Maruko's `/request/idr` now goes through the shared per-channel gate.**
+  `maruko_request_idr()` called the vendor request directly, making it the
+  only IDR source on any backend that was neither rate-limited nor counted:
+  an HTTP caller could issue unbounded back-to-back IDRs and
+  `/api/v1/idr/stats` reported none of them. Compile-tested only; Maruko
+  hardware was unreachable.
+
+- **Contract corrections, no code change.** The `/api/v1/dual/set` `bitrate`
+  row claimed venc issues an IDR; `dual_apply_bitrate()` only updates the
+  channel attribute and never has. The `/api/v1/idr/stats` example reported
+  `min_spacing_us: 250000` against a compile-time
+  `IDR_RATE_LIMIT_MIN_SPACING_US` of `100000`.
+
 ## [0.67.3] - 2026-08-23
 
 Follow-up to 0.67.2 from the upstream review. No wire format, config schema,

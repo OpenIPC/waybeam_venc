@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.6`
+- `contract_version`: `0.18.7`
 - `status`: `active`
 
 ## Governance Rules
@@ -80,7 +80,7 @@ Response `200`:
   "ok": true,
   "data": {
     "app_version": "0.67.0",
-    "contract_version": "0.18.6",
+    "contract_version": "0.18.7",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1350,7 +1350,7 @@ Live-change secondary VENC channel parameters. Supported parameters:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `bitrate` | uint | Bitrate in kbps (applied immediately via MI_VENC, IDR issued) |
+| `bitrate` | uint | Bitrate in kbps, applied immediately via `MI_VENC_SetChnAttr`. No IDR is *requested*; `dual_apply_bitrate()` only updates the channel attribute. Note that on Star6E `MI_VENC_SetChnAttr` emits an IDR of its own (measured 2026-08-23), so a rate change still produces a keyframe — it is simply not one venc asked for and it is not counted in `/api/v1/idr/stats`. For an explicit ch1 resync point use `/api/v1/dual/idr`. |
 | `gop` | double | GOP interval in seconds (converted to frames using ch1 fps) |
 
 ```bash
@@ -1410,7 +1410,7 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "min_spacing_us": 250000,
+    "min_spacing_us": 100000,
     "channels": [
       {"idx": 0, "honored": 47, "dropped": 3},
       {"idx": 1, "honored": 12, "dropped": 0}
@@ -1794,7 +1794,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.18.6`:
+in Notes. As of `contract_version: 0.18.7`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1819,6 +1819,31 @@ in Notes. As of `contract_version: 0.18.6`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.7` (behavioral — rate-control writes no longer request an IDR):
+  `video0.bitrate`, `video0.qpDelta` and `video0.maxIBytes`/`maxPBytes` no
+  longer request an IDR after applying, on Star6E and Maruko. A controller
+  that wants a resync point calls `/request/idr` (ch0) or
+  `/api/v1/dual/idr` (ch1) explicitly. CV610 never IDR'd on these paths.
+
+  Device-measured on a SSC338Q, 2026-08-23, ten live writes spaced 300 ms,
+  counted as IRAP access units in the encoder's own bitstream: `qpDelta`
+  and `maxIBytes` fell from 11 to 1, `bitrate` stayed at 11. The bitrate
+  path is unchanged **on the wire** because `MI_VENC_SetChnAttr` emits an
+  IDR by itself and `MI_VENC_RcParam_t` carries no bitrate field, leaving
+  no rate-only actuator to switch to; what the removal does fix there is
+  the shared 100 ms IDR gate, which a bitrate write used to consume — a
+  genuine recovery request arriving within that window was swallowed — and
+  `/api/v1/idr/stats`, which counted an IDR per bitrate write that the
+  write did not cause.
+
+  Also in this release: Maruko's `/request/idr` now goes through the shared
+  per-channel gate, so it is rate-limited and counted in
+  `/api/v1/idr/stats` like Star6E's and CV610's. It previously was neither,
+  which is why the parity statement above it did not hold. Two contract
+  corrections with no code change: the `/api/v1/dual/set` `bitrate` row no
+  longer claims venc requests an IDR (it never did), and the
+  `/api/v1/idr/stats` example reports `min_spacing_us: 100000`, matching
+  `IDR_RATE_LIMIT_MIN_SPACING_US`.
 - `0.18.6` (documentation + correctness; no shipped response changes):
   `GET /api/v1/intra/status` and `GET /api/v1/resilience/status` are now
   documented — both have been served for several releases and the CV610
