@@ -124,6 +124,61 @@ extern "C" {
  * an unbounded number of AIMD windows to climb back. */
 #define VENC_SHM_THROTTLE_MIN_PERMILLE    50u
 #define VENC_SHM_THROTTLE_FULL_PERMILLE 1000u
+
+/* Minimum clamp movement worth re-programming the encoder for.
+ *
+ * On SigmaStar the only bitrate actuator is MI_VENC_SetChnAttr, and it emits
+ * an IDR whenever the programmed rate actually changes (device-measured on a
+ * SSC338Q, 2026-08-23: ten writes of *distinct* values produced ten extra
+ * IRAP access units, ten writes of the *same* value produced none).  So every
+ * clamp step this loop applies costs one keyframe — the largest frame the
+ * encoder makes — pushed into a ring that is already backing up.  Applying
+ * each +50 additive-increase step individually turns a recovery ramp into a
+ * keyframe train, and a fill signal that oscillates never settles.
+ *
+ * 100 permille (10%) is coarse enough to suppress that chatter and still far
+ * finer than the control law's own steps (x4/5 decrease, x3/5 on a drop).
+ * Full release and the floor are exempt: leaving the encoder clamped because
+ * the last 10% did not clear a deadband would be worse than the keyframe. */
+#define VENC_SHM_THROTTLE_APPLY_DEADBAND_PERMILLE 100u
+
+/* Should `want` be programmed, given what was last successfully applied?
+ * Pure so tests can drive it without a ring.
+ *
+ * THE DEADBAND MUST NEVER COST REACH.  Two properties guarantee it:
+ *
+ *   1. Both rails are exempt.  `want` at or below the floor, or at full
+ *      release, always applies — the two states where being off by up to
+ *      10% actually matters (a ring still backing up at the floor, or an
+ *      encoder left clamped once the consumer recovered).
+ *   2. The comparison is against the last *applied* value, not the last
+ *      *wanted* one, so suppressed movement accumulates.  A control law
+ *      walking down in sub-deadband steps therefore still arrives: each
+ *      blocked step widens the gap to `applied` until it crosses, and once
+ *      the law is within the floor band property 1 takes over.  It is never
+ *      possible for the clamp to stall above the floor while the law keeps
+ *      asking for less. tests/test_venc_shm_throttle.c drives the full
+ *      descent and asserts the floor is reached.
+ *
+ * What the deadband does cost is precision at rest: if the law settles at a
+ * value within the deadband of `applied`, the encoder stays at `applied`.
+ * That is a bounded <=10% conservative error on a clamp whose own steps are
+ * x4/5 and x3/5 — and it is the entire point, since on SigmaStar each
+ * distinct programmed rate costs an IDR. */
+static inline int venc_shm_throttle_should_apply(uint16_t want, uint16_t applied)
+{
+	unsigned int delta;
+
+	if (want == applied)
+		return 0;
+	/* Rails first: never deadband the floor or a full release. */
+	if (want >= VENC_SHM_THROTTLE_FULL_PERMILLE ||
+	    want <= VENC_SHM_THROTTLE_FLOOR_PERMILLE)
+		return 1;
+	delta = (want > applied) ? (unsigned int)(want - applied)
+				 : (unsigned int)(applied - want);
+	return delta >= VENC_SHM_THROTTLE_APPLY_DEADBAND_PERMILLE;
+}
 #define VENC_SHM_THROTTLE_AI_STEP         50u  /* additive increase */
 
 #define VENC_SHM_THROTTLE_NO_SAMPLE  0xFFFFFFFFu

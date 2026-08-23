@@ -354,5 +354,117 @@ int test_venc_shm_throttle(void)
 	CHECK("thr_null_floor_edge", venc_shm_throttle_floor_edge(NULL) == 0);
 	CHECK("thr_null_apply", venc_shm_throttle_apply(NULL, 5000) == 5000);
 
+	/* ── Apply deadband ────────────────────────────────────────────────
+	 * On SigmaStar a programmed rate *change* costs an IDR, so the clamp
+	 * must not chatter.  The deadband must never cost reach, in either
+	 * direction — that is what the descent/release cases below pin. */
+	CHECK("thr_apply_noop", !venc_shm_throttle_should_apply(500, 500));
+	CHECK("thr_apply_small_blocked",
+		!venc_shm_throttle_should_apply(550, 500));
+	CHECK("thr_apply_small_blocked_down",
+		!venc_shm_throttle_should_apply(450, 500));
+	CHECK("thr_apply_at_deadband",
+		venc_shm_throttle_should_apply(600, 500));
+	CHECK("thr_apply_beyond_deadband",
+		venc_shm_throttle_should_apply(300, 500));
+	/* Rails are exempt: a sub-deadband move that lands on the floor or on
+	 * full release still programs. */
+	CHECK("thr_apply_floor_rail",
+		venc_shm_throttle_should_apply(VENC_SHM_THROTTLE_FLOOR_PERMILLE,
+			VENC_SHM_THROTTLE_FLOOR_PERMILLE + 50));
+	CHECK("thr_apply_below_floor_rail",
+		venc_shm_throttle_should_apply(VENC_SHM_THROTTLE_MIN_PERMILLE,
+			VENC_SHM_THROTTLE_FLOOR_PERMILLE + 20));
+	CHECK("thr_apply_full_rail",
+		venc_shm_throttle_should_apply(VENC_SHM_THROTTLE_FULL_PERMILLE,
+			VENC_SHM_THROTTLE_FULL_PERMILLE - 50));
+
+	/* Reach, descent: a law walking down in sub-deadband steps still
+	 * arrives at the floor, because the comparison is against the last
+	 * APPLIED value so suppressed movement accumulates. */
+	{
+		uint16_t applied = VENC_SHM_THROTTLE_FULL_PERMILLE;
+		uint16_t want = VENC_SHM_THROTTLE_FULL_PERMILLE;
+		int applies = 0, windows = 0;
+
+		while (want > VENC_SHM_THROTTLE_MIN_PERMILLE && windows < 500) {
+			want = (want > VENC_SHM_THROTTLE_MIN_PERMILLE + 30)
+				? (uint16_t)(want - 30)
+				: VENC_SHM_THROTTLE_MIN_PERMILLE;
+			windows++;
+			if (venc_shm_throttle_should_apply(want, applied)) {
+				applied = want;
+				applies++;
+			}
+		}
+		CHECK("thr_apply_descent_reaches_floor",
+			applied <= VENC_SHM_THROTTLE_FLOOR_PERMILLE);
+		CHECK("thr_apply_descent_is_coarser", applies < windows);
+	}
+
+	/* Reach, release: the additive-increase ramp is +50, half the
+	 * deadband, so every second step crosses — the ramp keeps its
+	 * wall-clock speed and costs half the keyframes. */
+	{
+		uint16_t applied = VENC_SHM_THROTTLE_FLOOR_PERMILLE;
+		uint16_t want = VENC_SHM_THROTTLE_FLOOR_PERMILLE;
+		int applies = 0, windows = 0;
+
+		while (want < VENC_SHM_THROTTLE_FULL_PERMILLE && windows < 500) {
+			unsigned int n = (unsigned int)want +
+				VENC_SHM_THROTTLE_AI_STEP;
+			want = (n >= VENC_SHM_THROTTLE_FULL_PERMILLE)
+				? (uint16_t)VENC_SHM_THROTTLE_FULL_PERMILLE
+				: (uint16_t)n;
+			windows++;
+			if (venc_shm_throttle_should_apply(want, applied)) {
+				applied = want;
+				applies++;
+			}
+		}
+		CHECK("thr_apply_release_reaches_full",
+			applied == VENC_SHM_THROTTLE_FULL_PERMILLE);
+		CHECK("thr_apply_release_is_coarser", applies < windows);
+	}
+
+	/* The same two properties against the REAL control law rather than a
+	 * simulated ramp: clamp to the floor on a standing full ring, then
+	 * return to steady state (0 used slots) and confirm the clamp is
+	 * actually released all the way, deadband included. */
+	{
+		VencShmThrottle t;
+		uint64_t tnow = 0;
+		uint16_t applied;
+		int guard = 0;
+
+		venc_shm_throttle_reset(&t, tnow);
+		while (venc_shm_throttle_permille(&t) >
+		       VENC_SHM_THROTTLE_FLOOR_PERMILLE && guard++ < 200) {
+			venc_shm_throttle_observe(&t, 8, 0);
+			tnow += VENC_SHM_THROTTLE_WINDOW_US;
+			(void)venc_shm_throttle_tick(&t, tnow);
+		}
+		CHECK("thr_law_reaches_floor",
+			venc_shm_throttle_permille(&t) <=
+			VENC_SHM_THROTTLE_FLOOR_PERMILLE);
+
+		applied = venc_shm_throttle_permille(&t);
+		guard = 0;
+		while (venc_shm_throttle_permille(&t) <
+		       VENC_SHM_THROTTLE_FULL_PERMILLE && guard++ < 200) {
+			venc_shm_throttle_observe(&t, 0, 0);
+			tnow += VENC_SHM_THROTTLE_WINDOW_US;
+			(void)venc_shm_throttle_tick(&t, tnow);
+			if (venc_shm_throttle_should_apply(
+			    venc_shm_throttle_permille(&t), applied))
+				applied = venc_shm_throttle_permille(&t);
+		}
+		CHECK("thr_law_release_reaches_full",
+			venc_shm_throttle_permille(&t) ==
+			VENC_SHM_THROTTLE_FULL_PERMILLE);
+		CHECK("thr_law_release_applies_full",
+			applied == VENC_SHM_THROTTLE_FULL_PERMILLE);
+	}
+
 	return failures;
 }

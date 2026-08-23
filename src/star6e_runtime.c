@@ -1090,6 +1090,7 @@ static uint64_t g_osd_enc_bytes;
  * pipeline thread. */
 static VencShmThrottle g_shm_throttle;
 static int g_shm_throttle_ready;
+static int g_throttle_retry;   /* last clamp apply failed; bypass the deadband once */
 /* Last factor successfully programmed into the encoder. */
 static uint16_t g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
 
@@ -1136,10 +1137,22 @@ static void star6e_service_shm_throttle(Star6eOutput *output,
 	 * factor that then stops changing — pinned at the floor is exactly
 	 * that — would never be retried.  Comparing against the applied
 	 * value both retries and keeps the write-on-change property. */
+	/* Deadband the apply: on SigmaStar a programmed rate *change* costs an
+	 * IDR (venc_shm_throttle_should_apply), so chattering the clamp
+	 * keyframes the link it is trying to unclog.  g_throttle_retry keeps
+	 * the old retry-on-failure property, which a bare deadband would lose:
+	 * a failed apply leaves g_applied_permille stale, and the next want may
+	 * sit inside the deadband and never retry. */
 	want = venc_shm_throttle_permille(&g_shm_throttle);
-	if (want != g_applied_permille &&
-	    star6e_controls_set_output_throttle(want) == 0)
-		g_applied_permille = want;
+	if ((g_throttle_retry ||
+	     venc_shm_throttle_should_apply(want, g_applied_permille))) {
+		if (star6e_controls_set_output_throttle(want) == 0) {
+			g_applied_permille = want;
+			g_throttle_retry = 0;
+		} else {
+			g_throttle_retry = 1;
+		}
+	}
 	output->throttle_permille = want;
 	/* Publish into the ring header so the consumer can see that the
 	 * producer has already reduced its own rate -- below 1000 is
