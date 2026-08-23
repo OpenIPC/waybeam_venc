@@ -185,7 +185,7 @@ static int test_encoder_config(void)
 	venc_config_defaults(&cfg);
 	cfg.video0.slice_count = 1;
 	failures += expect("enc_off_derives",
-		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) == 0);
+		cv610_encoder_config_derive(&cfg, 1920, 1080, 100, &enc) == 0);
 	failures += expect("enc_off_features_disabled",
 		!enc.intra.enabled && !enc.ref.enabled && !enc.slice.enabled);
 	failures += expect("enc_off_slice_defaults",
@@ -194,53 +194,88 @@ static int test_encoder_config(void)
 
 	(void)venc_config_apply_resilience_preset("racing", &cfg.video0);
 	failures += expect("enc_racing_derives",
-		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) == 0);
+		cv610_encoder_config_derive(&cfg, 1920, 1080, 100, &enc) == 0);
+	/* COLUMN refresh: the sweep covers the WIDTH, so at 1920 the extent is
+	 * 60 units of 32 px, not the 34 that the height would give. "fast" allows
+	 * 150 ms = 15 frames at 100 fps, so ceil(60/15) = 4 units per P frame. */
 	failures += expect("enc_racing_gdr",
-		enc.intra.enabled && enc.intra.mode == 0 &&
-		enc.intra.refresh_num == 3 && enc.intra.request_i_qp == 36 &&
-		enc.intra.derived.total_rows == 34);
+		enc.intra.enabled && enc.intra.refresh_dir == 1 &&
+		enc.intra.refresh_num == 4 && enc.intra.request_i_qp == 36 &&
+		enc.intra.derived.total_rows == 60);
+	failures += expect("enc_racing_sweep_meets_target",
+		enc.intra.refresh_num *
+			((100u * enc.intra.derived.target_ms + 500u) / 1000u) >=
+		enc.intra.derived.total_rows);
 	failures += expect("enc_racing_no_refpred", !enc.ref.enabled);
 
 	(void)venc_config_apply_resilience_preset("rally", &cfg.video0);
 	failures += expect("enc_rally_derives",
-		cv610_encoder_config_derive(&cfg, 1080, 60, &enc) == 0);
+		cv610_encoder_config_derive(&cfg, 1920, 1080, 60, &enc) == 0);
 	failures += expect("enc_rally_refpred",
 		enc.ref.enabled && enc.ref.base == 1 && enc.ref.enhance == 1 &&
 		enc.ref.pred == 1);
 
 	(void)venc_config_apply_resilience_preset("ltr:4", &cfg.video0);
 	failures += expect("enc_ltr_derives",
-		cv610_encoder_config_derive(&cfg, 1080, 60, &enc) == 0);
+		cv610_encoder_config_derive(&cfg, 1920, 1080, 60, &enc) == 0);
 	failures += expect("enc_ltr_refpred_without_gdr",
 		!enc.intra.enabled && enc.ref.enabled && enc.ref.base == 1 &&
 		enc.ref.enhance == 4 && enc.ref.pred == 0);
 
 	cfg.video0.slice_count = 17;
 	failures += expect("enc_slice_17_derives",
-		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) == 0);
+		cv610_encoder_config_derive(&cfg, 1920, 1080, 100, &enc) == 0);
 	failures += expect("enc_slice_17_geometry",
 		enc.slice.enabled && enc.slice.split_mode == 1 &&
 		enc.slice.split_size == 2 && enc.slice.expected_count == 17);
 	cfg.video0.slice_count = 12;
-	(void)cv610_encoder_config_derive(&cfg, 1080, 100, &enc);
+	(void)cv610_encoder_config_derive(&cfg, 1920, 1080, 100, &enc);
 	failures += expect("enc_slice_12_geometry",
 		enc.slice.split_size == 3 && enc.slice.expected_count == 12);
 	cfg.video0.slice_count = 32;
-	(void)cv610_encoder_config_derive(&cfg, 1080, 100, &enc);
+	(void)cv610_encoder_config_derive(&cfg, 1920, 1080, 100, &enc);
 	failures += expect("enc_slice_saturates_at_rows",
 		enc.slice.split_size == 2 && enc.slice.expected_count == 17);
 	cfg.video0.slice_count = 9;
-	(void)cv610_encoder_config_derive(&cfg, 720, 100, &enc);
+	(void)cv610_encoder_config_derive(&cfg, 1280, 720, 100, &enc);
 	failures += expect("enc_slice_720_quantizes",
 		enc.slice.total_lcu_rows == 23 && enc.slice.split_size == 3 &&
 		enc.slice.expected_count == 8);
 
+	/* The two axes must not be confused: in one derive call the intra sweep is
+	 * width-derived and the slice split is height-derived. At 1280x720 they
+	 * differ (40 vs 23 units), so a regression that fed height to the sweep --
+	 * the bug this replaced -- fails here rather than silently slowing the
+	 * refresh by the aspect ratio. */
+	(void)venc_config_apply_resilience_preset("racing", &cfg.video0);
+	cfg.video0.slice_count = 4;
+	failures += expect("enc_720_axes_derive",
+		cv610_encoder_config_derive(&cfg, 1280, 720, 100, &enc) == 0);
+	failures += expect("enc_720_intra_uses_width",
+		enc.intra.derived.total_rows == 40 && enc.intra.refresh_num == 3);
+	failures += expect("enc_720_slices_use_height",
+		enc.slice.total_lcu_rows == 23 && enc.slice.expected_count == 4);
+	failures += expect("enc_720_sweep_meets_target",
+		enc.intra.refresh_num * 15u >= enc.intra.derived.total_rows);
+
+	/* A non-16:9 picture is the sharpest axis check: 1080x1920 portrait swaps
+	 * which number is larger, so a height-fed sweep would read 60 here. */
+	failures += expect("enc_portrait_derive",
+		cv610_encoder_config_derive(&cfg, 1080, 1920, 100, &enc) == 0);
+	failures += expect("enc_portrait_intra_uses_width",
+		enc.intra.derived.total_rows == 34);
+	failures += expect("enc_portrait_slices_use_height",
+		enc.slice.total_lcu_rows == 60);
+
+	failures += expect("enc_reject_zero_width",
+		cv610_encoder_config_derive(&cfg, 0, 1080, 100, &enc) != 0);
+
 	cfg.video0.slice_count = 0;
 	failures += expect("enc_reject_slice_zero",
-		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) != 0);
+		cv610_encoder_config_derive(&cfg, 1920, 1080, 100, &enc) != 0);
 	cfg.video0.slice_count = VENC_SLICE_COUNT_MAX + 1;
 	failures += expect("enc_reject_slice_over_max",
-		cv610_encoder_config_derive(&cfg, 1080, 100, &enc) != 0);
+		cv610_encoder_config_derive(&cfg, 1920, 1080, 100, &enc) != 0);
 
 	return failures;
 }

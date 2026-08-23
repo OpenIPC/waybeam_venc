@@ -1,5 +1,57 @@
 # History
 
+## [0.68.0] - 2026-08-23
+
+CV610 only. No wire format or config schema change, but see the frame-SHM
+metadata note below: a field that was already on the wire now carries a
+different (correct) value.
+
+- **CV610 now refreshes by COLUMN, so the GDR recovery frame keeps its slices.**
+  Under `OT_VENC_INTRA_REFRESH_ROW` the intra band is a contiguous CTB range, so
+  on the recovery frame the encoder carved it off as its own I slice and then
+  ignored the configured row split: measured on .181 at 1080p100 with
+  `sliceCount: 17`, that frame shipped **2 slices at addresses `[0,45]`** — on
+  the largest frame in the stream and the one carrying VPS/SPS/PPS and the
+  `recovery_point` SEI. waybeam-link's spatial repair drops any frame whose
+  slice addresses fall outside the geometry it has learned, so the recovery
+  frame was precisely the frame it could never salvage. A column band is not
+  contiguous in raster order, so it cannot become a slice and the row split
+  survives.
+
+  Measured ROW -> COLUMN: refresh-AU slices 2 -> 17; refresh-AU first slice
+  I -> P; refresh-AU size 1.32x -> 1.07x of the stream mean; stream mean AU
+  11235 -> 11416 B against a 9264 kbps target. GDR markers unchanged
+  (`recovery_point` every 200 frames, no IRAP). Not configurable: there is no
+  reason to select ROW.
+
+- **The intra-refresh sweep now derives from the picture WIDTH on CV610.**
+  `intra_refresh_compute()` divides whatever extent it is given into 32-px
+  units; it was being handed the height, so a column sweep covered 34 units on a
+  60-unit-wide picture and ran 1.7x slower than the mode's target
+  (19 frames measured, against the 15 that "fast" asks for at 100 fps). With the
+  width it derives `refresh_num` 4 and a 15-frame cycle, measured converging in
+  14 frames. The slice split still uses the height, because slices are always
+  rows. The shared `intra_refresh_compute()` parameter is renamed `height` ->
+  `extent` and documented, since silently passing the wrong dimension is what
+  caused this.
+
+  Consequence: on CV610, `total_rows` and `lines` in `/api/v1/intra/status` now
+  count 32-px **columns** (60 at 1080p, not 34). The JSON key is shared across
+  backends and was left alone rather than renamed for one of them.
+
+- **frame-SHM `gdr_len` was wrong on CV610 and is now correct.** Byte 7 of the
+  frame metadata (`protocols/frame-shm.md`) advertises the GDR cycle length in
+  frames. It is computed as `ceil(total_rows / refresh_num)`, so with the
+  height-derived extent it published **12** while the encoder's true sweep was
+  20; it now publishes 15, matching the device log. No consumer reads the field
+  today (waybeam-link parses it into `FrameShmMeta::gdr_len` and never uses it),
+  so nothing changes behaviourally — but a future consumer would have been
+  reading a wrong number.
+
+  Star6E and Maruko are unaffected: `MI_VENC_SetIntraRefresh` has no direction
+  field, they still pass the height, and their derivation is unchanged. Measured
+  on .232, Star6E sweeps top-to-bottom and converges in ~9 frames at 60 fps.
+
 ## [0.67.4] - 2026-08-23
 
 CV610 only. No wire format, config schema, frame-SHM layout or HTTP contract

@@ -634,7 +634,18 @@ static int cv610_apply_encoder_config(Cv610RunnerContext *ctx,
 		goto fail;
 	}
 	intra.enable = enc->intra.enabled ? TD_TRUE : TD_FALSE;
-	intra.mode = OT_VENC_INTRA_REFRESH_ROW;
+	/* COLUMN, not ROW. Under ROW the intra band is a contiguous CTB range, and
+	 * on the GDR recovery frame the encoder carves it off as its own I slice
+	 * and then ignores the configured row split — measured on .181 as 2 slices
+	 * (addresses [0,45]) instead of 17, on the largest frame in the stream and
+	 * the one carrying VPS/SPS/PPS. A column band is not contiguous in raster
+	 * order, so it cannot become a slice at all and the row split survives:
+	 * 17/17 slices on every frame, refresh frame stays a P slice, and its size
+	 * spike drops from 1.32x to 1.07x of the stream mean. waybeam-link's
+	 * spatial repair drops any frame whose slice addresses are outside the
+	 * learned geometry (core/src/spatial_repair.cpp:304), so under ROW the
+	 * recovery frame was exactly the frame it could never salvage. */
+	intra.mode = (ot_venc_intra_refresh_mode)enc->intra.refresh_dir;
 	if (enc->intra.enabled) {
 		intra.refresh_num = enc->intra.refresh_num;
 		intra.request_i_qp = enc->intra.request_i_qp;
@@ -801,7 +812,8 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	uint32_t gop;
 	td_s32 ret;
 
-	if (cv610_encoder_config_derive(&ctx->config, ctx->pipeline.out_height,
+	if (cv610_encoder_config_derive(&ctx->config, ctx->pipeline.out_width,
+			ctx->pipeline.out_height,
 		ctx->pipeline.fps, &enc) != 0) {
 		fprintf(stderr, "ERROR: invalid CV610 encoder resilience/slice config\n");
 		return -1;

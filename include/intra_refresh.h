@@ -28,7 +28,9 @@ typedef enum {
 typedef struct {
 	IntraRefreshMode mode;
 	uint32_t target_ms;       /* mode constant; 0 if off */
-	uint32_t total_rows;      /* ceil(height / lcu_h); 0 if off */
+	uint32_t total_rows;      /* ceil(extent / 32); 0 if off. Units along the
+	                           * REFRESH AXIS, not necessarily rows — see
+	                           * intra_refresh_compute(). */
 	uint32_t lines;           /* effective stripe lines per P-frame; 0 if off */
 	uint32_t gop_frames;      /* auto GOP in frames; 0 if off or overridden */
 	double   gop_sec;         /* auto GOP in seconds; 0.0 if off or overridden */
@@ -44,10 +46,19 @@ const char      *intra_refresh_mode_name(IntraRefreshMode m);
  * `override_lines==0` means "use mode auto", `override_qp==0` means
  * "use codec default", `explicit_gop_sec>0` suppresses auto-GOP.
  *
+ * `extent` is the picture dimension the refresh sweep travels ALONG, in pixels
+ * — NOT always the height. A row-refresh backend (Star6E, Maruko) passes the
+ * height; CV610 refreshes by column and passes the WIDTH. Everything derived
+ * from it (`total_rows`, `lines`) is therefore in 32-px units of that axis.
+ * Passing the wrong dimension does not fail loudly: it silently makes the sweep
+ * cover the wrong distance, so the refresh runs at the aspect ratio's factor
+ * away from the mode's target_ms. That was a real bug (CV610 swept 34 units on
+ * a 60-unit-wide picture, 1.7x slower than "fast" asks for).
+ *
  * Always populates `*out`; for OFF mode all fields are zero. */
 void intra_refresh_compute(
 	IntraRefreshMode mode,
-	uint32_t height, uint32_t fps,
+	uint32_t extent, uint32_t fps,
 	uint32_t override_lines,
 	uint32_t override_qp,
 	double   explicit_gop_sec,
