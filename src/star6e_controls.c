@@ -209,15 +209,26 @@ static uint32_t rc_compensate_kbps(uint32_t kbps, uint32_t delivered_fps)
  * enough, it is a naturally aligned advisory scalar. */
 static uint16_t g_output_throttle_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
 
-/* No IDR on bitrate writes.  The decoder needs no resync — the rate
- * controller absorbs rate changes mid-GOP, which the shm-throttle clamp
- * (re-programming as often as every 200 ms) has always relied on.  The
- * forced IDR this path used to request was itself the dominant latency-spike
- * source: an IDR is the largest frame the encoder can emit (~42 KB at
- * 10 Mbps, measured 2026-08-22), so every adaptive-link ladder or congestion
- * write that cleared the 100 ms IDR gate turned rate control into IDR
- * trains.  A controller that wants a resync point calls request_idr()
- * explicitly. */
+/* No IDR request on bitrate writes.
+ *
+ * This removal is a no-op on the wire, and that is worth stating plainly:
+ * MI_VENC_SetChnAttr() below emits an IDR on its own.  Measured on a
+ * SSC338Q (IMX335 1920x1080@60, H.265 CBR, GDR via the racing preset,
+ * 2026-08-23), ten spaced video0.bitrate writes produced eleven IRAP
+ * access units both with and without the request — it only ever
+ * duplicated a keyframe the SDK had already inserted.
+ *
+ * It is still worth removing.  The request consumed a slot in the shared
+ * 100 ms gate (idr_rate_limit_allow), so a genuine recovery request — a
+ * ring-full drop, or /request/idr from the link — landing within 100 ms
+ * of a bitrate write was silently swallowed.  And every write inflated
+ * /api/v1/idr/stats with an IDR it did not cause, which is what made the
+ * counters read as if bitrate writes were the IDR source.
+ *
+ * The surviving implicit IDR is a SetChnAttr property that this layer
+ * cannot gate: MI_VENC_RcParam_t carries no bitrate field on either
+ * SigmaStar backend (include/star6e.h), so there is no rate-only actuator
+ * to switch to.  Calling SetChnAttr less often is the open follow-up. */
 static int apply_bitrate(uint32_t kbps)
 {
 	MI_VENC_ChnAttr_t attr = {0};
@@ -359,8 +370,11 @@ static int apply_qp_delta(int delta)
 		return -1;
 	if (MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
 		return -1;
-	if (request_idr() != 0)
-		return -1;
+	/* No IDR: a QP-delta change is rate-control state, absorbed mid-GOP.
+	 * Unlike apply_bitrate() this is a real reduction — MI_VENC_SetRcParam
+	 * does NOT implicitly keyframe, so the request removed here was the
+	 * only IDR source on this path.  Measured 2026-08-23: ten spaced
+	 * video0.qpDelta writes went from eleven IRAP access units to one. */
 	printf("> qpDelta changed to %d\n", delta);
 	return 0;
 }
@@ -467,8 +481,11 @@ static int apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
 		: E_MI_VENC_RC_PRIORITY_BITRATE_FIRST;
 	MI_VENC_SetRcPriority(g_star6e_control_ctx.venc_chn, pri);
 
-	if (request_idr() != 0)
-		return -1;
+	/* No IDR: frame-size caps are rate-control state.  As with
+	 * apply_qp_delta(), neither MI_VENC_SetRcParam nor MI_VENC_SetRcPriority
+	 * keyframes implicitly, so this is a real reduction — measured
+	 * 2026-08-23, ten spaced video0.maxIBytes writes went from eleven IRAP
+	 * access units to one. */
 	printf("> maxFrameSize changed: I=%u P=%u bytes, priority=%s\n",
 		max_i_bytes, max_p_bytes,
 		pri == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST

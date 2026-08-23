@@ -209,10 +209,10 @@ static int maruko_apply_rc_qp_delta(const i6c_venc_chn *attr, MI_VENC_RcParam_t 
  * same ring geometry, same control law, same authority rules. */
 static uint16_t g_output_throttle_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
 
-/* No IDR on bitrate writes — see the matching note in
- * src/star6e_controls.c apply_bitrate(): the rate controller absorbs rate
- * changes without decoder resync, and the forced IDR was the dominant
- * latency-spike source under adaptive-link ladder activity. */
+/* No IDR request on bitrate writes — see the matching note in
+ * src/star6e_controls.c apply_bitrate() for the measurement.  Compile-tested
+ * only here: Maruko was unreachable, so whether i6c set_chn_attr keyframes
+ * implicitly the way Star6E's MI_VENC_SetChnAttr does is UNVERIFIED. */
 static int maruko_apply_bitrate(uint32_t kbps)
 {
 	i6c_venc_chn attr = {0};
@@ -308,8 +308,8 @@ static int maruko_apply_qp_delta(int delta)
 	    g_ctx.venc_chn, &param) != 0)
 		return -1;
 
-	if (idr_rate_limit_allow(g_ctx.venc_chn))
-		maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
+	/* No IDR: a QP-delta change is rate-control state, absorbed mid-GOP.
+	 * Star6E parity — see apply_qp_delta() in src/star6e_controls.c. */
 	printf("> qpDelta changed to %d\n", delta);
 	return 0;
 }
@@ -368,8 +368,8 @@ static int maruko_apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_byte
 		: E_MI_VENC_RC_PRIORITY_BITRATE_FIRST;
 	maruko_mi_venc_set_rc_priority(g_ctx.venc_dev, g_ctx.venc_chn, pri);
 
-	if (idr_rate_limit_allow(g_ctx.venc_chn))
-		maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
+	/* No IDR: frame-size caps are rate-control state.  Star6E parity —
+	 * see apply_max_frame_size() in src/star6e_controls.c. */
 	printf("> maxFrameSize changed: I=%u P=%u bytes, priority=%s\n",
 		max_i_bytes, max_p_bytes,
 		pri == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
