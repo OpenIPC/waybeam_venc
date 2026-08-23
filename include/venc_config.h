@@ -256,14 +256,6 @@ typedef struct {
 	bool shm_throttle;                  /* frame-shm:// ring-fill bitrate
 	                                     * clamp (include/venc_shm_throttle.h).
 	                                     * Inert on every other transport. */
-	bool shm_recovery_idr;              /* frame-shm:// only: let a ring-full
-	                                     * drop request a recovery IDR on its
-	                                     * own (paced to 1/s).  Default false —
-	                                     * the consumer knows whether its
-	                                     * decoder actually needs a random
-	                                     * access point; venc does not.  Set
-	                                     * true if nothing on your pipeline
-	                                     * calls /request/idr. */
 } VencConfigOutgoing;
 
 typedef struct {

@@ -2543,17 +2543,7 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		return -1;
 	ctx->venc_started = 1;
 
-	/* Ring-full recovery IDR: opt-in (outgoing.shmRecoveryIdr, default
-	 * off) — Star6E parity, see star6e_runtime.c.  ctx->cfg is the
-	 * MarukoConfig, not the VencConfig, so this reads the one registered
-	 * by maruko_controls_bind() — which runs before maruko_pipeline_init()
-	 * (src/maruko_runtime.c:79 vs :96), so it is populated here. */
-	{
-		const VencConfig *vc = maruko_controls_vcfg();
-		ctx->output.request_idr =
-			(vc && vc->outgoing.shm_recovery_idr)
-			? maruko_ring_request_idr : NULL;
-	}
+	ctx->output.request_idr = maruko_ring_request_idr;
 	ctx->output.idr_ctx = ctx;
 	maruko_update_output_resilience_flags(ctx);
 

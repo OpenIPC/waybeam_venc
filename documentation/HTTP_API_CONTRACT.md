@@ -1833,18 +1833,21 @@ in Notes. As of `contract_version: 0.18.7`:
 
 ## Change Log (Contract)
 - `0.18.7` (behavioral — venc stops injecting IDRs of its own accord):
-  New field `outgoing.shm_recovery_idr` (boolean, **default `false`**,
-  `MUT_RESTART`, alias `outgoing.shmRecoveryIdr`, all three backends).  A
-  `frame-shm://` ring-full drop no longer asks the encoder for a recovery
-  IDR unless this is set.  venc only knows its ring overflowed; whether a
-  decoder actually lost sync is the consumer's to know, and the consumer
-  can say so with `/request/idr`.  **Behavioural change**: a pipeline that
-  relied on venc healing the reference chain by itself must either set this
-  true or request IDRs itself.  What is lost is at most one IDR per second
-  (the path has been paced by a 1 s holdoff since 0.66.0), not a storm.
-  Device-measured with the ring consumer stopped for 12 s: 13 IRAP access
-  units before, 1 after (the recorder's own), and 13 again with the field
-  set true — at identical access-unit positions.
+  A `frame-shm://` ring-full drop no longer requests a recovery IDR when the
+  stream is running a rolling intra refresh (GDR).  Such a stream repairs a
+  chain break on its own within one refresh cycle -- bounded, and already
+  paid for -- so the IDR bought only the gap between the drop and the sweep
+  passing over the damage, at the cost of the largest frame the encoder
+  makes pushed into a ring that is by definition full.  A plain GOP stream
+  keeps the recovery IDR unconditionally: it has no other heal, and with a
+  long GOP the damage otherwise persists for seconds.  No configuration --
+  venc can see which case it is in.
+
+  Device-measured with the ring consumer stopped for 12 s (ring pinned at
+  100%, 8/8 slots, ~900 drops): a GDR craft went from 13 IRAP access units
+  to 1 (the recorder's own start IDR), while the same craft with
+  `video0.resilience=off` kept its recovery IDRs.  The path remains paced by
+  a 1 s holdoff (0.66.0) in the GOP case.
 
   The `frame-shm` ring-fill clamp now deadbands its own writes: movement
   below 100 permille (10%) does not re-program the encoder.  Both rails are

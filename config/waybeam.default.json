@@ -59,8 +59,7 @@
     "allowUnixEncoderStall": false,
     "audioPort": 5601,
     "sidecarPort": 5602,
-    "shmThrottle": true,
-    "shmRecoveryIdr": false
+    "shmThrottle": true
   },
   "discovery": {
     "enabled": true,

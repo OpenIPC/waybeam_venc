@@ -60,7 +60,8 @@ static void maruko_recover_dropped_access_unit(const i6c_venc_strm *stream,
 	if (output->svct_active &&
 	    stream->h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF)
 		flags |= VENC_FRAME_FLAG_ENHANCE;
-	if (venc_frame_drop_breaks_chain(flags) && output->request_idr &&
+	if (venc_frame_drop_needs_idr(flags, output->gdr_active) &&
+	    output->request_idr &&
 	    venc_frame_drop_idr_due(&output->drop_idr_last_us,
 		wb_monotonic_us()) &&
 	    output->request_idr(output->idr_ctx) == 0)
@@ -385,7 +386,7 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
 	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0) {
-		if (venc_frame_drop_breaks_chain(meta.flags) &&
+		if (venc_frame_drop_needs_idr(meta.flags, output->gdr_active) &&
 		    output->request_idr &&
 		    venc_frame_drop_idr_due(&output->drop_idr_last_us,
 					    wb_monotonic_us()) &&

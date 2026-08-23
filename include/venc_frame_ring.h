@@ -64,6 +64,35 @@ static inline int venc_frame_drop_breaks_chain(uint8_t flags)
 	return (flags & VENC_FRAME_FLAG_ENHANCE) ? 0 : 1;
 }
 
+/* Does discarding this frame need a recovery IDR to heal?
+ *
+ * Two independent reasons it does not, folded here so all three backends
+ * share one definition:
+ *
+ *   1. The frame was non-referenced (SVC-T enhance) — nothing predicts from
+ *      it, so nothing broke.  venc_frame_drop_breaks_chain() above.
+ *   2. The stream is running a rolling intra refresh (GDR).  A chain break
+ *      then heals on its own within one refresh cycle, bounded and already
+ *      paid for, so an IDR buys only the time between the drop and the
+ *      sweep passing over the damage.  That is a bad trade: an IDR is the
+ *      largest frame the encoder makes and the ring it would be pushed into
+ *      is, by definition, full.  Measured on a SSC338Q with the consumer
+ *      stopped (2026-08-23): a GDR craft emitted 13 recovery IDRs in 12 s,
+ *      none of which could be delivered — the ring was dropping every frame
+ *      including those.
+ *
+ * So the recovery IDR is reserved for the case that actually has no other
+ * heal: a non-GDR stream, where a dropped reference means garbage until the
+ * next IDR — with a long GOP, seconds.  That case keeps it, unconditionally
+ * and without asking the operator to configure anything, because venc can
+ * see which case it is in. */
+static inline int venc_frame_drop_needs_idr(uint8_t flags, int gdr_active)
+{
+	if (!venc_frame_drop_breaks_chain(flags))
+		return 0;
+	return gdr_active ? 0 : 1;
+}
+
 /* Holdoff between ring-full recovery IDRs.  The shared per-channel IDR
  * limiter (100 ms) exists for scene changes, where speed matters; through
  * it a ring with NO consumer draining it — every frame dropping — still

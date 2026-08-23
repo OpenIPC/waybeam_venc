@@ -951,6 +951,32 @@ static int test_fr_drop_breaks_chain(void)
 	CHECK("fr_chain_unknown_bits_break",
 		venc_frame_drop_breaks_chain(0x80) == 1);
 
+	/* venc_frame_drop_needs_idr(): the recovery IDR is reserved for the
+	 * case with no other heal.  A GDR stream repairs a chain break within
+	 * one refresh cycle for free, so it must NOT spend an IDR; a plain
+	 * GOP stream has nothing else and must keep it -- with a long GOP the
+	 * damage otherwise persists for seconds. */
+	CHECK("fr_needs_idr_gop_plain_p",
+		venc_frame_drop_needs_idr(0, 0) == 1);
+	CHECK("fr_needs_idr_gdr_plain_p_heals_itself",
+		venc_frame_drop_needs_idr(0, 1) == 0);
+	/* The ENHANCE exemption still wins in both stream types -- nothing
+	 * predicts from a non-referenced frame, so nothing broke. */
+	CHECK("fr_needs_idr_gop_enhance_safe",
+		venc_frame_drop_needs_idr(VENC_FRAME_FLAG_ENHANCE, 0) == 0);
+	CHECK("fr_needs_idr_gdr_enhance_safe",
+		venc_frame_drop_needs_idr(VENC_FRAME_FLAG_ENHANCE, 1) == 0);
+	/* The per-frame GDR meta flag is NOT the stream-level state: a frame
+	 * can carry FLAG_GDR while the caller passes gdr_active=0 only in a
+	 * mismatched build, but the reverse -- an IDR frame inside a GDR
+	 * stream -- is normal, and the stream state is what decides. */
+	CHECK("fr_needs_idr_gdr_stream_idr_frame",
+		venc_frame_drop_needs_idr(VENC_FRAME_FLAG_IDR, 1) == 0);
+	CHECK("fr_needs_idr_gop_stream_idr_frame",
+		venc_frame_drop_needs_idr(VENC_FRAME_FLAG_IDR, 0) == 1);
+	CHECK("fr_needs_idr_unknown_bits_gop",
+		venc_frame_drop_needs_idr(0x80, 0) == 1);
+
 	/* End-to-end: a full ring must actually reject, which is the event
 	 * the policy hangs off.  8 slots, 9th write fails. */
 	{

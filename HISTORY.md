@@ -3,8 +3,7 @@
 ## [0.68.1] - 2026-08-23
 
 venc stops injecting IDRs of its own accord. Contract `0.18.6` -> `0.18.7`.
-One new config field (`outgoing.shmRecoveryIdr`); no wire format or
-frame-SHM layout changes.
+No new config, no wire format, config schema or frame-SHM layout changes.
 
 Version numbering: `0.67.4` and `0.68.0` are already taken on the
 snokvist fork and are pending sync, so this lands at `0.68.1` rather than
@@ -58,27 +57,30 @@ renumbering again when that bundle arrives.
   `min_spacing_us: 250000` against a compile-time
   `IDR_RATE_LIMIT_MIN_SPACING_US` of `100000`.
 
-- **The frame-shm ring-full recovery IDR is now opt-in**
-  (`outgoing.shmRecoveryIdr`, default `false`, all three backends). A drop
-  told venc its ring overflowed, not that any decoder lost sync — that is
-  the consumer's to know, and it can say so with `/request/idr`. Answering
-  congestion with the largest frame the encoder makes, pushed into a ring
-  that is by definition already full, was also the wrong direction.
+- **The frame-shm ring-full recovery IDR is now reserved for GOP streams.**
+  A drop told venc its ring overflowed, not that any decoder lost sync. On a
+  GDR stream that distinction is decisive: a rolling intra refresh repairs a
+  chain break within one cycle for free, so the recovery IDR bought only the
+  gap until the sweep reached the damage -- and paid for it with the largest
+  frame the encoder makes, pushed into a ring that was by definition full.
+  On a plain GOP stream there is no other heal and the IDR is genuinely a
+  lifesaver, so that case keeps it, paced by the existing 1 s holdoff.
 
-  Device-measured on a SSC338Q with the ring consumer stopped for 12 s
-  (ring pinned at 100%, 8/8 slots, ~900 drops):
+  `venc_frame_drop_needs_idr()` folds this with the existing SVC-T enhance
+  exemption so all three backends share one definition. No configuration:
+  venc already knows which kind of stream it is producing.
 
-  | | IRAP access units |
+  Device-measured on a SSC338Q with the ring consumer stopped for 12 s (ring
+  pinned at 100%, 8/8 slots, ~900 drops):
+
+  | stream | IRAP access units |
   |---|---:|
-  | before | 13 |
-  | after (default) | **1** |
-  | after, `shmRecoveryIdr=true` | 13 |
+  | GDR (`resilience=racing`), before | 13 |
+  | GDR, after | **1** |
+  | GOP (`resilience=off`), after | **kept** |
 
-  The 13 land at identical access-unit positions in the before and opt-in
-  captures, so the field restores the previous behaviour exactly. This is a
-  behavioural change for anyone who relied on venc healing the chain by
-  itself; what is lost is at most one IDR/s, since the path has been paced
-  by a 1 s holdoff since 0.66.0.
+  The single remaining IRAP is the recorder's own start IDR; a do-nothing
+  control arm recorded exactly that one.
 
 - **The ring-fill clamp deadbands its own writes.** It re-programmed the
   encoder on every permille change, as often as every 200 ms — and each

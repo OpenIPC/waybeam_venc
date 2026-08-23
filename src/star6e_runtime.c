@@ -894,13 +894,7 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	 * both producers of forced IDRs coalesce through one 100 ms window.
 	 * Set here rather than in the pipeline because the callback is
 	 * runtime-local; safe against pipeline restarts, which re-run this. */
-	/* Ring-full recovery IDR: opt-in (outgoing.shmRecoveryIdr, default
-	 * off).  Leaving the hook NULL is the whole disable — both recovery
-	 * sites in star6e_output.c already test it.  venc only knows its ring
-	 * overflowed; whether a decoder actually lost sync is the consumer's
-	 * to know, and it can say so with /request/idr. */
-	ps->output.request_idr = vcfg->outgoing.shm_recovery_idr
-		? star6e_ring_request_idr : NULL;
+	ps->output.request_idr = star6e_ring_request_idr;
 	ps->output.idr_ctx = &ps->venc_channel;
 
 	star6e_recorder_init(&ps->recorder);

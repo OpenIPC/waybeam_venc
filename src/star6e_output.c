@@ -58,7 +58,8 @@ static void star6e_output_recover_dropped_access_unit(Star6eOutput *output,
 	if (output->svct_active &&
 	    stream->h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF)
 		flags |= VENC_FRAME_FLAG_ENHANCE;
-	if (venc_frame_drop_breaks_chain(flags) && output->request_idr &&
+	if (venc_frame_drop_needs_idr(flags, output->gdr_active) &&
+	    output->request_idr &&
 	    venc_frame_drop_idr_due(&output->drop_idr_last_us,
 		wb_monotonic_us()) &&
 	    output->request_idr(output->idr_ctx) == 0)
@@ -956,7 +957,7 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
 	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0) {
-		if (venc_frame_drop_breaks_chain(meta.flags) &&
+		if (venc_frame_drop_needs_idr(meta.flags, output->gdr_active) &&
 		    output->request_idr &&
 		    venc_frame_drop_idr_due(&output->drop_idr_last_us,
 					    wb_monotonic_us()) &&

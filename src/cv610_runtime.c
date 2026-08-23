@@ -1182,11 +1182,8 @@ static int cv610_run(void *opaque)
 				if (write_ret != 0) {
 					__atomic_add_fetch(&ctx->output_drops, 1,
 						__ATOMIC_RELAXED);
-					/* Ring-full recovery IDR: opt-in
-					 * (outgoing.shmRecoveryIdr, default
-					 * off) — see star6e_runtime.c. */
-					if (ctx->config.outgoing.shm_recovery_idr &&
-					    venc_frame_drop_breaks_chain(meta.flags) &&
+					if (venc_frame_drop_needs_idr(meta.flags,
+						ctx->gdr_active) &&
 					    venc_frame_drop_idr_due(&ctx->drop_idr_last_us,
 						wb_monotonic_us()) &&
 					    cv610_ring_request_idr() == 0)
