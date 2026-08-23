@@ -122,6 +122,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->outgoing.connected_udp = true;
 	cfg->outgoing.allow_unix_encoder_stall = false;
 	cfg->outgoing.shm_throttle = true;
+	cfg->outgoing.shm_recovery_idr = false;
 
 	/* fpv */
 	cfg->fpv.roi_enabled = true;
@@ -754,6 +755,8 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
 		(int)s->sidecar_port);
 	s->shm_throttle = json_get_bool(obj, "shmThrottle", s->shm_throttle);
+	s->shm_recovery_idr = json_get_bool(obj, "shmRecoveryIdr",
+		s->shm_recovery_idr);
 }
 
 static void load_discovery(const cJSON *root, VencConfigDiscovery *s)
@@ -1414,7 +1417,8 @@ static void render_outgoing(PrettyBuf *p, const VencConfig *cfg, int is_last)
 		cfg->outgoing.allow_unix_encoder_stall, 0);
 	pp_field_int(p,    2, "audioPort",       cfg->outgoing.audio_port,        0);
 	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,    0);
-	pp_field_bool(p,   2, "shmThrottle",     cfg->outgoing.shm_throttle,      1);
+	pp_field_bool(p,   2, "shmThrottle",     cfg->outgoing.shm_throttle,      0);
+	pp_field_bool(p,   2, "shmRecoveryIdr", cfg->outgoing.shm_recovery_idr,  1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1677,6 +1681,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(out, "audioPort", cfg->outgoing.audio_port);
 		cJSON_AddNumberToObject(out, "sidecarPort", cfg->outgoing.sidecar_port);
 		cJSON_AddBoolToObject(out, "shmThrottle", cfg->outgoing.shm_throttle);
+		cJSON_AddBoolToObject(out, "shmRecoveryIdr",
+			cfg->outgoing.shm_recovery_idr);
 	}
 
 	/* discovery */

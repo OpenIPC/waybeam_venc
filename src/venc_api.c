@@ -462,6 +462,18 @@ static const FieldUi ui_shm_throttle = {
 	"controller keeps ownership of that. Default: on."
 };
 
+/* UI descriptor for outgoing.shm_recovery_idr — whether a frame-shm ring-full
+ * drop may request a recovery IDR on its own. */
+static const FieldUi ui_shm_recovery_idr = {
+	"Outgoing", "SHM recovery IDR", "toggle", 0, 0, 0, NULL,
+	"frame-shm:// only: let a ring-full drop request an IDR to re-establish the "
+	"reference chain, paced to one per second. Off by default — the consumer "
+	"knows whether its decoder actually lost sync, venc only knows its ring "
+	"overflowed, and an IDR is the largest frame the encoder makes pushed into "
+	"a ring that is already full. Turn on if nothing in your pipeline calls "
+	"/request/idr. Default: off."
+};
+
 /* UI descriptors for the per-frame size caps (0.45.0).  Rendered as a
  * "Frame size caps" group purely from capabilities — the caps were API-only
  * until now (no static SECTIONS rows). */
@@ -587,6 +599,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, audio_port,        FT_INT,    MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
 	FIELD_UI(outgoing, shm_throttle,   FT_BOOL,   MUT_LIVE, &ui_shm_throttle),
+	FIELD_UI(outgoing, shm_recovery_idr, FT_BOOL, MUT_RESTART, &ui_shm_recovery_idr),
 
 	/* mDNS device beacon — read at boot / re-read on SIGHUP-respawn, so
 	 * all restart-required (no live re-announce path). */
@@ -780,6 +793,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.pauseStab", "video0.pause_stab" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.shmThrottle", "outgoing.shm_throttle" },
+	{ "outgoing.shmRecoveryIdr", "outgoing.shm_recovery_idr" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.allowUnixEncoderStall", "outgoing.allow_unix_encoder_stall" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -893,6 +907,10 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"outgoing.enabled", "outgoing.server",
 			"outgoing.max_payload_size", "outgoing.audio_port",
 			"outgoing.connected_udp",
+			/* CV610 has no shm throttle (no clamp loop), but it
+			 * does have the frame-shm ring-full recovery IDR, so
+			 * this one is genuinely settable here. */
+			"outgoing.shm_recovery_idr",
 			"outgoing.allow_unix_encoder_stall",
 			"audio.enabled", "audio.mute",
 			"debug.show_osd",

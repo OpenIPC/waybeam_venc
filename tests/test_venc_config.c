@@ -1319,6 +1319,58 @@ static int test_detect_export_roundtrip(void)
 
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
+/* outgoing.shmRecoveryIdr: the frame-shm ring-full recovery IDR opt-in.
+ * A new config field has to be touched in four places (default, parse,
+ * pretty-print, serialize) and a miss is silent, so pin the whole path:
+ * default off, parse of an explicit true, and a serialize->reload round
+ * trip that would catch a missing writer. */
+static int test_shm_recovery_idr_roundtrip(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	char path[] = "/tmp/venc_shm_recov_XXXXXX";
+	int fd = mkstemp(path);
+	char *json;
+
+	if (fd < 0)
+		return failures;
+
+	venc_config_defaults(&cfg);
+	CHECK("shm_recovery_idr_default_off",
+		cfg.outgoing.shm_recovery_idr == false);
+
+	/* Explicit true survives a load. */
+	{
+		FILE *f = fdopen(fd, "w");
+		if (!f) { close(fd); unlink(path); return failures; }
+		fputs("{\"outgoing\":{\"shmRecoveryIdr\":true}}", f);
+		fclose(f);
+	}
+	venc_config_defaults(&cfg);
+	CHECK("shm_recovery_idr_load_ok", venc_config_load(path, &cfg) == 0);
+	CHECK("shm_recovery_idr_parsed_true",
+		cfg.outgoing.shm_recovery_idr == true);
+
+	/* ...and survives serialize -> reload, which is what catches a
+	 * serializer that never learned about the field. */
+	json = venc_config_to_json_string(&cfg);
+	CHECK("shm_recovery_idr_serialize_ok", json != NULL);
+	if (json) {
+		FILE *f = fopen(path, "w");
+		if (f) { fputs(json, f); fclose(f); }
+		venc_config_defaults(&cfg);
+		CHECK("shm_recovery_idr_reload_ok",
+			venc_config_load(path, &cfg) == 0);
+		CHECK("shm_recovery_idr_roundtrip_true",
+			cfg.outgoing.shm_recovery_idr == true);
+		free(json);
+	}
+
+	unlink(path);
+	return failures;
+}
+
+
 int test_venc_config(void)
 {
 	int failures = 0;
@@ -1346,5 +1398,6 @@ int test_venc_config(void)
 	failures += test_save_layout_populated_round_trip();
 	failures += test_resilience_preset_expansion();
 	failures += test_detect_export_roundtrip();
+	failures += test_shm_recovery_idr_roundtrip();
 	return failures;
 }
