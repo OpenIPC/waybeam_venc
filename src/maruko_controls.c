@@ -448,7 +448,9 @@ static int maruko_apply_fps(uint32_t fps)
 			g_ctx.venc_chn, &attr);
 	}
 
-	maruko_request_idr();
+	/* No IDR here — see apply_fps() in src/star6e_controls.c.  Only the
+	 * live video0.fps write needs one; it is issued in
+	 * maruko_apply_fps_live(). */
 	printf("> FPS changed to %u (bind %u:%u)\n", fps, sensor_fps, fps);
 	return 0;
 }
@@ -459,6 +461,17 @@ static int maruko_apply_verbose(bool on)
 		*g_ctx.verbose_ptr = on ? 1 : 0;
 	printf("> Verbose %s via API\n", on ? "enabled" : "disabled");
 	return 0;
+}
+
+/* Live video0.fps write: the rebind re-creates the encoder channel, so a
+ * receiver needs a random-access point.  Star6E parity — see
+ * apply_fps_live() in src/star6e_controls.c. */
+static int maruko_apply_fps_live(uint32_t fps)
+{
+	int ret = maruko_apply_fps(fps);
+	if (ret == 0)
+		(void)maruko_request_idr();
+	return ret;
 }
 
 static int maruko_request_idr(void)
@@ -1177,7 +1190,10 @@ static int maruko_apply_output_enabled(bool on)
 			*g_ctx.stored_fps_ptr :
 			(g_ctx.vcfg ? g_ctx.vcfg->video0.fps : 30);
 		maruko_apply_fps(restored_fps);
-		maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
+		/* Exactly one recovery IDR for the enable, through the shared
+		 * gate so it is counted.  apply_fps() no longer issues its own,
+		 * so this is no longer a back-to-back pair. */
+		(void)maruko_request_idr();
 		printf("> Output enabled, FPS restored to %u\n", restored_fps);
 	} else {
 		*g_ctx.output_enabled_ptr = 0;
@@ -1203,7 +1219,9 @@ static int maruko_apply_server(const char *uri)
 	if (maruko_output_apply_server(g_maruko_output_ptr, uri) != 0)
 		return -1;
 
-	maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
+	/* A new destination is a receiver that has never seen a parameter set;
+	 * through the shared gate so it is counted like every other source. */
+	(void)maruko_request_idr();
 	printf("> Destination changed to %s\n", uri);
 	return 0;
 }
@@ -1474,7 +1492,7 @@ void maruko_controls_service_detect_reload(void)
 
 static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_bitrate = maruko_apply_bitrate,
-	.apply_fps = maruko_apply_fps,
+	.apply_fps = maruko_apply_fps_live,
 	.apply_gop = maruko_apply_gop,
 	.apply_qp_delta = maruko_apply_qp_delta,
 	.apply_roi_qp = maruko_apply_roi_qp,

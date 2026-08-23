@@ -606,10 +606,27 @@ static int apply_fps(uint32_t fps)
 			(void)apply_bitrate(cfg_kbps);
 	}
 
-	request_idr();
+	/* No IDR here.  A rebind does need one, but three of this function's
+	 * four callers do not: output-enable issues its own immediately after
+	 * (two back-to-back requests, coalesced only by luck of the 100 ms
+	 * gate), output-disable would emit one *after* the output is already
+	 * off, and the startup idle transition has no consumer at all.  Only
+	 * the live video0.fps write needs it, so it is issued there — see
+	 * apply_fps_live(). */
 	printf("> FPS delivered %u, RC fpsNum %u (bind %u:%u)\n", fps, rc_fps,
 		sensor_fps, fps);
 	return 0;
+}
+
+/* Live video0.fps write: the rebind re-creates the encoder channel, so the
+ * stream is genuinely discontinuous and a receiver needs a random-access
+ * point.  This is the one fps path that owns an IDR. */
+static int apply_fps_live(uint32_t fps)
+{
+	int ret = apply_fps(fps);
+	if (ret == 0)
+		(void)request_idr();
+	return ret;
 }
 
 static int apply_gain_max(uint32_t gain)
@@ -1754,7 +1771,7 @@ static int attitude_calibrate_level(float *roll_deg, float *pitch_deg)
 static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_bitrate = apply_bitrate,
 	.apply_qp_bounds = apply_qp_bounds,
-	.apply_fps = apply_fps,
+	.apply_fps = apply_fps_live,
 	.apply_gop = apply_gop,
 	.apply_qp_delta = apply_qp_delta,
 	.apply_roi_qp = apply_roi_qp,
