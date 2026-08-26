@@ -1468,7 +1468,9 @@ Response `200` (frame-shm ring, with the ring-fill bitrate clamp engaged):
     "oversizeDrops": 0,
     "slotCount": 8,
     "usedSlots": 2,
-    "ringLowWaterSlots": 1
+    "ringLowWaterSlots": 1,
+    "otherDrops": 0,
+    "badAuDrops": 0
   }
 }
 ```
@@ -1506,6 +1508,8 @@ Field reference:
 | `packetsSent` | Lifetime sends accepted: ring writes for SHM, datagrams for UDP/Unix |
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
+| `otherDrops` | (frame-shm only) Frames the producer discarded for a reason **other than a full ring** — an access unit it could not build at all (oversize, or a malformed SDK packet table).  Kept apart from `transportDrops` on purpose: that one is congestion the consumer is causing and a rate controller should slow down for it, this one is not congestion and slowing down fixes nothing.  Mirrored into the ring header at offset 96 so the consumer sees it too |
+| `badAuDrops` | Access units discarded because the SDK's packet table was incomplete or invalid.  Transport-independent — this happens on RTP as well — and a subset of `otherDrops` on `frame-shm` |
 | `ringLowWaterSlots` | (frame-shm only) Lowest ring occupancy reached in the last 200 ms window, **in slots**.  `<= 1` is the healthy band and `>= 2` sustained is standing backlog — venc samples just after writing, so a consumer that is keeping up still leaves exactly one frame queued.  Raw slots rather than a fraction of `slotCount`: at a 16-slot ring one slot is 62.5 permille, which truncates to 62 and converts back to 0, destroying the very reading that separates a healthy ring from a drained one.  A **measurement, not an actuator** — venc publishes it and changes nothing in response |
 
 On `unix://`, `fillPct` is measured against the *peer's* datagram queue,
@@ -1881,6 +1885,12 @@ in Notes. As of `contract_version: 0.19.0`:
     healthy here (`<= 1`), where `1000` was healthy for the clamp.  Read
     `video0.bitrate` from `/api/v1/config`; there is no longer a scaled
     "effective" rate, because nothing scales it.
+  - **New `other_drops` at ring header offset 96** (u64, producer cumulative):
+    frames the producer discarded for a reason other than a full ring.  Only
+    `full_drops` was ever published, so a consumer was structurally blind to an
+    oversize or malformed access unit — the frame simply vanished.  Deliberately
+    separate from `full_drops` because the two demand opposite responses from a
+    rate controller.  `transport/status` gains `otherDrops` and `badAuDrops`.
   - **Frame-SHM ring header is now version `2`.**  Offset 88 changed meaning:
     it carried `throttle_permille` (`1000` = unclamped) and now carries
     `low_water_slots` (ring occupancy in slots, `<= 1` healthy).  `sizeof` stays 192 and

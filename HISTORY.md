@@ -76,6 +76,21 @@ encoder behaviour only when something asks.
   rounding, and a consumer that wants a fraction already has `slot_count` at
   header offset 8.
 
+- **Producer drops that are not congestion are now visible to the consumer.**
+  Only `full_drops` ever reached the ring header. A frame the producer could
+  not build at all -- an oversize access unit, or one whose SDK packet table
+  was incomplete -- simply vanished: the malformed-AU path counted nothing
+  anywhere (one stderr WARN, latched, then silence), and the producer-side
+  oversize counters lived in process-local ring stats no consumer could
+  reach. With venc no longer self-healing, nobody downstream could tell a
+  frame had gone missing.
+
+  Header offset 96 now carries `other_drops`, kept strictly apart from
+  `full_drops`: congestion the consumer is causing calls for slowing down,
+  a frame the producer could not build does not. Malformed access units also
+  get a transport-independent per-output counter (they happen on RTP too),
+  and both surface as `otherDrops`/`badAuDrops` on `transport/status`.
+
 - **`GET /api/v1/transport/status`**: `throttlePermille` and
   `effectiveBitrateKbps` removed, `ringLowWaterSlots` added on the
   `frame-shm` branch. Read `video0.bitrate` from `/api/v1/config`; nothing
