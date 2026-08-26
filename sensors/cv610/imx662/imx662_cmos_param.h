@@ -38,8 +38,7 @@
 #define IMX662_BLACK_LEVEL   200
 
 /* ---- AWB static reference and Planckian curve -----------------------------
- * Recovered from the factory xipc, with the blue gain since corrected on
- * hardware -- see IMX662_AWB_STATIC_WB_B. The scene routine leaves
+ * Recovered verbatim from the factory xipc. The scene routine leaves
  * ref_color_temp unchanged; 4950 K follows the CV6xx sensor-driver convention
  * until the factory sensor callback itself is recovered.
  */
@@ -47,13 +46,12 @@
 #define IMX662_AWB_STATIC_WB_R     418
 #define IMX662_AWB_STATIC_WB_GR    256           /* 1.000 * 256 */
 #define IMX662_AWB_STATIC_WB_GB    256           /* 1.000 * 256 */
-/* 545 was the factory xipc value.  Measured on .181 at ~2900 K indoor: AWB
- * converged ~10% too blue against the operator's eye, and a post-CCM trim of
- * R,G x1.109 (blue down 9.8% relative, R:G held) was judged correct.  Folding
- * that into the calibration rather than trimming after the CCM keeps the
- * correction in AWB's own domain, so it tracks colour temperature instead of
- * fighting it.  545 x 0.9028 = 492.  NOTE: verified at ONE colour temperature
- * (~2900 K indoor); the daylight end is still unmeasured. */
+/* Measured ~10% too blue at ~2900 K indoor on .181 (2026-08-26).  Lowering
+ * this to 492 recovers about half of that and is the right domain for the
+ * correction, but the transfer saturates, the magnitude was never resolved
+ * above the bench's own repeatability, and it was only ever measured at one
+ * colour temperature -- so the factory value stands.  The remainder is a
+ * wb_para curve-shape problem.  Patch and data are on the tracking issue. */
 #define IMX662_AWB_STATIC_WB_B     545
 #define IMX662_AWB_P1              (-86)
 #define IMX662_AWB_P2              342
