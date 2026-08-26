@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.7`
+- `contract_version`: `0.19.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -80,7 +80,7 @@ Response `200`:
   "ok": true,
   "data": {
     "app_version": "0.67.0",
-    "contract_version": "0.18.7",
+    "contract_version": "0.19.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1468,8 +1468,7 @@ Response `200` (frame-shm ring, with the ring-fill bitrate clamp engaged):
     "oversizeDrops": 0,
     "slotCount": 8,
     "usedSlots": 2,
-    "throttlePermille": 640,
-    "effectiveBitrateKbps": 6400
+    "ringLowWaterPermille": 0
   }
 }
 ```
@@ -1507,8 +1506,7 @@ Field reference:
 | `packetsSent` | Lifetime sends accepted: ring writes for SHM, datagrams for UDP/Unix |
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
-| `throttlePermille` | (frame-shm only) Ring-fill bitrate clamp, `1000` = unclamped, `250` = floor.  A **clamp, not a veto** — `video0.bitrate` in `/api/v1/config` is never modified, so an external rate controller's writes all still succeed |
-| `effectiveBitrateKbps` | (frame-shm only) `video0.bitrate` scaled by `throttlePermille`; what the encoder is actually programmed to |
+| `ringLowWaterPermille` | (frame-shm only) Lowest ring occupancy reached in the last 200 ms window, as permille of `slotCount`.  `0` = the ring drained to empty at some point (the consumer is keeping up); `1000` = it never dropped below full (real standing backlog).  A **measurement, not an actuator** — venc publishes it and changes nothing in response |
 
 On `unix://`, `fillPct` is measured against the *peer's* datagram queue,
 which is the limit that actually blocks a sender — not the local
@@ -1526,23 +1524,32 @@ may show a full queue while the consumer is paused. The usual cause of
 unexpected pressure is a shallow `net.unix.max_dgram_qlen` — see the
 `unix://` notes in the README.
 
-A `throttlePermille` below `1000` means the consumer is not draining the ring
-fast enough for the configured bitrate.  Pinned at the floor the clamp has
-spent all its authority and drops may resume — that case is also logged once
-on entry and once on exit.  Disable with `outgoing.shmThrottle=false` (live).
+A `ringLowWaterPermille` above `0` means the ring failed to drain at some
+point in the window; at `1000` it never dropped below full and frames are
+being discarded after encode.  venc does not act on this — it is published
+for the rate controller, which on a `frame-shm://` deployment is co-located
+on the same SoC and reads the same value from the ring header.
 
-**When to disable it.** The clamp is a *second* rate controller. If something
-upstream already owns `video0.bitrate` — an adaptive-link controller, a
-congestion-control loop — two loops with different time constants are acting
-on the same actuator, and on SigmaStar every actuation costs an IDR because
-`MI_VENC_SetChnAttr` keyframes whenever the programmed rate changes (0.18.7).
-Turning the clamp off leaves ring-full drops as the backpressure signal, which
-the consumer can read directly from the ring header (`full_drops`,
-`throttle_permille`) and which a GDR stream heals within one refresh cycle.
-Measured 2026-08-23 on a SSC338Q with the consumer stopped entirely: the clamp
-walked all the way to its floor and the ring still sat at 100% with ~75
-drops/s, so in that regime it averted no drops at all and only spent rate
-changes. It earns its keep when the consumer is *slow*, not when it is gone.
+**Low-water, not peak, and the distinction is what makes it usable.**
+Measured on a Star6E at 100 fps into an 8-slot ring with a perfectly healthy
+consumer, the ring routinely spikes to 2-3 slots inside a 200 ms window and
+drains again — the consumer reads one frame per event-loop iteration, so short
+bursts are normal.  A peak-based reading calls those bursts congestion 15-25%
+of the time with nothing wrong.  Low-water asks whether the ring failed to
+drain at *any* point in the window, which is the question that discriminates
+a transient burst from standing backlog.
+
+**Why venc no longer clamps its own rate (0.19.0).** Through 0.18.7 venc ran a
+ring-fill bitrate clamp here.  It was a *second* rate controller: on a
+`frame-shm://` craft waybeam-link already owns `video0.bitrate` and already
+reads the egress ring, so two loops with different time constants acted on one
+actuator — and on SigmaStar every actuation costs an IDR, because
+`MI_VENC_SetChnAttr` keyframes whenever the programmed rate changes.  Measured
+2026-08-24 on a Star6E at 720p120: with the clamp engaged the receiver saw
+6.5 IDR/s and 100-143 ms glass-to-glass; with it off, 0.2 IDR/s and 15-37 ms.
+Ring-full drops remain the backpressure signal, readable from the ring header
+(`full_drops`, `low_water_permille`), and a GDR stream heals a chain break
+within one refresh cycle.
 
 Error `501` — backend has no transport observability hook.
 
@@ -1807,7 +1814,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.18.7`:
+in Notes. As of `contract_version: 0.19.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1832,6 +1839,45 @@ in Notes. As of `contract_version: 0.18.7`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.19.0` (**breaking** — venc stops actuating on its own egress, and the
+  frame-SHM ring header goes to v2):
+  - **Removed `outgoing.shm_throttle`** (alias `outgoing.shmThrottle`) and the
+    ring-fill bitrate clamp behind it.  venc no longer writes the encoder rate
+    in response to ring pressure at all.  On a `frame-shm://` craft the rate
+    controller (waybeam-link) is co-located, already reads the egress ring, and
+    already owns `video0.bitrate` — the clamp was a second controller on the
+    same signal, and its only actuator keyframes.  Measured 2026-08-24 on a
+    Star6E at 720p120: clamp on, 6.5 IDR/s and 100-143 ms glass-to-glass; clamp
+    off, 0.2 IDR/s and 15-37 ms.  A config carrying the key still loads; the
+    key is ignored and disappears on the next config write.
+  - **Removed the ring-full recovery IDR entirely.**  Through 0.18.7 a
+    `frame-shm://` ring-full drop asked the encoder for an IDR on a plain-GOP
+    stream.  That request fired precisely when the ring was full, so the
+    largest frame in the stream could not be delivered anyway — measured on a
+    SSC338Q with the consumer stopped, 13 IDRs in 12 s, none of which reached
+    anyone.  Recovery is now the operator-selected GOP cadence, or an explicit
+    request: `/request/idr`, or waybeam-link's §3.9 `RECOVERY_REQUEST`.  Every
+    remaining venc-issued IDR is either explicitly asked for (the endpoints,
+    the opt-in scene detector) or structural bootstrap (recorder start, live
+    fps rebind, output enable, new destination) — a receiver that has never
+    seen a parameter set has nothing to start from.
+  - **`GET /api/v1/transport/status`**: `throttlePermille` and
+    `effectiveBitrateKbps` are **removed**; `ringLowWaterPermille` is added on
+    the `frame-shm` branch.  Note the polarity is inverted — `0` is healthy
+    here, where `1000` was healthy for the clamp.  Read `video0.bitrate` from
+    `/api/v1/config`; there is no longer a scaled "effective" rate, because
+    nothing scales it.
+  - **Frame-SHM ring header is now version `2`.**  Offset 88 changed meaning:
+    it carried `throttle_permille` (`1000` = unclamped) and now carries
+    `low_water_permille` (`0` = the ring drained).  `sizeof` stays 192 and
+    nothing before offset 88 moves, but the polarity inverts, so this is a
+    hard version break by design — every consumer validates `version` and
+    refuses to attach on a mismatch rather than silently misreading the field.
+    **A v2 producer will not serve a v1 consumer:** waybeam-link, waybeam-hub
+    and radeon-vrx must be rebuilt alongside.
+  - Sidecar `TRANSPORT_INFO` trailer: `throttle_permille` returns to `_pad[2]`.
+    Trailer stays 16 bytes and later trailers keep their offsets.
+
 - `0.18.7` (behavioral — venc stops injecting IDRs of its own accord):
   A `frame-shm://` ring-full drop no longer requests a recovery IDR when the
   stream is running a rolling intra refresh (GDR).  Such a stream repairs a
@@ -2090,7 +2136,9 @@ in Notes. As of `contract_version: 0.18.7`:
     Both must be `0` (default) or a multiple of 32 (`>=64`).
   - `detect.confThresh` / `nmsIou` accept `[0, 1)` (0 = plugin default);
     `netWidth` / `netHeight` accept `0` or a `>=64` multiple of 32.
-- `0.57.0` (additive — new config field + new response fields):
+- `0.57.0` (additive — new config field + new response fields).  **All of it
+  removed again in `0.19.0`; kept here so a reader of an older device can
+  still decode what it sees.**
   - Added `outgoing.shm_throttle` (boolean, default `true`, `MUT_LIVE`,
     alias `outgoing.shmThrottle`).  Enables the `frame-shm://` ring-fill
     bitrate clamp; inert on every other transport.  Both backends.

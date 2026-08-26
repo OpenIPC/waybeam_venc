@@ -109,11 +109,10 @@ typedef struct {
 	uint32_t socket_drops;
 	uint32_t socket_writes;
 	Star6eOutputBatch batch;
-	/* Last clamp factor published by the frame-shm ring-fill throttle
-	 * (include/venc_shm_throttle.h), 1000 = unclamped.  Cached here so
-	 * the sidecar emit path can report it without reaching into the
-	 * backend control layer. */
-	uint16_t throttle_permille;
+	/* Last frame-shm ring low-water reading (permille of slot_count,
+	 * 0 = the ring drained to empty).  Cached here so the debug OSD can
+	 * report it without recomputing the window. */
+	uint16_t low_water_permille;
 	/* Transport-pressure observation cache (telemetry only — never gates
 	 * frame transmission).  Populated by star6e_output_observe_pressure
 	 * once per frame on the producer thread and read by the sidecar emit
@@ -144,30 +143,6 @@ typedef struct {
 	int svct_active;
 	uint8_t gdr_cycle_len;
 	uint8_t gdr_counter;
-	/* Recovery hook for a frame-shm:// ring-full drop.
-	 *
-	 * A full ring discards a frame that is ALREADY ENCODED, so the
-	 * decoder's reference chain breaks and it renders garbage until the
-	 * next IDR — with a long GOP, that is seconds.  The producer is the
-	 * one party that knows instantly it just broke the chain, so it
-	 * re-establishes it locally instead of waiting for the ground to
-	 * notice and ask: waybeam-link only requests an IDR on a
-	 * RecoveryRequest arriving over RF, which is a full round trip and is
-	 * off by default (venc.recovery_enabled).
-	 *
-	 * Wired to star6e_ring_request_idr(), so it inherits the shared
-	 * per-channel IDR rate limiter (100 ms) — but 10 IDRs/s into an
-	 * already-congested ring is still a storm (measured: a consumer-less
-	 * ring degraded the stream to an IDR every ~7 frames with GDR
-	 * suppressed), so this path adds its own holdoff on top:
-	 * venc_frame_drop_idr_due(), one request per second, state in
-	 * drop_idr_last_us.  Returns 1 when the IDR was actually issued, 0
-	 * when the shared limiter swallowed it — the caller then rolls the
-	 * holdoff anchor back so the next drop retries instead of leaving
-	 * the chain unhealed for up to a second. */
-	int (*request_idr)(void *ctx);
-	void *idr_ctx;
-	uint64_t drop_idr_last_us;
 	/* One WARN per pipeline start (reset by star6e_output_reset's memset)
 	 * when packet metadata is incomplete or invalid — the frame is aborted,
 	 * never shipped truncated. */
@@ -232,11 +207,11 @@ int star6e_output_is_frame_shm(const Star6eOutput *output);
  *  on the producer hot path. */
 void star6e_output_observe_pressure(Star6eOutput *output);
 
-/* Snapshot the frame-shm ring occupancy for the bitrate clamp
- * (include/venc_shm_throttle.h).  Returns -1 when the active transport is
- * not frame-shm://.  Deliberately NOT star6e_output_observe_pressure() -- that
- * one is gated on a live sidecar subscription, and the clamp is a safety
- * mechanism that must run whether or not anyone is watching. */
+/* Snapshot the frame-shm ring occupancy for the low-water measurement.
+ * Returns -1 when the active transport is not frame-shm://.  Deliberately NOT
+ * star6e_output_observe_pressure() -- that one is gated on a live sidecar
+ * subscription, and the measurement must run whether or not anyone is
+ * watching, because waybeam-link reads the result from the ring header. */
 int star6e_output_frame_ring_fill(
 	const Star6eOutput *output, venc_frame_ring_fill_t *out);
 

@@ -882,7 +882,7 @@ static int test_fr_producer_health(void)
 	memcpy(&thr, raw + 88, sizeof(thr));
 	CHECK("fr_health_magic_at_76", hm == VENC_FRAME_RING_HEALTH_MAGIC);
 	CHECK("fr_health_drops_at_80_zero", fd_drops == 0);
-	CHECK("fr_health_throttle_at_88_unclamped", thr == 1000);
+	CHECK("fr_health_low_water_at_88_drained", thr == 0);
 
 	/* Marker must be published before init_complete, so a consumer that
 	 * has attached at all always sees a coherent group. */
@@ -907,78 +907,119 @@ static int test_fr_producer_health(void)
 	memcpy(&fd_drops, raw + 80, sizeof(fd_drops));
 	CHECK("fr_health_drops_accumulate", fd_drops == 2);
 
-	/* Clamp publication. */
-	venc_frame_ring_set_throttle(r, 640);
+	/* Low-water publication at the pinned offset 88. */
+	venc_frame_ring_set_low_water(r, 640);
 	memcpy(&thr, raw + 88, sizeof(thr));
-	CHECK("fr_health_throttle_published", thr == 640);
-	venc_frame_ring_set_throttle(r, 1000);
+	CHECK("fr_health_low_water_published", thr == 640);
+	venc_frame_ring_set_low_water(r, 0);
 	memcpy(&thr, raw + 88, sizeof(thr));
-	CHECK("fr_health_throttle_released", thr == 1000);
+	CHECK("fr_health_low_water_drained", thr == 0);
 
 	/* Nothing before the new fields moved, and the header is still the
 	 * size every consumer maps. */
 	CHECK("fr_health_hdr_still_192",
 		sizeof(venc_frame_ring_hdr_t) == 192);
-	CHECK("fr_health_version_unbumped",
+	/* v2: offset 88 changed meaning (throttle clamp -> ring low-water) and
+	 * the polarity inverted with it, so consumers MUST see a version they
+	 * do not recognise rather than silently misread the field. */
+	CHECK("fr_health_version_is_2",
 		r->hdr->version == VENC_FRAME_RING_VERSION &&
-		r->hdr->version == 1);
+		r->hdr->version == 2);
 
 	venc_frame_ring_destroy(r);
 	return failures;
 }
 
 /* An attached (consumer) ring must never write the producer's fields. */
-/* The ring-full drop policy: only a REFERENCED frame breaks the decoder's
- * reference chain, so only that case may provoke a recovery IDR.  Firing one
- * for a droppable SVC-T frame would push the largest frame in the stream into
- * a ring that is already full, to repair damage that never happened. */
-static int test_fr_drop_breaks_chain(void)
+/* venc measures ring pressure and publishes it; it never acts on it.  The
+ * low-water tracker is that measurement: the lowest occupancy reached in each
+ * 200 ms window, as permille of capacity.  Low-water, not high-water, because
+ * a healthy consumer reading one frame per event-loop iteration routinely
+ * spikes the ring 2-3 slots inside a window and drains again -- high-water
+ * calls that congestion, low-water asks whether the ring failed to drain at
+ * ANY point, which is the question that discriminates. */
+static int test_fr_low_water(void)
 {
 	int failures = 0;
+	VencRingLowWater t;
 
-	CHECK("fr_chain_plain_p_breaks",
-		venc_frame_drop_breaks_chain(0) == 1);
-	CHECK("fr_chain_idr_breaks",
-		venc_frame_drop_breaks_chain(VENC_FRAME_FLAG_IDR) == 1);
-	CHECK("fr_chain_gdr_breaks",
-		venc_frame_drop_breaks_chain(VENC_FRAME_FLAG_GDR) == 1);
-	CHECK("fr_chain_enhance_safe",
-		venc_frame_drop_breaks_chain(VENC_FRAME_FLAG_ENHANCE) == 0);
-	/* Flag combinations must key off ENHANCE alone, not equality. */
-	CHECK("fr_chain_enhance_with_gdr_safe",
-		venc_frame_drop_breaks_chain(
-			VENC_FRAME_FLAG_ENHANCE | VENC_FRAME_FLAG_GDR) == 0);
-	CHECK("fr_chain_unknown_bits_break",
-		venc_frame_drop_breaks_chain(0x80) == 1);
+	/* A window that has not elapsed publishes nothing, so the header keeps
+	 * the previous window's verdict rather than flapping mid-window. */
+	venc_ring_low_water_reset(&t, 1000000);
+	venc_ring_low_water_observe(&t, 8, 8);
+	CHECK("lw_window_open_no_publish",
+		venc_ring_low_water_tick(&t, 1000000 +
+			VENC_RING_LOW_WATER_WINDOW_US - 1) == 0);
+	CHECK("lw_window_open_keeps_seed", venc_ring_low_water_permille(&t) == 0);
 
-	/* venc_frame_drop_needs_idr(): the recovery IDR is reserved for the
-	 * case with no other heal.  A GDR stream repairs a chain break within
-	 * one refresh cycle for free, so it must NOT spend an IDR; a plain
-	 * GOP stream has nothing else and must keep it -- with a long GOP the
-	 * damage otherwise persists for seconds. */
-	CHECK("fr_needs_idr_gop_plain_p",
-		venc_frame_drop_needs_idr(0, 0) == 1);
-	CHECK("fr_needs_idr_gdr_plain_p_heals_itself",
-		venc_frame_drop_needs_idr(0, 1) == 0);
-	/* The ENHANCE exemption still wins in both stream types -- nothing
-	 * predicts from a non-referenced frame, so nothing broke. */
-	CHECK("fr_needs_idr_gop_enhance_safe",
-		venc_frame_drop_needs_idr(VENC_FRAME_FLAG_ENHANCE, 0) == 0);
-	CHECK("fr_needs_idr_gdr_enhance_safe",
-		venc_frame_drop_needs_idr(VENC_FRAME_FLAG_ENHANCE, 1) == 0);
-	/* The per-frame GDR meta flag is NOT the stream-level state: a frame
-	 * can carry FLAG_GDR while the caller passes gdr_active=0 only in a
-	 * mismatched build, but the reverse -- an IDR frame inside a GDR
-	 * stream -- is normal, and the stream state is what decides. */
-	CHECK("fr_needs_idr_gdr_stream_idr_frame",
-		venc_frame_drop_needs_idr(VENC_FRAME_FLAG_IDR, 1) == 0);
-	CHECK("fr_needs_idr_gop_stream_idr_frame",
-		venc_frame_drop_needs_idr(VENC_FRAME_FLAG_IDR, 0) == 1);
-	CHECK("fr_needs_idr_unknown_bits_gop",
-		venc_frame_drop_needs_idr(0x80, 0) == 1);
+	/* A ring that never dropped below full across the whole window is real
+	 * standing backlog: 8/8 slots -> 1000. */
+	CHECK("lw_full_window_publishes",
+		venc_ring_low_water_tick(&t, 1000000 +
+			VENC_RING_LOW_WATER_WINDOW_US) == 1);
+	CHECK("lw_full_window_is_1000",
+		venc_ring_low_water_permille(&t) == 1000);
 
-	/* End-to-end: a full ring must actually reject, which is the event
-	 * the policy hangs off.  8 slots, 9th write fails. */
+	/* One touch of bottom anywhere in the window clears it, however deep
+	 * the spikes around it were -- that is the whole point of low-water. */
+	venc_ring_low_water_observe(&t, 7, 8);
+	venc_ring_low_water_observe(&t, 0, 8);
+	venc_ring_low_water_observe(&t, 8, 8);
+	CHECK("lw_touched_bottom_publishes",
+		venc_ring_low_water_tick(&t, 1000000 +
+			2 * VENC_RING_LOW_WATER_WINDOW_US) == 1);
+	CHECK("lw_touched_bottom_is_0",
+		venc_ring_low_water_permille(&t) == 0);
+
+	/* The minimum is what is reported, not the last sample. */
+	venc_ring_low_water_observe(&t, 6, 8);
+	venc_ring_low_water_observe(&t, 2, 8);
+	venc_ring_low_water_observe(&t, 5, 8);
+	CHECK("lw_reports_minimum",
+		venc_ring_low_water_tick(&t, 1000000 +
+			3 * VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
+		venc_ring_low_water_permille(&t) == 250);
+
+	/* Each window starts clean: last window's minimum must not leak into
+	 * the next one, or a single good window would mask a standing backlog
+	 * forever. */
+	venc_ring_low_water_observe(&t, 8, 8);
+	CHECK("lw_window_resets_between",
+		venc_ring_low_water_tick(&t, 1000000 +
+			4 * VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
+		venc_ring_low_water_permille(&t) == 1000);
+
+	/* A window with no observations at all (no frames encoded) reports an
+	 * empty ring rather than inheriting the previous verdict -- nothing is
+	 * queued, which is true. */
+	CHECK("lw_idle_window_is_0",
+		venc_ring_low_water_tick(&t, 1000000 +
+			5 * VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
+		venc_ring_low_water_permille(&t) == 0);
+
+	/* Degenerate geometry must not divide by zero. */
+	venc_ring_low_water_reset(&t, 0);
+	venc_ring_low_water_observe(&t, 0, 0);
+	CHECK("lw_zero_slot_count_safe",
+		venc_ring_low_water_tick(&t, VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
+		venc_ring_low_water_permille(&t) == 0);
+
+	/* Occupancy above capacity (a torn read across a resize) clamps rather
+	 * than reporting more than 1000. */
+	venc_ring_low_water_reset(&t, 0);
+	venc_ring_low_water_observe(&t, 99, 8);
+	CHECK("lw_over_capacity_clamps",
+		venc_ring_low_water_tick(&t, VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
+		venc_ring_low_water_permille(&t) == 1000);
+
+	/* NULL is inert in every direction. */
+	venc_ring_low_water_reset(NULL, 0);
+	venc_ring_low_water_observe(NULL, 1, 8);
+	CHECK("lw_null_tick_safe", venc_ring_low_water_tick(NULL, 0) == 0);
+	CHECK("lw_null_read_safe", venc_ring_low_water_permille(NULL) == 0);
+
+	/* End-to-end: a full ring must actually reject, which is the event the
+	 * measurement hangs off.  8 slots, 9th write fails. */
 	{
 		venc_frame_ring_t *r = venc_frame_ring_create("test_fr_dropc",
 			8, 4096);
@@ -1004,36 +1045,6 @@ static int test_fr_drop_breaks_chain(void)
 		}
 	}
 
-	/* The recovery-IDR holdoff: a consumer-less ring drops EVERY frame,
-	 * and unpaced requests degraded the stream to an IDR every ~7 frames
-	 * with GDR suppressed (measured on star6e, 2026-08-20).  One request
-	 * per second heals a live consumer's transient drop; a storm of
-	 * drops within the window coalesces to that one. */
-	{
-		uint64_t last = 0;
-
-		CHECK("fr_idr_first_drop_fires",
-			venc_frame_drop_idr_due(&last, 5000000) == 1);
-		CHECK("fr_idr_within_holdoff_quiet",
-			venc_frame_drop_idr_due(&last, 5000001) == 0);
-		CHECK("fr_idr_just_under_holdoff_quiet",
-			venc_frame_drop_idr_due(&last,
-				5000000 + VENC_FRAME_DROP_IDR_HOLDOFF_US -
-				1) == 0);
-		CHECK("fr_idr_at_holdoff_fires",
-			venc_frame_drop_idr_due(&last,
-				5000000 + VENC_FRAME_DROP_IDR_HOLDOFF_US)
-				== 1);
-		/* A quiet probe must not advance the window. */
-		CHECK("fr_idr_quiet_probe_keeps_anchor",
-			venc_frame_drop_idr_due(&last,
-				6000000 + VENC_FRAME_DROP_IDR_HOLDOFF_US -
-				1) == 0 &&
-			venc_frame_drop_idr_due(&last,
-				6000000 + VENC_FRAME_DROP_IDR_HOLDOFF_US)
-				== 1);
-	}
-
 	return failures;
 }
 
@@ -1053,12 +1064,12 @@ static int test_fr_health_consumer_readonly(void)
 		return failures;
 	}
 
-	venc_frame_ring_set_throttle(w, 500);
-	venc_frame_ring_set_throttle(rd, 250);   /* must be ignored */
+	venc_frame_ring_set_low_water(w, 500);
+	venc_frame_ring_set_low_water(rd, 250);   /* must be ignored */
 	CHECK("fr_health_ro_consumer_ignored",
-		w->hdr->throttle_permille == 500);
+		w->hdr->low_water_permille == 500);
 	CHECK("fr_health_ro_consumer_reads",
-		rd->hdr->throttle_permille == 500);
+		rd->hdr->low_water_permille == 500);
 	CHECK("fr_health_ro_consumer_sees_magic",
 		rd->hdr->health_magic == VENC_FRAME_RING_HEALTH_MAGIC);
 
@@ -1098,7 +1109,7 @@ int test_venc_frame_ring(void)
 	failures += test_fr_double_begin();
 	failures += test_fr_producer_health();
 	failures += test_fr_health_consumer_readonly();
-	failures += test_fr_drop_breaks_chain();
+	failures += test_fr_low_water();
 
 	return failures;
 }

@@ -3,15 +3,6 @@
 
 #include <string.h>
 
-static int g_recovery_calls;
-
-static int recovery_stub(void *ctx)
-{
-	(void)ctx;
-	g_recovery_calls++;
-	return 1;
-}
-
 int test_maruko_video(void)
 {
 	MarukoOutput output;
@@ -68,21 +59,17 @@ int test_maruko_video(void)
 	CHECK("maruko packetInfo table overflow rejected",
 		!maruko_video_stream_packet_info_complete(&stream));
 
-	output.request_idr = recovery_stub;
-	g_recovery_calls = 0;
+	/* An invalid AU is rejected every time and actuates nothing -- the
+	 * decision to ask for a keyframe belongs to the consumer, which is
+	 * the only party that can see whether the decoder is broken. */
 	CHECK("maruko invalid AU rejected",
 		maruko_video_reject_incomplete_access_unit(&stream, &output) == 1);
-	CHECK("maruko invalid AU requests recovery", g_recovery_calls == 1);
-	CHECK("maruko invalid AU recovery paced",
-		maruko_video_reject_incomplete_access_unit(&stream, &output) == 1 &&
-		g_recovery_calls == 1);
-
-	output.drop_idr_last_us = 0;
+	CHECK("maruko invalid AU rejected again",
+		maruko_video_reject_incomplete_access_unit(&stream, &output) == 1);
 	output.svct_active = 1;
 	stream.h265Info.refType = MARUKO_REFTYPE_ENHANCE_P_NOTFORREF;
-	CHECK("maruko droppable invalid AU skips recovery",
-		maruko_video_reject_incomplete_access_unit(&stream, &output) == 1 &&
-		g_recovery_calls == 1);
+	CHECK("maruko droppable invalid AU still rejected",
+		maruko_video_reject_incomplete_access_unit(&stream, &output) == 1);
 
 	return failures;
 }

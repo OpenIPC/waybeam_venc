@@ -97,7 +97,7 @@ venc_frame_ring_t *venc_frame_ring_create(const char *shm_name,
 	 * last, and the whole group before init_complete -- a consumer must
 	 * never see VHLT set over uninitialised counters. */
 	hdr->full_drops = 0;
-	hdr->throttle_permille = 1000;
+	hdr->low_water_permille = 0;
 	__atomic_store_n(&hdr->health_magic, VENC_FRAME_RING_HEALTH_MAGIC,
 		__ATOMIC_RELEASE);
 

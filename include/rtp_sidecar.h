@@ -176,14 +176,12 @@ typedef struct {
 typedef struct {
 	uint8_t  fill_pct;          /* output queue fill: 0..100              */
 	uint8_t  in_pressure;       /* 1 = pressure hysteresis flag asserted  */
-	uint16_t throttle_permille; /* frame-shm ring-fill bitrate clamp:
-	                             * 1000 = unclamped, 50 = minimum.  Carved
-	                             * from the old _pad[2] in 0.57.0, so the
-	                             * trailer is still 16 bytes and every
-	                             * later trailer keeps its offset.  A
-	                             * pre-0.57 producer sends 0 here, which
-	                             * consumers MUST read as "not reported"
-	                             * rather than "clamped to nothing".      */
+	uint8_t  _pad[2];           /* 0.57.0-0.68.x carried throttle_permille
+	                             * here; 0.69.0 removed venc's rate clamp,
+	                             * so it is reserved again.  Kept as pad
+	                             * rather than reclaimed: the trailer must
+	                             * stay 16 bytes or every later trailer
+	                             * relocates for existing consumers.      */
 	uint32_t transport_drops;   /* drops at the transport layer (low 32)  */
 	uint32_t pressure_drops;    /* frames the producer observed in
 	                             * pressure (was "frames skipped" pre-
@@ -218,8 +216,8 @@ typedef struct {
  * finds ATTITUDE by skipping ENC_INFO and TRANSPORT_INFO.  So growing an
  * earlier trailer silently relocates every later one for every existing
  * consumer.  0.57.0 carved TRANSPORT_INFO's _pad[2] into throttle_permille
- * precisely because that keeps the size fixed; pin it so the next such
- * change has to be deliberate. */
+ * and 0.69.0 returned it to pad, both times keeping the size fixed; pin it so
+ * the next such change has to be deliberate. */
 _Static_assert(sizeof(RtpSidecarEncInfoWire) == 12,
 	"RtpSidecarEncInfoWire must stay 12 bytes (trailer offsets)");
 _Static_assert(sizeof(RtpSidecarTransportInfoWire) == 16,
@@ -314,7 +312,6 @@ typedef struct {
 typedef struct {
 	uint8_t  fill_pct;
 	uint8_t  in_pressure;
-	uint16_t throttle_permille;  /* 0 = not applicable / not reported */
 	uint32_t transport_drops;
 	uint32_t pressure_drops;
 	uint32_t packets_sent;

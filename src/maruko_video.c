@@ -50,24 +50,6 @@ int maruko_video_stream_packet_info_complete(const i6c_venc_strm *stream)
 	return 1;
 }
 
-static void maruko_recover_dropped_access_unit(const i6c_venc_strm *stream,
-	MarukoOutput *output)
-{
-	uint8_t flags = 0;
-
-	if (!stream || !output)
-		return;
-	if (output->svct_active &&
-	    stream->h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF)
-		flags |= VENC_FRAME_FLAG_ENHANCE;
-	if (venc_frame_drop_needs_idr(flags, output->gdr_active) &&
-	    output->request_idr &&
-	    venc_frame_drop_idr_due(&output->drop_idr_last_us,
-		wb_monotonic_us()) &&
-	    output->request_idr(output->idr_ctx) == 0)
-		output->drop_idr_last_us = 0;
-}
-
 int maruko_video_reject_incomplete_access_unit(const i6c_venc_strm *stream,
 	MarukoOutput *output)
 {
@@ -79,7 +61,6 @@ int maruko_video_reject_incomplete_access_unit(const i6c_venc_strm *stream,
 			"WARN: Maruko packetInfo table is incomplete or invalid; "
 			"dropping whole access unit\n");
 	}
-	maruko_recover_dropped_access_unit(stream, output);
 	return 1;
 }
 
@@ -385,18 +366,8 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 	    stream->h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF)
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
-	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0) {
-		if (venc_frame_drop_needs_idr(meta.flags, output->gdr_active) &&
-		    output->request_idr &&
-		    venc_frame_drop_idr_due(&output->drop_idr_last_us,
-					    wb_monotonic_us()) &&
-		    output->request_idr(output->idr_ctx) == 0) {
-			/* Swallowed by the shared 100 ms limiter — roll the
-			 * holdoff back so the next drop retries. */
-			output->drop_idr_last_us = 0;
-		}
+	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0)
 		return 0;
-	}
 
 	for (i = 0; i < stream->count; ++i) {
 		const i6c_venc_pack *pack = &stream->packet[i];
@@ -419,8 +390,6 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 				if (venc_frame_ring_append(frame_ring,
 				    pack->data + offset, length) != 0) {
 					venc_frame_ring_abort_write(frame_ring);
-					maruko_recover_dropped_access_unit(stream,
-						output);
 					return 0;
 				}
 				total_bytes += length;
@@ -434,7 +403,6 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 			if (venc_frame_ring_append(frame_ring,
 			    pack->data + pack->offset, length) != 0) {
 				venc_frame_ring_abort_write(frame_ring);
-				maruko_recover_dropped_access_unit(stream, output);
 				return 0;
 			}
 			total_bytes += length;

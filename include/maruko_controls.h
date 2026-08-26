@@ -22,14 +22,6 @@ const VencConfig *maruko_controls_vcfg(void);
  * thread.  The HTTP callback only posts a coherent config snapshot. */
 void maruko_controls_service_detect_reload(void);
 
-/** Publish the frame-shm ring-fill clamp factor (permille, 50..1000) and
- *  re-program the encoder from the configured bitrate scaled by it.  Mirrors
- *  star6e_controls_set_output_throttle; video0.bitrate is never written. */
-int maruko_controls_set_output_throttle(uint16_t permille);
-
-/** Current clamp factor in permille (1000 = unclamped). */
-uint16_t maruko_controls_output_throttle(void);
-
 /** Compact AE/AWB live status for the debug OSD.  Gains are in SDK x1024
  * units (1024 = 1.0x), color_temp in Kelvin.  Validity flags gate their
  * field groups: ae_valid covers shutter/gains (sensor-plane fallback);

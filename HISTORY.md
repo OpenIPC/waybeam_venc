@@ -1,5 +1,78 @@
 # History
 
+## [0.69.0] - 2026-08-26
+
+venc stops actuating on its own egress. Contract `0.18.7` -> `0.19.0`.
+**Breaking**: one config key removed, two `transport/status` fields removed,
+and the frame-SHM ring header goes to **version 2**. A v2 producer will not
+serve a v1 consumer -- waybeam-link, waybeam-hub and radeon-vrx must be
+rebuilt alongside.
+
+The principle: **venc is a sensor and an actuator-on-request, never a
+controller.** It measures egress pressure and publishes it; it changes
+encoder behaviour only when something asks.
+
+- **Removed the frame-shm ring-fill bitrate clamp** and its config key
+  `outgoing.shmThrottle`. On a `frame-shm://` craft the rate controller
+  (waybeam-link) runs on the same SoC, already reads the egress ring, and
+  already owns `video0.bitrate` -- so the clamp was a second controller on
+  the same input signal, and its only actuator keyframes
+  (`MI_VENC_SetChnAttr` emits an IDR on every real rate change).
+
+  Measured by @vertexodessa on a Star6E, 720p120, ~11 Mbps, 2026-08-24:
+
+  | | clamp on | clamp off |
+  |---|---|---|
+  | IDR rate at receiver | 6.5 /sec | 0.2 /sec |
+  | glass-to-glass | ~100-143 ms | **~15-37 ms** |
+  | ring read latency | 40-120 ms | **1-9 ms** |
+
+  A config still carrying the key loads fine; the key is ignored and
+  disappears on the next config write.
+
+- **Removed the ring-full recovery IDR entirely**, for GOP as well as GDR.
+  It fired precisely when the ring was full, so the largest frame in the
+  stream could not be delivered anyway -- measured on a SSC338Q with the
+  consumer stopped, 13 IDRs in 12 s, none of which reached anyone. Recovery
+  is now the operator-selected GOP cadence, or an explicit request:
+  `/request/idr`, or waybeam-link's §3.9 `RECOVERY_REQUEST`.
+
+  Known gap, stated rather than hidden: waybeam-link's §3.9 currently arms
+  only on stream latch, not on mid-stream damage, and `venc.recovery_enabled`
+  defaults false. Until that is wired to the receiver's existing damage
+  signal, a mid-flight ring-full drop on a **plain-GOP** stream has no
+  automatic heal until the next GOP boundary. GDR (`resilience=racing`), the
+  flight configuration, heals within one refresh cycle as before.
+
+- **Ring header v2 -- offset 88 changed meaning.** `throttle_permille`
+  (`1000` = unclamped) becomes `low_water_permille` (`0` = the ring drained
+  to empty at some point in the last 200 ms window, `1000` = it never
+  dropped below full). `sizeof` stays 192 and nothing before offset 88
+  moves, but **the polarity inverts**, so this is a deliberate hard version
+  break: consumers validate `version` and refuse to attach rather than
+  silently misread a healthy ring as a catastrophic clamp.
+
+  Low-water rather than peak, and that is the measured choice: on a Star6E
+  at 100 fps into an 8-slot ring with a healthy consumer, the ring routinely
+  spikes 2-3 slots inside a window and drains again, so a peak reading calls
+  that congestion 15-25% of the time with nothing wrong. Low-water asks
+  whether the ring failed to drain at *any* point, which is what separates a
+  transient burst from standing backlog. The consumer cannot derive it
+  itself -- it can sample occupancy any time, but the low-water mark
+  *between* its own reads is producer-side knowledge.
+
+- **`GET /api/v1/transport/status`**: `throttlePermille` and
+  `effectiveBitrateKbps` removed, `ringLowWaterPermille` added on the
+  `frame-shm` branch. Read `video0.bitrate` from `/api/v1/config`; nothing
+  scales it any more.
+
+- Sidecar `TRANSPORT_INFO`: `throttle_permille` returns to `_pad[2]`.
+  Trailer stays 16 bytes; later trailers keep their offsets.
+
+- Debug OSD: the `thr<n>%` bitrate annotation becomes `ring<n>%`, showing
+  ring low-water when the ring did not drain, so a stuttering picture
+  separates "the consumer is behind" from "the encoder is behind".
+
 ## [0.68.1] - 2026-08-23
 
 venc stops injecting IDRs of its own accord. Contract `0.18.6` -> `0.18.7`.

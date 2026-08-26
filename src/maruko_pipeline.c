@@ -30,7 +30,6 @@
 #include "venc_api.h"
 #include "venc_httpd.h"
 #include "venc_jpeg.h"
-#include "venc_shm_throttle.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -1971,23 +1970,6 @@ void maruko_pipeline_ref_pred_status(MarukoRefPredStatus *out)
 	pthread_mutex_unlock(&g_ref_pred_status_mutex);
 }
 
-/* frame-shm:// ring-full recovery: re-establish the reference chain the drop
- * just broke.  Gated by the shared per-channel IDR rate limiter so a
- * persistently full ring coalesces instead of firing keyframes into the ring
- * that is already congested.  Mirrors star6e_scene_request_idr(). */
-static int maruko_ring_request_idr(void *vctx)
-{
-	MarukoBackendContext *ctx = (MarukoBackendContext *)vctx;
-
-	if (!ctx)
-		return 0;
-	if (!idr_rate_limit_allow(ctx->venc_channel))
-		return 0;
-	maruko_mi_venc_request_idr(ctx->venc_device,
-		ctx->venc_channel, 1);
-	return 1;
-}
-
 static int maruko_apply_ref_pred(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	const MarukoBackendConfig *cfg)
 {
@@ -2543,8 +2525,6 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		return -1;
 	ctx->venc_started = 1;
 
-	ctx->output.request_idr = maruko_ring_request_idr;
-	ctx->output.idr_ctx = ctx;
 	maruko_update_output_resilience_flags(ctx);
 
 	MI_U32 venc_device = (MI_U32)ctx->venc_device;
@@ -3054,17 +3034,6 @@ static void *maruko_dual_stream_thread(void *arg)
 				incomplete_warned = 1;
 				fprintf(stderr, "WARN: [maruko][dual] invalid packetInfo; "
 					"dropping whole access unit\n");
-			}
-			if (!(d->output.svct_active &&
-			    stream.h265Info.refType ==
-				MARUKO_REFTYPE_ENHANCE_P_NOTFORREF) &&
-			    venc_frame_drop_idr_due(&d->output.drop_idr_last_us,
-				wb_monotonic_us())) {
-				if (idr_rate_limit_allow(d->channel))
-					(void)maruko_mi_venc_request_idr(
-						ctx->venc_device, d->channel, 1);
-				else
-					d->output.drop_idr_last_us = 0;
 			}
 			(void)maruko_mi_venc_release_stream(ctx->venc_device,
 				d->channel, &stream);
@@ -4066,80 +4035,43 @@ static void maruko_patch_stream_to_trail_n(i6c_venc_strm *s)
  * g_osd_enc_bytes in star6e_runtime.c. */
 static uint64_t g_osd_enc_bytes;
 
-/* frame-shm ring-fill bitrate clamp state — byte-symmetric with the Star6E
- * side (src/star6e_runtime.c star6e_service_shm_throttle).  Both backends
- * share one control law on purpose: a per-backend divergence in shared
- * behaviour is a standing drift trap in this repo. */
-static VencShmThrottle g_shm_throttle;
-static int g_shm_throttle_ready;
-/* Last factor successfully programmed into the encoder. */
-static uint16_t g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+/* frame-shm ring low-water measurement — byte-symmetric with the Star6E side
+ * (src/star6e_runtime.c star6e_service_ring_low_water).  Both backends share
+ * one definition on purpose: a per-backend divergence in shared behaviour is a
+ * standing drift trap in this repo. */
+static VencRingLowWater g_ring_low_water;
+static int g_ring_low_water_ready;
 
-static void maruko_service_shm_throttle(MarukoOutput *output,
-	const VencConfig *vcfg)
+static void maruko_service_ring_low_water(MarukoOutput *output)
 {
 	venc_frame_ring_fill_t fill;
 	uint64_t now_us;
-	uint16_t want;
-	int edge;
 
-	if (!output || !vcfg)
+	if (!output)
 		return;
 	if (maruko_output_frame_ring_fill(output, &fill) != 0) {
-		/* Release the clamp on a transport switch away from
-		 * frame-shm — see the star6e_runtime equivalent. */
-		g_shm_throttle_ready = 0;
-		output->throttle_permille = 0;  /* 0 = not reported */
-		if (g_applied_permille != VENC_SHM_THROTTLE_FULL_PERMILLE &&
-		    maruko_controls_set_output_throttle(
-			VENC_SHM_THROTTLE_FULL_PERMILLE) == 0)
-			g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+		/* Transport switch away from frame-shm — see the
+		 * star6e_runtime equivalent. */
+		g_ring_low_water_ready = 0;
+		output->low_water_permille = 0;
 		return;
 	}
 
 	now_us = wb_monotonic_us();
-	if (!g_shm_throttle_ready) {
-		venc_shm_throttle_reset(&g_shm_throttle, now_us);
-		g_shm_throttle_ready = 1;
+	if (!g_ring_low_water_ready) {
+		venc_ring_low_water_reset(&g_ring_low_water, now_us);
+		g_ring_low_water_ready = 1;
 	}
 
-	venc_shm_throttle_set_enabled(&g_shm_throttle,
-		vcfg->outgoing.shm_throttle, now_us);
-	venc_shm_throttle_observe(&g_shm_throttle, fill.used_slots,
-		fill.full_drops);
-	(void)venc_shm_throttle_tick(&g_shm_throttle, now_us);
+	venc_ring_low_water_observe(&g_ring_low_water, fill.used_slots,
+		fill.slot_count);
+	if (venc_ring_low_water_tick(&g_ring_low_water, now_us)) {
+		uint16_t permille =
+			venc_ring_low_water_permille(&g_ring_low_water);
 
-	/* Applied-value comparison, not tick()'s flag — see the
-	 * star6e_runtime equivalent for why the retry matters. */
-	want = venc_shm_throttle_permille(&g_shm_throttle);
-	/* Deadband the apply — Star6E parity, see star6e_service_shm_throttle()
-	 * and venc_shm_throttle_should_apply(). */
-	if (g_shm_throttle.apply_retry ||
-	    venc_shm_throttle_should_apply(want, g_applied_permille)) {
-		if (maruko_controls_set_output_throttle(want) == 0) {
-			g_applied_permille = want;
-			g_shm_throttle.apply_retry = 0;
-		} else {
-			g_shm_throttle.apply_retry = 1;
-		}
+		output->low_water_permille = permille;
+		venc_frame_ring_set_low_water(output->frame_ring, permille);
 	}
-	output->throttle_permille = want;
-	/* Publish into the ring header so the consumer can see that the
-	 * producer has already reduced its own rate -- below 1000 is
-	 * direct evidence that the consumer's rate model is optimistic
-	 * (protocols/frame-shm.md). */
-	venc_frame_ring_set_throttle(output->frame_ring, want);
-
-	edge = venc_shm_throttle_floor_edge(&g_shm_throttle);
-	if (edge > 0)
-		fprintf(stderr,
-			"WARNING: [maruko] shm throttle pinned at floor %u%% "
-			"— the consumer is not draining\n",
-			VENC_SHM_THROTTLE_FLOOR_PERMILLE / 10);
-	else if (edge < 0)
-		/* stderr for the same buffering reason as star6e_runtime. */
-		fprintf(stderr,
-			"> [maruko] shm throttle left the floor, recovering\n");
 }
 
 static uint32_t maruko_osd_box_px(float v, uint32_t canvas, uint32_t net)
@@ -4281,12 +4213,12 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		{
 			/* See the star6e_runtime equivalent. */
 			char osd_thr[16];
-			unsigned int thr = ctx->output.throttle_permille;
+			unsigned int lw = ctx->output.low_water_permille;
 
 			osd_thr[0] = '\0';
-			if (thr > 0 && thr < VENC_SHM_THROTTLE_FULL_PERMILLE)
-				snprintf(osd_thr, sizeof(osd_thr), " thr%u%%",
-					thr / 10);
+			if (lw > 0)
+				snprintf(osd_thr, sizeof(osd_thr), " ring%u%%",
+					lw / 10);
 			debug_osd_text(ctx->debug_osd, 4, "br", "%u/%uk%s",
 				osd_kbps, ctx->cfg.venc_max_rate, osd_thr);
 		}
@@ -4467,10 +4399,9 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			&rt->rtp_state, &rt->param_sets, &ctx->cfg,
 			MARUKO_PKTZR_VERBOSE_ACTIVE(ctx) ? &frame_pktzr : NULL);
 
-		/* frame-shm ring-fill bitrate clamp — see the matching call
-		 * in star6e_runtime.c.  Unconditional by design. */
-		maruko_service_shm_throttle(&ctx->output,
-			maruko_controls_vcfg());
+		/* frame-shm ring low-water measurement — see the matching
+		 * call in star6e_runtime.c.  Unconditional by design. */
+		maruko_service_ring_low_water(&ctx->output);
 	}
 
 	/* Mirror mode: write chn 0 frames to whichever recorder is active
@@ -4569,8 +4500,6 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			tinfo.fill_pct = ctx->output.last_fill_pct;
 			tinfo.in_pressure = ctx->output.in_pressure ? 1 : 0;
 			tinfo.pressure_drops = ctx->output.pressure_drops;
-			/* frame-shm only; 0 elsewhere = "not reported". */
-			tinfo.throttle_permille = ctx->output.throttle_permille;
 			tinfo.transport_drops = ctx->output.last_full_drops;
 			tinfo.packets_sent = ctx->output.last_writes;
 			tinfo_ptr = &tinfo;

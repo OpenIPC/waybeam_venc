@@ -65,7 +65,6 @@ typedef struct {
 	uint64_t bytes;
 	uint64_t output_drops;
 	uint64_t packets_sent;
-	uint64_t drop_idr_last_us;
 	uint8_t gdr_active;
 	uint8_t gdr_cycle_len;
 	uint8_t gdr_counter;
@@ -267,17 +266,6 @@ static int cv610_request_idr(void)
 		return 0;
 	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
 		? 0 : -1;
-}
-
-/* Ring-drop recovery form: unlike the public callback, report whether the
- * request actually passed the shared limiter so the one-second holdoff can
- * retry a coalesced request on the next chain-breaking drop. */
-static int cv610_ring_request_idr(void)
-{
-	if (!idr_rate_limit_allow(CV610_VENC_CHN))
-		return 0;
-	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
-		? 1 : 0;
 }
 
 static uint32_t cv610_query_live_fps(void)
@@ -1179,16 +1167,9 @@ static int cv610_run(void *opaque)
 				}
 				write_ret = venc_frame_ring_write(ctx->frame_ring, &meta,
 					frame, (uint32_t)frame_len);
-				if (write_ret != 0) {
+				if (write_ret != 0)
 					__atomic_add_fetch(&ctx->output_drops, 1,
 						__ATOMIC_RELAXED);
-					if (venc_frame_drop_needs_idr(meta.flags,
-						ctx->gdr_active) &&
-					    venc_frame_drop_idr_due(&ctx->drop_idr_last_us,
-						wb_monotonic_us()) &&
-					    cv610_ring_request_idr() == 0)
-						ctx->drop_idr_last_us = 0;
-				}
 			} else if (ctx->socket_handle >= 0) {
 				/* cv610_output_write owns per-datagram drop accounting. */
 				(void)cv610_send_rtp_frame(ctx, frame, frame_len);

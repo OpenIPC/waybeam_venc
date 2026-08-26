@@ -15,7 +15,6 @@
 #include "venc_config.h"
 #include "venc_api.h"
 #include "venc_jpeg.h"
-#include "venc_shm_throttle.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -204,11 +203,6 @@ static int maruko_apply_rc_qp_delta(const i6c_venc_chn *attr, MI_VENC_RcParam_t 
 
 /* ── Basic controls (existing) ───────────────────────────────────────── */
 
-/* Published clamp factor from the frame-shm ring-fill throttle
- * (include/venc_shm_throttle.h).  Byte-symmetric with the Star6E side —
- * same ring geometry, same control law, same authority rules. */
-static uint16_t g_output_throttle_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
-
 /* No IDR request on bitrate writes — see the matching note in
  * src/star6e_controls.c apply_bitrate() for the measurement.  Compile-tested
  * only here: Maruko was unreachable, so whether i6c set_chn_attr keyframes
@@ -219,11 +213,6 @@ static int maruko_apply_bitrate(uint32_t kbps)
 	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
 	    g_ctx.venc_chn, &attr) != 0)
 		return -1;
-	/* Clamp first, absolute rails last — same pinned order as Star6E
-	 * (Maruko has no >120 fps CBR compensation step in between). */
-	kbps = venc_shm_throttle_scale(
-		__atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED),
-		kbps);
 	if (kbps > VENC_BITRATE_MAX_KBPS)
 		kbps = VENC_BITRATE_MAX_KBPS;
 	if (kbps < VENC_BITRATE_MIN_KBPS)
@@ -249,27 +238,6 @@ static int maruko_apply_bitrate(uint32_t kbps)
 	    g_ctx.venc_chn, &attr) != 0)
 		return -1;
 	return 0;
-}
-
-int maruko_controls_set_output_throttle(uint16_t permille)
-{
-	uint32_t cfg_kbps;
-	int rc;
-
-	__atomic_store_n(&g_output_throttle_permille, permille,
-		__ATOMIC_RELAXED);
-
-	if (!venc_api_cfg_trylock())
-		return -1;  /* config transaction in flight; retry next window */
-	cfg_kbps = g_ctx.vcfg ? g_ctx.vcfg->video0.bitrate : 0;
-	rc = cfg_kbps > 0 ? maruko_apply_bitrate(cfg_kbps) : 0;
-	venc_api_cfg_unlock();
-	return rc;
-}
-
-uint16_t maruko_controls_output_throttle(void)
-{
-	return __atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED);
 }
 
 static int maruko_apply_gop(uint32_t gop_size)
@@ -1270,9 +1238,6 @@ static char *maruko_query_transport_status(void)
 	const char *transport;
 	int pos;
 	uint32_t pressure_drops;
-	/* Clamp state — see the star6e_controls equivalent. */
-	uint16_t permille = maruko_controls_output_throttle();
-	uint32_t cfg_kbps = g_ctx.vcfg ? g_ctx.vcfg->video0.bitrate : 0;
 
 	if (!backend)
 		return NULL;
@@ -1331,8 +1296,7 @@ static char *maruko_query_transport_status(void)
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
 			"\"usedSlots\":%u,"
-			"\"throttlePermille\":%u,"
-			"\"effectiveBitrateKbps\":%u}}",
+			"\"ringLowWaterPermille\":%u}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1342,8 +1306,7 @@ static char *maruko_query_transport_status(void)
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
 			(unsigned)fill.used_slots,
-			(unsigned)permille,
-			(unsigned)venc_shm_throttle_scale(permille, cfg_kbps));
+			(unsigned)backend->output.low_water_permille);
 	} else if ((backend->output.transport == VENC_OUTPUT_URI_UNIX ||
 	            backend->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           backend->output.socket_handle >= 0) {

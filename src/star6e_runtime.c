@@ -27,7 +27,6 @@
 #include "venc_config.h"
 #include "venc_httpd.h"
 #include "venc_respawn.h"
-#include "venc_shm_throttle.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -746,13 +745,6 @@ static void *dual_rec_thread_fn(void *arg)
 				fprintf(stderr, "WARN: [dual] invalid packetInfo; "
 					"dropping whole access unit\n");
 			}
-			if (!(d->output.svct_active &&
-			    stream.h265Info.refType ==
-				STAR6E_REFTYPE_ENHANCE_P_NOTFORREF) &&
-			    venc_frame_drop_idr_due(&d->output.drop_idr_last_us,
-				wb_monotonic_us()) &&
-			    star6e_ring_request_idr(&d->channel) == 0)
-				d->output.drop_idr_last_us = 0;
 			MI_VENC_ReleaseStream(d->channel, &stream);
 			continue;
 		}
@@ -888,14 +880,6 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		printf("> Output disabled at startup, idling at %u fps\n",
 			STAR6E_CONTROLS_IDLE_FPS);
 	}
-
-	/* Let a frame-shm:// ring-full drop re-establish the reference chain
-	 * locally.  Same rate-limited primitive the scene detector uses, so
-	 * both producers of forced IDRs coalesce through one 100 ms window.
-	 * Set here rather than in the pipeline because the callback is
-	 * runtime-local; safe against pipeline restarts, which re-run this. */
-	ps->output.request_idr = star6e_ring_request_idr;
-	ps->output.idr_ctx = &ps->venc_channel;
 
 	star6e_recorder_init(&ps->recorder);
 	audio_ring_init(&ps->audio_ring);
@@ -1084,98 +1068,50 @@ static uint32_t osd_box_px(float v, uint32_t canvas, uint32_t net)
  * writer (the pipeline thread, which is also the only reader). */
 static uint64_t g_osd_enc_bytes;
 
-/* frame-shm ring-fill bitrate clamp state (include/venc_shm_throttle.h).
- * Owned by the pipeline thread; zero-initialised, so the first service call
- * seeds it.  File-static like g_osd_enc_bytes above — one output, one
- * pipeline thread. */
-static VencShmThrottle g_shm_throttle;
-static int g_shm_throttle_ready;
-/* Last factor successfully programmed into the encoder. */
-static uint16_t g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+/* frame-shm ring low-water measurement state.  Owned by the pipeline thread;
+ * zero-initialised, so the first service call seeds it.  File-static like
+ * g_osd_enc_bytes above — one output, one pipeline thread.
+ *
+ * venc measures and publishes; it does not act.  The rate controller
+ * (waybeam-link) is co-located on this SoC, reads this ring, and owns every
+ * response to what the measurement says. */
+static VencRingLowWater g_ring_low_water;
+static int g_ring_low_water_ready;
 
-static void star6e_service_shm_throttle(Star6eOutput *output,
-	const VencConfig *vcfg)
+static void star6e_service_ring_low_water(Star6eOutput *output)
 {
 	venc_frame_ring_fill_t fill;
 	uint64_t now_us;
-	uint16_t want;
-	int edge;
 
-	if (!output || !vcfg)
+	if (!output)
 		return;
 	if (star6e_output_frame_ring_fill(output, &fill) != 0) {
 		/* Not a frame-shm transport (or the ring went away across a
-		 * reinit).  Release the clamp — a live transport switch away
-		 * from frame-shm must not leave the encoder pinned at
-		 * whatever the ring last asked for — and drop the state so a
-		 * later frame-shm run starts from a fresh window. */
-		g_shm_throttle_ready = 0;
-		output->throttle_permille = 0;  /* 0 = not reported */
-		if (g_applied_permille != VENC_SHM_THROTTLE_FULL_PERMILLE &&
-		    star6e_controls_set_output_throttle(
-			VENC_SHM_THROTTLE_FULL_PERMILLE) == 0)
-			g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+		 * reinit).  Drop the state so a later frame-shm run starts
+		 * from a fresh window. */
+		g_ring_low_water_ready = 0;
+		output->low_water_permille = 0;
 		return;
 	}
 
 	now_us = wb_monotonic_us();
-	if (!g_shm_throttle_ready) {
-		venc_shm_throttle_reset(&g_shm_throttle, now_us);
-		g_shm_throttle_ready = 1;
+	if (!g_ring_low_water_ready) {
+		venc_ring_low_water_reset(&g_ring_low_water, now_us);
+		g_ring_low_water_ready = 1;
 	}
 
-	venc_shm_throttle_set_enabled(&g_shm_throttle,
-		vcfg->outgoing.shm_throttle, now_us);
-	venc_shm_throttle_observe(&g_shm_throttle, fill.used_slots,
-		fill.full_drops);
-	(void)venc_shm_throttle_tick(&g_shm_throttle, now_us);
+	venc_ring_low_water_observe(&g_ring_low_water, fill.used_slots,
+		fill.slot_count);
+	if (venc_ring_low_water_tick(&g_ring_low_water, now_us)) {
+		uint16_t permille =
+			venc_ring_low_water_permille(&g_ring_low_water);
 
-	/* Drive the apply off "what did we last successfully program?"
-	 * rather than off tick()'s changed flag.  The apply can legitimately
-	 * fail (trylock lost to an in-flight config transaction), and a
-	 * factor that then stops changing — pinned at the floor is exactly
-	 * that — would never be retried.  Comparing against the applied
-	 * value both retries and keeps the write-on-change property. */
-	/* Deadband the apply: on SigmaStar a programmed rate *change* costs an
-	 * IDR (venc_shm_throttle_should_apply), so chattering the clamp
-	 * keeps the old retry-on-failure property, which a bare deadband would
-	 * lose: a failed apply leaves g_applied_permille stale, and the next
-	 * want may sit inside the deadband and never retry. */
-	want = venc_shm_throttle_permille(&g_shm_throttle);
-	if (g_shm_throttle.apply_retry ||
-	    venc_shm_throttle_should_apply(want, g_applied_permille)) {
-		if (star6e_controls_set_output_throttle(want) == 0) {
-			g_applied_permille = want;
-			g_shm_throttle.apply_retry = 0;
-		} else {
-			g_shm_throttle.apply_retry = 1;
-		}
+		output->low_water_permille = permille;
+		/* Publish into the ring header: a window in which the ring
+		 * never drained is direct evidence that the consumer's rate
+		 * model is optimistic (protocols/frame-shm.md). */
+		venc_frame_ring_set_low_water(output->frame_ring, permille);
 	}
-	output->throttle_permille = want;
-	/* Publish into the ring header so the consumer can see that the
-	 * producer has already reduced its own rate -- below 1000 is
-	 * direct evidence that the consumer's rate model is optimistic
-	 * (protocols/frame-shm.md). */
-	venc_frame_ring_set_throttle(output->frame_ring, want);
-
-	/* Log the floor transitions only.  Pinned at the floor the clamp has
-	 * spent all its authority and the ring is still backing up — that is
-	 * a consumer problem, and silence there reads as "working". */
-	edge = venc_shm_throttle_floor_edge(&g_shm_throttle);
-	if (edge > 0)
-		fprintf(stderr,
-			"WARNING: shm throttle pinned at floor %u%% — the "
-			"consumer is not draining %s\n",
-			VENC_SHM_THROTTLE_FLOOR_PERMILLE / 10,
-			output->frame_ring ? output->frame_ring->name : "");
-	else if (edge < 0)
-		/* stderr, not stdout: stdout is fully buffered once the
-		 * daemon's output is redirected to a file, so the recovery
-		 * line sat unflushed while the entry warning (stderr) showed
-		 * up immediately -- the pair read as "pinned, never
-		 * recovered" on a box that had in fact recovered. */
-		fprintf(stderr,
-			"> shm throttle left the floor, recovering\n");
 }
 
 static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
@@ -1322,7 +1258,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		 * (no subscription gate — it is a safety mechanism, not
 		 * telemetry) and only costs two relaxed atomic loads plus a
 		 * compare per frame when the transport isn't frame-shm. */
-		star6e_service_shm_throttle(&ps->output, vcfg);
+		star6e_service_ring_low_water(&ps->output);
 	}
 
 	/* Orientation (image.flip / image.mirror) is applied once at bring-up
@@ -1483,17 +1419,18 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		 * glance (a healthy encoder tracking target while the picture
 		 * stutters points at the radio, not here). */
 		{
-			/* Append the clamp when it is engaged, so a target the
-			 * encoder is deliberately not chasing does not read as
-			 * RC undershoot.  Absent when unclamped — the common
-			 * case should stay uncluttered. */
+			/* Append the ring low-water when the egress ring did
+			 * not drain, so a stuttering picture separates "the
+			 * consumer is behind" from "the encoder is behind".
+			 * Absent when the ring drained — the common case
+			 * should stay uncluttered. */
 			char osd_thr[16];
-			unsigned int thr = ps->output.throttle_permille;
+			unsigned int lw = ps->output.low_water_permille;
 
 			osd_thr[0] = '\0';
-			if (thr > 0 && thr < VENC_SHM_THROTTLE_FULL_PERMILLE)
-				snprintf(osd_thr, sizeof(osd_thr), " thr%u%%",
-					thr / 10);
+			if (lw > 0)
+				snprintf(osd_thr, sizeof(osd_thr), " ring%u%%",
+					lw / 10);
 			debug_osd_text(ps->debug_osd, 4, "br", "%u/%uk%s",
 				osd_kbps, vcfg->video0.bitrate, osd_thr);
 		}
