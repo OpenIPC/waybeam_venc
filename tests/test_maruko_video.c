@@ -62,10 +62,15 @@ int test_maruko_video(void)
 	/* An invalid AU is rejected every time and actuates nothing -- the
 	 * decision to ask for a keyframe belongs to the consumer, which is
 	 * the only party that can see whether the decoder is broken. */
+	output.bad_au_drops = 0;
 	CHECK("maruko invalid AU rejected",
 		maruko_video_reject_incomplete_access_unit(&stream, &output) == 1);
+	CHECK("maruko invalid AU counted", output.bad_au_drops == 1);
 	CHECK("maruko invalid AU rejected again",
 		maruko_video_reject_incomplete_access_unit(&stream, &output) == 1);
+	/* The one-shot WARN must not become a one-shot COUNTER -- the whole
+	 * point is that a repeating fault stays visible after the first line. */
+	CHECK("maruko invalid AU counts every time", output.bad_au_drops == 2);
 	output.svct_active = 1;
 	stream.h265Info.refType = MARUKO_REFTYPE_ENHANCE_P_NOTFORREF;
 	CHECK("maruko droppable invalid AU still rejected",

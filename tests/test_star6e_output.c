@@ -1715,6 +1715,14 @@ static int test_star6e_output_frame_ring_truncation_abort(void)
 	CHECK("ring trunc warned once", output.trunc_warned == 1);
 	CHECK("ring trunc nothing committed",
 		output.frame_ring->stats.writes == 0);
+	/* The frame is gone; the consumer must be able to SEE that it is gone.
+	 * Before other_drops existed this discard left no trace anywhere in
+	 * the shared header. */
+	CHECK("ring trunc counted locally", output.bad_au_drops == 1);
+	CHECK("ring trunc published to consumer",
+		output.frame_ring->hdr->other_drops == 1);
+	CHECK("ring trunc not conflated with congestion",
+		output.frame_ring->hdr->full_drops == 0);
 
 	/* The abort must leave the ring writable. */
 	test_ring_fill_p_frame(&pack, &stream, data, 8);

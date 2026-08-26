@@ -105,7 +105,23 @@ typedef struct __attribute__((aligned(64))) {
 	                             * fraction: permille of a small slot count
 	                             * cannot round-trip the 1-slot reading,
 	                             * which is the one that matters. */
-	uint8_t  _pad1[38];
+	uint8_t  _pad_lw[6];        /* 90-95: keeps other_drops 8-byte aligned */
+	uint64_t other_drops;       /* lifetime frames the PRODUCER discarded for
+	                             * a reason other than a full ring: an access
+	                             * unit it could not encode into a slot at
+	                             * all (oversize, or a malformed packet
+	                             * table).  Deliberately separate from
+	                             * full_drops, because the two demand
+	                             * opposite responses from a rate
+	                             * controller: full_drops is congestion the
+	                             * consumer is causing and should slow down
+	                             * for, other_drops is not congestion at all
+	                             * and slowing down fixes nothing.
+	                             * Producer-side only -- venc_frame_ring_t
+	                             * ::stats.oversize_drops is overloaded and
+	                             * also counts CONSUMER-side read failures,
+	                             * which have no business on this line. */
+	uint8_t  _pad1[24];
 
 	/* Line 2: Consumer-owned */
 	uint64_t read_idx          __attribute__((aligned(64)));
@@ -132,6 +148,7 @@ _Static_assert(offsetof(venc_frame_ring_hdr_t, health_magic) == 76, "off 76");
 _Static_assert(offsetof(venc_frame_ring_hdr_t, full_drops) == 80, "off 80");
 _Static_assert(offsetof(venc_frame_ring_hdr_t, low_water_slots) == 88,
                "off 88");
+_Static_assert(offsetof(venc_frame_ring_hdr_t, other_drops) == 96, "off 96");
 _Static_assert(offsetof(venc_frame_ring_hdr_t, read_idx) == 128, "off 128");
 _Static_assert(offsetof(venc_frame_ring_hdr_t, consumer_waiting) == 136,
                "off 136");
@@ -149,6 +166,7 @@ typedef struct {
 	uint64_t full_drops;
 	uint64_t oversize_drops;
 	uint64_t bad_slot_drops;
+	uint64_t other_drops;   /* producer-side subset, mirrored to the header */
 } venc_frame_ring_stats_t;
 
 typedef struct {
@@ -185,6 +203,7 @@ typedef struct {
 	uint64_t full_drops;
 	uint64_t oversize_drops;
 	uint64_t bad_slot_drops;
+	uint64_t other_drops;
 } venc_frame_ring_fill_t;
 
 static inline int venc_frame_ring_get_fill(const venc_frame_ring_t *r,
@@ -208,7 +227,25 @@ static inline int venc_frame_ring_get_fill(const venc_frame_ring_t *r,
 	out->full_drops = r->stats.full_drops;
 	out->oversize_drops = r->stats.oversize_drops;
 	out->bad_slot_drops = r->stats.bad_slot_drops;
+	out->other_drops = r->stats.other_drops;
 	return 0;
+}
+
+/* Record a frame the producer discarded for a reason other than a full ring
+ * (oversize, or an access unit it could not build at all) and mirror the
+ * running count into the shared header.  Producer-only; a no-op on an attached
+ * (consumer) ring, and safe to call with a NULL ring so a caller on a
+ * non-frame-shm transport does not need to branch.
+ *
+ * Relaxed store for the same reason as full_drops: our own cache line, and the
+ * value is evidence for a rate controller rather than exact accounting. */
+static inline void venc_frame_ring_note_other_drop(venc_frame_ring_t *r)
+{
+	if (!r || !r->hdr || !r->is_owner)
+		return;
+	r->stats.other_drops++;
+	__atomic_store_n(&r->hdr->other_drops, r->stats.other_drops,
+		__ATOMIC_RELAXED);
 }
 
 /* Publish the window low-water occupancy in slots.  Producer-only; a no-op on
@@ -367,6 +404,7 @@ static inline int venc_frame_ring_begin_write(venc_frame_ring_t *r,
 
 	if (VENC_FRAME_META_SIZE > r->slot_data_size) {
 		r->stats.oversize_drops++;
+		venc_frame_ring_note_other_drop(r);
 		return -1;
 	}
 
@@ -391,6 +429,7 @@ static inline int venc_frame_ring_append(venc_frame_ring_t *r,
 
 	if ((uint64_t)r->write_offset + len > r->slot_data_size) {
 		r->stats.oversize_drops++;
+		venc_frame_ring_note_other_drop(r);
 		return -1;
 	}
 

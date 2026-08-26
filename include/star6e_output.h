@@ -143,6 +143,12 @@ typedef struct {
 	int svct_active;
 	uint8_t gdr_cycle_len;
 	uint8_t gdr_counter;
+	/* Access units discarded before they could be shipped because the
+	 * SDK's packet table was incomplete or invalid.  Transport-independent
+	 * (it happens on RTP too), which is why it lives here rather than in
+	 * the ring's stats; on frame-shm it is ALSO mirrored into the ring
+	 * header's other_drops so the consumer can see the frame vanish. */
+	uint64_t bad_au_drops;
 	/* One WARN per pipeline start (reset by star6e_output_reset's memset)
 	 * when packet metadata is incomplete or invalid — the frame is aborted,
 	 * never shipped truncated. */

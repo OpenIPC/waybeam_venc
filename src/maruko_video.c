@@ -55,11 +55,16 @@ int maruko_video_reject_incomplete_access_unit(const i6c_venc_strm *stream,
 {
 	if (maruko_video_stream_packet_info_complete(stream))
 		return 0;
-	if (output && !output->trunc_warned) {
-		output->trunc_warned = 1;
-		fprintf(stderr,
-			"WARN: Maruko packetInfo table is incomplete or invalid; "
-			"dropping whole access unit\n");
+	if (output) {
+		output->bad_au_drops++;
+		/* No-op off frame-shm — see the Star6E equivalent. */
+		venc_frame_ring_note_other_drop(output->frame_ring);
+		if (!output->trunc_warned) {
+			output->trunc_warned = 1;
+			fprintf(stderr,
+				"WARN: Maruko packetInfo table is incomplete "
+				"or invalid; dropping whole access unit\n");
+		}
 	}
 	return 1;
 }

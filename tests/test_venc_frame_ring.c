@@ -1065,6 +1065,102 @@ static int test_fr_low_water(void)
 	return failures;
 }
 
+/* Producer-side drops that are NOT congestion.
+ *
+ * full_drops and other_drops demand opposite responses from a rate
+ * controller: a full ring is the consumer falling behind and slowing down
+ * helps, while an access unit the producer could not build at all is not
+ * congestion and slowing down fixes nothing.  Before this counter existed a
+ * consumer was structurally blind to the second kind -- the frame simply
+ * vanished with nothing in the header to see it by. */
+static int test_fr_other_drops(void)
+{
+	int failures = 0;
+	VencFrameMeta meta;
+	const unsigned char *raw;
+	uint64_t hdr_other, hdr_full;
+	venc_frame_ring_t *r = venc_frame_ring_create("test_fr_otherd", 2, 64);
+
+	CHECK("fr_other_create", r != NULL);
+	if (!r)
+		return failures;
+	raw = (const unsigned char *)r->hdr;
+
+	memcpy(&hdr_other, raw + 96, sizeof(hdr_other));
+	CHECK("fr_other_seeds_zero", hdr_other == 0);
+
+	/* An oversize append is a producer-side discard: it must bump BOTH the
+	 * local breakdown and the published aggregate. */
+	memset(&meta, 0, sizeof(meta));
+	meta.codec = VENC_FRAME_CODEC_H265;
+	CHECK("fr_other_begin", venc_frame_ring_begin_write(r, &meta) == 0);
+	{
+		unsigned char big[128] = {0};
+		CHECK("fr_other_append_rejected",
+			venc_frame_ring_append(r, big, sizeof(big)) != 0);
+	}
+	venc_frame_ring_abort_write(r);
+	CHECK("fr_other_oversize_local", r->stats.oversize_drops == 1);
+	CHECK("fr_other_local", r->stats.other_drops == 1);
+	memcpy(&hdr_other, raw + 96, sizeof(hdr_other));
+	CHECK("fr_other_published", hdr_other == 1);
+
+	/* An explicit note (the malformed-access-unit path, which never touches
+	 * the ring at all) publishes through the same field. */
+	venc_frame_ring_note_other_drop(r);
+	memcpy(&hdr_other, raw + 96, sizeof(hdr_other));
+	CHECK("fr_other_note_published", hdr_other == 2);
+
+	/* A full-ring drop is the OTHER kind and must not contaminate it. */
+	{
+		int i;
+		for (i = 0; i < 2; ++i) {
+			if (venc_frame_ring_begin_write(r, &meta) != 0)
+				break;
+			venc_frame_ring_commit_write(r);
+		}
+		CHECK("fr_other_ring_filled", i == 2);
+		CHECK("fr_other_full_rejects",
+			venc_frame_ring_begin_write(r, &meta) != 0);
+	}
+	memcpy(&hdr_full, raw + 80, sizeof(hdr_full));
+	memcpy(&hdr_other, raw + 96, sizeof(hdr_other));
+	CHECK("fr_other_full_counted", hdr_full == 1);
+	CHECK("fr_other_full_not_conflated", hdr_other == 2);
+
+	/* get_fill surfaces it alongside the rest. */
+	{
+		venc_frame_ring_fill_t fill;
+		CHECK("fr_other_fill_ok",
+			venc_frame_ring_get_fill(r, &fill) == 0);
+		CHECK("fr_other_fill_value", fill.other_drops == 2);
+	}
+
+	venc_frame_ring_destroy(r);
+
+	/* Producer-only, and NULL-safe so a caller on a non-frame-shm
+	 * transport can call it unconditionally. */
+	venc_frame_ring_note_other_drop(NULL);
+	{
+		venc_frame_ring_t *w = venc_frame_ring_create("test_fr_otherd_ro",
+			2, 64);
+		venc_frame_ring_t *rd = NULL;
+		CHECK("fr_other_ro_create", w != NULL);
+		if (w)
+			rd = venc_frame_ring_attach("test_fr_otherd_ro");
+		CHECK("fr_other_ro_attach", rd != NULL);
+		if (w && rd) {
+			venc_frame_ring_note_other_drop(rd);  /* must be inert */
+			CHECK("fr_other_ro_consumer_ignored",
+				w->hdr->other_drops == 0);
+		}
+		if (rd) venc_frame_ring_destroy(rd);
+		if (w) venc_frame_ring_destroy(w);
+	}
+
+	return failures;
+}
+
 static int test_fr_health_consumer_readonly(void)
 {
 	int failures = 0;
@@ -1127,6 +1223,7 @@ int test_venc_frame_ring(void)
 	failures += test_fr_producer_health();
 	failures += test_fr_health_consumer_readonly();
 	failures += test_fr_low_water();
+	failures += test_fr_other_drops();
 
 	return failures;
 }

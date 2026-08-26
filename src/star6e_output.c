@@ -53,11 +53,17 @@ int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
 {
 	if (star6e_output_stream_packet_info_complete(stream))
 		return 0;
-	if (output && !output->trunc_warned) {
-		output->trunc_warned = 1;
-		fprintf(stderr,
-			"WARN: Star6E packetInfo table is incomplete or invalid; "
-			"dropping whole access unit\n");
+	if (output) {
+		output->bad_au_drops++;
+		/* No-op off frame-shm; the per-output counter above is the
+		 * transport-independent record. */
+		venc_frame_ring_note_other_drop(output->frame_ring);
+		if (!output->trunc_warned) {
+			output->trunc_warned = 1;
+			fprintf(stderr,
+				"WARN: Star6E packetInfo table is incomplete "
+				"or invalid; dropping whole access unit\n");
+		}
 	}
 	return 1;
 }
