@@ -436,6 +436,7 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.query_transport_status = cv610_query_transport_status,
 	.query_audio_status = cv610_query_audio_status,
 	.query_iq_info = cv610_iq_query,
+	.query_awb_info = cv610_awb_query,
 	.apply_iq_param = cv610_iq_set,
 	.apply_qp_bounds = cv610_apply_qp_bounds,
 };
