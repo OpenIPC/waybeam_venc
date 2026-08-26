@@ -1618,16 +1618,28 @@ static void test_ring_fill_p_frame(MI_VENC_Pack_t *pack,
 	stream->packet = pack;
 }
 
-/* Ring-full drop: the 1 s holdoff paces HONORED requests, and a request the
- * shared 100 ms limiter swallowed rolls the anchor back so the next drop
- * retries instead of leaving the chain unhealed. */
 /* A ring-full drop must discard the frame, count it, and actuate NOTHING.
  * venc measures egress pressure and publishes it; the co-located rate
- * controller (waybeam-link) reads the ring and owns every response.  The
- * producer-side recovery IDR this replaced fired precisely when the ring was
- * full, so the largest frame in the stream could not be delivered anyway --
- * measured on a SSC338Q with the consumer stopped, 13 IDRs in 12 s, none of
- * which reached anyone. */
+ * controller (waybeam-link) reads the ring and owns every response.
+ *
+ * Two separate reasons, and it is worth keeping them apart because only the
+ * first is about the ring being full:
+ *
+ *   1. Categorically, venc no longer requests an IDR on its own -- for any
+ *      reason, on any transport.  Recovery belongs to the operator-selected
+ *      GOP cadence or to an explicit request (/request/idr, or waybeam-link's
+ *      §3.9 RECOVERY_REQUEST from the receiver, which is the only party that
+ *      can see whether the decoder is actually broken).
+ *   2. In THIS path specifically the request was also futile: it fired when
+ *      the ring was full, so the largest frame in the stream could not be
+ *      delivered anyway -- measured on a SSC338Q with the consumer stopped,
+ *      13 IDRs in 12 s, none of which reached anyone.
+ *
+ * Reason 2 does NOT extend to the sibling drop paths (a malformed packetInfo
+ * table, or an oversize frame aborting mid-append).  Those fire with a ring
+ * that has room, and on every transport including plain RTP, so an IDR there
+ * would have been delivered.  They are removed under reason 1 alone, and the
+ * damage they leave is bounded by GDR rather than by any venc action. */
 static int test_star6e_output_frame_ring_full_drop_is_inert(void)
 {
 	Star6eOutputSetup setup;

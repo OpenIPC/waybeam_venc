@@ -1462,9 +1462,7 @@ static char *query_transport_status(void)
 	const char *transport;
 	int pos;
 	uint32_t pressure_drops;
-	/* Clamp state, reported alongside the ring so an operator can see the
-	 * gap between the bitrate they set and the one actually programmed.
-	 * video0.bitrate itself is deliberately untouched (D1). */
+
 	if (!ps)
 		return NULL;
 	transport = output_transport_name(&ps->output);

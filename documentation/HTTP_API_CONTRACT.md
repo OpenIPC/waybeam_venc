@@ -1855,8 +1855,15 @@ in Notes. As of `contract_version: 0.19.0`:
     already owns `video0.bitrate` — the clamp was a second controller on the
     same signal, and its only actuator keyframes.  Measured 2026-08-24 on a
     Star6E at 720p120: clamp on, 6.5 IDR/s and 100-143 ms glass-to-glass; clamp
-    off, 0.2 IDR/s and 15-37 ms.  A config carrying the key still loads; the
-    key is ignored and disappears on the next config write.
+    off, 0.2 IDR/s and 15-37 ms.
+    **Config files tolerate the key; the API does not.**  A
+    `waybeam.json` still carrying `outgoing.shmThrottle` loads fine — the
+    parser ignores unknown keys, and the key disappears on the next config
+    write.  A `POST /api/v1/set` naming it is a different matter: the
+    multi-field preflight rejects the **whole batch** `404 unknown config
+    field` on the first unrecognised key, so a stored ground-side "apply my
+    profile" batch that still carries it now applies *none* of its other
+    fields.  Strip it from any saved batch before upgrading.
   - **Removed the ring-full recovery IDR entirely.**  Through 0.18.7 a
     `frame-shm://` ring-full drop asked the encoder for an IDR on a plain-GOP
     stream.  That request fired precisely when the ring was full, so the

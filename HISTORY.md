@@ -27,8 +27,13 @@ encoder behaviour only when something asks.
   | glass-to-glass | ~100-143 ms | **~15-37 ms** |
   | ring read latency | 40-120 ms | **1-9 ms** |
 
-  A config still carrying the key loads fine; the key is ignored and
-  disappears on the next config write.
+  A config *file* still carrying the key loads fine — unknown keys are
+  ignored and the key disappears on the next config write. A `POST
+  /api/v1/set` naming it does **not**: the multi-field preflight rejects the
+  whole batch with `404 unknown config field` on the first unrecognised key,
+  so a stored "apply my profile" batch that still carries `shmThrottle`
+  applies none of its other fields. Strip it from saved batches before
+  upgrading.
 
 - **Removed the ring-full recovery IDR entirely**, for GOP as well as GDR.
   It fired precisely when the ring was full, so the largest frame in the
