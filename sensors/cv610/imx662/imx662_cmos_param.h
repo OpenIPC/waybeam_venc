@@ -21,20 +21,39 @@
 #define IMX662_ID   662
 #endif
 
-/* ---- Black level (FRAMOS blsData = 200/4095 on all 4 channels, 12-bit) ----
- * Scale to your ISP path's bit depth if not 12-bit (200 @12b ≈ 50 @10b ≈ 12 @8b).
+/* ---- Black level -----------------------------------------------------------
+ * ot_isp_cmos_black_level is Format:14.0 (ot_common_isp.h) -- a FIXED 14-bit
+ * ISP domain, NOT the sensor's output bit depth.  imx662_sensor_ctl.c writes
+ * BLKLEVEL = 50, a 12-bit pedestal, so the ISP value is 50 << 2 = 200 and it
+ * is the same number in every mode: every vendor plugin on this silicon uses
+ * one constant across all of its modes (sc450ai/sc431hai/sc500ai/sc4336p
+ * 0x410, os04d10/gc4023 0x400), sc450ai included, which runs both a 12-bit
+ * linear and a 10-bit WDR mode off BLACK_LEVEL_DEFAULT.
+ *
+ * Do not rescale this by the mode's bit depth.  It used to be shifted down
+ * for the RAW10 modes, which left ~150 codes of pedestal unsubtracted on the
+ * 90 and 100 fps modes; the WB gains then multiply that common-mode residue
+ * by 1.13x on R and 2.9x on B, lifting blue hardest.
  */
-#define IMX662_BLACK_LEVEL_12BIT   200
+#define IMX662_BLACK_LEVEL   200
 
 /* ---- AWB static reference and Planckian curve -----------------------------
- * Mode 0/1 values recovered verbatim from the factory xipc. The scene routine
- * leaves ref_color_temp unchanged; 4950 K follows the CV6xx sensor-driver
- * convention until the factory sensor callback itself is recovered.
+ * Recovered from the factory xipc, with the blue gain since corrected on
+ * hardware -- see IMX662_AWB_STATIC_WB_B. The scene routine leaves
+ * ref_color_temp unchanged; 4950 K follows the CV6xx sensor-driver convention
+ * until the factory sensor callback itself is recovered.
  */
 #define IMX662_AWB_STATIC_TEMP     4950
 #define IMX662_AWB_STATIC_WB_R     418
 #define IMX662_AWB_STATIC_WB_GR    256           /* 1.000 * 256 */
 #define IMX662_AWB_STATIC_WB_GB    256           /* 1.000 * 256 */
+/* 545 was the factory xipc value.  Measured on .181 at ~2900 K indoor: AWB
+ * converged ~10% too blue against the operator's eye, and a post-CCM trim of
+ * R,G x1.109 (blue down 9.8% relative, R:G held) was judged correct.  Folding
+ * that into the calibration rather than trimming after the CCM keeps the
+ * correction in AWB's own domain, so it tracks colour temperature instead of
+ * fighting it.  545 x 0.9028 = 492.  NOTE: verified at ONE colour temperature
+ * (~2900 K indoor); the daylight end is still unmeasured. */
 #define IMX662_AWB_STATIC_WB_B     545
 #define IMX662_AWB_P1              (-86)
 #define IMX662_AWB_P2              342
