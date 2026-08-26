@@ -4053,7 +4053,7 @@ static void maruko_service_ring_low_water(MarukoOutput *output)
 		/* Transport switch away from frame-shm — see the
 		 * star6e_runtime equivalent. */
 		g_ring_low_water_ready = 0;
-		output->low_water_permille = 0;
+		output->low_water_slots = 0;
 		return;
 	}
 
@@ -4066,11 +4066,11 @@ static void maruko_service_ring_low_water(MarukoOutput *output)
 	venc_ring_low_water_observe(&g_ring_low_water, fill.used_slots,
 		fill.slot_count);
 	if (venc_ring_low_water_tick(&g_ring_low_water, now_us)) {
-		uint16_t permille =
-			venc_ring_low_water_permille(&g_ring_low_water);
+		uint16_t slots =
+			venc_ring_low_water_slots(&g_ring_low_water);
 
-		output->low_water_permille = permille;
-		venc_frame_ring_set_low_water(output->frame_ring, permille);
+		output->low_water_slots = slots;
+		venc_frame_ring_set_low_water(output->frame_ring, slots);
 	}
 }
 
@@ -4213,12 +4213,12 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		{
 			/* See the star6e_runtime equivalent. */
 			char osd_thr[16];
-			unsigned int lw = ctx->output.low_water_permille;
+			unsigned int lw = ctx->output.low_water_slots;
 
 			osd_thr[0] = '\0';
-			if (lw > 0)
-				snprintf(osd_thr, sizeof(osd_thr), " ring%u%%",
-					lw / 10);
+			if (lw > 1)
+				snprintf(osd_thr, sizeof(osd_thr), " ring%u",
+					lw);
 			debug_osd_text(ctx->debug_osd, 4, "br", "%u/%uk%s",
 				osd_kbps, ctx->cfg.venc_max_rate, osd_thr);
 		}

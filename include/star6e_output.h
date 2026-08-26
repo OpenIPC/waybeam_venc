@@ -109,10 +109,10 @@ typedef struct {
 	uint32_t socket_drops;
 	uint32_t socket_writes;
 	Star6eOutputBatch batch;
-	/* Last frame-shm ring low-water reading (permille of slot_count,
-	 * 0 = the ring drained to empty).  Cached here so the debug OSD can
-	 * report it without recomputing the window. */
-	uint16_t low_water_permille;
+	/* Last frame-shm ring low-water reading, in slots.  <= 1 is healthy
+	 * (the ring's idle occupancy is one frame).  Cached here so the debug
+	 * OSD can report it without recomputing the window. */
+	uint16_t low_water_slots;
 	/* Transport-pressure observation cache (telemetry only — never gates
 	 * frame transmission).  Populated by star6e_output_observe_pressure
 	 * once per frame on the producer thread and read by the sidecar emit

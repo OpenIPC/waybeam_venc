@@ -1528,7 +1528,7 @@ static char *query_transport_status(void)
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
 			"\"usedSlots\":%u,"
-			"\"ringLowWaterPermille\":%u}}",
+			"\"ringLowWaterSlots\":%u}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1538,7 +1538,7 @@ static char *query_transport_status(void)
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
 			(unsigned)fill.used_slots,
-			(unsigned)ps->output.low_water_permille);
+			(unsigned)ps->output.low_water_slots);
 	} else if ((ps->output.transport == VENC_OUTPUT_URI_UNIX ||
 	            ps->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           ps->output.socket_handle >= 0) {

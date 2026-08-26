@@ -1468,7 +1468,7 @@ Response `200` (frame-shm ring, with the ring-fill bitrate clamp engaged):
     "oversizeDrops": 0,
     "slotCount": 8,
     "usedSlots": 2,
-    "ringLowWaterPermille": 0
+    "ringLowWaterSlots": 1
   }
 }
 ```
@@ -1506,7 +1506,7 @@ Field reference:
 | `packetsSent` | Lifetime sends accepted: ring writes for SHM, datagrams for UDP/Unix |
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
-| `ringLowWaterPermille` | (frame-shm only) Lowest ring occupancy reached in the last 200 ms window, as permille of `slotCount`.  `0` = the ring drained to empty at some point (the consumer is keeping up); `1000` = it never dropped below full (real standing backlog).  A **measurement, not an actuator** — venc publishes it and changes nothing in response |
+| `ringLowWaterSlots` | (frame-shm only) Lowest ring occupancy reached in the last 200 ms window, **in slots**.  `<= 1` is the healthy band and `>= 2` sustained is standing backlog — venc samples just after writing, so a consumer that is keeping up still leaves exactly one frame queued.  Raw slots rather than a fraction of `slotCount`: at a 16-slot ring one slot is 62.5 permille, which truncates to 62 and converts back to 0, destroying the very reading that separates a healthy ring from a drained one.  A **measurement, not an actuator** — venc publishes it and changes nothing in response |
 
 On `unix://`, `fillPct` is measured against the *peer's* datagram queue,
 which is the limit that actually blocks a sender — not the local
@@ -1524,11 +1524,18 @@ may show a full queue while the consumer is paused. The usual cause of
 unexpected pressure is a shallow `net.unix.max_dgram_qlen` — see the
 `unix://` notes in the README.
 
-A `ringLowWaterPermille` above `0` means the ring failed to drain at some
-point in the window; at `1000` it never dropped below full and frames are
-being discarded after encode.  venc does not act on this — it is published
-for the rate controller, which on a `frame-shm://` deployment is co-located
-on the same SoC and reads the same value from the ring header.
+A `ringLowWaterSlots` of `2` or more means the ring never got back down to
+its one-frame idle occupancy inside the window; at `slotCount` it never
+dropped below full and frames are being discarded after encode.  venc does
+not act on this — it is published for the rate controller, which on a
+`frame-shm://` deployment is co-located on the same SoC and reads the same
+value from the ring header.
+
+**The healthy reading is 1, not 0.**  The measurement is taken immediately
+after the frame is written, so even a consumer draining perfectly leaves the
+frame just written in the ring.  `0` means the consumer emptied the ring
+between the write and the sample; `1` is the ordinary steady state.  Treat
+`<= 1` as clean.
 
 **Low-water, not peak, and the distinction is what makes it usable.**
 Measured on a Star6E at 100 fps into an 8-slot ring with a perfectly healthy
@@ -1548,7 +1555,7 @@ actuator — and on SigmaStar every actuation costs an IDR, because
 2026-08-24 on a Star6E at 720p120: with the clamp engaged the receiver saw
 6.5 IDR/s and 100-143 ms glass-to-glass; with it off, 0.2 IDR/s and 15-37 ms.
 Ring-full drops remain the backpressure signal, readable from the ring header
-(`full_drops`, `low_water_permille`), and a GDR stream heals a chain break
+(`full_drops`, `low_water_slots`), and a GDR stream heals a chain break
 within one refresh cycle.
 
 Error `501` — backend has no transport observability hook.
@@ -1862,14 +1869,14 @@ in Notes. As of `contract_version: 0.19.0`:
     fps rebind, output enable, new destination) — a receiver that has never
     seen a parameter set has nothing to start from.
   - **`GET /api/v1/transport/status`**: `throttlePermille` and
-    `effectiveBitrateKbps` are **removed**; `ringLowWaterPermille` is added on
-    the `frame-shm` branch.  Note the polarity is inverted — `0` is healthy
-    here, where `1000` was healthy for the clamp.  Read `video0.bitrate` from
-    `/api/v1/config`; there is no longer a scaled "effective" rate, because
-    nothing scales it.
+    `effectiveBitrateKbps` are **removed**; `ringLowWaterSlots` is added on the
+    `frame-shm` branch.  Note the polarity is inverted — a LOW number is
+    healthy here (`<= 1`), where `1000` was healthy for the clamp.  Read
+    `video0.bitrate` from `/api/v1/config`; there is no longer a scaled
+    "effective" rate, because nothing scales it.
   - **Frame-SHM ring header is now version `2`.**  Offset 88 changed meaning:
     it carried `throttle_permille` (`1000` = unclamped) and now carries
-    `low_water_permille` (`0` = the ring drained).  `sizeof` stays 192 and
+    `low_water_slots` (ring occupancy in slots, `<= 1` healthy).  `sizeof` stays 192 and
     nothing before offset 88 moves, but the polarity inverts, so this is a
     hard version break by design — every consumer validates `version` and
     refuses to attach on a mismatch rather than silently misreading the field.

@@ -45,10 +45,10 @@ encoder behaviour only when something asks.
   flight configuration, heals within one refresh cycle as before.
 
 - **Ring header v2 -- offset 88 changed meaning.** `throttle_permille`
-  (`1000` = unclamped) becomes `low_water_permille` (`0` = the ring drained
-  to empty at some point in the last 200 ms window, `1000` = it never
-  dropped below full). `sizeof` stays 192 and nothing before offset 88
-  moves, but **the polarity inverts**, so this is a deliberate hard version
+  (`1000` = unclamped) becomes `low_water_slots`: the lowest ring occupancy,
+  **in slots**, reached in the producer's last 200 ms window. `sizeof` stays
+  192 and nothing before offset 88 moves, but **the polarity inverts** (a
+  LOW number is now the healthy end), so this is a deliberate hard version
   break: consumers validate `version` and refuse to attach rather than
   silently misread a healthy ring as a catastrophic clamp.
 
@@ -61,17 +61,28 @@ encoder behaviour only when something asks.
   itself -- it can sample occupancy any time, but the low-water mark
   *between* its own reads is producer-side knowledge.
 
+  **The healthy reading is 1, not 0, and it is reported in slots for exactly
+  that reason.** The sample is taken immediately after the frame is written,
+  so a consumer that is keeping up still leaves one frame queued -- which is
+  why the clamp this replaced recovered at `<= 1` slot and engaged at `>= 2`.
+  A permille encoding cannot carry that distinction: at the ring format's
+  16-slot default, one slot is 62.5 permille, truncates to 62, and converts
+  back to 0 -- indistinguishable from a drained ring. Raw slots have no such
+  rounding, and a consumer that wants a fraction already has `slot_count` at
+  header offset 8.
+
 - **`GET /api/v1/transport/status`**: `throttlePermille` and
-  `effectiveBitrateKbps` removed, `ringLowWaterPermille` added on the
+  `effectiveBitrateKbps` removed, `ringLowWaterSlots` added on the
   `frame-shm` branch. Read `video0.bitrate` from `/api/v1/config`; nothing
   scales it any more.
 
 - Sidecar `TRANSPORT_INFO`: `throttle_permille` returns to `_pad[2]`.
   Trailer stays 16 bytes; later trailers keep their offsets.
 
-- Debug OSD: the `thr<n>%` bitrate annotation becomes `ring<n>%`, showing
-  ring low-water when the ring did not drain, so a stuttering picture
-  separates "the consumer is behind" from "the encoder is behind".
+- Debug OSD: the `thr<n>%` bitrate annotation becomes `ring<n>`, showing
+  ring low-water in slots when it stayed above the healthy 1-slot band, so a
+  stuttering picture separates "the consumer is behind" from "the encoder is
+  behind".
 
 ## [0.68.1] - 2026-08-23
 

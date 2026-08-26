@@ -882,7 +882,7 @@ static int test_fr_producer_health(void)
 	memcpy(&thr, raw + 88, sizeof(thr));
 	CHECK("fr_health_magic_at_76", hm == VENC_FRAME_RING_HEALTH_MAGIC);
 	CHECK("fr_health_drops_at_80_zero", fd_drops == 0);
-	CHECK("fr_health_low_water_at_88_drained", thr == 0);
+	CHECK("fr_health_low_water_at_88_seed", thr == 0);
 
 	/* Marker must be published before init_complete, so a consumer that
 	 * has attached at all always sees a coherent group. */
@@ -907,13 +907,13 @@ static int test_fr_producer_health(void)
 	memcpy(&fd_drops, raw + 80, sizeof(fd_drops));
 	CHECK("fr_health_drops_accumulate", fd_drops == 2);
 
-	/* Low-water publication at the pinned offset 88. */
-	venc_frame_ring_set_low_water(r, 640);
+	/* Low-water publication at the pinned offset 88, in slots. */
+	venc_frame_ring_set_low_water(r, 6);
 	memcpy(&thr, raw + 88, sizeof(thr));
-	CHECK("fr_health_low_water_published", thr == 640);
-	venc_frame_ring_set_low_water(r, 0);
+	CHECK("fr_health_low_water_published", thr == 6);
+	venc_frame_ring_set_low_water(r, 1);
 	memcpy(&thr, raw + 88, sizeof(thr));
-	CHECK("fr_health_low_water_drained", thr == 0);
+	CHECK("fr_health_low_water_healthy", thr == 1);
 
 	/* Nothing before the new fields moved, and the header is still the
 	 * size every consumer maps. */
@@ -933,11 +933,17 @@ static int test_fr_producer_health(void)
 /* An attached (consumer) ring must never write the producer's fields. */
 /* venc measures ring pressure and publishes it; it never acts on it.  The
  * low-water tracker is that measurement: the lowest occupancy reached in each
- * 200 ms window, as permille of capacity.  Low-water, not high-water, because
- * a healthy consumer reading one frame per event-loop iteration routinely
- * spikes the ring 2-3 slots inside a window and drains again -- high-water
- * calls that congestion, low-water asks whether the ring failed to drain at
- * ANY point, which is the question that discriminates. */
+ * 200 ms window, in SLOTS.
+ *
+ * Two things the encoding has to get right, both learned from the clamp this
+ * replaced.  Low-water, not high-water: a healthy consumer reading one frame
+ * per event-loop iteration routinely spikes the ring 2-3 slots inside a window
+ * and drains again, so high-water calls that congestion at random.  And raw
+ * slots, not permille: the caller samples just AFTER writing, so a perfectly
+ * drained ring still reads 1 slot -- the healthy band is <= 1, not 0 -- and at
+ * the ring's 16-slot default one slot is 62.5 permille, which truncates to 62
+ * and converts back to 0.  A fraction cannot carry the one reading that
+ * matters. */
 static int test_fr_low_water(void)
 {
 	int failures = 0;
@@ -950,35 +956,45 @@ static int test_fr_low_water(void)
 	CHECK("lw_window_open_no_publish",
 		venc_ring_low_water_tick(&t, 1000000 +
 			VENC_RING_LOW_WATER_WINDOW_US - 1) == 0);
-	CHECK("lw_window_open_keeps_seed", venc_ring_low_water_permille(&t) == 0);
+	CHECK("lw_window_open_keeps_seed", venc_ring_low_water_slots(&t) == 0);
 
 	/* A ring that never dropped below full across the whole window is real
-	 * standing backlog: 8/8 slots -> 1000. */
+	 * standing backlog: 8/8 slots. */
 	CHECK("lw_full_window_publishes",
 		venc_ring_low_water_tick(&t, 1000000 +
 			VENC_RING_LOW_WATER_WINDOW_US) == 1);
-	CHECK("lw_full_window_is_1000",
-		venc_ring_low_water_permille(&t) == 1000);
+	CHECK("lw_full_window_is_capacity",
+		venc_ring_low_water_slots(&t) == 8);
+
+	/* The healthy steady state: the producer samples just after writing,
+	 * so a consumer that is keeping up leaves exactly one frame queued.
+	 * This MUST be distinguishable from a fully drained ring -- it is the
+	 * reading a permille encoding destroys at 16 slots. */
+	venc_ring_low_water_observe(&t, 3, 8);
+	venc_ring_low_water_observe(&t, 1, 8);
+	venc_ring_low_water_observe(&t, 2, 8);
+	CHECK("lw_one_slot_is_1",
+		venc_ring_low_water_tick(&t, 1000000 +
+			2 * VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
+		venc_ring_low_water_slots(&t) == 1);
+
+	/* ...and a genuinely empty ring is 0, distinct from the above. */
+	venc_ring_low_water_observe(&t, 4, 8);
+	venc_ring_low_water_observe(&t, 0, 8);
+	CHECK("lw_drained_is_0",
+		venc_ring_low_water_tick(&t, 1000000 +
+			3 * VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
+		venc_ring_low_water_slots(&t) == 0);
 
 	/* One touch of bottom anywhere in the window clears it, however deep
 	 * the spikes around it were -- that is the whole point of low-water. */
 	venc_ring_low_water_observe(&t, 7, 8);
-	venc_ring_low_water_observe(&t, 0, 8);
+	venc_ring_low_water_observe(&t, 1, 8);
 	venc_ring_low_water_observe(&t, 8, 8);
-	CHECK("lw_touched_bottom_publishes",
+	CHECK("lw_spikes_around_bottom_ignored",
 		venc_ring_low_water_tick(&t, 1000000 +
-			2 * VENC_RING_LOW_WATER_WINDOW_US) == 1);
-	CHECK("lw_touched_bottom_is_0",
-		venc_ring_low_water_permille(&t) == 0);
-
-	/* The minimum is what is reported, not the last sample. */
-	venc_ring_low_water_observe(&t, 6, 8);
-	venc_ring_low_water_observe(&t, 2, 8);
-	venc_ring_low_water_observe(&t, 5, 8);
-	CHECK("lw_reports_minimum",
-		venc_ring_low_water_tick(&t, 1000000 +
-			3 * VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
-		venc_ring_low_water_permille(&t) == 250);
+			4 * VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
+		venc_ring_low_water_slots(&t) == 1);
 
 	/* Each window starts clean: last window's minimum must not leak into
 	 * the next one, or a single good window would mask a standing backlog
@@ -986,37 +1002,38 @@ static int test_fr_low_water(void)
 	venc_ring_low_water_observe(&t, 8, 8);
 	CHECK("lw_window_resets_between",
 		venc_ring_low_water_tick(&t, 1000000 +
-			4 * VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
-		venc_ring_low_water_permille(&t) == 1000);
-
-	/* A window with no observations at all (no frames encoded) reports an
-	 * empty ring rather than inheriting the previous verdict -- nothing is
-	 * queued, which is true. */
-	CHECK("lw_idle_window_is_0",
-		venc_ring_low_water_tick(&t, 1000000 +
 			5 * VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
-		venc_ring_low_water_permille(&t) == 0);
+		venc_ring_low_water_slots(&t) == 8);
 
-	/* Degenerate geometry must not divide by zero. */
+	/* A 16-slot ring reports 1 slot as 1 -- the regression this encoding
+	 * exists to prevent (62.5 permille truncates to 62, which converts
+	 * back to 0 and reads as a drained ring). */
+	venc_ring_low_water_reset(&t, 0);
+	venc_ring_low_water_observe(&t, 1, 16);
+	CHECK("lw_one_slot_of_16_survives",
+		venc_ring_low_water_tick(&t, VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
+		venc_ring_low_water_slots(&t) == 1);
+
+	/* Degenerate geometry must not publish out-of-range occupancy. */
 	venc_ring_low_water_reset(&t, 0);
 	venc_ring_low_water_observe(&t, 0, 0);
 	CHECK("lw_zero_slot_count_safe",
 		venc_ring_low_water_tick(&t, VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
-		venc_ring_low_water_permille(&t) == 0);
+		venc_ring_low_water_slots(&t) == 0);
 
-	/* Occupancy above capacity (a torn read across a resize) clamps rather
-	 * than reporting more than 1000. */
+	/* Occupancy above capacity (a torn read across a resize) clamps at the
+	 * point of publication -- the value crosses a process boundary. */
 	venc_ring_low_water_reset(&t, 0);
 	venc_ring_low_water_observe(&t, 99, 8);
 	CHECK("lw_over_capacity_clamps",
 		venc_ring_low_water_tick(&t, VENC_RING_LOW_WATER_WINDOW_US) == 1 &&
-		venc_ring_low_water_permille(&t) == 1000);
+		venc_ring_low_water_slots(&t) == 8);
 
 	/* NULL is inert in every direction. */
 	venc_ring_low_water_reset(NULL, 0);
 	venc_ring_low_water_observe(NULL, 1, 8);
 	CHECK("lw_null_tick_safe", venc_ring_low_water_tick(NULL, 0) == 0);
-	CHECK("lw_null_read_safe", venc_ring_low_water_permille(NULL) == 0);
+	CHECK("lw_null_read_safe", venc_ring_low_water_slots(NULL) == 0);
 
 	/* End-to-end: a full ring must actually reject, which is the event the
 	 * measurement hangs off.  8 slots, 9th write fails. */
@@ -1064,12 +1081,12 @@ static int test_fr_health_consumer_readonly(void)
 		return failures;
 	}
 
-	venc_frame_ring_set_low_water(w, 500);
-	venc_frame_ring_set_low_water(rd, 250);   /* must be ignored */
+	venc_frame_ring_set_low_water(w, 5);
+	venc_frame_ring_set_low_water(rd, 2);   /* must be ignored */
 	CHECK("fr_health_ro_consumer_ignored",
-		w->hdr->low_water_permille == 500);
+		w->hdr->low_water_slots == 5);
 	CHECK("fr_health_ro_consumer_reads",
-		rd->hdr->low_water_permille == 500);
+		rd->hdr->low_water_slots == 5);
 	CHECK("fr_health_ro_consumer_sees_magic",
 		rd->hdr->health_magic == VENC_FRAME_RING_HEALTH_MAGIC);
 

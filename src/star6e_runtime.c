@@ -1090,7 +1090,7 @@ static void star6e_service_ring_low_water(Star6eOutput *output)
 		 * reinit).  Drop the state so a later frame-shm run starts
 		 * from a fresh window. */
 		g_ring_low_water_ready = 0;
-		output->low_water_permille = 0;
+		output->low_water_slots = 0;
 		return;
 	}
 
@@ -1103,14 +1103,14 @@ static void star6e_service_ring_low_water(Star6eOutput *output)
 	venc_ring_low_water_observe(&g_ring_low_water, fill.used_slots,
 		fill.slot_count);
 	if (venc_ring_low_water_tick(&g_ring_low_water, now_us)) {
-		uint16_t permille =
-			venc_ring_low_water_permille(&g_ring_low_water);
+		uint16_t slots =
+			venc_ring_low_water_slots(&g_ring_low_water);
 
-		output->low_water_permille = permille;
+		output->low_water_slots = slots;
 		/* Publish into the ring header: a window in which the ring
 		 * never drained is direct evidence that the consumer's rate
 		 * model is optimistic (protocols/frame-shm.md). */
-		venc_frame_ring_set_low_water(output->frame_ring, permille);
+		venc_frame_ring_set_low_water(output->frame_ring, slots);
 	}
 }
 
@@ -1425,12 +1425,12 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			 * Absent when the ring drained — the common case
 			 * should stay uncluttered. */
 			char osd_thr[16];
-			unsigned int lw = ps->output.low_water_permille;
+			unsigned int lw = ps->output.low_water_slots;
 
 			osd_thr[0] = '\0';
-			if (lw > 0)
-				snprintf(osd_thr, sizeof(osd_thr), " ring%u%%",
-					lw / 10);
+			if (lw > 1)
+				snprintf(osd_thr, sizeof(osd_thr), " ring%u",
+					lw);
 			debug_osd_text(ps->debug_osd, 4, "br", "%u/%uk%s",
 				osd_kbps, vcfg->video0.bitrate, osd_thr);
 		}

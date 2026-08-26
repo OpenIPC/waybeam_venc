@@ -33,11 +33,12 @@
 
 #define VENC_FRAME_RING_MAGIC   0x5646524D  /* "VFRM" */
 /* v2 (0.69.0): offset 88 changed meaning -- it carried throttle_permille, the
- * producer's self-imposed bitrate clamp, and now carries low_water_permille,
- * raw ring occupancy.  The two have OPPOSITE polarity (1000 was healthy, it is
- * now "ring never drained"), so this is deliberately a hard version break
- * rather than a field rename: every consumer validates version and refuses to
- * attach on a mismatch, which turns a silent misread into a loud one. */
+ * producer's self-imposed bitrate clamp, and now carries low_water_slots, the
+ * raw ring occupancy the clamp used to react to.  The two have OPPOSITE
+ * polarity (1000 was healthy; a HIGH slot count is now the unhealthy end), so
+ * this is deliberately a hard version break rather than a field rename: every
+ * consumer validates version and refuses to attach on a mismatch, which turns
+ * a silent misread into a loud one. */
 #define VENC_FRAME_RING_VERSION 2
 /* "VHLT" -- marks the producer-health fields on header line 1 as populated.
  * A consumer MUST treat any other value (notably 0, from a pre-0.57
@@ -79,7 +80,7 @@ typedef struct __attribute__((aligned(64))) {
 	 * old _pad1[52] in 0.57.0.  sizeof stays 192 and nothing before them
 	 * moves -- both external consumers address this header by byte offset
 	 * (radeon-vrx VFRM_OFF_*, waybeam-link kFrHdr*).  0.69.0 replaced
-	 * throttle_permille with low_water_permille in place at offset 88 and
+	 * throttle_permille with low_water_slots in place at offset 88 and
 	 * bumped `version` to 2 to make that visible: the polarity inverts, so
 	 * an unrebuilt consumer must refuse the ring rather than misread it.
 	 * See protocols/frame-shm.md, which is the canonical spec.
@@ -94,11 +95,16 @@ typedef struct __attribute__((aligned(64))) {
 	uint32_t futex_seq;
 	uint32_t health_magic;      /* VENC_FRAME_RING_HEALTH_MAGIC, or 0 */
 	uint64_t full_drops;        /* lifetime full-ring drops */
-	uint16_t low_water_permille; /* window low-water occupancy: 0 = the
-	                              * ring drained to empty at some point,
-	                              * 1000 = it never dropped below full.
-	                              * NOTE the polarity is inverted vs the
-	                              * throttle_permille this replaced. */
+	uint16_t low_water_slots;   /* lowest ring occupancy, in SLOTS, reached
+	                             * in the producer's last measurement
+	                             * window.  <= 1 is the healthy band (the
+	                             * ring's idle occupancy is one frame, not
+	                             * zero -- the producer samples just after
+	                             * writing); >= 2 across a whole window is
+	                             * standing backlog.  Raw slots, not a
+	                             * fraction: permille of a small slot count
+	                             * cannot round-trip the 1-slot reading,
+	                             * which is the one that matters. */
 	uint8_t  _pad1[38];
 
 	/* Line 2: Consumer-owned */
@@ -124,7 +130,7 @@ _Static_assert(offsetof(venc_frame_ring_hdr_t, write_idx) == 64, "off 64");
 _Static_assert(offsetof(venc_frame_ring_hdr_t, futex_seq) == 72, "off 72");
 _Static_assert(offsetof(venc_frame_ring_hdr_t, health_magic) == 76, "off 76");
 _Static_assert(offsetof(venc_frame_ring_hdr_t, full_drops) == 80, "off 80");
-_Static_assert(offsetof(venc_frame_ring_hdr_t, low_water_permille) == 88,
+_Static_assert(offsetof(venc_frame_ring_hdr_t, low_water_slots) == 88,
                "off 88");
 _Static_assert(offsetof(venc_frame_ring_hdr_t, read_idx) == 128, "off 128");
 _Static_assert(offsetof(venc_frame_ring_hdr_t, consumer_waiting) == 136,
@@ -205,23 +211,21 @@ static inline int venc_frame_ring_get_fill(const venc_frame_ring_t *r,
 	return 0;
 }
 
-/* Publish the window low-water occupancy (permille of slot_count, 0 = the
- * ring drained to empty).  Producer-only; a no-op on an attached (consumer)
- * ring. */
+/* Publish the window low-water occupancy in slots.  Producer-only; a no-op on
+ * an attached (consumer) ring. */
 static inline void venc_frame_ring_set_low_water(venc_frame_ring_t *r,
-	uint16_t permille)
+	uint16_t slots)
 {
 	if (!r || !r->hdr || !r->is_owner)
 		return;
-	__atomic_store_n(&r->hdr->low_water_permille, permille,
-		__ATOMIC_RELAXED);
+	__atomic_store_n(&r->hdr->low_water_slots, slots, __ATOMIC_RELAXED);
 }
 
 /* ── Ring low-water tracker ──────────────────────────────────────────────
  *
  * venc measures ring pressure and publishes it; it does not act on it.  The
  * rate controller (waybeam-link) is co-located on the same SoC, reads this
- * ring, and owns every response to what it says.
+ * ring, and owns every response to what the measurement says.
  *
  * Low-water, not high-water, and that distinction is what makes the signal
  * usable.  Measured on a Star6E at 100 fps into an 8-slot ring with a
@@ -230,9 +234,16 @@ static inline void venc_frame_ring_set_low_water(venc_frame_ring_t *r,
  * event-loop iteration, so short bursts are normal.  High-water reports those
  * bursts as congestion 15-25 % of the time with nothing wrong.  Low-water
  * asks the question that actually discriminates: did the ring fail to drain
- * *at any point* in the whole window?  If it touched bottom the consumer is
- * keeping up; if it never got there across 20 frame times, that is real
- * standing backlog.
+ * *at any point* in the whole window?
+ *
+ * SLOTS, not a fraction of capacity.  The healthy band is "at most one frame
+ * queued" -- the caller samples just after writing, so a perfectly drained
+ * ring still reads 1, which is why the clamp this replaced recovered at
+ * <= 1 slot and engaged at >= 2.  A permille encoding cannot carry that: at
+ * the ring's 16-slot default one slot is 62.5 permille, truncates to 62, and
+ * converts back to 0 -- destroying the exact reading that separates a healthy
+ * ring from a drained one.  Raw slots have no such rounding, and the consumer
+ * already knows slot_count (header offset 8) if it wants a fraction.
  *
  * The consumer cannot derive this for itself.  It can sample instantaneous
  * occupancy from write_idx/read_idx whenever it likes, but the low-water mark
@@ -247,9 +258,9 @@ static inline void venc_frame_ring_set_low_water(venc_frame_ring_t *r,
 
 typedef struct {
 	uint32_t low_slots;    /* lowest occupancy seen this window */
-	uint32_t slot_count;   /* capacity the low-water is measured against */
+	uint32_t slot_count;   /* capacity, for the defensive clamp below */
 	uint64_t window_us;    /* start of the current window */
-	uint16_t permille;     /* last completed window's result */
+	uint16_t slots;        /* last completed window's result */
 	int      seen;         /* any observation this window? */
 } VencRingLowWater;
 
@@ -261,7 +272,7 @@ static inline void venc_ring_low_water_reset(VencRingLowWater *t,
 	t->low_slots = 0;
 	t->slot_count = 0;
 	t->window_us = now_us;
-	t->permille = 0;
+	t->slots = 0;
 	t->seen = 0;
 }
 
@@ -274,7 +285,7 @@ static inline void venc_ring_low_water_observe(VencRingLowWater *t,
 		t->low_slots = used_slots;
 		t->seen = 1;
 	}
-	/* Track the live capacity so a ring resize mid-window still scales
+	/* Track the live capacity so a ring resize mid-window still clamps
 	 * against the geometry the samples were taken from. */
 	t->slot_count = slot_count;
 }
@@ -292,11 +303,11 @@ static inline int venc_ring_low_water_tick(VencRingLowWater *t,
 		return 0;
 
 	low = t->seen ? t->low_slots : 0;
+	/* venc_frame_ring_get_fill() already clamps, but this value crosses a
+	 * process boundary -- keep it in range at the point of publication. */
 	if (low > t->slot_count)
 		low = t->slot_count;
-	t->permille = t->slot_count
-		? (uint16_t)(((uint64_t)low * 1000u) / t->slot_count)
-		: 0u;
+	t->slots = (uint16_t)low;
 
 	t->window_us = now_us;
 	t->low_slots = 0;
@@ -304,9 +315,9 @@ static inline int venc_ring_low_water_tick(VencRingLowWater *t,
 	return 1;
 }
 
-static inline uint16_t venc_ring_low_water_permille(const VencRingLowWater *t)
+static inline uint16_t venc_ring_low_water_slots(const VencRingLowWater *t)
 {
-	return t ? t->permille : 0u;
+	return t ? t->slots : 0u;
 }
 
 /* ── Inline helpers ──────────────────────────────────────────────────── */
