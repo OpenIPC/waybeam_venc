@@ -1,5 +1,49 @@
 # History
 
+## [0.68.2] - 2026-08-26
+
+CV610 / IMX662 colour. Both changes device-verified on `.181`.
+
+- **`/api/v1/awb` now works on the CV610 backend.** `cv610_awb_query()` in
+  `src/cv610_iq.c` reads `ss_mpi_isp_query_wb_info()` and
+  `ss_mpi_isp_query_exposure_info()` and reports the gains AWB actually
+  converged on, the CCM saturation the AGC bucket selected, the detected
+  colour temperature, the interpolated CCM, scene status, Bv, and the
+  exposure that selected all of it. `query_awb_info` already existed for
+  star6e and maruko; cv610 returned 501.
+
+  The pre-existing `wb` group in `/api/v1/iq` could not answer this. It reads
+  back `ot_isp_wb_attr`, whose `manual_attr` holds the last value *written* --
+  on a backend that never leaves auto WB it reads 256/256/256/256 forever.
+  Diagnosing a colour cast without this was guesswork.
+
+- **The ISP black level is no longer rescaled by the sensor's bit depth.**
+  `cmos_get_isp_black_level()` sent `IMX662_BLACK_LEVEL_12BIT >> 2` for the
+  RAW10 modes. `ot_isp_cmos_black_level` is `Format:14.0` -- a fixed 14-bit ISP
+  domain, not the sensor's output depth -- so the correct value is `50 << 2 =
+  200` in *every* mode. Every vendor plugin on this silicon uses one constant
+  across all of its modes (sc450ai/sc431hai/sc500ai/sc4336p `0x410`,
+  os04d10/gc4023 `0x400`), sc450ai included, which runs both a 12-bit linear
+  and a 10-bit WDR mode off `BLACK_LEVEL_DEFAULT`.
+
+  The shift left ~150 codes of pedestal unsubtracted on the 90 and 100 fps
+  modes -- which is what the craft flies. AWB then measures `(B+p)/(G+p)`,
+  biased toward 1, so it reads blue as relatively stronger than it is and
+  under-applies blue gain; the residue itself is multiplied by 2.9x on B
+  against 1.1x on R, so it lifts blue hardest where signal is smallest.
+
+  Verified at matched analog gain 12.02x, before/after: `b_gain` 732 -> 791
+  (+8.1%), `b/r` 2.511 -> 2.810 (+11.9%), CCT 2976 -> 2898 K. The direction
+  and asymmetry were written down before the deploy. Operator verdict on the
+  image: "a bit more natural".
+
+**Not included, deliberately:** the residual white point is still roughly 5%
+too blue at ~2900 K indoor. A candidate correction to
+`IMX662_AWB_STATIC_WB_B` recovers about half of it, but its magnitude could
+not be resolved above the bench's own repeatability (a repeat arm on one
+unchanged build spread 6.2% once the room light drifted), and everything was
+measured at a single colour temperature. Tracked with the patch attached.
+
 ## [0.68.1] - 2026-08-23
 
 Header only. Bit 3 of the frame-SHM metadata flags is reserved for the
