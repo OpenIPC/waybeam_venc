@@ -758,3 +758,83 @@ out:
 	pthread_mutex_unlock(&g_iq_mutex);
 	return rc;
 }
+
+/* ==========================================================================
+ *  Applied AWB result
+ *
+ *  None of the groups above can show this.  f_wb reads back ot_isp_wb_attr,
+ *  whose manual_attr holds whatever was last written -- not what the auto
+ *  loop converged on -- so on a backend that never leaves auto WB it reads
+ *  as a constant.  ot_isp_wb_info is the auto loop's own output.
+ *
+ *  It carries the two numbers a colour cast has to be attributed between:
+ *  the gains actually in force (the white point) and the CCM saturation the
+ *  ISO bucket selected (how hard an error in that white point is rendered).
+ *  Exposure comes along because saturation is indexed by AGC bucket, so the
+ *  gain is what picks it -- without the ISO the saturation reading cannot be
+ *  tied back to g_imx662_awb_agc_table.
+ * ========================================================================== */
+char *cv610_awb_query(void)
+{
+	/* Local, not static like cv610_iq_query()'s: that one is static because
+	 * 24 KB does not belong on the httpd thread's stack, and it holds
+	 * g_iq_mutex across the fill.  This one is 2 KB and touches no shared
+	 * state, so a local keeps it correct without depending on the server
+	 * staying single-threaded. */
+	char buf[2048];
+	ot_isp_wb_info wb;
+	ot_isp_exp_info exp;
+	td_s32 wb_ret, exp_ret;
+	int pos = 0;
+
+	if (!cv610_pipeline_isp_ready())
+		return NULL;
+
+	(void)memset(&wb, 0, sizeof(wb));
+	(void)memset(&exp, 0, sizeof(exp));
+	wb_ret = ss_mpi_isp_query_wb_info(CV610_IQ_PIPE, &wb);
+	exp_ret = ss_mpi_isp_query_exposure_info(CV610_IQ_PIPE, &exp);
+
+	JSON_PUT(buf, pos, sizeof(buf), "{\"ok\":true,\"data\":{\"wb\":{\"ret\":%d",
+		(int)wb_ret);
+	if (wb_ret == TD_SUCCESS) {
+		/* Gains are Format:8.8, so 256 == 1.0x; emitted raw to stay exact. */
+		JSON_PUT(buf, pos, sizeof(buf),
+			",\"r_gain\":%u,\"gr_gain\":%u,\"gb_gain\":%u,\"b_gain\":%u"
+			",\"saturation\":%u,\"color_temp\":%u"
+			",\"ls0_ct\":%u,\"ls1_ct\":%u,\"ls0_area\":%u,\"ls1_area\":%u"
+			",\"multi_degree\":%u,\"scene\":\"%s\",\"bv\":%d"
+			",\"first_stable_time\":%u,\"ccm\":[",
+			(unsigned)wb.r_gain, (unsigned)wb.gr_gain,
+			(unsigned)wb.gb_gain, (unsigned)wb.b_gain,
+			(unsigned)wb.saturation, (unsigned)wb.color_temp,
+			(unsigned)wb.ls0_ct, (unsigned)wb.ls1_ct,
+			(unsigned)wb.ls0_area, (unsigned)wb.ls1_area,
+			(unsigned)wb.multi_degree,
+			(wb.scene_status == OT_ISP_AWB_SCENE_MODE_OUTDOOR) ?
+				"outdoor" : "indoor",
+			(int)wb.bv, (unsigned)wb.first_stable_time);
+		for (int i = 0; i < OT_ISP_CCM_MATRIX_SIZE; i++)
+			JSON_PUT(buf, pos, sizeof(buf), "%s%u",
+				i ? "," : "", (unsigned)wb.ccm[i]);
+		JSON_PUT(buf, pos, sizeof(buf), "]");
+	}
+	JSON_PUT(buf, pos, sizeof(buf), "},\"exposure\":{\"ret\":%d", (int)exp_ret);
+	if (exp_ret == TD_SUCCESS) {
+		/* Gains are Format:22.10, so 1024 == 1.0x. */
+		JSON_PUT(buf, pos, sizeof(buf),
+			",\"iso\":%u,\"a_gain\":%u,\"d_gain\":%u,\"isp_d_gain\":%u"
+			",\"exp_time\":%u,\"ave_lum\":%u,\"fps\":%u",
+			(unsigned)exp.iso, (unsigned)exp.a_gain, (unsigned)exp.d_gain,
+			(unsigned)exp.isp_d_gain, (unsigned)exp.exp_time,
+			(unsigned)exp.ave_lum, (unsigned)exp.fps);
+	}
+	JSON_PUT(buf, pos, sizeof(buf), "}}}");
+
+	if (pos >= (int)sizeof(buf) - 1) {
+		fprintf(stderr, "[cv610-iq] awb query truncated at %d bytes; "
+			"grow buf[] past %zu\n", pos, sizeof(buf));
+		return NULL;
+	}
+	return strdup(buf);
+}
