@@ -42,6 +42,24 @@ extern "C" {
  * always honored (bypass — safer than silently dropping). */
 int idr_rate_limit_allow(int venc_chn);
 
+/* Honor a BOOTSTRAP IDR unconditionally, bypassing the spacing check.
+ *
+ * The spacing gate exists to coalesce storms from producers that are merely
+ * asking for a fresher picture — the scene detector, /api/v1/idr.  Losing one
+ * of those costs nothing: another is already in flight, which is exactly why
+ * idr_rate_limit_allow() reports a coalesced request as success.
+ *
+ * A bootstrap IDR is a different event.  Output enable, a destination change
+ * and a live fps rebind all hand the stream to a receiver that has seen no
+ * parameter set at all, so a coalesced request leaves it with NOTHING to
+ * start from until the next GOP or GDR cycle — and the caller was told the
+ * apply succeeded.  These must not be swallowed.
+ *
+ * Counted as honored like every other source (the /api/v1/idr/stats parity
+ * claim depends on it) and re-arms the spacing window, so an ordinary request
+ * arriving right behind a bootstrap still coalesces against it. */
+void idr_rate_limit_force(int venc_chn);
+
 /* Read the honored count for this channel since process start. */
 uint32_t idr_rate_limit_honored(int venc_chn);
 

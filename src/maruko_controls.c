@@ -204,9 +204,15 @@ static int maruko_apply_rc_qp_delta(const i6c_venc_chn *attr, MI_VENC_RcParam_t 
 /* ── Basic controls (existing) ───────────────────────────────────────── */
 
 /* No IDR request on bitrate writes — see the matching note in
- * src/star6e_controls.c apply_bitrate() for the measurement.  Compile-tested
- * only here: Maruko was unreachable, so whether i6c set_chn_attr keyframes
- * implicitly the way Star6E's MI_VENC_SetChnAttr does is UNVERIFIED. */
+ * src/star6e_controls.c apply_bitrate() for the measurement.
+ *
+ * Compile-tested only here.  Operator ruling 2026-08-26: assume i6c
+ * set_chn_attr keyframes implicitly the way Star6E's MI_VENC_SetChnAttr was
+ * measured to, and keep the two backends symmetric rather than diverging on
+ * an untested difference.  Stated as an assumption because it is one — if a
+ * Maruko ever reaches a bench, the check is ten spaced video0.bitrate writes
+ * against a count of IRAP access units (not /api/v1/idr/stats, which only
+ * sees requests and is blind to an SDK-implicit keyframe). */
 static int maruko_apply_bitrate(uint32_t kbps)
 {
 	i6c_venc_chn attr = {0};
@@ -283,6 +289,7 @@ static int maruko_apply_qp_delta(int delta)
 }
 
 static int maruko_request_idr(void);
+static int maruko_request_idr_bootstrap(void);
 static uint32_t maruko_query_live_fps(void);
 
 static int maruko_apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
@@ -438,7 +445,7 @@ static int maruko_apply_fps_live(uint32_t fps)
 {
 	int ret = maruko_apply_fps(fps);
 	if (ret == 0)
-		(void)maruko_request_idr();
+		(void)maruko_request_idr_bootstrap();
 	return ret;
 }
 
@@ -453,6 +460,15 @@ static int maruko_request_idr(void)
 	 * asked for a resync point and one is already in flight. */
 	if (!idr_rate_limit_allow(g_ctx.venc_chn))
 		return 0;
+	return maruko_mi_venc_request_idr(g_ctx.venc_dev,
+		g_ctx.venc_chn, 1) == 0 ? 0 : -1;
+}
+
+/* Bootstrap form — Star6E parity, see request_idr_bootstrap() in
+ * src/star6e_controls.c for why these three sites must not be coalesced. */
+static int maruko_request_idr_bootstrap(void)
+{
+	idr_rate_limit_force(g_ctx.venc_chn);
 	return maruko_mi_venc_request_idr(g_ctx.venc_dev,
 		g_ctx.venc_chn, 1) == 0 ? 0 : -1;
 }
@@ -1158,10 +1174,10 @@ static int maruko_apply_output_enabled(bool on)
 			*g_ctx.stored_fps_ptr :
 			(g_ctx.vcfg ? g_ctx.vcfg->video0.fps : 30);
 		maruko_apply_fps(restored_fps);
-		/* Exactly one recovery IDR for the enable, through the shared
-		 * gate so it is counted.  apply_fps() no longer issues its own,
-		 * so this is no longer a back-to-back pair. */
-		(void)maruko_request_idr();
+		/* Exactly one IDR for the enable: counted, but NOT coalesced —
+		 * the consumer has seen no parameter set.  apply_fps() no
+		 * longer issues its own, so this is not a back-to-back pair. */
+		(void)maruko_request_idr_bootstrap();
 		printf("> Output enabled, FPS restored to %u\n", restored_fps);
 	} else {
 		*g_ctx.output_enabled_ptr = 0;
@@ -1187,9 +1203,9 @@ static int maruko_apply_server(const char *uri)
 	if (maruko_output_apply_server(g_maruko_output_ptr, uri) != 0)
 		return -1;
 
-	/* A new destination is a receiver that has never seen a parameter set;
-	 * through the shared gate so it is counted like every other source. */
-	(void)maruko_request_idr();
+	/* A new destination is a receiver that has never seen a parameter set,
+	 * so this is counted but never coalesced. */
+	(void)maruko_request_idr_bootstrap();
 	printf("> Destination changed to %s\n", uri);
 	return 0;
 }

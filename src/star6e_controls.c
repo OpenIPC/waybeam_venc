@@ -151,6 +151,7 @@ static Star6eControlContext g_star6e_control_ctx;
 
 static int apply_encoder_gop(uint32_t gop_size);
 static int request_idr(void);
+static int request_idr_bootstrap(void);
 
 static uint32_t align_down(uint32_t value, uint32_t align)
 {
@@ -588,7 +589,7 @@ static int apply_fps_live(uint32_t fps)
 {
 	int ret = apply_fps(fps);
 	if (ret == 0)
-		(void)request_idr();
+		(void)request_idr_bootstrap();
 	return ret;
 }
 
@@ -631,6 +632,18 @@ static int request_idr(void)
 	int chn = g_star6e_control_ctx.venc_chn;
 	if (!idr_rate_limit_allow(chn))
 		return 0;  /* coalesced — not an error */
+	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
+}
+
+/* Bootstrap form: output enable, destination change, live fps rebind.  Each
+ * hands the stream to a receiver that has seen no parameter set, so the
+ * spacing gate must not swallow it — see idr_rate_limit_force().  Counted,
+ * never coalesced, so a -1 here means a real SDK failure and the callers'
+ * error handling finally means what it says. */
+static int request_idr_bootstrap(void)
+{
+	int chn = g_star6e_control_ctx.venc_chn;
+	idr_rate_limit_force(chn);
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
@@ -1354,7 +1367,7 @@ static int apply_output_enabled(bool on)
 			g_star6e_control_ctx.pipeline->output_enabled = 0;
 			return -1;
 		}
-		if (request_idr() != 0) {
+		if (request_idr_bootstrap() != 0) {
 			g_star6e_control_ctx.pipeline->output_enabled = 0;
 			return -1;
 		}
@@ -1382,7 +1395,7 @@ static int apply_server(const char *uri)
 	    uri) != 0) {
 		return -1;
 	}
-	if (request_idr() != 0)
+	if (request_idr_bootstrap() != 0)
 		return -1;
 	printf("> Destination changed to %s\n", uri);
 	return 0;

@@ -47,6 +47,23 @@ int idr_rate_limit_allow(int venc_chn)
 	return 1;
 }
 
+void idr_rate_limit_force(int venc_chn)
+{
+	struct chn_state *s;
+
+	if (venc_chn < 0 || venc_chn >= IDR_RATE_LIMIT_MAX_CHANNELS)
+		return;
+
+	s = &g_state[venc_chn];
+	/* No CAS loop: nothing here is conditional on the previous value, and
+	 * a concurrent allow() is safe either way — its CAS compares against
+	 * the `last` it loaded, so a store landing underneath makes that CAS
+	 * fail and retry, where it then sees the re-armed window and
+	 * coalesces.  That is the outcome we want. */
+	__atomic_store_n(&s->last_us, wb_monotonic_us(), __ATOMIC_RELEASE);
+	__atomic_add_fetch(&s->honored, 1, __ATOMIC_RELAXED);
+}
+
 uint32_t idr_rate_limit_honored(int venc_chn)
 {
 	if (venc_chn < 0 || venc_chn >= IDR_RATE_LIMIT_MAX_CHANNELS)
