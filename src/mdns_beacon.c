@@ -595,26 +595,24 @@ int mdns_beacon_start(MdnsBeacon *b, const MdnsBeaconParams *p)
 	return 0;
 }
 
-void mdns_beacon_start_from_config(MdnsBeacon *b, const char *config_path)
+void mdns_beacon_start_from_cfg(MdnsBeacon *b, const VencConfig *cfg)
 {
-	VencConfig cfg;
-	venc_config_defaults(&cfg);
-	if (config_path)
-		(void)venc_config_load(config_path, &cfg);
+	if (!cfg)
+		return;
 
 	MdnsBeaconParams p;
 	memset(&p, 0, sizeof(p));
-	p.enabled = cfg.discovery.enabled;
+	p.enabled = cfg->discovery.enabled;
 	copy_str(p.service_type, sizeof(p.service_type),
-		cfg.discovery.service_type[0] ? cfg.discovery.service_type
+		cfg->discovery.service_type[0] ? cfg->discovery.service_type
 			: "_waybeam-venc._tcp");
 
 	/* Name resolution (§4.1/§4.5): operator override → serial-suffixed
 	 * waybeam-<die-id tail> → bare waybeam.  The SoC die ID gives every
 	 * Star6E a stable, collision-free name with no RFC conflict churn;
 	 * Maruko (no die ID) lands on bare waybeam unless pinned via config. */
-	if (cfg.discovery.name[0]) {
-		copy_str(p.name, sizeof(p.name), cfg.discovery.name);
+	if (cfg->discovery.name[0]) {
+		copy_str(p.name, sizeof(p.name), cfg->discovery.name);
 	} else {
 		const char *serial = device_id_serial_cached();
 		size_t sl = strlen(serial);
@@ -631,8 +629,8 @@ void mdns_beacon_start_from_config(MdnsBeacon *b, const char *config_path)
 	}
 
 	snprintf(p.version, sizeof(p.version), "%s", VENC_VERSION);
-	p.web_port = cfg.system.web_port;
-	p.bare_alias = cfg.discovery.bare_alias;
+	p.web_port = cfg->system.web_port;
+	p.bare_alias = cfg->discovery.bare_alias;
 
 	(void)mdns_beacon_start(b, &p);
 }
