@@ -132,6 +132,14 @@ int venc_jpeg_backend_init(const VencJpegConfig *cfg)
 	if (ret != TD_SUCCESS) {
 		fprintf(stderr, "[jpeg-cv610] create_chn(%d)=0x%x\n",
 			(int)g_chn, (unsigned)ret);
+		/* Name the one cause that is not a code bug.  JPEG encode is its
+		 * own kernel module on this SoC and the H.265 path comes up
+		 * without it, so a device missing open_jpege.ko fails exactly
+		 * here and nowhere else. */
+		if ((unsigned)ret == 0xa0088018u)
+			fprintf(stderr, "[jpeg-cv610] OT_ERR_NOT_READY: the JPEG "
+				"codec module is probably not loaded — check "
+				"`lsmod | grep jpege`\n");
 		return -EIO;
 	}
 	g_chn_created = 1;

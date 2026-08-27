@@ -27,7 +27,7 @@ is_loaded()
 # Built by concatenation, not as one multi-line literal: the lookup below matches
 # on " name ", so a name landing on a line boundary would carry a newline
 # instead of a space and never match at all.
-MPP_DEVICES="ab acodec adec aenc ai aio ao bus chnl h265e i2c isp_dev logmpp"
+MPP_DEVICES="ab acodec adec aenc ai aio ao bus chnl h265e i2c isp_dev jpege logmpp"
 MPP_DEVICES="$MPP_DEVICES mipi_rx mmz_userdev ot_mipi_rx rc rgn sys user vb"
 MPP_DEVICES="$MPP_DEVICES vca venc venc_msg vgs vi vpp vpss"
 
@@ -154,6 +154,16 @@ start_modules()
 	load_stock open_rc || return 1
 	load_stock open_venc g_venc_max_chn_num=8 || return 1
 	load_stock open_h265e || return 1
+	# JPEG encode is a separate codec module. Without it the H.265 path runs
+	# fine but ss_mpi_venc_create_chn() for an OT_PT_JPEG channel returns
+	# OT_ERR_NOT_READY (0xa0088018) -- device-confirmed on the SIP-K662C6S,
+	# where loading it turns that same create_chn(7) into a working 1280x720
+	# snapshot.  Deliberately NOT fatal: snapshot is optional and venc
+	# degrades to a 503 on /api/v1/snapshot.jpg, so a firmware that ships no
+	# open_jpege.ko must still get video.
+	if ! load_stock open_jpege; then
+		echo "warning: open_jpege not loaded; /api/v1/snapshot.jpg will 503" >&2
+	fi
 
 	# AI capture only: open_ao/open_adec are playback-side and stay out.
 	# open_acodec drives the analog front end and must come after open_aio.
@@ -185,7 +195,7 @@ stop_modules()
 	fi
 	modules="open_user open_mipi_rx open_sensor_i2c \
 		open_acodec open_aenc open_ai open_aio \
-		open_h265e open_venc open_rc open_chnl open_isp open_vi \
+		open_jpege open_h265e open_venc open_rc open_chnl open_isp open_vi \
 		open_vpss open_vgs open_vpp open_rgn open_sys open_vca open_vb \
 		open_pm_stub open_base open_mmz open_osal open_sys_config"
 	rc=0

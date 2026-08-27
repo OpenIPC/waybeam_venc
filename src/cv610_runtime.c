@@ -577,6 +577,12 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.query_awb_info = cv610_awb_query,
 	.apply_iq_param = cv610_iq_set,
 	.apply_qp_bounds = cv610_apply_qp_bounds,
+	/* Same shared implementation Star6E and Maruko register; it dispatches
+	 * to venc_jpeg_backend_set_quality() under the snapshot module lock, so
+	 * a live q change cannot interleave with a capture in progress. Without
+	 * it, /api/v1/capabilities advertises snapshot.quality supported while
+	 * every write to it 501s. */
+	.apply_snapshot_quality = venc_jpeg_set_quality,
 };
 
 static void cv610_signal_handler(int signo)
@@ -1483,8 +1489,9 @@ static int cv610_run(void *opaque)
 				clock_gettime(CLOCK_MONOTONIC, &rec_now);
 				(void)star6e_ts_recorder_write_video(&ctx->ts_recorder,
 					frame, frame_len,
-					(uint64_t)rec_now.tv_sec * 90000ull +
-						(uint64_t)rec_now.tv_nsec * 9ull / 100000ull,
+					ts_mux_timespec_to_pts(
+						(uint32_t)rec_now.tv_sec,
+						(uint32_t)rec_now.tv_nsec),
 					is_idr);
 			} else {
 				(void)star6e_recorder_write_au(&ctx->recorder,
