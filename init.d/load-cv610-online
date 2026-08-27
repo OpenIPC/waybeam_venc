@@ -27,7 +27,7 @@ is_loaded()
 # Built by concatenation, not as one multi-line literal: the lookup below matches
 # on " name ", so a name landing on a line boundary would carry a newline
 # instead of a space and never match at all.
-MPP_DEVICES="ab acodec adec aenc ai aio ao bus chnl h265e i2c isp_dev jpege logmpp"
+MPP_DEVICES="ab acodec adec aenc ai aio ao bus chnl h265e i2c isp_dev logmpp"
 MPP_DEVICES="$MPP_DEVICES mipi_rx mmz_userdev ot_mipi_rx rc rgn sys user vb"
 MPP_DEVICES="$MPP_DEVICES vca venc venc_msg vgs vi vpp vpss"
 
@@ -164,6 +164,12 @@ start_modules()
 	if ! load_stock open_jpege; then
 		echo "warning: open_jpege not loaded; /api/v1/snapshot.jpg will 503" >&2
 	fi
+	# Deliberately NOT added to MPP_DEVICES: device-checked on the target,
+	# open_jpege creates no /dev node of its own (129 char devices with and
+	# without it, empty diff).  JPEG encoding goes through the existing
+	# /dev/venc, which the list already covers.  Adding "jpege" on the
+	# strength of the module name is the guess this file warns against
+	# above, and it would have named a device that can never be held.
 
 	# AI capture only: open_ao/open_adec are playback-side and stay out.
 	# open_acodec drives the analog front end and must come after open_aio.

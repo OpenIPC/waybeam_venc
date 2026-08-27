@@ -118,12 +118,17 @@ int venc_jpeg_backend_init(const VencJpegConfig *cfg)
 	attr.venc_attr.type = OT_PT_JPEG;
 	attr.venc_attr.max_pic_width = w;
 	attr.venc_attr.max_pic_height = h;
-	/* 3/4, matching the main H.265 channel — this buffer is reserved out
-	 * of a 64 MB MMZ for the life of the process whether or not a snapshot
-	 * is ever taken, and 3/2 would hold ~3 MB at 1080p, double what the
-	 * video channel itself takes.  Device-measured worst case is 379.5 KB
-	 * (q=95, 720p), so 3/4 is still ample headroom. */
-	attr.venc_attr.buf_size = ((w * h * 3 / 4) + 63) & ~63u;
+	/* 3/2 of the raw luma+chroma, i.e. a full uncompressed frame.
+	 *
+	 * This looks generous next to the main H.265 channel's 3/4, and it is
+	 * reserved out of a 64 MB MMZ for process life whether or not a
+	 * snapshot is ever taken — but 3/4 was TRIED on hardware and the SDK
+	 * refuses it: ss_mpi_venc_create_chn() returns 0xa0088007
+	 * (OT_ERR_ILLEGAL_PARAM) and the snapshot endpoint is dead. The vendor
+	 * evidently requires a JPEG channel to be able to hold a worst-case
+	 * incompressible frame, which a delta-coded video channel never has
+	 * to. Do not shrink this without re-testing create_chn on a device. */
+	attr.venc_attr.buf_size = ((w * h * 3 / 2) + 63) & ~63u;
 	attr.venc_attr.is_by_frame = TD_TRUE;
 	attr.venc_attr.pic_width = w;
 	attr.venc_attr.pic_height = h;
