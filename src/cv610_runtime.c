@@ -388,7 +388,14 @@ static void cv610_record_sink(void *opaque, const uint8_t *au, size_t len,
  * Order matters: the writer thread is the only thread that touches recorder
  * state while recording, so it has to be drained and joined BEFORE either
  * recorder is closed. */
-static void cv610_record_stop(Cv610RunnerContext *ctx)
+/* `bounded` picks how long the queued tail may hold this caller up.
+ *
+ * Mid-run (the encode loop) it must be bounded: an unbounded drain would put
+ * the disk stall straight back on the live video path at every stop, which is
+ * the whole thing this writer removes.  At teardown the video path is going
+ * away regardless, so blocking is free and the full flush is what gets the
+ * recording's last seconds onto disk instead of discarding them. */
+static void cv610_record_stop(Cv610RunnerContext *ctx, int bounded)
 {
 	VencRecWriter *w;
 
@@ -413,7 +420,10 @@ static void cv610_record_stop(Cv610RunnerContext *ctx)
 	 * disk stall back on the encode loop at every stop — the very thing
 	 * the writer removes — so a stalled queue is abandoned instead: the
 	 * recording loses its tail, the live link loses nothing. */
-	venc_rec_writer_stop_bounded(w, 250, &ctx->rec_dropped_frames);
+	if (bounded)
+		venc_rec_writer_stop_bounded(w, 250, &ctx->rec_dropped_frames);
+	else
+		venc_rec_writer_stop(w);
 	cv610_audio_set_record_ring(ctx->audio, NULL);
 	star6e_ts_recorder_stop(&ctx->ts_recorder);
 	star6e_recorder_stop(&ctx->recorder);
@@ -428,7 +438,7 @@ static void cv610_record_start(Cv610RunnerContext *ctx, const char *dir)
 		return;
 	/* Stop first: a start over a live recording must not leak the open fd,
 	 * and only one of the two recorders may ever be active. */
-	cv610_record_stop(ctx);
+	cv610_record_stop(ctx, 1);
 
 	if (strcmp(ctx->config.record.format, "hevc") == 0) {
 		if (star6e_recorder_start(&ctx->recorder, dir) != 0)
@@ -455,7 +465,7 @@ static void cv610_record_start(Cv610RunnerContext *ctx, const char *dir)
 	if (rc != 0) {
 		fprintf(stderr, "ERROR: recorder writer thread did not start "
 			"(%d); recording not started\n", rc);
-		cv610_record_stop(ctx);
+		cv610_record_stop(ctx, 1);
 		return;
 	}
 
@@ -1462,7 +1472,7 @@ static int cv610_run(void *opaque)
 			int stop_pending = venc_api_get_record_stop();
 
 			if (stop_pending && !start_pending)
-				cv610_record_stop(ctx);
+				cv610_record_stop(ctx, 1);
 			if (start_pending) {
 				if (!rec_dir[0])
 					venc_api_get_record_dir(rec_dir,
@@ -1633,7 +1643,7 @@ static void cv610_teardown(void *opaque)
 	g_cv610_runner = NULL;
 	/* Before cv610_audio_stop(): the tee points into ctx->audio_ring, and
 	 * the recorder is the only reader of it. */
-	cv610_record_stop(ctx);
+	cv610_record_stop(ctx, 0);   /* full flush: shutting down anyway */
 	cv610_audio_stop(ctx->audio);
 	ctx->audio = NULL;
 	/* AFTER cv610_audio_stop(), which is what joins the capture thread.
