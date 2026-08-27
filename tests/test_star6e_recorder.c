@@ -392,6 +392,110 @@ static int test_recorder_dir_stored(void)
 	return failures;
 }
 
+/* ── star6e_recorder_write_au: the SoC-independent contiguous writer ──── */
+
+static int test_recorder_write_au_not_active(void)
+{
+	Star6eRecorderState state;
+	uint8_t au[] = { 0x00, 0x00, 0x00, 0x01, 0x40, 0x01 };
+	int failures = 0;
+
+	star6e_recorder_init(&state);
+	CHECK("write_au not active returns 0",
+		star6e_recorder_write_au(&state, au, sizeof(au)) == 0);
+	CHECK("write_au not active wrote nothing", state.bytes_written == 0);
+	return failures;
+}
+
+static int test_recorder_write_au_null(void)
+{
+	Star6eRecorderState state;
+	uint8_t au[] = { 0x00, 0x00, 0x00, 0x01, 0x40, 0x01 };
+	int failures = 0;
+
+	star6e_recorder_init(&state);
+	CHECK("write_au null state", star6e_recorder_write_au(NULL, au, 1) == 0);
+	CHECK("write_au null buffer",
+		star6e_recorder_start(&state, g_test_dir) == 0 &&
+		star6e_recorder_write_au(&state, NULL, 4) == 0);
+	CHECK("write_au zero length",
+		star6e_recorder_write_au(&state, au, 0) == 0);
+	CHECK("write_au null/zero left the file empty", state.bytes_written == 0);
+	star6e_recorder_stop(&state);
+	return failures;
+}
+
+static int test_recorder_write_au_bytes(void)
+{
+	Star6eRecorderState state;
+	uint8_t au[] = { 0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xDE, 0xAD, 0xBE };
+	uint8_t back[sizeof(au)];
+	struct stat st;
+	int failures = 0;
+	FILE *f;
+
+	star6e_recorder_init(&state);
+	CHECK("write_au start ok", star6e_recorder_start(&state, g_test_dir) == 0);
+
+	for (int i = 0; i < 10; i++)
+		CHECK("write_au returns byte count",
+			star6e_recorder_write_au(&state, au, sizeof(au)) ==
+				(int)sizeof(au));
+
+	CHECK("write_au frames_written", state.frames_written == 10);
+	CHECK("write_au bytes_written",
+		state.bytes_written == 10 * sizeof(au));
+
+	/* The bytes must reach the file verbatim — this writer is the whole
+	 * recorder interface for a backend that hands over one contiguous AU,
+	 * so a silent truncation here would be a silently corrupt recording. */
+	f = fopen(state.path, "rb");
+	if (f) {
+		size_t got = fread(back, 1, sizeof(back), f);
+		fclose(f);
+		CHECK("write_au first AU read back",
+			got == sizeof(au) && memcmp(back, au, sizeof(au)) == 0);
+	} else {
+		CHECK("write_au file readable", 0);
+	}
+
+	star6e_recorder_stop(&state);
+	if (stat(state.path, &st) == 0)
+		CHECK("write_au file size",
+			(size_t)st.st_size == 10 * sizeof(au));
+	else
+		CHECK("write_au file exists", 0);
+	return failures;
+}
+
+/* A write to a closed fd must stop the recorder rather than spin: the drain
+ * loop calls this unconditionally on every frame. */
+static int test_recorder_write_au_error_stops(void)
+{
+	Star6eRecorderState state;
+	uint8_t au[] = { 0x00, 0x00, 0x00, 0x01, 0x26, 0x01 };
+	int failures = 0;
+
+	star6e_recorder_init(&state);
+	CHECK("write_au err start ok",
+		star6e_recorder_start(&state, g_test_dir) == 0);
+	CHECK("write_au err first write ok",
+		star6e_recorder_write_au(&state, au, sizeof(au)) > 0);
+
+	/* Close the descriptor behind the recorder's back; the next write
+	 * fails with EBADF, which is neither ENOSPC nor success. */
+	close(state.fd);
+	CHECK("write_au err returns -1",
+		star6e_recorder_write_au(&state, au, sizeof(au)) == -1);
+	CHECK("write_au err recorder stopped",
+		!star6e_recorder_is_active(&state));
+	CHECK("write_au err stop reason",
+		state.last_stop_reason == RECORDER_STOP_WRITE_ERROR);
+	CHECK("write_au err is idempotent",
+		star6e_recorder_write_au(&state, au, sizeof(au)) == 0);
+	return failures;
+}
+
 int test_star6e_recorder(void)
 {
 	int failures = 0;
@@ -413,6 +517,10 @@ int test_star6e_recorder(void)
 	failures += test_recorder_trailing_slash();
 	failures += test_recorder_free_space();
 	failures += test_recorder_dir_stored();
+	failures += test_recorder_write_au_not_active();
+	failures += test_recorder_write_au_null();
+	failures += test_recorder_write_au_bytes();
+	failures += test_recorder_write_au_error_stops();
 
 	cleanup_test_dir();
 

@@ -1,5 +1,86 @@
 # History
 
+## [0.70.0] - 2026-08-27
+
+Snapshot and recording reach the CV610 backend, and the config file is read
+exactly once at startup. Contract `0.19.0` -> `0.20.0` — **additive**: no
+field was removed, renamed, or given a new meaning, and a client written
+against `0.19.0` sees strictly more capability and no changed response shape.
+
+- **`GET /api/v1/snapshot.jpg` on CV610.** It was the one route a backend
+  omitted entirely. The JPEG channel binds as a **second destination** on the
+  same VPSS output the H.265 channel already consumes — the SDK allows four
+  bind targets per source — so it needs no VPSS channel of its own: no extra
+  scaling, no extra VB pool, and nothing running while nobody is asking. The
+  bind is permanent and only the channel's receive state pulses
+  (`start_chn(recv_pic_num=1)` -> `get_stream` -> `stop_chn`), which
+  deliberately avoids reconfiguring the source per request.
+
+  Because it shares the main stream's VPSS channel it inherits that geometry.
+  `snapshot.width` / `snapshot.height` are advertised **unsupported** on CV610
+  rather than accepted and ignored.
+
+- **Recording on CV610 in `record.mode=mirror`**, `format=ts` (Opus muxed) and
+  `format=hevc`, with rotation and `/api/v1/record/{start,stop,status}`.
+
+  No SDK-typed adapter was needed. The CV610 drain loop already copies each
+  access unit into one contiguous Annex-B buffer before any consumer sees it,
+  and `star6e_ts_recorder_write_video()` has always taken a flat buffer. Only
+  the `.hevc` path was missing a SoC-independent entry point, so
+  `star6e_recorder_write_au()` was added beside the existing iovec writer,
+  carrying the same side-effect order: disk-space check, frame boundary,
+  write, truncate-back-to-boundary on failure, then counters and the
+  `sync_file_range` cadence.
+
+  `record.bitrate` / `fps` / `gop_size` / `server` stay **unsupported**: they
+  describe the second VENC channel that `dual` and `dual-stream` need, which
+  this backend does not create. Those modes are refused with a warning rather
+  than silently recording ch0 at the wrong bitrate.
+
+- **Record start forces an un-coalescible IDR on CV610.** The shipped
+  configuration is `resilience=racing` — a GDR craft emits no periodic IDR at
+  all — so a request the rate limiter coalesced away would leave a recording
+  with no IRAP access unit anywhere in it: a file that seeks to nothing and
+  plays from nothing, while the caller was told the start succeeded. Same
+  reasoning and same path as Star6E.
+
+- **The shared recorder is no longer gated behind a SigmaStar-only guard.**
+  `star6e_recorder.c`, `star6e_ts_recorder.c` and `ts_mux.c` were always
+  SoC-independent apart from their SDK-typed adapters; the guard around those
+  adapters read `#ifndef PLATFORM_MARUKO`, which silently included them in any
+  build that was not Maruko. It now names what it actually requires —
+  `star6e_output.c` being linked — so CV610 can use the cores.
+
+  Verified as a no-op for the existing backends: with the version strings held
+  constant, `star6e_ts_recorder.o` and `ts_mux.o` are **byte-identical** on
+  both star6e and maruko, and `star6e_recorder.o` differs only by the added
+  `star6e_recorder_write_au` — no pre-existing symbol changed or disappeared.
+
+- **`RECORDER_DEFAULT_DIR` had two definitions.** `venc_api.c` carried its own
+  copy for CV610 because that backend did not link the recorder header. Now it
+  includes the header like everything else.
+
+- Note for operators: the shipped `record.dir` default is `/mnt/mmcblk0p1`,
+  which does not exist on the CV610 reference board (the bench mounts USB
+  storage at `/mnt/sda1`). It is left at the shared default rather than
+  hardcoding one board's mount point; set it for the target before recording.
+
+### The config file is read exactly once
+
+venc parsed `/etc/waybeam.json` twice at startup — once in `main()` for the
+mDNS beacon, once in `backend_execute()` for the backend. The two reads were
+not atomic and not equally trusted: a config write landing between them handed
+the beacon and the encoder different snapshots of `system.web_port`, and the
+beacon's load discarded its return value, so a malformed config announced a
+service on defaults and *then* exited.
+
+The config file is a program-level input, not a module-level one, so it is now
+parsed once at the program boundary and the value handed down; modules take a
+`const VencConfig *`, never a path. Loading before the beacon also means a
+malformed config exits without ever having announced.
+`BackendOps.config_path` is gone, and `VENC_CONFIG_DEFAULT_PATH` went from
+seven mentions across five files to one call site.
+
 ## [0.69.0] - 2026-08-26
 
 venc stops actuating on its own egress. Contract `0.18.6` -> `0.19.0`

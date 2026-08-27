@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.19.0`
+- `contract_version`: `0.20.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -79,8 +79,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.69.0",
-    "contract_version": "0.19.0",
+    "app_version": "0.70.0",
+    "contract_version": "0.20.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -895,9 +895,14 @@ scales with pixels per module, so size the channel up for longer-distance
 markers.  Pairing, commands, boot scheduling, and action dispatch are
 deliberately outside the waybeam binary and this endpoint.
 
-This route is registered by the Star6E and Maruko backends. The initial CV610
-backend does not advertise snapshot capability and does not register the
-route, so requests receive the normal HTTP `404` route response.
+Registered on **all three** backends since `0.20.0`. On CV610 the JPEG channel
+is a second bind target on the same VPSS output the H.265 channel consumes
+(the SDK allows up to four destinations per source), pulse-encoded with
+`start_chn(recv_pic_num = 1)` -> `get_stream` -> `stop_chn`. Because it shares
+the main stream's VPSS channel it inherits that geometry: `snapshot.width` and
+`snapshot.height` report `supported:false` on CV610 rather than being accepted
+and ignored. `snapshot.enabled`, `snapshot.quality` and `snapshot.channel` are
+honoured; quality maps to `ss_mpi_venc_set_jpeg_param(qfactor)`.
 
 > **Retired:** `GET /api/v1/snapshot.pgm` (grayscale P5 PGM, added 0.59.0)
 > was removed in 0.60.0 and now answers `404`.  It captured through a
@@ -1829,12 +1834,12 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.19.0`:
+in Notes. As of `contract_version: 0.20.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
-| `/api/v1/record/{start,stop}` | yes | **501** | Maruko has no runtime poll loop yet (Phase 6.5).  Config-driven recording (`record.enabled=true` + `record.mode="mirror"\|"dual"`) works. |
-| `/api/v1/record/status` | live counters | live counters | Both backends register a status callback against the live `Star6eTsRecorderState`; Maruko reflects daemon-config-driven recording (mirror/dual). |
+| `/api/v1/record/{start,stop}` | yes | **501** | Maruko has no runtime poll loop yet (Phase 6.5).  Config-driven recording (`record.enabled=true` + `record.mode="mirror"\|"dual"`) works. **CV610 from 0.20.0**, `record.mode=mirror` only: the drain loop polls the same start/stop flags. `dual`/`dual-stream` need a second VENC channel and are refused with a warning rather than silently recording ch0. |
+| `/api/v1/record/status` | live counters | live counters | Both backends register a status callback against the live `Star6eTsRecorderState`; Maruko reflects daemon-config-driven recording (mirror/dual). **CV610 from 0.20.0** registers the same callback. |
 | `/api/v1/qr/*` | yes | **404** | Star6E-only VPE port1 luma tap. QR capability fields remain in the shared schema but report `supported:false` on Maruko. |
 | `/api/v1/recordings*` | yes | yes | File listing/download/delete works against `record.dir` regardless of which backend wrote the file. |
 | `/api/v1/audio/status` | yes | yes | Both backends register `query_audio_status`. |
@@ -1854,6 +1859,25 @@ in Notes. As of `contract_version: 0.19.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.20.0` (additive — snapshot and recording reach CV610):
+  - **`GET /api/v1/snapshot.jpg` is now registered on CV610.** It was the one
+    route a backend omitted entirely; all three now serve it. The CV610 JPEG
+    channel binds as a second destination on the main stream's VPSS output, so
+    it inherits that geometry — `snapshot.width` / `snapshot.height` report
+    `supported:false` there.
+  - **`record.*` reaches CV610 in `mirror` mode.** `record.enabled`, `dir`,
+    `format` (`ts` | `hevc`), `mode`, `max_seconds` and `max_mb` are now
+    advertised supported, and `/api/v1/record/{start,stop,status}` act on a
+    real recorder. `record.bitrate` / `fps` / `gop_size` / `server` stay
+    `supported:false`: they describe the second VENC channel that `dual` and
+    `dual-stream` would need, which this backend does not create.
+  - Record start on CV610 forces an **un-coalescible** IDR. The shipped
+    configuration is `resilience=racing` (GDR, no periodic IDR), so a
+    rate-limited request would produce a file with no IRAP access unit
+    anywhere in it.
+  - No field was removed, renamed or given a new meaning. A client written
+    against `0.19.0` sees strictly more capability and no changed response
+    shape.
 - `0.19.0` (**breaking** — venc stops actuating on its own egress, and the
   frame-SHM ring header goes to v2):
   - **Removed `outgoing.shm_throttle`** (alias `outgoing.shmThrottle`) and the

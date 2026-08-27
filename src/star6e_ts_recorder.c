@@ -1,5 +1,12 @@
 #include "star6e_ts_recorder.h"
-#ifndef PLATFORM_MARUKO
+/* The SigmaStar-typed adapters below need star6e_output.c, which only the
+ * Star6E target and the host test build link.  Maruko has its own adapter
+ * in maruko_recorder.c / maruko_ts_recorder.c; CV610 needs none, because it
+ * hands the recorder one contiguous access unit and calls the SoC-
+ * independent entry points directly.  Stated as "not those two" rather than
+ * "PLATFORM_STAR6E" because the host test build defines no platform macro
+ * at all and must keep compiling these. */
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 #include "star6e_output.h"
 #endif
 
@@ -337,7 +344,7 @@ int star6e_ts_recorder_is_active(const Star6eTsRecorderState *state)
 	return state && state->fd >= 0;
 }
 
-#ifndef PLATFORM_MARUKO
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 	const MI_VENC_Stream_t *stream)
 {

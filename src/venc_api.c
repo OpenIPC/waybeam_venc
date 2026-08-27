@@ -20,10 +20,13 @@
 #include "rtp_packetizer.h"
 #if !HAVE_BACKEND_CV610
 #include "sensor_select.h"
-#include "star6e_recorder.h"
-#else
-#define RECORDER_DEFAULT_DIR "/mnt/mmcblk0p1"
 #endif
+/* The recorder state machine, its RECORDER_DEFAULT_DIR and the TS mux are
+ * SoC-independent; only the SDK-typed adapters inside are compiled out per
+ * backend.  CV610 used to carry its own copy of the default-dir constant
+ * because it did not link the recorder — two definitions that had to agree
+ * by hand. */
+#include "star6e_recorder.h"
 #include "venc_httpd.h"
 #include "venc_jpeg.h"
 #include "venc_webui.h"
@@ -872,6 +875,20 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"outgoing.connected_udp",
 			"outgoing.allow_unix_encoder_stall",
 			"audio.enabled", "audio.mute",
+			/* Snapshot: the JPEG channel is a second bind target on
+			 * the main stream's VPSS output, so it inherits that
+			 * geometry.  snapshot.width/height are deliberately NOT
+			 * listed — nothing reads them here, and advertising a
+			 * field the encoder ignores is what this list exists to
+			 * prevent. */
+			"snapshot.enabled", "snapshot.quality",
+			"snapshot.channel",
+			/* Recording, mirror mode only.  record.bitrate/fps/
+			 * gop_size/server describe a second VENC channel that
+			 * dual and dual-stream would need; those modes are not
+			 * implemented on this backend. */
+			"record.enabled", "record.dir", "record.format",
+			"record.mode", "record.max_seconds", "record.max_mb",
 			"debug.show_osd",
 			"discovery.enabled", "discovery.service_type",
 			"discovery.name", "discovery.bare_alias",
@@ -2890,7 +2907,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.19.0\","
+		"\"contract_version\":\"0.20.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -4133,9 +4150,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	g_api_routes_registered = 1;
 	pthread_mutex_unlock(&g_cfg_mutex);
 
-#if !HAVE_BACKEND_CV610
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
-#endif
 #if HAVE_BACKEND_STAR6E
 	r |= venc_httpd_route("GET", "/api/v1/qr/tap.pgm", handle_qr_tap_pgm,
 		backend_ctx);

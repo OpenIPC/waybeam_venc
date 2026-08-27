@@ -1,5 +1,12 @@
 #include "star6e_recorder.h"
-#ifndef PLATFORM_MARUKO
+/* The SigmaStar-typed adapters below need star6e_output.c, which only the
+ * Star6E target and the host test build link.  Maruko has its own adapter
+ * in maruko_recorder.c / maruko_ts_recorder.c; CV610 needs none, because it
+ * hands the recorder one contiguous access unit and calls the SoC-
+ * independent entry points directly.  Stated as "not those two" rather than
+ * "PLATFORM_STAR6E" because the host test build defines no platform macro
+ * at all and must keep compiling these. */
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 #include "star6e_output.h"
 #endif
 
@@ -59,7 +66,7 @@ static int build_recording_path(char *path, size_t path_size, const char *dir)
 	return 0;
 }
 
-#ifndef PLATFORM_MARUKO
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 static ssize_t writev_all(int fd, const struct iovec *iov, int iov_count)
 {
 	struct iovec pending[16];
@@ -194,7 +201,89 @@ static int check_disk_space(Star6eRecorderState *state)
 	return 0;
 }
 
-#ifndef PLATFORM_MARUKO
+static ssize_t write_all(int fd, const uint8_t *data, size_t len)
+{
+	size_t total = 0;
+
+	while (total < len) {
+		ssize_t ret = write(fd, data + total, len - total);
+
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (ret == 0) {
+			errno = EIO;
+			return -1;
+		}
+		total += (size_t)ret;
+	}
+
+	return (ssize_t)total;
+}
+
+int star6e_recorder_write_au(Star6eRecorderState *state,
+	const uint8_t *au, size_t len)
+{
+	ssize_t written;
+	off_t frame_start;
+
+	if (!state || state->fd < 0 || !au || len == 0)
+		return 0;
+
+	/* Same order as star6e_recorder_write_frame() below: space check
+	 * first (it can stop the recorder), then the frame boundary, then the
+	 * write, then the counters and the sync cadence. */
+	if (check_disk_space(state) != 0)
+		return 0;
+	frame_start = lseek(state->fd, 0, SEEK_CUR);
+
+	written = write_all(state->fd, au, len);
+	if (written < 0) {
+		int saved_errno = errno;
+
+		/* A failure may follow a short successful write. Roll the
+		 * regular file back to its frame boundary so it never retains
+		 * half an AU. */
+		if (frame_start >= 0)
+			(void)ftruncate(state->fd, frame_start);
+		errno = saved_errno;
+		if (errno == ENOSPC) {
+			fprintf(stderr, "[recorder] disk full (ENOSPC)\n");
+			stop_with_reason(state, RECORDER_STOP_DISK_FULL);
+		} else {
+			fprintf(stderr, "[recorder] write error: %s\n",
+				strerror(errno));
+			stop_with_reason(state, RECORDER_STOP_WRITE_ERROR);
+		}
+		return -1;
+	}
+
+	state->bytes_written += (uint64_t)written;
+	state->frames_written++;
+	state->frames_since_sync++;
+
+	if (state->sync_interval_frames > 0 &&
+	    state->frames_since_sync >= state->sync_interval_frames) {
+		/* Non-blocking writeback hint: bounds the dirty page count
+		 * without stalling the encoder thread. Durability checkpoint
+		 * is the fdatasync at recorder stop. */
+		sync_file_range(state->fd, 0, 0, SYNC_FILE_RANGE_WRITE);
+		state->frames_since_sync = 0;
+	}
+
+	return (int)written;
+}
+
+/* The failure tail above is spelled out rather than shared with
+ * write_frame(): folding them would edit a device-verified Star6E code path
+ * for no behavioural gain, and would cost the byte-for-byte no-change control
+ * on the star6e and maruko binaries that this change relies on. Collapsing
+ * the two — together with the larger maruko_recorder.c duplication — is a
+ * separate change with its own verification. */
+
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 int star6e_recorder_write_frame(Star6eRecorderState *state,
 	const MI_VENC_Stream_t *stream)
 {

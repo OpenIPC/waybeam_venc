@@ -10,6 +10,7 @@
 #include "cv610_audio.h"
 
 #include "output_socket.h"
+#include "audio_ring.h"
 #include "rtp_packetizer.h"
 
 #include <errno.h>
@@ -69,6 +70,11 @@ struct Cv610AudioState {
 	uint64_t bytes;
 	uint64_t packets;
 	uint64_t drops;
+	/* Optional tee for the TS recorder.  Owned by the runtime, set only
+	 * while a TS recording is open; the capture thread reads it with an
+	 * acquire load so a start/stop from the main loop is visible without
+	 * a lock on the audio path.  Mirrors star6e_audio's rec_ring. */
+	AudioRing *rec_ring;
 };
 
 #define AUDIO_CHECK(expr) do { \
@@ -328,8 +334,21 @@ static void *cv610_audio_thread(void *opaque)
 		if (ret != TD_SUCCESS)
 			continue;
 		if (stream.len > 0 && stream.stream) {
+			AudioRing *rec = __atomic_load_n(&state->rec_ring,
+				__ATOMIC_ACQUIRE);
 			int sent = 0;
 
+			/* Tee before the transport: a recording must capture the
+			 * audio even when nothing is streaming it. */
+			if (rec) {
+				struct timespec now;
+
+				clock_gettime(CLOCK_MONOTONIC, &now);
+				audio_ring_push(rec, stream.stream,
+					(uint16_t)stream.len,
+					(uint64_t)now.tv_sec * 1000000ull +
+						(uint64_t)now.tv_nsec / 1000ull);
+			}
 			if (state->socket_handle < 0) {
 				sent = 1;
 			} else {
@@ -496,6 +515,13 @@ fail_mutex:
 fail:
 	free(state);
 	return NULL;
+}
+
+void cv610_audio_set_record_ring(Cv610AudioState *state, AudioRing *ring)
+{
+	if (!state)
+		return;
+	__atomic_store_n(&state->rec_ring, ring, __ATOMIC_RELEASE);
 }
 
 void cv610_audio_stop(Cv610AudioState *state)

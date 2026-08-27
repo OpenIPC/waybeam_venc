@@ -11,6 +11,10 @@
 #include "h26x_util.h"
 #include "hevc_rtp.h"
 #include "idr_rate_limit.h"
+#include "audio_ring.h"
+#include "star6e_recorder.h"
+#include "star6e_ts_recorder.h"
+#include "venc_jpeg.h"
 #include "output_socket.h"
 #include "rtp_session.h"
 #include "timing.h"
@@ -90,6 +94,14 @@ typedef struct {
 	int venc_created;
 	int venc_started;
 	int venc_bound;
+	/* Recording (record.mode=mirror only on this backend): the main
+	 * channel's already-copied access unit is teed to file.  The shared
+	 * recorder cores are SoC-independent — CV610 needs no SDK-typed
+	 * adapter because cv610_copy_stream() has already produced one
+	 * contiguous Annex-B buffer by the time either writer sees it. */
+	Star6eRecorderState recorder;
+	Star6eTsRecorderState ts_recorder;
+	AudioRing audio_ring;
 } Cv610RunnerContext;
 
 /* Backend selection and the vendor MPP graph are process-singleton. The
@@ -320,6 +332,98 @@ static int cv610_request_idr(void)
 		return 0;
 	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
 		? 0 : -1;
+}
+
+/* Recorder start is a BOOTSTRAP event, not a request for a fresher picture.
+ * The file that just opened contains nothing, and the shipped CV610 config is
+ * resilience=racing — a GDR craft emits no periodic IDR at all, so a request
+ * that the rate limiter coalesces away leaves a recording with NO IRAP access
+ * unit anywhere in it.  That file seeks to nothing and plays from nothing
+ * while the caller was told the start succeeded.  Same reasoning and same
+ * un-coalescible path as Star6E's runtime_request_idr_on(). */
+static void cv610_record_force_idr(void)
+{
+	idr_rate_limit_force(CV610_VENC_CHN);
+	if (ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) != TD_SUCCESS)
+		fprintf(stderr, "WARN: record start could not force an IDR; "
+			"the recording may not decode from its first frame\n");
+}
+
+/* Close whichever recorder is open and drop the audio tee.  Idempotent. */
+static void cv610_record_stop(Cv610RunnerContext *ctx)
+{
+	cv610_audio_set_record_ring(ctx->audio, NULL);
+	star6e_ts_recorder_stop(&ctx->ts_recorder);
+	star6e_recorder_stop(&ctx->recorder);
+}
+
+static void cv610_record_start(Cv610RunnerContext *ctx, const char *dir)
+{
+	int want_audio;
+
+	if (!dir || !dir[0])
+		return;
+	/* Stop first: a start over a live recording must not leak the open fd,
+	 * and only one of the two recorders may ever be active. */
+	cv610_record_stop(ctx);
+
+	if (strcmp(ctx->config.record.format, "hevc") == 0) {
+		if (star6e_recorder_start(&ctx->recorder, dir) != 0)
+			return;
+	} else {
+		want_audio = ctx->config.audio.enabled && ctx->audio;
+		if (star6e_ts_recorder_start(&ctx->ts_recorder, dir,
+				want_audio ? &ctx->audio_ring : NULL) != 0)
+			return;
+		if (want_audio)
+			cv610_audio_set_record_ring(ctx->audio, &ctx->audio_ring);
+	}
+	cv610_record_force_idr();
+}
+
+static void cv610_record_status_callback(VencRecordStatus *out)
+{
+	Cv610RunnerContext *ctx = g_cv610_runner;
+
+	memset(out, 0, sizeof(*out));
+	if (!ctx)
+		return;
+
+	if (star6e_ts_recorder_is_active(&ctx->ts_recorder)) {
+		out->active = 1;
+		snprintf(out->format, sizeof(out->format), "ts");
+		star6e_ts_recorder_status(&ctx->ts_recorder,
+			&out->bytes_written, &out->frames_written,
+			&out->segments, NULL, NULL);
+		snprintf(out->path, sizeof(out->path), "%s", ctx->ts_recorder.path);
+		out->elapsed_ms =
+			star6e_recorder_elapsed_ms(&ctx->ts_recorder.start_time);
+		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
+	} else if (star6e_recorder_is_active(&ctx->recorder)) {
+		out->active = 1;
+		snprintf(out->format, sizeof(out->format), "hevc");
+		star6e_recorder_status(&ctx->recorder,
+			&out->bytes_written, &out->frames_written, NULL, NULL);
+		snprintf(out->path, sizeof(out->path), "%s", ctx->recorder.path);
+		out->elapsed_ms =
+			star6e_recorder_elapsed_ms(&ctx->recorder.start_time);
+		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
+	} else {
+		/* Either recorder may hold the reason; a manual stop on one does
+		 * not mask a disk-full on the other. */
+		const char *reason = "manual";
+		Star6eRecorderStopReason sr = ctx->ts_recorder.last_stop_reason;
+
+		if (sr == RECORDER_STOP_MANUAL)
+			sr = ctx->recorder.last_stop_reason;
+		if (sr == RECORDER_STOP_DISK_FULL)
+			reason = "disk_full";
+		else if (sr == RECORDER_STOP_WRITE_ERROR)
+			reason = "write_error";
+		snprintf(out->stop_reason, sizeof(out->stop_reason), "%s", reason);
+		snprintf(out->format, sizeof(out->format), "%s",
+			ctx->config.record.format);
+	}
 }
 
 /* Star6E/Maruko parity — see star6e_service_ring_low_water().  venc measures
@@ -943,6 +1047,27 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	if (ss_mpi_sys_bind(&source, &destination) != TD_SUCCESS)
 		return -1;
 	ctx->venc_bound = 1;
+
+	/* JPEG snapshot: a second consumer on the source the main channel just
+	 * bound, registered only now so it can never join a source that failed
+	 * to come up.  Non-fatal — /api/v1/snapshot.jpg serves 503 if it does
+	 * not initialise.  snapshot.width/height are not honoured here (the
+	 * channel shares the main stream's VPSS output), which is why they are
+	 * advertised unsupported for this backend. */
+	{
+		const VencConfigSnapshot *snap = &ctx->config.snapshot;
+		VencJpegConfig jcfg = {
+			.width   = ctx->pipeline.out_width,
+			.height  = ctx->pipeline.out_height,
+			.quality = snap->quality,
+			.channel = snap->channel,
+			.enabled = snap->enabled,
+		};
+
+		venc_jpeg_set_source(&source);
+		(void)venc_jpeg_init(&jcfg);
+	}
+
 	printf("> CV610 H.265 %ux%u@%u CBR=%u kbit/s GOP=%.2fs/%uf\n",
 		ctx->pipeline.out_width, ctx->pipeline.out_height, ctx->pipeline.fps,
 		ctx->config.video0.bitrate, ctx->config.video0.gop_size, gop);
@@ -953,6 +1078,10 @@ static void cv610_venc_stop(Cv610RunnerContext *ctx)
 {
 	ot_mpp_chn source = { OT_ID_VPSS, CV610_VPSS_GRP, CV610_VPSS_CHN };
 	ot_mpp_chn destination = { OT_ID_VENC, 0, CV610_VENC_CHN };
+
+	/* Before the source it is bound to goes away — the snapshot channel is
+	 * the other consumer of `source`. */
+	venc_jpeg_shutdown();
 
 	if (ctx->venc_bound) {
 		(void)ss_mpi_sys_unbind(&source, &destination);
@@ -1115,10 +1244,41 @@ static int cv610_init(void *opaque)
 				"WARNING: CV610 audio did not start; continuing without it "
 				"(cause reported above)\n");
 	}
+	star6e_recorder_init(&ctx->recorder);
+	audio_ring_init(&ctx->audio_ring);
+	/* CV610 audio is fixed at 48 kHz mono Opus in cv610_audio.c; the rate
+	 * and channel count come from the config only so a mismatch shows up
+	 * as a bad TS rather than being silently papered over.  Zero rate ==
+	 * "no audio in the mux". */
+	star6e_ts_recorder_init(&ctx->ts_recorder,
+		ctx->config.audio.enabled ? ctx->config.audio.sample_rate : 0,
+		ctx->config.audio.enabled ? (uint8_t)ctx->config.audio.channels : 0,
+		TS_AUDIO_CODEC_OPUS);
+	if (ctx->config.record.max_seconds > 0)
+		ctx->ts_recorder.max_seconds = ctx->config.record.max_seconds;
+	if (ctx->config.record.max_mb > 0)
+		ctx->ts_recorder.max_bytes =
+			(uint64_t)ctx->config.record.max_mb * 1024 * 1024;
+
 	g_cv610_runner = ctx;
 	if (venc_api_register(&ctx->config, "cv610",
 		&g_cv610_apply_callbacks, NULL) != 0)
 		return -1;
+	venc_api_set_record_status_fn(cv610_record_status_callback);
+	venc_api_set_record_http_control_supported(true);
+
+	/* Auto-start.  Only "mirror" is implemented here: dual and dual-stream
+	 * need a second VENC channel, deliberately deferred (docs/CV610_BACKEND.md).
+	 * An unimplemented mode is refused loudly rather than silently recording
+	 * the wrong channel. */
+	if (ctx->config.record.enabled && ctx->config.record.dir[0]) {
+		if (strcmp(ctx->config.record.mode, "mirror") == 0)
+			cv610_record_start(ctx, ctx->config.record.dir);
+		else if (strcmp(ctx->config.record.mode, "off") != 0)
+			fprintf(stderr, "WARNING: record.mode=%s is not implemented "
+				"on CV610; recording not started (mirror only)\n",
+				ctx->config.record.mode);
+	}
 	if (venc_httpd_start(ctx->config.system.web_port) != 0)
 		return -1;
 	return 0;
@@ -1188,6 +1348,31 @@ static int cv610_run(void *opaque)
 			venc_respawn_request();
 			printf("> CV610 reinit requested: cold restart via fork+exec\n");
 			break;
+		}
+
+		/* HTTP-driven record control.  Read both flags before acting so a
+		 * start racing a stop cannot leave the request latched. */
+		{
+			char rec_dir[VENC_CONFIG_STRING_MAX];
+			int start_pending = venc_api_get_record_start(rec_dir,
+				sizeof(rec_dir));
+			int stop_pending = venc_api_get_record_stop();
+
+			if (stop_pending && !start_pending)
+				cv610_record_stop(ctx);
+			if (start_pending) {
+				if (!rec_dir[0])
+					venc_api_get_record_dir(rec_dir,
+						sizeof(rec_dir));
+				if (strcmp(ctx->config.record.mode, "mirror") == 0 ||
+				    ctx->config.record.mode[0] == '\0')
+					cv610_record_start(ctx, rec_dir);
+				else
+					fprintf(stderr, "WARNING: record.mode=%s is not "
+						"implemented on CV610; start ignored "
+						"(mirror only)\n",
+						ctx->config.record.mode);
+			}
 		}
 
 		FD_ZERO(&readfds);
@@ -1289,6 +1474,22 @@ static int cv610_run(void *opaque)
 				/* cv610_output_write owns per-datagram drop accounting. */
 				(void)cv610_send_rtp_frame(ctx, frame, frame_len);
 			}
+			/* Mirror-mode recording: the same access unit the
+			 * transport just took.  Both writers no-op while no
+			 * recorder is open, so this is unconditional. */
+			if (star6e_ts_recorder_is_active(&ctx->ts_recorder)) {
+				struct timespec rec_now;
+
+				clock_gettime(CLOCK_MONOTONIC, &rec_now);
+				(void)star6e_ts_recorder_write_video(&ctx->ts_recorder,
+					frame, frame_len,
+					(uint64_t)rec_now.tv_sec * 90000ull +
+						(uint64_t)rec_now.tv_nsec * 9ull / 100000ull,
+					is_idr);
+			} else {
+				(void)star6e_recorder_write_au(&ctx->recorder,
+					frame, frame_len);
+			}
 			__atomic_add_fetch(&ctx->frames, 1, __ATOMIC_RELAXED);
 			__atomic_add_fetch(&ctx->bytes, frame_len, __ATOMIC_RELAXED);
 			if (ctx->debug_osd)
@@ -1311,6 +1512,10 @@ static void cv610_teardown(void *opaque)
 	venc_httpd_pause();
 	venc_httpd_stop();
 	g_cv610_runner = NULL;
+	/* Before cv610_audio_stop(): the tee points into ctx->audio_ring, and
+	 * the recorder is the only reader of it. */
+	cv610_record_stop(ctx);
+	audio_ring_destroy(&ctx->audio_ring);
 	cv610_audio_stop(ctx->audio);
 	ctx->audio = NULL;
 	cv610_output_stop(ctx);

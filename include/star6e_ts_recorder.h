@@ -74,10 +74,17 @@ void star6e_ts_recorder_status(const Star6eTsRecorderState *state,
 	uint32_t *segments, const char **path,
 	Star6eRecorderStopReason *last_stop_reason);
 
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 /** Convenience: extract NAL data from MI_VENC_Stream_t and write as TS.
  *  Handles IDR detection and PTS from CLOCK_MONOTONIC.
- *  No-op if not active. */
+ *  No-op if not active.
+ *
+ *  SigmaStar-typed, so it is compiled only where star6e_output.c is linked
+ *  (the Star6E target and the host test build).  Maruko has
+ *  maruko_ts_recorder_write_stream(); CV610 already holds a contiguous AU and
+ *  calls star6e_ts_recorder_write_video() directly. */
 int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 	const MI_VENC_Stream_t *stream);
+#endif
 
 #endif /* STAR6E_TS_RECORDER_H */
