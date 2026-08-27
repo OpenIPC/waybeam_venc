@@ -1119,7 +1119,6 @@ static int cv610_init(void *opaque)
 	if (venc_api_register(&ctx->config, "cv610",
 		&g_cv610_apply_callbacks, NULL) != 0)
 		return -1;
-	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
 	if (venc_httpd_start(ctx->config.system.web_port) != 0)
 		return -1;
 	return 0;
@@ -1328,7 +1327,6 @@ static int cv610_map_result(int result)
 
 static const BackendOps g_cv610_ops = {
 	.name = "cv610",
-	.config_path = VENC_CONFIG_DEFAULT_PATH,
 	.context_size = sizeof(Cv610RunnerContext),
 	.config = cv610_config,
 	.prepare = cv610_prepare,

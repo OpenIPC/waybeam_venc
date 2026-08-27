@@ -131,7 +131,6 @@ static int maruko_runner_init(void *opaque)
 	maruko_bind_controls(ctx);
 	maruko_reset_scene(backend);
 	venc_api_register(&ctx->vcfg, "maruko", maruko_controls_callbacks(), NULL);
-	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
 	g_maruko_runner_ctx = ctx;
 	venc_api_set_record_status_fn(maruko_record_status_callback);
 	venc_api_set_record_http_control_supported(true);
@@ -231,7 +230,6 @@ static int maruko_map_pipeline_result(int result)
 
 static const BackendOps g_backend_ops = {
 	.name = "maruko",
-	.config_path = VENC_CONFIG_DEFAULT_PATH,
 	.context_size = sizeof(MarukoRunnerContext),
 	.config = maruko_config,
 	.prepare = maruko_prepare,

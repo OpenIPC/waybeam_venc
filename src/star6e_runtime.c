@@ -856,7 +856,6 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	star6e_iq_init();
 	venc_api_register(vcfg, "star6e", star6e_controls_callbacks(),
 		ps->luma_tap);
-	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
 	venc_api_set_record_status_fn(record_status_callback);
 	venc_api_set_record_http_control_supported(true);
 
@@ -1888,7 +1887,6 @@ static int star6e_map_pipeline_result(int result)
 
 static const BackendOps g_backend_ops = {
 	.name = "star6e",
-	.config_path = VENC_CONFIG_DEFAULT_PATH,
 	.context_size = sizeof(Star6eRunnerContext),
 	.config = star6e_config,
 	.prepare = star6e_prepare,
