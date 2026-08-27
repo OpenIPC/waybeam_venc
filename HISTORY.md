@@ -53,9 +53,13 @@ they got through is more useful than the fixes are.
   rotation, while `is_active()` goes on answering "is a file open right now".
   Only the recorder can tell those apart, so that is where the answer lives.
 
-  Device-verified on the Star6E SD card, both binaries under an identical
-  amplified rotation window: 12 rotations produced 12 gaps of 36-87 ms
-  (~34 frames, reported by nothing) before, and none after.
+  Not observed on the Star6E bench, and the reason is worth recording: the
+  same `fdatasync`/`close`/`open` that opens the window also stalls the
+  encoder, so no frames arrive to be dropped. Five runs there — fixed and
+  unfixed — all show the recorder writing exactly what the encoder produced.
+  On hardware where rotation is slow but does not stall the encoder, the
+  window is live. The case for this fix is the source-level defect plus a
+  mutation test, not a device measurement.
 
 - **`star6e_output_stream_flatten()` and `maruko_video_stream_flatten()`.**
   The writer needs its own copy, because SDK stream memory dies at
