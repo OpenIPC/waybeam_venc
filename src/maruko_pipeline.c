@@ -3028,13 +3028,14 @@ static void *maruko_dual_stream_thread(void *arg)
 				usleep(1000);
 			continue;
 		}
-		if (!maruko_video_stream_packet_info_complete(&stream)) {
-			static int incomplete_warned;
-			if (!incomplete_warned) {
-				incomplete_warned = 1;
-				fprintf(stderr, "WARN: [maruko][dual] invalid packetInfo; "
-					"dropping whole access unit\n");
-			}
+		/* Through the shared helper, as Star6E's ch1 is: the open-coded
+		 * version counted nothing, so a ch1 discard never reached
+		 * bad_au_drops and its one-shot warn had already latched.  (No
+		 * ring is involved here — maruko_output_init() rejects
+		 * frame-shm:// for the dual output — so this is a lost counter,
+		 * not a false-healthy gauge.) */
+		if (maruko_video_reject_incomplete_access_unit(&stream,
+		    &d->output)) {
 			(void)maruko_mi_venc_release_stream(ctx->venc_device,
 				d->channel, &stream);
 			continue;
@@ -4221,15 +4222,15 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		 * stutters points at the radio, not here). */
 		{
 			/* See the star6e_runtime equivalent. */
-			char osd_thr[16];
+			char osd_ring[16];
 			unsigned int lw = ctx->output.low_water_slots;
 
-			osd_thr[0] = '\0';
+			osd_ring[0] = '\0';
 			if (lw > 1)
-				snprintf(osd_thr, sizeof(osd_thr), " ring%u",
+				snprintf(osd_ring, sizeof(osd_ring), " ring%u",
 					lw);
 			debug_osd_text(ctx->debug_osd, 4, "br", "%u/%uk%s",
-				osd_kbps, ctx->cfg.venc_max_rate, osd_thr);
+				osd_kbps, ctx->cfg.venc_max_rate, osd_ring);
 		}
 
 		{

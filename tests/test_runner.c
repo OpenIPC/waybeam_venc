@@ -135,7 +135,6 @@ int main(void)
 	printf("\n--- test_idr_rate_limit ---\n");
 	failures += test_idr_rate_limit();
 
-
 	printf("\n--- test_backend ---\n");
 	failures += test_backend();
 

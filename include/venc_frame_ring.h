@@ -52,11 +52,21 @@
 #define VENC_FRAME_FLAG_IDR     0x01
 #define VENC_FRAME_FLAG_GDR     0x02  /* GDR rolling intra stripe active */
 #define VENC_FRAME_FLAG_ENHANCE 0x04  /* SVC-T enhance layer (droppable) */
+/* Bit 3 is RESERVED for the receiver-set SALVAGED flag: a frame rebuilt from
+ * synthesized replacement slices, decodable but NOT what was sent.  venc never
+ * sets it -- an encoder cannot salvage its own output -- but it must not hand
+ * the bit to anything else either, because consumers already act on it (one
+ * maps it to a "corrupted" buffer flag and refuses the frame as a recording
+ * seek point and as a parameter-set cache seed).  Declared here so the
+ * canonical producer header agrees with protocols/frame-shm.md and with the
+ * receivers, rather than leaving 0x08 looking free. */
+#define VENC_FRAME_FLAG_SALVAGED 0x08
 
 typedef struct {
 	uint32_t pts;        /* capture timestamp (µs, truncated to 32 bits) */
 	uint8_t  codec;      /* VENC_FRAME_CODEC_H265 */
-	uint8_t  flags;      /* VENC_FRAME_FLAG_{IDR,GDR,ENHANCE} */
+	uint8_t  flags;      /* VENC_FRAME_FLAG_*; venc sets IDR/GDR/ENHANCE
+	                      * only -- SALVAGED is receiver-set */
 	uint8_t  gdr_pos;    /* 0-based position in GDR cycle (0 when inactive) */
 	uint8_t  gdr_len;    /* GDR cycle length in frames (0 when inactive) */
 } VencFrameMeta;

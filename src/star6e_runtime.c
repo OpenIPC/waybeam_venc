@@ -390,9 +390,10 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s)
 	return 0;
 }
 
-/* Ring-full recovery form: reports whether the shared 100 ms limiter let
- * the IDR through, so the frame-ring holdoff can retry a swallowed request
- * on the next drop instead of pacing a no-op (Star6eOutput.request_idr). */
+/* Scene-detector IDR: goes through the shared 100 ms limiter, and a
+ * coalesced request is not an error — another is already in flight.  (The
+ * ring-full recovery path that used to share this helper is gone; venc no
+ * longer requests an IDR in response to its own egress.) */
 static void star6e_service_ring_low_water(Star6eOutput *output);
 
 static int star6e_ring_request_idr(void *ctx)
@@ -552,16 +553,18 @@ static void record_status_callback(VencRecordStatus *out)
  * to nothing and plays from nothing, while the caller was told the start
  * succeeded.  Same failure shape as a destination change, so it takes the same
  * un-coalescible path: counted in /api/v1/idr/stats, never swallowed. */
-static int runtime_request_idr(void)
+static int runtime_request_idr_on(int chn)
 {
-	int chn;
-
-	if (!g_runner_ctx)
-		return -1;
-
-	chn = g_runner_ctx->ps.venc_channel;
 	idr_rate_limit_force(chn);
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
+}
+
+/* Mirror-mode recorder: the file is fed by the main channel. */
+static int runtime_request_idr(void)
+{
+	if (!g_runner_ctx)
+		return -1;
+	return runtime_request_idr_on(g_runner_ctx->ps.venc_channel);
 }
 
 /* Start the supervisory AE limit enforcer.  This is the sole AE path on
@@ -689,8 +692,13 @@ static void *dual_rec_thread_fn(void *arg)
 			star6e_ts_recorder_stop(d->ts_recorder);
 			star6e_ts_recorder_start(d->ts_recorder,
 				d->rec_req_start_dir, d->audio_ring);
-			if (d->ts_recorder->request_idr)
-				d->ts_recorder->request_idr();
+			/* Ask the channel that actually feeds this file.  The
+			 * shared hook targets the main channel, so in dual mode
+			 * it keyframed the LIVE stream while the ch1 recording
+			 * still opened without an IRAP — the exact outcome the
+			 * un-coalescible path exists to prevent, aimed one
+			 * channel off. */
+			(void)runtime_request_idr_on(d->channel);
 			d->rec_req_start = 0;
 		}
 
@@ -1271,10 +1279,11 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			ps->output_enabled, vcfg->system.verbose, &enc_info,
 			att_ptr, detect_ptr, detect_len);
 
-		/* frame-shm ring-fill bitrate clamp.  Runs unconditionally
-		 * (no subscription gate — it is a safety mechanism, not
-		 * telemetry) and only costs two relaxed atomic loads plus a
-		 * compare per frame when the transport isn't frame-shm. */
+		/* frame-shm ring low-water measurement.  Runs unconditionally
+		 * (no subscription gate — the consumer reads the result from
+		 * the ring header, so it must be published whether or not
+		 * anyone is watching over HTTP) and costs two relaxed atomic
+		 * loads plus a compare per frame off frame-shm. */
 		star6e_service_ring_low_water(&ps->output);
 	}
 
@@ -1441,15 +1450,15 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			 * consumer is behind" from "the encoder is behind".
 			 * Absent when the ring drained — the common case
 			 * should stay uncluttered. */
-			char osd_thr[16];
+			char osd_ring[16];
 			unsigned int lw = ps->output.low_water_slots;
 
-			osd_thr[0] = '\0';
+			osd_ring[0] = '\0';
 			if (lw > 1)
-				snprintf(osd_thr, sizeof(osd_thr), " ring%u",
+				snprintf(osd_ring, sizeof(osd_ring), " ring%u",
 					lw);
 			debug_osd_text(ps->debug_osd, 4, "br", "%u/%uk%s",
-				osd_kbps, vcfg->video0.bitrate, osd_thr);
+				osd_kbps, vcfg->video0.bitrate, osd_ring);
 		}
 
 		{

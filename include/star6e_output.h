@@ -155,7 +155,10 @@ typedef struct {
 	 * SDK's packet table was incomplete or invalid.  Transport-independent
 	 * (it happens on RTP too), which is why it lives here rather than in
 	 * the ring's stats; on frame-shm it is ALSO mirrored into the ring
-	 * header's other_drops so the consumer can see the frame vanish. */
+	 * header's other_drops so the consumer can see the frame vanish.
+	 * Written on the pipeline thread, read on the httpd thread: relaxed
+	 * atomics, like socket_drops/socket_writes beside it in the same
+	 * response. */
 	uint64_t bad_au_drops;
 	/* One WARN per pipeline start (reset by star6e_output_reset's memset)
 	 * when packet metadata is incomplete or invalid — the frame is aborted,

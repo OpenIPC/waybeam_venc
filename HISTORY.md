@@ -145,20 +145,28 @@ encoder behaviour only when something asks.
   stuttering picture separates "the consumer is behind" from "the encoder is
   behind".
 
-## [0.68.1] - 2026-08-23
+### Folded in: the work first staged as `0.68.1`
 
-venc stops injecting IDRs of its own accord. Contract `0.18.6` -> `0.18.7`.
-No new config, no wire format, config schema or frame-SHM layout changes.
+This began as a separate release, "venc stops injecting IDRs of its own
+accord" (contract `0.18.6` -> `0.18.7`). It never shipped separately, and
+`0.69.0` is the only release that carries it — so it is recorded here rather
+than as its own entry, per the one-version-bump-per-change rule.
 
-Version numbering: `0.67.4` and `0.68.0` are already taken on the
-snokvist fork and are pending sync, so this lands at `0.68.1` rather than
-renumbering again when that bundle arrives.
+Two reasons not to leave it standing as `0.68.1`. That number is **taken**:
+the fork already ships a different `0.68.1` (the frame-SHM bit-3 SALVAGED
+reservation, contract unchanged at `0.18.6`) and a `0.68.2` after it, so two
+disjoint releases would share one number and date. And several items below
+were superseded again by `0.69.0` above — the ring-full recovery IDR they
+kept for plain GOP is now removed outright, and the throttle-clamp deadband
+they tuned is gone with the clamp. Kept for the reasoning and the device
+measurements, which still stand.
 
 - **`video0.bitrate`, `video0.qpDelta` and `video0.maxIBytes`/`maxPBytes` no
   longer request an IDR after applying** (Star6E and Maruko). These are all
   decoder-neutral rate-control state, absorbed mid-GOP by the rate
-  controller; the frame-shm throttle clamp has relied on exactly that since
-  it shipped. A controller that wants a resync point calls `/request/idr`
+  controller; the frame-shm throttle clamp relied on exactly that for as long
+  as it existed (`0.69.0` above removed the clamp, so that corroboration is
+  historical — the SDK behaviour it rested on is unchanged). A controller that wants a resync point calls `/request/idr`
   explicitly. CV610 never IDR'd on these paths.
 
   Device-measured on a SSC338Q (IMX335 1920x1080@60, H.265 CBR, GDR via the
@@ -232,7 +240,9 @@ renumbering again when that bundle arrives.
   The single remaining IRAP is the recorder's own start IDR; a do-nothing
   control arm recorded exactly that one.
 
-- **The ring-fill clamp deadbands its own writes.** It re-programmed the
+- **The ring-fill clamp deadbands its own writes.** *(Superseded by `0.69.0`
+  above, which removed the clamp entirely; the deadband no longer exists.)*
+  It re-programmed the
   encoder on every permille change, as often as every 200 ms — and each
   programmed rate change costs an IDR, so a clamp chasing an oscillating
   fill signal keyframed the link it was trying to unclog. Movement below

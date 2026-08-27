@@ -79,7 +79,7 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.67.0",
+    "app_version": "0.69.0",
     "contract_version": "0.19.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
@@ -1453,7 +1453,7 @@ Response `200` (SHM ring transport, common for `outgoing.server=shm://...`):
 }
 ```
 
-Response `200` (frame-shm ring, with the ring-fill bitrate clamp engaged):
+Response `200` (frame-shm ring):
 ```json
 {
   "ok": true,
@@ -1486,7 +1486,8 @@ Response `200` (UDP/Unix kernel-buffer fill_pct):
     "inPressure": false,
     "pressureDrops": 0,
     "transportDrops": 0,
-    "packetsSent": 184523
+    "packetsSent": 184523,
+    "badAuDrops": 0
   }
 }
 ```
@@ -1508,9 +1509,9 @@ Field reference:
 | `packetsSent` | Lifetime sends accepted: ring writes for SHM, datagrams for UDP/Unix |
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
-| `otherDrops` | (frame-shm only) Frames the producer discarded for a reason **other than a full ring** — an access unit it could not build at all (oversize, or a malformed SDK packet table).  Kept apart from `transportDrops` on purpose: that one is congestion the consumer is causing and a rate controller should slow down for it, this one is not congestion and slowing down fixes nothing.  Mirrored into the ring header at offset 96 so the consumer sees it too |
-| `badAuDrops` | Access units discarded because the SDK's packet table was incomplete or invalid.  Transport-independent — this happens on RTP as well — and a subset of `otherDrops` on `frame-shm` |
-| `ringLowWaterSlots` | (frame-shm only) Lowest ring occupancy reached in the last 200 ms window, **in slots**.  `<= 1` is the healthy band and `>= 2` sustained is standing backlog — venc samples just after writing, so a consumer that is keeping up still leaves exactly one frame queued.  Raw slots rather than a fraction of `slotCount`, because whether a fraction round-trips that 1 depends on the geometry — at the 8 slots venc creates it does (125 permille exactly), at 16 it does not (62.5 truncates to 62, back to 0: a healthy ring indistinguishable from a drained one) — and the header does not fix `slotCount`.  A **measurement, not an actuator** — venc publishes it and changes nothing in response |
+| `otherDrops` | (frame-shm only, all three backends) Frames the producer discarded for a reason **other than a full ring** — an access unit it could not build at all (oversize, or a malformed SDK packet table).  Kept apart from `transportDrops` on purpose: that one is congestion the consumer is causing and a rate controller should slow down for it, this one is not congestion and slowing down fixes nothing.  Mirrored into the ring header at offset 96 so the consumer sees it too |
+| `badAuDrops` | Access units discarded because the SDK's packet table was incomplete or invalid.  Transport-independent — this happens on RTP as well — and a subset of `otherDrops` on `frame-shm`.  **Star6E and Maruko only:** the CV610 stream path has no packet-table validation, so the field is absent there rather than reported as a permanent zero |
+| `ringLowWaterSlots` | (frame-shm only, all three backends) Lowest ring occupancy reached in the last 200 ms window, **in slots**.  `<= 1` is the healthy band and `>= 2` sustained is standing backlog — venc samples just after writing, so a consumer that is keeping up still leaves exactly one frame queued.  Raw slots rather than a fraction of `slotCount`, because whether a fraction round-trips that 1 depends on the geometry — at the 8 slots venc creates it does (125 permille exactly), at 16 it does not (62.5 truncates to 62, back to 0: a healthy ring indistinguishable from a drained one) — and the header does not fix `slotCount`.  A **measurement, not an actuator** — venc publishes it and changes nothing in response |
 
 On `unix://`, `fillPct` is measured against the *peer's* datagram queue,
 which is the limit that actually blocks a sender — not the local
@@ -1554,8 +1555,10 @@ a transient burst from standing backlog.
 ring-fill bitrate clamp here.  It was a *second* rate controller: on a
 `frame-shm://` craft waybeam-link already owns `video0.bitrate` and already
 reads the egress ring, so two loops with different time constants acted on one
-actuator — and on SigmaStar every actuation costs an IDR, because
-`MI_VENC_SetChnAttr` keyframes whenever the programmed rate changes.  Measured
+actuator — and every actuation costs an IDR, because `MI_VENC_SetChnAttr`
+keyframes whenever the programmed rate changes. That was **measured on
+Star6E** (2026-08-23); Maruko is assumed to behave the same way and is
+labelled as an assumption in the code, not a measurement.  Measured
 2026-08-24 on a Star6E at 720p120: with the clamp engaged the receiver saw
 6.5 IDR/s and 100-143 ms glass-to-glass; with it off, 0.2 IDR/s and 15-37 ms.
 Ring-full drops remain the backpressure signal, readable from the ring header
@@ -1839,7 +1842,7 @@ in Notes. As of `contract_version: 0.19.0`:
 | `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Star6E/Maruko share one IQ table schema. **CV610 also serves these from 0.18.4, in a DIFFERENT shape** — see "CV610 IQ response shape" below. `/api/v1/iq/import` stays Star6E/Maruko-only and 501s on CV610 (advertised as `routes.iq_import:false`). |
 | `/api/v1/awb` | live | live | Both backends register `query_awb_info`. CV610: **501**. |
 | `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
-| `/api/v1/transport/status` | yes | yes | SHM-ring fields are shown when `outgoing.server=shm://`; otherwise the UDP/Unix subset. |
+| `/api/v1/transport/status` | yes | yes | Three distinct field sets by transport: `frame-shm://` (ring fields plus `ringLowWaterSlots`/`otherDrops`), `shm://` (packet-ring fields), and UDP/Unix (socket subset). `badAuDrops` appears on every transport. **CV610** serves the same endpoint but emits no `badAuDrops` (no packet-table validation in its stream path); its `frame-shm` branch does carry `ringLowWaterSlots` and `otherDrops`. |
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
@@ -1911,7 +1914,12 @@ in Notes. As of `contract_version: 0.19.0`:
   - Sidecar `TRANSPORT_INFO` trailer: `throttle_permille` returns to `_pad[2]`.
     Trailer stays 16 bytes and later trailers keep their offsets.
 
-- `0.18.7` (behavioral — venc stops injecting IDRs of its own accord):
+- `0.18.7` (behavioral — venc stops injecting IDRs of its own accord).
+  **Never shipped separately: it is folded into `0.19.0` above, which
+  superseded most of it.** The ring-full recovery IDR described below was
+  removed outright for plain GOP as well as GDR, and the throttle-clamp
+  deadband went with the clamp. Recorded for the reasoning and the device
+  measurements, which still stand:
   A `frame-shm://` ring-full drop no longer requests a recovery IDR when the
   stream is running a rolling intra refresh (GDR).  Such a stream repairs a
   chain break on its own within one refresh cycle -- bounded, and already
@@ -1962,11 +1970,7 @@ in Notes. As of `contract_version: 0.19.0`:
   `/api/v1/idr/stats`, which counted an IDR per bitrate write that the
   write did not cause.
 
-  Also in this release: Maruko's `/request/idr` now goes through the shared
-  per-channel gate, so it is rate-limited and counted in
-  `/api/v1/idr/stats` like Star6E's and CV610's. It previously was neither,
-  which is why the parity statement above it did not hold. Two contract
-  corrections with no code change: the `/api/v1/dual/set` `bitrate` row no
+  Two contract corrections with no code change: the `/api/v1/dual/set` `bitrate` row no
   longer claims venc requests an IDR (it never did), and the
   `/api/v1/idr/stats` example reports `min_spacing_us: 100000`, matching
   `IDR_RATE_LIMIT_MIN_SPACING_US`.

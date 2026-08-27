@@ -213,9 +213,9 @@ static uint32_t rc_compensate_kbps(uint32_t kbps, uint32_t delivered_fps)
  * duplicated a keyframe the SDK had already inserted.
  *
  * It is still worth removing.  The request consumed a slot in the shared
- * 100 ms gate (idr_rate_limit_allow), so a genuine recovery request — a
- * ring-full drop, or /request/idr from the link — landing within 100 ms
- * of a bitrate write was silently swallowed.  And every write inflated
+ * 100 ms gate (idr_rate_limit_allow), so a genuine request — /request/idr,
+ * or the receiver's own recovery ask — landing within 100 ms of a bitrate
+ * write was silently swallowed.  And every write inflated
  * /api/v1/idr/stats with an IDR it did not cause, which is what made the
  * counters read as if bitrate writes were the IDR source.
  *
@@ -1363,6 +1363,15 @@ static int apply_output_enabled(bool on)
 	if (!g_star6e_control_ctx.pipeline)
 		return -1;
 
+	/* Enabling an already-enabled output is not a bootstrap event: nothing
+	 * was re-created and no consumer lost its parameter sets.  Firing the
+	 * un-coalescible IDR on it turned an unchanged re-POST into an ungated
+	 * keyframe at the caller's request rate — and because a forced IDR
+	 * re-arms the spacing anchor, it starved the scene detector for the
+	 * duration.  Same reasoning as apply_fps_live(). */
+	if (on == (g_star6e_control_ctx.pipeline->output_enabled ? 1 : 0))
+		return 0;
+
 	if (on) {
 		if (!g_star6e_control_ctx.vcfg ||
 		    !g_star6e_control_ctx.vcfg->outgoing.server[0]) {
@@ -1407,6 +1416,12 @@ static int apply_server(const char *uri)
 {
 	if (!g_star6e_control_ctx.pipeline)
 		return -1;
+	/* Re-pointing at the destination already in use is not a bootstrap
+	 * event — see apply_output_enabled() above.  Compare before touching
+	 * the socket so an unchanged re-POST costs nothing at all. */
+	if (g_star6e_control_ctx.vcfg && uri &&
+	    strcmp(g_star6e_control_ctx.vcfg->outgoing.server, uri) == 0)
+		return 0;
 	if (star6e_output_apply_server(&g_star6e_control_ctx.pipeline->output,
 	    uri) != 0) {
 		return -1;
@@ -1536,7 +1551,8 @@ static char *query_transport_status(void)
 			"\"packetsSent\":%llu,"
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
-			"\"usedSlots\":%u}}",
+			"\"usedSlots\":%u,"
+			"\"badAuDrops\":%llu}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1545,7 +1561,9 @@ static char *query_transport_status(void)
 			(unsigned long long)fill.writes,
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
-			(unsigned)fill.used_slots);
+			(unsigned)fill.used_slots,
+			(unsigned long long)__atomic_load_n(
+				&ps->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else if (ps->output.frame_ring) {
 		venc_frame_ring_fill_t fill;
 		int in_pressure;
@@ -1578,7 +1596,8 @@ static char *query_transport_status(void)
 			(unsigned)fill.used_slots,
 			(unsigned)ps->output.low_water_slots,
 			(unsigned long long)fill.other_drops,
-			(unsigned long long)ps->output.bad_au_drops);
+			(unsigned long long)__atomic_load_n(
+				&ps->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else if ((ps->output.transport == VENC_OUTPUT_URI_UNIX ||
 	            ps->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           ps->output.socket_handle >= 0) {
@@ -1606,7 +1625,8 @@ static char *query_transport_status(void)
 				__ATOMIC_RELAXED),
 			(unsigned)__atomic_load_n(&ps->output.socket_writes,
 				__ATOMIC_RELAXED),
-			(unsigned long long)ps->output.bad_au_drops);
+			(unsigned long long)__atomic_load_n(
+				&ps->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"

@@ -44,6 +44,12 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	output->trunc_warned = 0;
 	output->bad_au_drops = 0;
 	output->low_water_slots = 0;
+	/* The window state too, not just the published scalar: a stale
+	 * low_water_ready would skip the reset on the next ring and let a
+	 * carried-over low_slots of 0 swallow the new ring's first sample,
+	 * publishing "perfectly drained" over a ring that is full. */
+	output->low_water_ready = 0;
+	memset(&output->low_water, 0, sizeof(output->low_water));
 	memset(&output->send_queue, 0, sizeof(output->send_queue));
 	__atomic_store_n(&output->socket_drops, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&output->socket_writes, 0, __ATOMIC_RELAXED);
@@ -80,6 +86,12 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 	output->trunc_warned = 0;
 	output->bad_au_drops = 0;
 	output->low_water_slots = 0;
+	/* The window state too, not just the published scalar: a stale
+	 * low_water_ready would skip the reset on the next ring and let a
+	 * carried-over low_slots of 0 swallow the new ring's first sample,
+	 * publishing "perfectly drained" over a ring that is full. */
+	output->low_water_ready = 0;
+	memset(&output->low_water, 0, sizeof(output->low_water));
 	memset(&output->send_queue, 0, sizeof(output->send_queue));
 	__atomic_store_n(&output->socket_drops, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&output->socket_writes, 0, __ATOMIC_RELAXED);
@@ -121,6 +133,12 @@ int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name)
 	output->trunc_warned = 0;
 	output->bad_au_drops = 0;
 	output->low_water_slots = 0;
+	/* The window state too, not just the published scalar: a stale
+	 * low_water_ready would skip the reset on the next ring and let a
+	 * carried-over low_slots of 0 swallow the new ring's first sample,
+	 * publishing "perfectly drained" over a ring that is full. */
+	output->low_water_ready = 0;
+	memset(&output->low_water, 0, sizeof(output->low_water));
 	memset(&output->send_queue, 0, sizeof(output->send_queue));
 	__atomic_store_n(&output->socket_drops, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&output->socket_writes, 0, __ATOMIC_RELAXED);

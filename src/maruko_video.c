@@ -2,7 +2,6 @@
 
 #include "h26x_util.h"
 #include "hevc_rtp.h"
-#include "timing.h"
 #include "rtp_packetizer.h"
 #include "rtp_session.h"
 
@@ -56,7 +55,7 @@ int maruko_video_reject_incomplete_access_unit(const i6c_venc_strm *stream,
 	if (maruko_video_stream_packet_info_complete(stream))
 		return 0;
 	if (output) {
-		output->bad_au_drops++;
+		__atomic_add_fetch(&output->bad_au_drops, 1, __ATOMIC_RELAXED);
 		/* No-op off frame-shm — see the Star6E equivalent. */
 		venc_frame_ring_note_other_drop(output->frame_ring);
 		if (!output->trunc_warned) {

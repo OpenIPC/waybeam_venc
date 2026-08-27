@@ -31,7 +31,15 @@ int idr_rate_limit_allow(int venc_chn)
 	 * winning store synchronizes with the next caller's load. */
 	last = __atomic_load_n(&s->last_us, __ATOMIC_ACQUIRE);
 	for (;;) {
-		if (last != 0 && (now - last) < IDR_RATE_LIMIT_MIN_SPACING_US) {
+		/* `now <= last` first: another thread may have stamped an anchor
+		 * AHEAD of our clock read (force() does exactly that, from the
+		 * httpd thread, and a lost CAS refreshes `last` to it).  Without
+		 * this the unsigned `now - last` wraps to ~2^64, sails past the
+		 * spacing check, and the CAS then rewinds the anchor by the
+		 * difference — disarming the gate for as long as the preemption
+		 * lasted. */
+		if (last != 0 && (now <= last ||
+		    (now - last) < IDR_RATE_LIMIT_MIN_SPACING_US)) {
 			__atomic_add_fetch(&s->dropped, 1, __ATOMIC_RELAXED);
 			return 0;
 		}

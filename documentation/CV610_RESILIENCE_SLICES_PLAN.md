@@ -1,5 +1,14 @@
 # CV610 resilience and H.265 multi-slice plan
 
+> **Superseded in part by 0.69.0.** venc no longer requests an IDR in response
+> to its own egress — the ring-full recovery IDR described below was removed
+> for every backend and every stream type, because the receiver is the only
+> party that can see whether a decoder is actually broken. Recovery now comes
+> from the operator-selected GOP cadence, an explicit `/request/idr`, or the
+> receiver's own recovery request. Everything else here — the GDR metadata, the
+> slice layout, the bench measurements — still stands; read the recovery-IDR
+> passages as a record of what 0.6x did, not of current behaviour.
+
 Status: implemented and confirmed on CV610 and Maruko devices on 2026-08-22.
 
 Branch: `feature/encoder-resilience-slices`, based directly on

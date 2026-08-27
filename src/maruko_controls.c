@@ -444,11 +444,18 @@ static int maruko_apply_verbose(bool on)
 static int maruko_apply_fps_live(uint32_t fps)
 {
 	/* Star6E parity -- see apply_fps_live() there for why ret == 0 is not
-	 * enough to conclude a rebind happened. */
+	 * enough to conclude a rebind happened.
+	 *
+	 * Both reads must SUCCEED before a difference means anything:
+	 * maruko_query_live_fps() returns 0 when the SDK attr read fails, so a
+	 * transient failure on the first call alone would read as 0 -> fps,
+	 * i.e. "it changed", and fire an ungated IDR on an apply that never
+	 * touched the encoder. */
 	uint32_t before = maruko_query_live_fps();
 	int ret = maruko_apply_fps(fps);
+	uint32_t after = maruko_query_live_fps();
 
-	if (ret == 0 && maruko_query_live_fps() != before)
+	if (ret == 0 && before != 0 && after != 0 && after != before)
 		(void)maruko_request_idr_bootstrap();
 	return ret;
 }
@@ -1168,6 +1175,12 @@ static int maruko_apply_output_enabled(bool on)
 	if (!g_ctx.output_enabled_ptr)
 		return -1;
 
+	/* Star6E parity — see apply_output_enabled() there for why an unchanged
+	 * re-POST must not reach the un-coalescible IDR. */
+	if (g_ctx.output_enabled_ptr &&
+	    on == (*g_ctx.output_enabled_ptr ? 1 : 0))
+		return 0;
+
 	if (on) {
 		if (!g_ctx.vcfg || !g_ctx.vcfg->outgoing.server[0]) {
 			fprintf(stderr, "> Cannot enable output: no server configured\n");
@@ -1204,6 +1217,10 @@ static int maruko_apply_server(const char *uri)
 {
 	if (!g_maruko_output_ptr)
 		return -1;
+	/* Star6E parity — an unchanged destination is not a bootstrap event. */
+	if (g_ctx.vcfg && uri &&
+	    strcmp(g_ctx.vcfg->outgoing.server, uri) == 0)
+		return 0;
 	if (maruko_output_apply_server(g_maruko_output_ptr, uri) != 0)
 		return -1;
 
@@ -1287,7 +1304,8 @@ static char *maruko_query_transport_status(void)
 			"\"packetsSent\":%llu,"
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
-			"\"usedSlots\":%u}}",
+			"\"usedSlots\":%u,"
+			"\"badAuDrops\":%llu}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1296,7 +1314,9 @@ static char *maruko_query_transport_status(void)
 			(unsigned long long)fill.writes,
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
-			(unsigned)fill.used_slots);
+			(unsigned)fill.used_slots,
+			(unsigned long long)__atomic_load_n(
+				&backend->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else if (backend->output.frame_ring) {
 		venc_frame_ring_fill_t fill;
 		int in_pressure;
@@ -1330,7 +1350,8 @@ static char *maruko_query_transport_status(void)
 			(unsigned)fill.used_slots,
 			(unsigned)backend->output.low_water_slots,
 			(unsigned long long)fill.other_drops,
-			(unsigned long long)backend->output.bad_au_drops);
+			(unsigned long long)__atomic_load_n(
+				&backend->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else if ((backend->output.transport == VENC_OUTPUT_URI_UNIX ||
 	            backend->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           backend->output.socket_handle >= 0) {
@@ -1358,7 +1379,8 @@ static char *maruko_query_transport_status(void)
 				__ATOMIC_RELAXED),
 			(unsigned)__atomic_load_n(&backend->output.socket_writes,
 				__ATOMIC_RELAXED),
-			(unsigned long long)backend->output.bad_au_drops);
+			(unsigned long long)__atomic_load_n(
+				&backend->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"

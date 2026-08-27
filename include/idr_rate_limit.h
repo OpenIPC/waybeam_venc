@@ -49,9 +49,9 @@ int idr_rate_limit_allow(int venc_chn);
  * of those costs nothing: another is already in flight, which is exactly why
  * idr_rate_limit_allow() reports a coalesced request as success.
  *
- * A bootstrap IDR is a different event.  Output enable, a destination change
- * and a live fps rebind all hand the stream to a receiver that has seen no
- * parameter set at all, so a coalesced request leaves it with NOTHING to
+ * A bootstrap IDR is a different event.  Output enable, a destination change,
+ * a live fps rebind and recorder start all hand the stream — or a freshly
+ * opened file — to a receiver that has seen no parameter set at all, so a coalesced request leaves it with NOTHING to
  * start from until the next GOP or GDR cycle — and the caller was told the
  * apply succeeded.  These must not be swallowed.
  *

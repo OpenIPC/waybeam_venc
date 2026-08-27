@@ -328,13 +328,16 @@ static char *cv610_query_transport_status(void)
 			"\"fillPct\":%u,\"inPressure\":%s,"
 			"\"transportDrops\":%llu,\"pressureDrops\":0,"
 			"\"framesSent\":%llu,\"oversizeDrops\":%llu,"
-			"\"slotCount\":%u,\"usedSlots\":%u}}",
+			"\"slotCount\":%u,\"usedSlots\":%u,"
+			"\"ringLowWaterSlots\":%u,\"otherDrops\":%llu}}",
 			(unsigned)fill.fill_pct,
 			fill.fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT ? "true" : "false",
 			(unsigned long long)fill.full_drops,
 			(unsigned long long)fill.writes,
 			(unsigned long long)fill.oversize_drops,
-			(unsigned)fill.slot_count, (unsigned)fill.used_slots);
+			(unsigned)fill.slot_count, (unsigned)fill.used_slots,
+			(unsigned)venc_ring_low_water_slots(&ctx->low_water),
+			(unsigned long long)fill.other_drops);
 	} else if (ctx->socket_handle >= 0) {
 		uint8_t fill_pct = 0;
 		const char *transport = ctx->transport == VENC_OUTPUT_URI_UNIX

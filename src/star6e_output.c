@@ -54,7 +54,7 @@ int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
 	if (star6e_output_stream_packet_info_complete(stream))
 		return 0;
 	if (output) {
-		output->bad_au_drops++;
+		__atomic_add_fetch(&output->bad_au_drops, 1, __ATOMIC_RELAXED);
 		/* No-op off frame-shm; the per-output counter above is the
 		 * transport-independent record. */
 		venc_frame_ring_note_other_drop(output->frame_ring);

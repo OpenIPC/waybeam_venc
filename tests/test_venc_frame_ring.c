@@ -868,7 +868,7 @@ static int test_fr_producer_health(void)
 	const unsigned char *raw;
 	uint32_t hm;
 	uint64_t fd_drops;
-	uint16_t thr;
+	uint16_t lw;
 	int i;
 
 	venc_frame_ring_t *r = venc_frame_ring_create("test_fr_health", 2, 64);
@@ -879,10 +879,10 @@ static int test_fr_producer_health(void)
 	raw = (const unsigned char *)r->hdr;
 	memcpy(&hm, raw + 76, sizeof(hm));
 	memcpy(&fd_drops, raw + 80, sizeof(fd_drops));
-	memcpy(&thr, raw + 88, sizeof(thr));
+	memcpy(&lw, raw + 88, sizeof(lw));
 	CHECK("fr_health_magic_at_76", hm == VENC_FRAME_RING_HEALTH_MAGIC);
 	CHECK("fr_health_drops_at_80_zero", fd_drops == 0);
-	CHECK("fr_health_low_water_at_88_seed", thr == 0);
+	CHECK("fr_health_low_water_at_88_seed", lw == 0);
 
 	/* Marker must be published before init_complete, so a consumer that
 	 * has attached at all always sees a coherent group. */
@@ -907,13 +907,25 @@ static int test_fr_producer_health(void)
 	memcpy(&fd_drops, raw + 80, sizeof(fd_drops));
 	CHECK("fr_health_drops_accumulate", fd_drops == 2);
 
+	/* Flag bits are disjoint, and bit 3 stays reserved for the
+	 * receiver-set SALVAGED flag.  venc never sets it, but handing 0x08 to
+	 * a future encoder-side flag would collide with receivers that already
+	 * act on it — one maps it to a corrupted-buffer flag and then refuses
+	 * the frame as a recording seek point and as a parameter-set seed. */
+	CHECK("fr_flags_disjoint",
+		(VENC_FRAME_FLAG_IDR | VENC_FRAME_FLAG_GDR |
+		 VENC_FRAME_FLAG_ENHANCE | VENC_FRAME_FLAG_SALVAGED) ==
+		(VENC_FRAME_FLAG_IDR ^ VENC_FRAME_FLAG_GDR ^
+		 VENC_FRAME_FLAG_ENHANCE ^ VENC_FRAME_FLAG_SALVAGED));
+	CHECK("fr_flag_salvaged_is_bit3", VENC_FRAME_FLAG_SALVAGED == 0x08);
+
 	/* Low-water publication at the pinned offset 88, in slots. */
 	venc_frame_ring_set_low_water(r, 6);
-	memcpy(&thr, raw + 88, sizeof(thr));
-	CHECK("fr_health_low_water_published", thr == 6);
+	memcpy(&lw, raw + 88, sizeof(lw));
+	CHECK("fr_health_low_water_published", lw == 6);
 	venc_frame_ring_set_low_water(r, 1);
-	memcpy(&thr, raw + 88, sizeof(thr));
-	CHECK("fr_health_low_water_healthy", thr == 1);
+	memcpy(&lw, raw + 88, sizeof(lw));
+	CHECK("fr_health_low_water_healthy", lw == 1);
 
 	/* Nothing before the new fields moved, and the header is still the
 	 * size every consumer maps. */
@@ -940,10 +952,11 @@ static int test_fr_producer_health(void)
  * per event-loop iteration routinely spikes the ring 2-3 slots inside a window
  * and drains again, so high-water calls that congestion at random.  And raw
  * slots, not permille: the caller samples just AFTER writing, so a perfectly
- * drained ring still reads 1 slot -- the healthy band is <= 1, not 0 -- and at
- * the ring's 16-slot default one slot is 62.5 permille, which truncates to 62
- * and converts back to 0.  A fraction cannot carry the one reading that
- * matters. */
+ * drained ring still reads 1 slot -- the healthy band is <= 1, not 0 -- and
+ * whether a fraction round-trips that 1 depends on the geometry (it does at the
+ * 8 slots venc creates, not at 16, where 62.5 truncates to 62 and converts back
+ * to 0).  slot_count is not fixed by the format, so the encoding must not
+ * depend on it. */
 static int test_fr_low_water(void)
 {
 	int failures = 0;
@@ -1038,7 +1051,7 @@ static int test_fr_low_water(void)
 	/* End-to-end: a full ring must actually reject, which is the event the
 	 * measurement hangs off.  8 slots, 9th write fails. */
 	{
-		venc_frame_ring_t *r = venc_frame_ring_create("test_fr_dropc",
+		venc_frame_ring_t *r = venc_frame_ring_create("test_fr_lowwater",
 			8, 4096);
 		VencFrameMeta meta;
 		int i;
