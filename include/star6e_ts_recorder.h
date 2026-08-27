@@ -41,7 +41,13 @@ typedef struct {
 	/* Per-segment counters */
 	uint64_t segment_bytes;
 
-	/* IDR request callback for segment rotation (NULL if not wired) */
+	/* Segment rotation can only cut on an IRAP, so on a stream that emits
+	 * none of its own (GDR / resilience=racing) it has to ask for one.
+	 * NULL leaves the pre-0.70.0 behaviour: rotation waits for a natural
+	 * keyframe and never fires if none comes.  Rate-limited by the second
+	 * below so a crossed threshold cannot turn into a per-frame request. */
+	int (*request_idr)(void);
+	time_t last_rotate_idr_request_sec;
 } Star6eTsRecorderState;
 
 /** Zero-initialize TS recorder state.

@@ -217,9 +217,6 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	unsigned long elapsed;
 	int should_rotate = 0;
 
-	if (!is_idr)
-		return 0;
-
 	/* Check time-based rotation */
 	if (state->max_seconds > 0) {
 		clock_gettime(CLOCK_MONOTONIC, &now);
@@ -235,6 +232,31 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	if (!should_rotate)
 		return 0;
 
+	/* A segment has to OPEN on an IRAP or it decodes from nothing, so the
+	 * cut can only happen on one.  The original code enforced that by
+	 * returning early on !is_idr — correct, but it silently assumed the
+	 * stream produces IDRs on its own.  A GDR craft (resilience=racing)
+	 * never does: device-measured on CV610, max_seconds=15 yielded ONE
+	 * segment after 50 s under racing and THREE under resilience=off.
+	 * max_seconds/max_mb were simply inert, and the file grew unbounded.
+	 *
+	 * So ask for one instead of waiting for one that is never coming, and
+	 * rotate on the IDR that answers.  Rate-limited to one request per
+	 * second: the threshold stays crossed until the cut actually happens,
+	 * and this must not become a per-frame IDR request — that would be the
+	 * automatic keyframing 0.69.0 removed, reintroduced through the back
+	 * door.  This is operator-configured rotation, not a congestion
+	 * response, and it is the only thing that asks. */
+	if (!is_idr) {
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (state->request_idr &&
+		    now.tv_sec != state->last_rotate_idr_request_sec) {
+			state->last_rotate_idr_request_sec = now.tv_sec;
+			(void)state->request_idr();
+		}
+		return 0;
+	}
+
 	/* Close current segment, open new one */
 	fdatasync(state->fd);
 	close(state->fd);
@@ -246,8 +268,9 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 		return -1;
 	}
 
-	/* No IDR request needed: check_rotation only fires when is_idr==1,
-	 * so the current frame (about to be written) IS already an IDR. */
+	/* The frame about to be written IS the IDR — either a natural one or
+	 * the answer to the request above — so the new segment opens on it. */
+	state->last_rotate_idr_request_sec = 0;
 	return 0;
 }
 

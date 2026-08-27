@@ -1860,6 +1860,20 @@ in Notes. As of `contract_version: 0.20.0`:
 
 ## Change Log (Contract)
 - `0.20.0` (additive — snapshot and recording reach CV610):
+  - **`/api/v1/record/status` gains `droppedFrames` and `writerPeakDepth`.**
+    Recording writes now run on their own thread behind a bounded 4 MB queue,
+    so a stalling disk sheds recording frames instead of stalling the live
+    video path. `droppedFrames` counts what the queue refused — a silent drop
+    would make a damaged recording look like a clean one. `writerPeakDepth` is
+    the high-water queue depth, which reads 0-1 when storage keeps up.
+    Both are 0 on backends that still write synchronously.
+  - **`record.max_seconds` / `max_mb` now work on a GDR craft.** Segment
+    rotation can only cut on an IRAP; under `resilience=racing` the stream
+    emits none, so rotation was silently inert and the file grew unbounded.
+    The recorder now requests one when rotation is due, rate-limited to one
+    request per second. Device-measured on CV610: `max_seconds=15` over 50 s
+    gave **1** segment before and **4** after, with `/api/v1/idr/stats`
+    showing exactly 4 honored requests (one start + three rotations).
   - **`GET /api/v1/snapshot.jpg` is now registered on CV610.** It was the one
     route a backend omitted entirely; all three now serve it. The CV610 JPEG
     channel binds as a second destination on the main stream's VPSS output, so

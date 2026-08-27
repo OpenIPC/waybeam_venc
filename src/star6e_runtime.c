@@ -912,6 +912,12 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			ch   = (uint8_t)vcfg->audio.channels;
 		}
 		star6e_ts_recorder_init(&ps->ts_recorder, rate, ch, ts_codec);
+		/* Segment rotation can only cut on an IRAP.  Under
+		 * resilience=racing the stream emits none, so without this
+		 * record.maxSeconds / maxMB are inert and the file grows
+		 * unbounded.  Rate-limited to one request per second inside
+		 * check_rotation(). */
+		ps->ts_recorder.request_idr = runtime_request_idr;
 	}
 	if (vcfg->record.max_seconds > 0)
 		ps->ts_recorder.max_seconds = vcfg->record.max_seconds;

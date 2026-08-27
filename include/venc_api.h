@@ -213,6 +213,13 @@ typedef struct {
 	uint64_t elapsed_ms;
 	uint32_t frames_written;
 	uint32_t segments;
+	/* Access units the async writer refused because its queue was full —
+	 * i.e. the disk could not keep up and the RECORDING was sacrificed to
+	 * keep the live video path unstalled.  Reported because a silent drop
+	 * makes a damaged recording look like a clean one.  0 on backends that
+	 * still write synchronously. */
+	uint32_t dropped_frames;
+	uint32_t writer_peak_depth;
 	char path[256];
 	char stop_reason[32];
 	char format[16];

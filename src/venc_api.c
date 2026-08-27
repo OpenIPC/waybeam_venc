@@ -3531,6 +3531,8 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 		"\"bytes\":%llu,"
 		"\"elapsed_ms\":%llu,"
 		"\"segments\":%u,"
+		"\"droppedFrames\":%u,"
+		"\"writerPeakDepth\":%u,"
 		"\"stop_reason\":\"%s\""
 		"}}",
 		st.active ? "true" : "false",
@@ -3540,6 +3542,8 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 		(unsigned long long)st.bytes_written,
 		(unsigned long long)st.elapsed_ms,
 		st.segments,
+		st.dropped_frames,
+		st.writer_peak_depth,
 		st.stop_reason);
 	return httpd_send_json(fd, 200, buf);
 }

@@ -60,6 +60,46 @@ against `0.19.0` sees strictly more capability and no changed response shape.
   copy for CV610 because that backend did not link the recorder header. Now it
   includes the header like everything else.
 
+- **Recording no longer stalls the live video path.** Every backend called the
+  recorder from its encode drain loop, between the transport send and the
+  SDK's ReleaseStream, with a blocking `write(2)`. When storage blocked,
+  ReleaseStream was late, the encoder's output queue backed up, and the LIVE
+  transport stalled with it.
+
+  Device-measured on CV610 with the same card, same mount and the same
+  stimulus (three concurrent direct-IO writers on a `-o sync` mount):
+
+  | | stream min | stall seconds | recorder |
+  |---|---|---|---|
+  | synchronous | 608 pkt/s (42% of baseline) | **15 / 18** | 33-44 fps |
+  | async writer | **1462 pkt/s (100%)** | **0 / 18** | 43-66 fps |
+
+  The queue absorbed the stall (depth 1 -> 358, hitting its 4 MB cap), then
+  shed recording frames — 526 of them, every one counted and reported through
+  the new `droppedFrames`. A slow disk now costs recording frames and never
+  the live link, which is the 0.69.0 principle applied one layer up.
+
+  Star6E's dual mode already drained its second channel on its own thread and
+  was never affected; this gives mirror mode the same property. **The star6e
+  and maruko mirror paths still write synchronously** — the coupling is
+  identical there by construction (`star6e_runtime.c`,
+  `maruko_pipeline.c`) and wiring them needs their own device runs.
+
+- **`record.max_seconds` / `max_mb` were inert on a GDR craft.** Rotation can
+  only cut on an IRAP or the new segment decodes from nothing, and the check
+  simply returned early when the frame was not one — correct, but it assumed
+  the stream produces IDRs by itself. Under `resilience=racing` it never does,
+  so a configured cap did nothing and the file grew unbounded. The recorder
+  now asks for an IDR when rotation is due, rate-limited to one request per
+  second so a crossed threshold cannot become per-frame keyframing.
+
+  Measured on CV610 under `racing`, `max_seconds=15` over 50 s: **1 segment
+  before, 4 after**, with `/api/v1/idr/stats` showing exactly 4 honored
+  requests and 0 dropped, and each rotated segment opening on `key_frame=1,
+  pict_type=I`. `Star6eTsRecorderState.request_idr` is the callback the
+  original author declared for exactly this and never wired; it was removed as
+  dead code in 0.69.0 and is restored here with the wiring that makes it live.
+
 - Note for operators: the shipped `record.dir` default is `/mnt/mmcblk0p1`,
   which does not exist on the CV610 reference board (the bench mounts USB
   storage at `/mnt/sda1`). It is left at the shared default rather than

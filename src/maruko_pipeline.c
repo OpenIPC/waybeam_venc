@@ -3615,6 +3615,14 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 		}
 		star6e_ts_recorder_init(&ctx->ts_recorder, rate, (uint8_t)ch,
 			ts_codec);
+		/* Segment rotation can only cut on an IRAP.  Under
+		 * resilience=racing the stream emits none, so without this
+		 * record.maxSeconds / maxMB are inert and the file grows
+		 * unbounded.  Rate-limited to one request per second inside
+		 * check_rotation().  Taken from the controls table rather than
+		 * a new export — it is the same function /request/idr uses. */
+		ctx->ts_recorder.request_idr =
+			maruko_controls_callbacks()->request_idr;
 	}
 	star6e_recorder_init(&ctx->recorder);
 	if (ctx->cfg.record.max_seconds > 0)

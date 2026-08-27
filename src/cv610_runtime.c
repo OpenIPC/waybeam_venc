@@ -15,6 +15,7 @@
 #include "star6e_recorder.h"
 #include "star6e_ts_recorder.h"
 #include "venc_jpeg.h"
+#include "venc_rec_writer.h"
 #include "output_socket.h"
 #include "rtp_session.h"
 #include "timing.h"
@@ -102,6 +103,11 @@ typedef struct {
 	Star6eRecorderState recorder;
 	Star6eTsRecorderState ts_recorder;
 	AudioRing audio_ring;
+	/* Disk writes run here, not on the encode drain loop.  A blocking
+	 * write(2) between the transport send and release_stream() stalls the
+	 * LIVE stream, device-measured at 22% of normal throughput for a full
+	 * second on a marginal card (see include/venc_rec_writer.h). */
+	VencRecWriter *rec_writer;
 } Cv610RunnerContext;
 
 /* Backend selection and the vendor MPP graph are process-singleton. The
@@ -349,9 +355,30 @@ static void cv610_record_force_idr(void)
 			"the recording may not decode from its first frame\n");
 }
 
-/* Close whichever recorder is open and drop the audio tee.  Idempotent. */
+/* Runs on the writer thread, one access unit at a time, in order.  Both
+ * writers no-op while their recorder is closed, and the writer is always
+ * stopped before either is, so this cannot race a close. */
+static void cv610_record_sink(void *opaque, const uint8_t *au, size_t len,
+	uint64_t pts_90khz, int is_idr)
+{
+	Cv610RunnerContext *ctx = opaque;
+
+	if (star6e_ts_recorder_is_active(&ctx->ts_recorder))
+		(void)star6e_ts_recorder_write_video(&ctx->ts_recorder, au, len,
+			pts_90khz, is_idr);
+	else
+		(void)star6e_recorder_write_au(&ctx->recorder, au, len);
+}
+
+/* Close whichever recorder is open and drop the audio tee.  Idempotent.
+ *
+ * Order matters: the writer thread is the only thread that touches recorder
+ * state while recording, so it has to be drained and joined BEFORE either
+ * recorder is closed. */
 static void cv610_record_stop(Cv610RunnerContext *ctx)
 {
+	venc_rec_writer_stop(ctx->rec_writer);
+	ctx->rec_writer = NULL;
 	cv610_audio_set_record_ring(ctx->audio, NULL);
 	star6e_ts_recorder_stop(&ctx->ts_recorder);
 	star6e_recorder_stop(&ctx->recorder);
@@ -378,6 +405,15 @@ static void cv610_record_start(Cv610RunnerContext *ctx, const char *dir)
 		if (want_audio)
 			cv610_audio_set_record_ring(ctx->audio, &ctx->audio_ring);
 	}
+
+	/* After the file is open, so the sink never sees a closed recorder.
+	 * A failed start is not fatal — rec_writer stays NULL and
+	 * venc_rec_writer_push() then frees the buffer and reports a drop, so
+	 * the live stream keeps its guarantee and only the recording suffers. */
+	if (venc_rec_writer_start(&ctx->rec_writer, cv610_record_sink, ctx) != 0)
+		fprintf(stderr, "WARNING: recorder writer thread did not start; "
+			"recording disabled rather than blocking the video path\n");
+
 	cv610_record_force_idr();
 }
 
@@ -388,6 +424,16 @@ static void cv610_record_status_callback(VencRecordStatus *out)
 	memset(out, 0, sizeof(*out));
 	if (!ctx)
 		return;
+
+	{
+		uint64_t dropped = 0;
+		uint32_t peak = 0;
+
+		venc_rec_writer_stats(ctx->rec_writer, NULL, &dropped, NULL,
+			&peak);
+		out->dropped_frames = (uint32_t)dropped;
+		out->writer_peak_depth = peak;
+	}
 
 	if (star6e_ts_recorder_is_active(&ctx->ts_recorder)) {
 		out->active = 1;
@@ -1260,6 +1306,10 @@ static int cv610_init(void *opaque)
 		ctx->config.audio.enabled ? ctx->config.audio.sample_rate : 0,
 		ctx->config.audio.enabled ? (uint8_t)ctx->config.audio.channels : 0,
 		TS_AUDIO_CODEC_OPUS);
+	/* Segment rotation can only cut on an IRAP, and the shipped config is
+	 * resilience=racing, which produces none.  Give the recorder a way to
+	 * ask; without it max_seconds/max_mb are inert on this craft. */
+	ctx->ts_recorder.request_idr = cv610_request_idr;
 	if (ctx->config.record.max_seconds > 0)
 		ctx->ts_recorder.max_seconds = ctx->config.record.max_seconds;
 	if (ctx->config.record.max_mb > 0)
@@ -1480,28 +1530,35 @@ static int cv610_run(void *opaque)
 				/* cv610_output_write owns per-datagram drop accounting. */
 				(void)cv610_send_rtp_frame(ctx, frame, frame_len);
 			}
-			/* Mirror-mode recording: the same access unit the
-			 * transport just took.  Both writers no-op while no
-			 * recorder is open, so this is unconditional. */
-			if (star6e_ts_recorder_is_active(&ctx->ts_recorder)) {
-				struct timespec rec_now;
-
-				clock_gettime(CLOCK_MONOTONIC, &rec_now);
-				(void)star6e_ts_recorder_write_video(&ctx->ts_recorder,
-					frame, frame_len,
-					ts_mux_timespec_to_pts(
-						(uint32_t)rec_now.tv_sec,
-						(uint32_t)rec_now.tv_nsec),
-					is_idr);
-			} else {
-				(void)star6e_recorder_write_au(&ctx->recorder,
-					frame, frame_len);
-			}
 			__atomic_add_fetch(&ctx->frames, 1, __ATOMIC_RELAXED);
 			__atomic_add_fetch(&ctx->bytes, frame_len, __ATOMIC_RELAXED);
 			if (ctx->debug_osd)
 				debug_osd_sample_cpu(ctx->debug_osd);
 			cv610_report_frame_status(ctx);
+
+			/* Mirror-mode recording: hand the SAME buffer the
+			 * transport just used to the writer thread and let it
+			 * block on the disk instead of this loop.  Ownership
+			 * transfers, so there is no extra copy — cv610_copy_stream
+			 * already produced the contiguous access unit, and push()
+			 * frees it whether it is queued or dropped.
+			 *
+			 * This has to stay off the drain loop: a blocking write
+			 * here delays ss_mpi_venc_release_stream() below, which
+			 * backs up the encoder's output queue and stalls the LIVE
+			 * transport, not just the recording. */
+			if (ctx->rec_writer) {
+				struct timespec rec_now;
+
+				clock_gettime(CLOCK_MONOTONIC, &rec_now);
+				(void)venc_rec_writer_push(ctx->rec_writer,
+					frame, frame_len,
+					ts_mux_timespec_to_pts(
+						(uint32_t)rec_now.tv_sec,
+						(uint32_t)rec_now.tv_nsec),
+					is_idr);
+				frame = NULL;  /* the writer owns it now */
+			}
 			free(frame);
 		}
 		ret = ss_mpi_venc_release_stream(CV610_VENC_CHN, &stream);
