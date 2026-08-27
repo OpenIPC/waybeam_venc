@@ -443,8 +443,12 @@ static int maruko_apply_verbose(bool on)
  * apply_fps_live() in src/star6e_controls.c. */
 static int maruko_apply_fps_live(uint32_t fps)
 {
+	/* Star6E parity -- see apply_fps_live() there for why ret == 0 is not
+	 * enough to conclude a rebind happened. */
+	uint32_t before = maruko_query_live_fps();
 	int ret = maruko_apply_fps(fps);
-	if (ret == 0)
+
+	if (ret == 0 && maruko_query_live_fps() != before)
 		(void)maruko_request_idr_bootstrap();
 	return ret;
 }
@@ -1344,7 +1348,8 @@ static char *maruko_query_transport_status(void)
 			"\"inPressure\":%s,"
 			"\"pressureDrops\":%u,"
 			"\"transportDrops\":%u,"
-			"\"packetsSent\":%u}}",
+			"\"packetsSent\":%u,"
+			"\"badAuDrops\":%llu}}",
 			transport,
 			(unsigned)fill_pct,
 			in_pressure ? "true" : "false",
@@ -1352,7 +1357,8 @@ static char *maruko_query_transport_status(void)
 			(unsigned)__atomic_load_n(&backend->output.socket_drops,
 				__ATOMIC_RELAXED),
 			(unsigned)__atomic_load_n(&backend->output.socket_writes,
-				__ATOMIC_RELAXED));
+				__ATOMIC_RELAXED),
+			(unsigned long long)backend->output.bad_au_drops);
 	} else {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"

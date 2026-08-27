@@ -50,17 +50,30 @@ int idr_rate_limit_allow(int venc_chn)
 void idr_rate_limit_force(int venc_chn)
 {
 	struct chn_state *s;
+	uint64_t now;
+	uint64_t last;
 
 	if (venc_chn < 0 || venc_chn >= IDR_RATE_LIMIT_MAX_CHANNELS)
 		return;
 
 	s = &g_state[venc_chn];
-	/* No CAS loop: nothing here is conditional on the previous value, and
-	 * a concurrent allow() is safe either way — its CAS compares against
-	 * the `last` it loaded, so a store landing underneath makes that CAS
-	 * fail and retry, where it then sees the re-armed window and
-	 * coalesces.  That is the outcome we want. */
-	__atomic_store_n(&s->last_us, wb_monotonic_us(), __ATOMIC_RELEASE);
+	now = wb_monotonic_us();
+
+	/* CAS-MAX, not a plain store.  A bare store reintroduces exactly the
+	 * load-then-store race allow()'s CAS loop exists to prevent, in the
+	 * other direction: this caller can read the clock, be preempted while
+	 * a concurrent allow() CASes a LATER timestamp, then resume and write
+	 * its own earlier one — rewinding the anchor and letting the next
+	 * allow() honor an IDR inside the spacing window.  Only ever move the
+	 * anchor forward. */
+	last = __atomic_load_n(&s->last_us, __ATOMIC_ACQUIRE);
+	while (last < now) {
+		if (__atomic_compare_exchange_n(&s->last_us, &last, now,
+		    /* weak */ 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+			break;
+		/* Lost the race — `last` now holds the winner's value; if it
+		 * is already at or past `now`, keep the later anchor. */
+	}
 	__atomic_add_fetch(&s->honored, 1, __ATOMIC_RELAXED);
 }
 

@@ -70,6 +70,14 @@ typedef struct {
 	 * (the ring's idle occupancy is one frame).  Cached here so the debug
 	 * OSD can report it without recomputing the window. */
 	uint16_t low_water_slots;
+	/* Window state for the reading above.  PER OUTPUT, not a file-static
+	 * singleton: a second frame-shm output (dual-stream ch1) is a second
+	 * ring with its own occupancy, and a shared tracker cannot represent
+	 * it -- the ring would publish VHLT with a low-water that nothing ever
+	 * writes, which reads as the healthiest value in the range rather than
+	 * as an absent gauge. */
+	VencRingLowWater low_water;
+	int low_water_ready;
 	int requested_connected_udp; /* user preference, persisted for apply_server */
 	int connected_udp;           /* actual kernel state — set by configure() */
 	int allow_unix_encoder_stall; /* unix:// blocking compatibility mode */

@@ -393,6 +393,8 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s)
 /* Ring-full recovery form: reports whether the shared 100 ms limiter let
  * the IDR through, so the frame-ring holdoff can retry a swallowed request
  * on the next drop instead of pacing a no-op (Star6eOutput.request_idr). */
+static void star6e_service_ring_low_water(Star6eOutput *output);
+
 static int star6e_ring_request_idr(void *ctx)
 {
 	int venc_chn = *(const int *)ctx;
@@ -543,6 +545,13 @@ static void record_status_callback(VencRecordStatus *out)
 	}
 }
 
+/* Recorder start is a BOOTSTRAP event, not a request for a fresher picture:
+ * the file that just opened contains nothing, and on a GDR craft — the flight
+ * configuration, which emits no periodic IDRs at all — a coalesced request
+ * leaves a recording with no IRAP access unit anywhere in it.  That file seeks
+ * to nothing and plays from nothing, while the caller was told the start
+ * succeeded.  Same failure shape as a destination change, so it takes the same
+ * un-coalescible path: counted in /api/v1/idr/stats, never swallowed. */
 static int runtime_request_idr(void)
 {
 	int chn;
@@ -551,8 +560,7 @@ static int runtime_request_idr(void)
 		return -1;
 
 	chn = g_runner_ctx->ps.venc_channel;
-	if (!idr_rate_limit_allow(chn))
-		return 0;  /* coalesced — not an error */
+	idr_rate_limit_force(chn);
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
@@ -738,13 +746,13 @@ static void *dual_rec_thread_fn(void *arg)
 				usleep(1000);
 			continue;
 		}
-		if (!star6e_output_stream_packet_info_complete(&stream)) {
-			static int incomplete_warned;
-			if (!incomplete_warned) {
-				incomplete_warned = 1;
-				fprintf(stderr, "WARN: [dual] invalid packetInfo; "
-					"dropping whole access unit\n");
-			}
+		/* Through the shared helper rather than an inline check: ch1 can
+		 * be its own frame-shm ring, and the open-coded version counted
+		 * nothing, so a ch1 discard was invisible in both bad_au_drops
+		 * and the ring header's other_drops while its one-shot warn had
+		 * already latched. */
+		if (star6e_output_reject_incomplete_access_unit(&d->output,
+		    &stream)) {
 			MI_VENC_ReleaseStream(d->channel, &stream);
 			continue;
 		}
@@ -762,6 +770,12 @@ static void *dual_rec_thread_fn(void *arg)
 					(void)star6e_video_send_frame(&d->video,
 						&d->output, &stream, 1, 0, NULL,
 						NULL, NULL, 0);
+					/* ch1 can be its own frame-shm ring;
+					 * measure it here or it publishes a
+					 * health marker over a low-water
+					 * nothing ever writes. */
+					star6e_service_ring_low_water(
+						&d->output);
 				} else if (d->ts_recorder) {
 					star6e_ts_recorder_write_stream(
 						d->ts_recorder, &stream);
@@ -1068,16 +1082,19 @@ static uint32_t osd_box_px(float v, uint32_t canvas, uint32_t net)
  * writer (the pipeline thread, which is also the only reader). */
 static uint64_t g_osd_enc_bytes;
 
-/* frame-shm ring low-water measurement state.  Owned by the pipeline thread;
- * zero-initialised, so the first service call seeds it.  File-static like
- * g_osd_enc_bytes above — one output, one pipeline thread.
+/* frame-shm ring low-water measurement.
  *
- * venc measures and publishes; it does not act.  The rate controller
- * (waybeam-link) is co-located on this SoC, reads this ring, and owns every
- * response to what the measurement says. */
-static VencRingLowWater g_ring_low_water;
-static int g_ring_low_water_ready;
-
+ * venc measures and publishes; it does not act.  The rate controller is
+ * co-located on this SoC, reads this ring, and owns every response to what the
+ * measurement says.
+ *
+ * State lives on the OUTPUT, not in a file static: dual-stream ch1 can be a
+ * second frame-shm ring with its own occupancy (star6e_output_init handles
+ * frame-shm:// for it just as it does for ch0), and a shared tracker cannot
+ * represent two rings.  A ring left unmeasured would still publish the VHLT
+ * health marker with low_water_slots at its create-time 0 -- the healthiest
+ * value in the range -- so "nobody measured this" would be indistinguishable
+ * from "the consumer is keeping up perfectly". */
 static void star6e_service_ring_low_water(Star6eOutput *output)
 {
 	venc_frame_ring_fill_t fill;
@@ -1089,22 +1106,22 @@ static void star6e_service_ring_low_water(Star6eOutput *output)
 		/* Not a frame-shm transport (or the ring went away across a
 		 * reinit).  Drop the state so a later frame-shm run starts
 		 * from a fresh window. */
-		g_ring_low_water_ready = 0;
+		output->low_water_ready = 0;
 		output->low_water_slots = 0;
 		return;
 	}
 
 	now_us = wb_monotonic_us();
-	if (!g_ring_low_water_ready) {
-		venc_ring_low_water_reset(&g_ring_low_water, now_us);
-		g_ring_low_water_ready = 1;
+	if (!output->low_water_ready) {
+		venc_ring_low_water_reset(&output->low_water, now_us);
+		output->low_water_ready = 1;
 	}
 
-	venc_ring_low_water_observe(&g_ring_low_water, fill.used_slots,
+	venc_ring_low_water_observe(&output->low_water, fill.used_slots,
 		fill.slot_count);
-	if (venc_ring_low_water_tick(&g_ring_low_water, now_us)) {
+	if (venc_ring_low_water_tick(&output->low_water, now_us)) {
 		uint16_t slots =
-			venc_ring_low_water_slots(&g_ring_low_water);
+			venc_ring_low_water_slots(&output->low_water);
 
 		output->low_water_slots = slots;
 		/* Publish into the ring header: a window in which the ring

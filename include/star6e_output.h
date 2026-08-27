@@ -113,6 +113,14 @@ typedef struct {
 	 * (the ring's idle occupancy is one frame).  Cached here so the debug
 	 * OSD can report it without recomputing the window. */
 	uint16_t low_water_slots;
+	/* Window state for the reading above.  PER OUTPUT, not a file-static
+	 * singleton: a second frame-shm output (dual-stream ch1) is a second
+	 * ring with its own occupancy, and a shared tracker cannot represent
+	 * it -- the ring would publish VHLT with a low-water that nothing ever
+	 * writes, which reads as the healthiest value in the range rather than
+	 * as an absent gauge. */
+	VencRingLowWater low_water;
+	int low_water_ready;
 	/* Transport-pressure observation cache (telemetry only — never gates
 	 * frame transmission).  Populated by star6e_output_observe_pressure
 	 * once per frame on the producer thread and read by the sidecar emit

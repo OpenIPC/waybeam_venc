@@ -52,6 +52,15 @@ typedef struct {
 	int connected_udp;
 	OutputSocketQueue send_queue;
 	venc_frame_ring_t *frame_ring;
+	/* frame-shm ring low-water measurement.  Every frame-shm producer must
+	 * measure: venc_frame_ring_create() publishes the VHLT health marker
+	 * unconditionally, so a ring nobody measures still advertises a live
+	 * gauge sitting at its create-time 0 -- the healthiest value in the
+	 * range.  "Not measured" would be indistinguishable from "the consumer
+	 * is keeping up perfectly", to the rate controller that is now solely
+	 * responsible for reacting. */
+	VencRingLowWater low_water;
+	int low_water_ready;
 	RtpPacketizerState rtp;
 	H26xParamSets param_sets;
 	DebugOsdState *debug_osd;
@@ -266,6 +275,31 @@ static int cv610_request_idr(void)
 		return 0;
 	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
 		? 0 : -1;
+}
+
+/* Star6E/Maruko parity — see star6e_service_ring_low_water().  venc measures
+ * egress pressure and publishes it; it never acts on it. */
+static void cv610_service_ring_low_water(Cv610RunnerContext *ctx)
+{
+	venc_frame_ring_fill_t fill;
+	uint64_t now_us;
+
+	if (!ctx || !ctx->frame_ring)
+		return;
+	if (venc_frame_ring_get_fill(ctx->frame_ring, &fill) != 0)
+		return;
+
+	now_us = wb_monotonic_us();
+	if (!ctx->low_water_ready) {
+		venc_ring_low_water_reset(&ctx->low_water, now_us);
+		ctx->low_water_ready = 1;
+	}
+
+	venc_ring_low_water_observe(&ctx->low_water, fill.used_slots,
+		fill.slot_count);
+	if (venc_ring_low_water_tick(&ctx->low_water, now_us))
+		venc_frame_ring_set_low_water(ctx->frame_ring,
+			venc_ring_low_water_slots(&ctx->low_water));
 }
 
 static uint32_t cv610_query_live_fps(void)
@@ -1170,6 +1204,7 @@ static int cv610_run(void *opaque)
 				if (write_ret != 0)
 					__atomic_add_fetch(&ctx->output_drops, 1,
 						__ATOMIC_RELAXED);
+				cv610_service_ring_low_water(ctx);
 			} else if (ctx->socket_handle >= 0) {
 				/* cv610_output_write owns per-datagram drop accounting. */
 				(void)cv610_send_rtp_frame(ctx, frame, frame_len);

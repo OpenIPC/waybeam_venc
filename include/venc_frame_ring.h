@@ -276,11 +276,14 @@ static inline void venc_frame_ring_set_low_water(venc_frame_ring_t *r,
  * SLOTS, not a fraction of capacity.  The healthy band is "at most one frame
  * queued" -- the caller samples just after writing, so a perfectly drained
  * ring still reads 1, which is why the clamp this replaced recovered at
- * <= 1 slot and engaged at >= 2.  A permille encoding cannot carry that: at
- * the ring's 16-slot default one slot is 62.5 permille, truncates to 62, and
- * converts back to 0 -- destroying the exact reading that separates a healthy
- * ring from a drained one.  Raw slots have no such rounding, and the consumer
- * already knows slot_count (header offset 8) if it wants a fraction.
+ * <= 1 slot and engaged at >= 2.  Whether a permille encoding can round-trip
+ * that 1 depends on the geometry: at the 8 slots every venc backend currently
+ * creates it does (125 permille exactly), but at 16 it does not (62.5 truncates
+ * to 62, which converts back to 0 -- a healthy ring indistinguishable from a
+ * drained one).  The header does not fix slot_count, so an encoding whose
+ * fidelity varies with it is the wrong choice regardless of what today's
+ * producers happen to pick.  Raw slots have no such dependence, and a consumer
+ * that wants a fraction already has slot_count at header offset 8.
  *
  * The consumer cannot derive this for itself.  It can sample instantaneous
  * occupancy from write_idx/read_idx whenever it likes, but the low-water mark

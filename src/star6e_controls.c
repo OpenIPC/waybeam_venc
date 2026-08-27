@@ -587,8 +587,18 @@ static int apply_fps(uint32_t fps)
  * point.  This is the one fps path that owns an IDR. */
 static int apply_fps_live(uint32_t fps)
 {
+	/* Only a real rebind is a bootstrap event.  apply_fps() returns 0 both
+	 * for a rebind and for its unchanged-fps early return, and the caller
+	 * cannot tell them apart -- venc_api dispatches on key name and never
+	 * compares old against new, so any POST naming video0.fps lands here.
+	 * Firing the deliberately un-coalescible bootstrap IDR on the no-op
+	 * turned a ground re-posting its profile into an ungated keyframe at
+	 * the caller's write rate: exactly the storm the spacing gate exists
+	 * to absorb.  Compare the delivered fps instead of trusting ret. */
+	uint32_t before = g_star6e_control_ctx.delivered_fps;
 	int ret = apply_fps(fps);
-	if (ret == 0)
+
+	if (ret == 0 && g_star6e_control_ctx.delivered_fps != before)
 		(void)request_idr_bootstrap();
 	return ret;
 }
@@ -1367,10 +1377,16 @@ static int apply_output_enabled(bool on)
 			g_star6e_control_ctx.pipeline->output_enabled = 0;
 			return -1;
 		}
-		if (request_idr_bootstrap() != 0) {
-			g_star6e_control_ctx.pipeline->output_enabled = 0;
-			return -1;
-		}
+		/* Not fatal.  The output IS enabled and the fps restored; a
+		 * failed keyframe request is a slower first picture, not a
+		 * failed apply, and unwinding output_enabled here would leave
+		 * the restored fps behind on a disabled output.  Recovery has
+		 * other routes (the explicit endpoint, and the receiver's own
+		 * request), so log it and keep the work. */
+		if (request_idr_bootstrap() != 0)
+			fprintf(stderr, "WARN: output enabled but the bootstrap "
+				"IDR request failed; the receiver has no start "
+				"point until the next one\n");
 		printf("> Output enabled, FPS restored to %u\n", restored_fps);
 	} else {
 		g_star6e_control_ctx.pipeline->output_enabled = 0;
@@ -1395,8 +1411,17 @@ static int apply_server(const char *uri)
 	    uri) != 0) {
 		return -1;
 	}
+	/* Not fatal, and here it is actively important: the socket has ALREADY
+	 * been repointed above, so returning -1 sends venc_api into
+	 * rollback_live_groups(), which re-enters this same failing call --
+	 * and if that fails too it commits the NEW outgoing.server while the
+	 * socket sits on the OLD one, leaving /api/v1/config advertising a
+	 * destination venc is not sending to.  Maruko already treated this as
+	 * non-fatal; the backends now genuinely agree. */
 	if (request_idr_bootstrap() != 0)
-		return -1;
+		fprintf(stderr, "WARN: destination changed but the bootstrap "
+			"IDR request failed; the new receiver has no start "
+			"point until the next one\n");
 	printf("> Destination changed to %s\n", uri);
 	return 0;
 }
@@ -1571,7 +1596,8 @@ static char *query_transport_status(void)
 			"\"inPressure\":%s,"
 			"\"pressureDrops\":%u,"
 			"\"transportDrops\":%u,"
-			"\"packetsSent\":%u}}",
+			"\"packetsSent\":%u,"
+			"\"badAuDrops\":%llu}}",
 			transport,
 			(unsigned)fill_pct,
 			in_pressure ? "true" : "false",
@@ -1579,7 +1605,8 @@ static char *query_transport_status(void)
 			(unsigned)__atomic_load_n(&ps->output.socket_drops,
 				__ATOMIC_RELAXED),
 			(unsigned)__atomic_load_n(&ps->output.socket_writes,
-				__ATOMIC_RELAXED));
+				__ATOMIC_RELAXED),
+			(unsigned long long)ps->output.bad_au_drops);
 	} else {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"

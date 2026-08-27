@@ -70,11 +70,14 @@ encoder behaviour only when something asks.
   that reason.** The sample is taken immediately after the frame is written,
   so a consumer that is keeping up still leaves one frame queued -- which is
   why the clamp this replaced recovered at `<= 1` slot and engaged at `>= 2`.
-  A permille encoding cannot carry that distinction: at the ring format's
-  16-slot default, one slot is 62.5 permille, truncates to 62, and converts
-  back to 0 -- indistinguishable from a drained ring. Raw slots have no such
-  rounding, and a consumer that wants a fraction already has `slot_count` at
-  header offset 8.
+  Whether a permille encoding round-trips that 1 depends on the geometry: at
+  the 8 slots every venc backend currently creates it does (125 permille
+  exactly), but at 16 it does not -- 62.5 truncates to 62, which converts back
+  to 0, a healthy ring indistinguishable from a drained one. The header does
+  not fix `slot_count`, so an encoding whose fidelity varies with it is the
+  wrong choice regardless of what today's producers pick. Raw slots have no
+  such dependence, and a consumer wanting a fraction already has `slot_count`
+  at header offset 8.
 
 - **Producer drops that are not congestion are now visible to the consumer.**
   Only `full_drops` ever reached the ring header. A frame the producer could
@@ -90,6 +93,44 @@ encoder behaviour only when something asks.
   a frame the producer could not build does not. Malformed access units also
   get a transport-independent per-output counter (they happen on RTP too),
   and both surface as `otherDrops`/`badAuDrops` on `transport/status`.
+
+- **Bootstrap IDRs are counted but never coalesced.** The 100 ms spacing gate
+  exists to absorb storms from producers asking for a *fresher* picture (the
+  scene detector, `/api/v1/idr`), where losing one costs nothing because
+  another is already in flight. A bootstrap IDR is a different event: output
+  enable, a destination change, a live fps rebind and recorder start each hand
+  the stream to a receiver — or a file — that has seen no parameter set, so a
+  coalesced request leaves it with nothing to start from while the caller is
+  told the apply succeeded. On a GDR craft, which emits no periodic IDRs at
+  all, "nothing to start from" is permanent: a recording with no IRAP anywhere
+  in it seeks to nothing and plays from nothing.
+
+  `idr_rate_limit_force()` honors those unconditionally, still books them in
+  `/api/v1/idr/stats`, and re-arms the spacing window so an ordinary request
+  right behind a bootstrap still coalesces — a bootstrap must not open a hole
+  for a storm. Applied at all four sites on both SigmaStar backends. Only a
+  *real* fps rebind qualifies: `apply_fps()` returns 0 for its unchanged-fps
+  early return too, and firing on that turned a ground re-posting an unchanged
+  profile into ungated keyframes at the caller's write rate.
+
+  A failed bootstrap IDR is **not** fatal to the apply. The work it accompanies
+  has already succeeded — in `apply_server` the socket is repointed before the
+  request — so failing the apply would send venc into a rollback that re-enters
+  the same failing call and can commit the new `outgoing.server` while the
+  socket sits on the old one. It is logged instead, and both backends now
+  genuinely behave the same way.
+
+- **Every frame-shm producer measures its own ring.** The low-water tracker
+  moved from a per-backend file static onto the output, because
+  `venc_frame_ring_create()` publishes the `VHLT` health marker unconditionally:
+  a ring nobody measured still advertised a live gauge sitting at its
+  create-time `0` — the *healthiest* value in the range — so "not measured" was
+  indistinguishable from "the consumer is keeping up perfectly". That affected
+  CV610 (which measured nothing at all) and Star6E dual-stream ch1, whose
+  second ring a shared tracker could not represent. `badAuDrops` is likewise
+  reported on every transport now, not only `frame-shm`, since a malformed
+  packet table happens on RTP too and there is no ring header to see it through
+  there.
 
 - **`GET /api/v1/transport/status`**: `throttlePermille` and
   `effectiveBitrateKbps` removed, `ringLowWaterSlots` added on the
@@ -170,6 +211,11 @@ renumbering again when that bundle arrives.
   On a plain GOP stream there is no other heal and the IDR is genuinely a
   lifesaver, so that case keeps it, paced by the existing 1 s holdoff.
 
+  (Superseded within this same release train: `0.69.0` below removed the
+  ring-full recovery IDR outright, for plain GOP as well as GDR, so the helper
+  named next never appeared in a shipped binary. The reasoning is kept because
+  it is the argument `0.69.0` then extended.)
+
   `venc_frame_drop_needs_idr()` folds this with the existing SVC-T enhance
   exemption so all three backends share one definition. No configuration:
   venc already knows which kind of stream it is producing.
@@ -206,7 +252,7 @@ renumbering again when that bundle arrives.
   channel, so that is where it now lives. Enable emits exactly one,
   disable none.
 
-- **Every Maruko IDR source is now paced and counted.**
+- **Every Maruko IDR source is now counted; the coalescible ones are paced.**
   `maruko_request_idr()` called the vendor request directly, and the
   output-enable and server-change paths bypassed the gate too, so Maruko's
   `/request/idr` was the only IDR source on any backend that was neither

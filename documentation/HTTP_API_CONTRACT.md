@@ -579,7 +579,7 @@ curl "http://<device-ip>/api/v1/set?outgoing.server=udp://<receiver-ip>:5600"
 - `shm://` and `frame-shm://` are video-only. They cannot share audio; use a nonzero `audioPort` for separate UDP audio.
 - On Star6E, `audioPort=0` piggybacks on the active video destination for both `udp://` and `unix://`.
 - On Star6E, a nonzero `audioPort` keeps audio on a dedicated UDP port. With `unix://`, `shm://`, or `frame-shm://` video output, that dedicated audio port is sent to `127.0.0.1:<audioPort>`.
-- `frame-shm://` publishes whole Annex-B frames into a 16-slot × 512 KB SPSC ring; each slot is prefixed with an 8-byte `VencFrameMeta` (`pts`, `codec`, `flags`; `flags` bit 0 = IDR). On a full ring the encoder drops the frame and keeps running (never blocks). `outgoing.maxPayloadSize` does not apply (no packetization). `GET /api/v1/transport/status` reports `"transport":"frame-shm"` with `framesSent`/`fillPct`/`transportDrops`/`oversizeDrops`.
+- `frame-shm://` publishes whole Annex-B frames into an 8-slot SPSC ring (384 KB per slot on Star6E and Maruko, 512 KB on CV610 — 16 × 512 KB is the ring *format*'s default, not what any venc backend creates); each slot is prefixed with an 8-byte `VencFrameMeta` (`pts`, `codec`, `flags`; `flags` bit 0 = IDR). On a full ring the encoder drops the frame and keeps running (never blocks). `outgoing.maxPayloadSize` does not apply (no packetization). `GET /api/v1/transport/status` reports `"transport":"frame-shm"` with `framesSent`/`fillPct`/`transportDrops`/`oversizeDrops`.
 
 ### Stream Mode and Send Feedback
 
@@ -1510,7 +1510,7 @@ Field reference:
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
 | `otherDrops` | (frame-shm only) Frames the producer discarded for a reason **other than a full ring** — an access unit it could not build at all (oversize, or a malformed SDK packet table).  Kept apart from `transportDrops` on purpose: that one is congestion the consumer is causing and a rate controller should slow down for it, this one is not congestion and slowing down fixes nothing.  Mirrored into the ring header at offset 96 so the consumer sees it too |
 | `badAuDrops` | Access units discarded because the SDK's packet table was incomplete or invalid.  Transport-independent — this happens on RTP as well — and a subset of `otherDrops` on `frame-shm` |
-| `ringLowWaterSlots` | (frame-shm only) Lowest ring occupancy reached in the last 200 ms window, **in slots**.  `<= 1` is the healthy band and `>= 2` sustained is standing backlog — venc samples just after writing, so a consumer that is keeping up still leaves exactly one frame queued.  Raw slots rather than a fraction of `slotCount`: at a 16-slot ring one slot is 62.5 permille, which truncates to 62 and converts back to 0, destroying the very reading that separates a healthy ring from a drained one.  A **measurement, not an actuator** — venc publishes it and changes nothing in response |
+| `ringLowWaterSlots` | (frame-shm only) Lowest ring occupancy reached in the last 200 ms window, **in slots**.  `<= 1` is the healthy band and `>= 2` sustained is standing backlog — venc samples just after writing, so a consumer that is keeping up still leaves exactly one frame queued.  Raw slots rather than a fraction of `slotCount`, because whether a fraction round-trips that 1 depends on the geometry — at the 8 slots venc creates it does (125 permille exactly), at 16 it does not (62.5 truncates to 62, back to 0: a healthy ring indistinguishable from a drained one) — and the header does not fix `slotCount`.  A **measurement, not an actuator** — venc publishes it and changes nothing in response |
 
 On `unix://`, `fillPct` is measured against the *peer's* datagram queue,
 which is the limit that actually blocks a sender — not the local
@@ -1885,6 +1885,15 @@ in Notes. As of `contract_version: 0.19.0`:
     healthy here (`<= 1`), where `1000` was healthy for the clamp.  Read
     `video0.bitrate` from `/api/v1/config`; there is no longer a scaled
     "effective" rate, because nothing scales it.
+  - **Bootstrap IDRs bypass the 100 ms spacing gate.** Output enable, a
+    destination change, a live fps rebind and recorder start hand the stream (or
+    a new file) to a receiver that has seen no parameter set, so they are
+    honored unconditionally rather than coalesced — still counted in
+    `/api/v1/idr/stats`, and they re-arm the window so an ordinary request
+    behind one still coalesces. Every *other* source, including
+    `/api/v1/idr` and the scene detector, is paced exactly as before. A failed
+    bootstrap IDR is logged, not fatal: the apply it accompanies has already
+    succeeded.
   - **New `other_drops` at ring header offset 96** (u64, producer cumulative):
     frames the producer discarded for a reason other than a full ring.  Only
     `full_drops` was ever published, so a consumer was structurally blind to an

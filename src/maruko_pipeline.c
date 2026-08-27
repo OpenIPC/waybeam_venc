@@ -4035,13 +4035,22 @@ static void maruko_patch_stream_to_trail_n(i6c_venc_strm *s)
  * g_osd_enc_bytes in star6e_runtime.c. */
 static uint64_t g_osd_enc_bytes;
 
-/* frame-shm ring low-water measurement — byte-symmetric with the Star6E side
- * (src/star6e_runtime.c star6e_service_ring_low_water).  Both backends share
- * one definition on purpose: a per-backend divergence in shared behaviour is a
- * standing drift trap in this repo. */
-static VencRingLowWater g_ring_low_water;
-static int g_ring_low_water_ready;
+/* Recorder start — Star6E parity, see runtime_request_idr() in
+ * src/star6e_runtime.c.  These two sites previously called the SDK directly,
+ * so they were neither paced nor counted: the only IDR sources on any backend
+ * outside /api/v1/idr/stats, which is precisely what made the contract's
+ * "every source is paced and counted" claim false for Maruko. */
+static void maruko_recorder_start_idr(MarukoBackendContext *ctx)
+{
+	idr_rate_limit_force(ctx->venc_channel);
+	(void)maruko_mi_venc_request_idr(ctx->venc_device,
+		ctx->venc_channel, 1);
+}
 
+/* frame-shm ring low-water measurement — byte-symmetric with the Star6E side
+ * (src/star6e_runtime.c star6e_service_ring_low_water), state on the output
+ * for the same reason.  Both backends share one definition on purpose: a
+ * per-backend divergence in shared behaviour is a standing drift trap here. */
 static void maruko_service_ring_low_water(MarukoOutput *output)
 {
 	venc_frame_ring_fill_t fill;
@@ -4052,22 +4061,22 @@ static void maruko_service_ring_low_water(MarukoOutput *output)
 	if (maruko_output_frame_ring_fill(output, &fill) != 0) {
 		/* Transport switch away from frame-shm — see the
 		 * star6e_runtime equivalent. */
-		g_ring_low_water_ready = 0;
+		output->low_water_ready = 0;
 		output->low_water_slots = 0;
 		return;
 	}
 
 	now_us = wb_monotonic_us();
-	if (!g_ring_low_water_ready) {
-		venc_ring_low_water_reset(&g_ring_low_water, now_us);
-		g_ring_low_water_ready = 1;
+	if (!output->low_water_ready) {
+		venc_ring_low_water_reset(&output->low_water, now_us);
+		output->low_water_ready = 1;
 	}
 
-	venc_ring_low_water_observe(&g_ring_low_water, fill.used_slots,
+	venc_ring_low_water_observe(&output->low_water, fill.used_slots,
 		fill.slot_count);
-	if (venc_ring_low_water_tick(&g_ring_low_water, now_us)) {
+	if (venc_ring_low_water_tick(&output->low_water, now_us)) {
 		uint16_t slots =
-			venc_ring_low_water_slots(&g_ring_low_water);
+			venc_ring_low_water_slots(&output->low_water);
 
 		output->low_water_slots = slots;
 		venc_frame_ring_set_low_water(output->frame_ring, slots);
@@ -4398,11 +4407,16 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		total_bytes = maruko_video_send_frame(&stream, &ctx->output,
 			&rt->rtp_state, &rt->param_sets, &ctx->cfg,
 			MARUKO_PKTZR_VERBOSE_ACTIVE(ctx) ? &frame_pktzr : NULL);
-
-		/* frame-shm ring low-water measurement — see the matching
-		 * call in star6e_runtime.c.  Unconditional by design. */
-		maruko_service_ring_low_water(&ctx->output);
 	}
+
+	/* frame-shm ring low-water measurement — see the matching call in
+	 * star6e_runtime.c.  Deliberately OUTSIDE the output_enabled block:
+	 * gating it there froze the tracker mid-window on disable, so the
+	 * header kept publishing the last verdict (a full ring reads as
+	 * permanent standing backlog on a ring nobody is writing) and the
+	 * first frame after re-enable closed a "200 ms window" built from one
+	 * sample.  Star6E reaches its reset branch every frame regardless. */
+	maruko_service_ring_low_water(&ctx->output);
 
 	/* Mirror mode: write chn 0 frames to whichever recorder is active
 	 * before the stream is released.  In dual mode the chn 1 drain
@@ -4455,9 +4469,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 				if (is_hevc) {
 					if (star6e_recorder_start(&ctx->recorder,
 					    rec_dir) == 0)
-						(void)maruko_mi_venc_request_idr(
-							ctx->venc_device,
-							ctx->venc_channel, 1);
+						maruko_recorder_start_idr(ctx);
 				} else {
 					ctx->audio.rec_ring = ctx->audio.started
 						? &ctx->audio_recorder_ring
@@ -4467,9 +4479,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 					    ctx->audio.started
 						? &ctx->audio_recorder_ring
 						: NULL) == 0)
-						(void)maruko_mi_venc_request_idr(
-							ctx->venc_device,
-							ctx->venc_channel, 1);
+						maruko_recorder_start_idr(ctx);
 				}
 			}
 			if (stop_pending) {

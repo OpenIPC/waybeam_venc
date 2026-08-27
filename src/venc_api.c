@@ -174,16 +174,6 @@ void venc_api_set_config_path(const char *path)
 	pthread_mutex_unlock(&g_cfg_mutex);
 }
 
-int venc_api_cfg_trylock(void)
-{
-	return pthread_mutex_trylock(&g_cfg_mutex) == 0 ? 1 : 0;
-}
-
-void venc_api_cfg_unlock(void)
-{
-	pthread_mutex_unlock(&g_cfg_mutex);
-}
-
 /* Persist current config to disk if a config path was registered and the
  * snapshot differs from the last-saved copy.  Caller must NOT hold
  * g_cfg_mutex (this function takes it).
@@ -2900,7 +2890,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.18.7\","
+		"\"contract_version\":\"0.19.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
