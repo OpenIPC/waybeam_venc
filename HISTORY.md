@@ -1,5 +1,152 @@
 # History
 
+## [0.70.0] - 2026-08-27
+
+Snapshot and recording reach the CV610 backend, and the config file is read
+exactly once at startup. Contract `0.19.0` -> `0.20.0` — **additive**: no
+field was removed, renamed, or given a new meaning, and a client written
+against `0.19.0` sees strictly more capability and no changed response shape.
+
+- **`GET /api/v1/snapshot.jpg` on CV610.** It was the one route a backend
+  omitted entirely. The JPEG channel binds as a **second destination** on the
+  same VPSS output the H.265 channel already consumes — the SDK allows four
+  bind targets per source — so it needs no VPSS channel of its own: no extra
+  scaling, no extra VB pool, and nothing running while nobody is asking. The
+  bind is permanent and only the channel's receive state pulses
+  (`start_chn(recv_pic_num=1)` -> `get_stream` -> `stop_chn`), which
+  deliberately avoids reconfiguring the source per request.
+
+  Because it shares the main stream's VPSS channel it inherits that geometry.
+  `snapshot.width` / `snapshot.height` are advertised **unsupported** on CV610
+  rather than accepted and ignored.
+
+- **Recording on CV610 in `record.mode=mirror`**, `format=ts` (Opus muxed) and
+  `format=hevc`, with rotation and `/api/v1/record/{start,stop,status}`.
+
+  No SDK-typed adapter was needed. The CV610 drain loop already copies each
+  access unit into one contiguous Annex-B buffer before any consumer sees it,
+  and `star6e_ts_recorder_write_video()` has always taken a flat buffer. Only
+  the `.hevc` path was missing a SoC-independent entry point, so
+  `star6e_recorder_write_au()` was added beside the existing iovec writer,
+  carrying the same side-effect order: disk-space check, frame boundary,
+  write, truncate-back-to-boundary on failure, then counters and the
+  `sync_file_range` cadence.
+
+  `record.bitrate` / `fps` / `gop_size` / `server` stay **unsupported**: they
+  describe the second VENC channel that `dual` and `dual-stream` need, which
+  this backend does not create. Those modes are refused with a warning rather
+  than silently recording ch0 at the wrong bitrate.
+
+- **Record start forces an un-coalescible IDR on CV610.** The shipped
+  configuration is `resilience=racing` — a GDR craft emits no periodic IDR at
+  all — so a request the rate limiter coalesced away would leave a recording
+  with no IRAP access unit anywhere in it: a file that seeks to nothing and
+  plays from nothing, while the caller was told the start succeeded. Same
+  reasoning and same path as Star6E.
+
+- **The shared recorder is no longer gated behind a SigmaStar-only guard.**
+  `star6e_recorder.c`, `star6e_ts_recorder.c` and `ts_mux.c` were always
+  SoC-independent apart from their SDK-typed adapters; the guard around those
+  adapters read `#ifndef PLATFORM_MARUKO`, which silently included them in any
+  build that was not Maruko. It now names what it actually requires —
+  `star6e_output.c` being linked — so CV610 can use the cores.
+
+  Verified as a no-op for the existing backends: with the version strings held
+  constant, `star6e_ts_recorder.o` and `ts_mux.o` are **byte-identical** on
+  both star6e and maruko, and `star6e_recorder.o` differs only by the added
+  `star6e_recorder_write_au` — no pre-existing symbol changed or disappeared.
+
+- **`RECORDER_DEFAULT_DIR` had two definitions.** `venc_api.c` carried its own
+  copy for CV610 because that backend did not link the recorder header. Now it
+  includes the header like everything else.
+
+- **Recording no longer stalls the live video path.** Every backend called the
+  recorder from its encode drain loop, between the transport send and the
+  SDK's ReleaseStream, with a blocking `write(2)`. When storage blocked,
+  ReleaseStream was late, the encoder's output queue backed up, and the LIVE
+  transport stalled with it.
+
+  Device-measured on CV610 with the same card, same mount and the same
+  stimulus (three concurrent direct-IO writers on a `-o sync` mount):
+
+  | | stream min | stall seconds | recorder |
+  |---|---|---|---|
+  | synchronous | 608 pkt/s (42% of baseline) | **15 / 18** | 33-44 fps |
+  | async writer | **1462 pkt/s (100%)** | **0 / 18** | 43-66 fps |
+
+  The queue absorbed the stall (depth 1 -> 358, hitting its 4 MB cap), then
+  shed recording frames — 526 of them, every one counted and reported through
+  the new `droppedFrames`. A slow disk now costs recording frames and never
+  the live link, which is the 0.69.0 principle applied one layer up.
+
+  Star6E's dual mode already drained its second channel on its own thread and
+  was never affected; this gives mirror mode the same property. **The star6e
+  and maruko mirror paths still write synchronously** — the coupling is
+  identical there by construction (`star6e_runtime.c`,
+  `maruko_pipeline.c`) and wiring them needs their own device runs.
+
+- **Rotation asks the right channel, from the right place, at the right rate.**
+  An adversarial review of the first cut found the rotation hook was wrong
+  three ways, all on the two backends that had not been on hardware: it fired
+  *inside* the SDK's GetStream/ReleaseStream window, which no other IDR call
+  site on any backend does; a single shared `int (*)(void)` could not name the
+  channel, so under `record.mode=dual` it keyframed the LIVE stream while the
+  ch1 recording rotated on nothing (a defect `star6e_runtime.c` already
+  carried a fix for at record-start); and on Star6E it resolved to the
+  *forced* path, which re-arms the rate limiter and would swallow a scene or
+  operator keyframe arriving in the next 100 ms.
+
+  The callback is gone. `check_rotation()` now raises a flag and the backend
+  services it after its own ReleaseStream, coalesced, on the channel that
+  actually feeds that recorder. Requests are bounded
+  (`TS_RECORDER_MAX_IDR_REQUESTS`) so an unanswered ask degrades to the old
+  wait-for-a-keyframe behaviour instead of becoming a permanent 1 Hz keyframe
+  tax, paced by elapsed interval rather than "a different second", and reset
+  per recording.
+
+  They are also **grace-delayed by one second**, which is a measured
+  correction rather than a precaution: on Maruko at `resilience=off` with a
+  1 s GOP, `max_seconds=15` over 50 s took the honored-IDR count from **1 to
+  4** — three needless keyframes for three rotations that happened naturally
+  anyway. With the grace, Maruko is back to **4 segments, 1501 frames, delta
+  1**, identical to 0.69.0.
+
+- **`record.max_seconds` / `max_mb` were inert on a GDR craft.** Rotation can
+  only cut on an IRAP or the new segment decodes from nothing, and the check
+  simply returned early when the frame was not one — correct, but it assumed
+  the stream produces IDRs by itself. Under `resilience=racing` it never does,
+  so a configured cap did nothing and the file grew unbounded. The recorder
+  now asks for an IDR when rotation is due, rate-limited to one request per
+  second so a crossed threshold cannot become per-frame keyframing.
+
+  Measured on CV610 under `racing`, `max_seconds=15` over 50 s: **1 segment
+  before, 4 after**, with `/api/v1/idr/stats` showing exactly 4 honored
+  requests and 0 dropped, and each rotated segment opening on `key_frame=1,
+  pict_type=I`. `Star6eTsRecorderState.request_idr` is the callback the
+  original author declared for exactly this and never wired; it was removed as
+  dead code in 0.69.0 and is restored here with the wiring that makes it live.
+
+- Note for operators: the shipped `record.dir` default is `/mnt/mmcblk0p1`,
+  which does not exist on the CV610 reference board (the bench mounts USB
+  storage at `/mnt/sda1`). It is left at the shared default rather than
+  hardcoding one board's mount point; set it for the target before recording.
+
+### The config file is read exactly once
+
+venc parsed `/etc/waybeam.json` twice at startup — once in `main()` for the
+mDNS beacon, once in `backend_execute()` for the backend. The two reads were
+not atomic and not equally trusted: a config write landing between them handed
+the beacon and the encoder different snapshots of `system.web_port`, and the
+beacon's load discarded its return value, so a malformed config announced a
+service on defaults and *then* exited.
+
+The config file is a program-level input, not a module-level one, so it is now
+parsed once at the program boundary and the value handed down; modules take a
+`const VencConfig *`, never a path. Loading before the beacon also means a
+malformed config exits without ever having announced.
+`BackendOps.config_path` is gone, and `VENC_CONFIG_DEFAULT_PATH` went from
+seven mentions across five files to one call site.
+
 ## [0.69.0] - 2026-08-26
 
 venc stops actuating on its own egress. Contract `0.18.6` -> `0.19.0`

@@ -551,6 +551,17 @@ static int runtime_request_idr_on(int chn)
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
+/* Segment rotation's request, as distinct from the bootstrap one above.
+ * COALESCED, not forced: a periodic rotation is not a bootstrap event, and
+ * forcing would also re-arm the rate limiter and swallow a scene-detector or
+ * operator keyframe arriving in the next 100 ms. */
+static int runtime_rotate_idr_on(int chn)
+{
+	if (!idr_rate_limit_allow(chn))
+		return 0;
+	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
+}
+
 /* Mirror-mode recorder: the file is fed by the main channel. */
 static int runtime_request_idr(void)
 {
@@ -783,6 +794,14 @@ static void *dual_rec_thread_fn(void *arg)
 			}
 
 		MI_VENC_ReleaseStream(d->channel, &stream);
+
+		/* ch1 feeds this recorder, so ch1 is the channel to ask.  The
+		 * shared record-start path already learned this the hard way
+		 * (see the comment above runtime_request_idr_on's ch1 caller):
+		 * aimed at ch0 it keyframes the LIVE stream and the recording
+		 * still rotates on nothing. */
+		if (star6e_ts_recorder_take_idr_request(d->ts_recorder))
+			(void)runtime_rotate_idr_on(d->channel);
 		total_count++;
 
 		/* Backpressure signal: the pre-GetStream Query found >= 2
@@ -1300,6 +1319,14 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * work (stdout printf, OSD draw) that can otherwise push send
 	 * spread past a full frame period at 120 fps. */
 	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
+
+	/* Rotation asked for a keyframe.  Serviced HERE, after the release, so
+	 * the SDK call never lands inside the GetStream/ReleaseStream window,
+	 * and aimed at the channel that actually feeds this file.  Dual mode
+	 * services its own recorder on the ch1 thread instead. */
+	if (!ps->dual &&
+	    star6e_ts_recorder_take_idr_request(&ps->ts_recorder))
+		(void)runtime_rotate_idr_on(ps->venc_channel);
 
 	/* Check HTTP record control flags.
 	 *

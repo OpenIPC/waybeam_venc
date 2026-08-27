@@ -57,12 +57,35 @@ void star6e_recorder_init(Star6eRecorderState *state);
  *  If already recording, stops the current recording first. */
 int star6e_recorder_start(Star6eRecorderState *state, const char *dir);
 
+/** Write one already-assembled Annex-B access unit to the recording file.
+ *  The SoC-independent writer: same side-effect order as
+ *  star6e_recorder_write_frame() — periodic disk-space check, then the
+ *  write, then the counters and the sync_file_range cadence, with a
+ *  truncate back to the frame boundary if the write fails part-way so the
+ *  file never retains half an AU.
+ *
+ *  For backends that already hand over one contiguous buffer (CV610 copies
+ *  the SDK's pack list into `frame` before it reaches any consumer), this is
+ *  the whole recorder interface — no SDK-typed adapter is needed.
+ *
+ *  No-op if not currently recording.  Returns bytes written, 0 if not
+ *  active, or -1 on error.  Automatically stops recording on disk full or
+ *  write error. */
+int star6e_recorder_write_au(Star6eRecorderState *state,
+	const uint8_t *au, size_t len);
+
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 /** Write one encoded frame (all NAL units) to the recording file.
  *  No-op if not currently recording.  Returns bytes written, 0 if not
  *  active, or -1 on error.  Automatically stops recording on disk full
- *  or write error. */
+ *  or write error.
+ *
+ *  SigmaStar-typed, so it is compiled only where star6e_output.c is linked
+ *  (the Star6E target and the host test build).  Maruko has its own adapter
+ *  in maruko_recorder.c; CV610 uses star6e_recorder_write_au() directly. */
 int star6e_recorder_write_frame(Star6eRecorderState *state,
 	const MI_VENC_Stream_t *stream);
+#endif
 
 /** Stop recording: fsync and close the file.  No-op if not recording. */
 void star6e_recorder_stop(Star6eRecorderState *state);

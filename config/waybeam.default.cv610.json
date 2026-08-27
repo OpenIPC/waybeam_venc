@@ -31,6 +31,19 @@
     "volume": 80,
     "mute": false
   },
+  "record": {
+    "enabled": false,
+    "dir": "/mnt/mmcblk0p1",
+    "format": "ts",
+    "mode": "mirror",
+    "maxSeconds": 300,
+    "maxMB": 500
+  },
+  "snapshot": {
+    "enabled": true,
+    "quality": 80,
+    "channel": 7
+  },
   "discovery": {
     "enabled": true,
     "serviceType": "_waybeam-venc._tcp",

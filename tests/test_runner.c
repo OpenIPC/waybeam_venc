@@ -29,6 +29,7 @@ extern int test_star6e_output(void);
 extern int test_star6e_audio(void);
 extern int test_star6e_video(void);
 extern int test_star6e_recorder(void);
+extern int test_venc_rec_writer(void);
 extern int test_ts_mux(void);
 extern int test_audio_ring(void);
 extern int test_star6e_ts_recorder(void);
@@ -122,6 +123,8 @@ int main(void)
 
 	printf("\n--- test_star6e_recorder ---\n");
 	failures += test_star6e_recorder();
+	printf("\n--- test_venc_rec_writer ---\n");
+	failures += test_venc_rec_writer();
 
 	printf("\n--- test_ts_mux ---\n");
 	failures += test_ts_mux();

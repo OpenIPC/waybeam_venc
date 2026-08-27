@@ -1,5 +1,12 @@
 #include "star6e_ts_recorder.h"
-#ifndef PLATFORM_MARUKO
+/* The SigmaStar-typed adapters below need star6e_output.c, which only the
+ * Star6E target and the host test build link.  Maruko has its own adapter
+ * in maruko_recorder.c / maruko_ts_recorder.c; CV610 needs none, because it
+ * hands the recorder one contiguous access unit and calls the SoC-
+ * independent entry points directly.  Stated as "not those two" rather than
+ * "PLATFORM_STAR6E" because the host test build defines no platform macro
+ * at all and must keep compiling these. */
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 #include "star6e_output.h"
 #endif
 
@@ -176,6 +183,13 @@ int star6e_ts_recorder_start(Star6eTsRecorderState *state, const char *dir,
 	state->space_check_countdown = RECORDER_SPACE_CHECK_INTERVAL;
 	state->last_stop_reason = RECORDER_STOP_MANUAL;
 	state->segment_bytes = 0;
+	/* Part of the per-recording reset like everything above it: a stop and
+	 * restart inside the same second must not inherit the old recording's
+	 * pacing anchor and suppress the new one's first rotation request. */
+	state->idr_request_last_sec = 0;
+	state->idr_requests_unanswered = 0;
+	state->rotation_due_since = 0;
+	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
 	clock_gettime(CLOCK_MONOTONIC, &state->start_time);
 
 	if (open_new_segment(state) != 0)
@@ -210,9 +224,6 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	unsigned long elapsed;
 	int should_rotate = 0;
 
-	if (!is_idr)
-		return 0;
-
 	/* Check time-based rotation */
 	if (state->max_seconds > 0) {
 		clock_gettime(CLOCK_MONOTONIC, &now);
@@ -228,6 +239,59 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	if (!should_rotate)
 		return 0;
 
+	/* A segment has to OPEN on an IRAP or it decodes from nothing, so the
+	 * cut can only happen on one.  The original code enforced that by
+	 * returning early on !is_idr — correct, but it silently assumed the
+	 * stream produces IDRs on its own.  A GDR craft (resilience=racing)
+	 * never does: device-measured on CV610, max_seconds=15 yielded ONE
+	 * segment after 50 s under racing and THREE under resilience=off.
+	 * max_seconds/max_mb were simply inert, and the file grew unbounded.
+	 *
+	 * So ask for one instead of waiting for one that is never coming, and
+	 * rotate on the IDR that answers.  Rate-limited to one request per
+	 * second: the threshold stays crossed until the cut actually happens,
+	 * and this must not become a per-frame IDR request — that would be the
+	 * automatic keyframing 0.69.0 removed, reintroduced through the back
+	 * door.  This is operator-configured rotation, not a congestion
+	 * response, and it is the only thing that asks. */
+	if (!is_idr) {
+		/* Bounded: an unanswered ask degrades back to waiting for a
+		 * natural keyframe rather than becoming a permanent 1 Hz
+		 * keyframe tax on the live link. */
+		if (state->idr_requests_unanswered >= TS_RECORDER_MAX_IDR_REQUESTS)
+			return 0;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		/* Give a keyframing stream a chance to rotate on its own before
+		 * asking for anything.  Costs at most one second of overshoot
+		 * on a GDR craft; saves a keyframe per rotation on every stream
+		 * that never needed the request. */
+		if (state->rotation_due_since == 0) {
+			state->rotation_due_since = now.tv_sec;
+			return 0;
+		}
+		if (now.tv_sec - state->rotation_due_since < 1)
+			return 0;
+		/* An elapsed-interval test, not "a different second": X.999 and
+		 * X+1.001 are different seconds 2 ms apart, and on a backend
+		 * whose request path is un-coalesced that is two back-to-back
+		 * keyframes.  `unanswered == 0` doubles as the never-asked
+		 * sentinel, so tv_sec == 0 in the first second after boot is
+		 * not mistaken for one. */
+		if (state->idr_requests_unanswered == 0 ||
+		    now.tv_sec - state->idr_request_last_sec >= 1) {
+			state->idr_request_last_sec = now.tv_sec;
+			state->idr_requests_unanswered++;
+			__atomic_store_n(&state->idr_request_pending, 1,
+				__ATOMIC_RELAXED);
+		}
+		return 0;
+	}
+
+	/* An IRAP arrived, so any outstanding ask was answered. */
+	state->idr_request_last_sec = 0;
+	state->idr_requests_unanswered = 0;
+	state->rotation_due_since = 0;
+
 	/* Close current segment, open new one */
 	fdatasync(state->fd);
 	close(state->fd);
@@ -239,8 +303,8 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 		return -1;
 	}
 
-	/* No IDR request needed: check_rotation only fires when is_idr==1,
-	 * so the current frame (about to be written) IS already an IDR. */
+	/* The frame about to be written IS the IDR — either a natural one or
+	 * the answer to the request above — so the new segment opens on it. */
 	return 0;
 }
 
@@ -337,7 +401,7 @@ int star6e_ts_recorder_is_active(const Star6eTsRecorderState *state)
 	return state && state->fd >= 0;
 }
 
-#ifndef PLATFORM_MARUKO
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 	const MI_VENC_Stream_t *stream)
 {

@@ -525,9 +525,41 @@ static int test_field_support_by_backend(void)
 	CHECK("rc mode unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"video0.rc_mode") == 0);
-	CHECK("recording unsupported cv610",
+	/* Recording and snapshot arrived on CV610 in mirror mode: the main
+	 * channel's access unit is teed to file, and the JPEG channel is a
+	 * second bind target on the main stream's VPSS output. */
+	CHECK("recording supported cv610",
 		venc_api_field_supported_for_backend("cv610",
-			"record.enabled") == 0);
+			"record.enabled") == 1);
+	CHECK("record dir supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"record.dir") == 1);
+	CHECK("record format supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"record.format") == 1);
+	/* dual / dual-stream need a second VENC channel, which this backend
+	 * does not create — so the fields that only describe that channel stay
+	 * unsupported rather than being accepted and ignored. */
+	CHECK("record bitrate unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"record.bitrate") == 0);
+	CHECK("record server unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"record.server") == 0);
+	CHECK("snapshot enabled supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"snapshot.enabled") == 1);
+	CHECK("snapshot quality supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"snapshot.quality") == 1);
+	/* The JPEG channel shares the main stream's VPSS output, so it cannot
+	 * honour an independent snapshot geometry. */
+	CHECK("snapshot width unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"snapshot.width") == 0);
+	CHECK("snapshot height unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"snapshot.height") == 0);
 
 	return failures;
 }
