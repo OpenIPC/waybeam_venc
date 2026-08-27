@@ -1,5 +1,269 @@
 # History
 
+## [0.69.0] - 2026-08-26
+
+venc stops actuating on its own egress. Contract `0.18.6` -> `0.19.0`
+(the intermediate `0.18.7` never shipped — see the folded section below).
+**Breaking**: one config key removed, two `transport/status` fields removed,
+and the frame-SHM ring header goes to **version 2**. A v2 producer will not
+serve a v1 consumer -- waybeam-link, waybeam-hub and radeon-vrx must be
+rebuilt alongside.
+
+The principle: **venc is a sensor and an actuator-on-request, never a
+controller.** It measures egress pressure and publishes it; it changes
+encoder behaviour only when something asks.
+
+- **Removed the frame-shm ring-fill bitrate clamp** and its config key
+  `outgoing.shmThrottle`. On a `frame-shm://` craft the rate controller
+  (waybeam-link) runs on the same SoC, already reads the egress ring, and
+  already owns `video0.bitrate` -- so the clamp was a second controller on
+  the same input signal, and its only actuator keyframes
+  (`MI_VENC_SetChnAttr` emits an IDR on every real rate change).
+
+  Measured by @vertexodessa on a Star6E, 720p120, ~11 Mbps, 2026-08-24:
+
+  | | clamp on | clamp off |
+  |---|---|---|
+  | IDR rate at receiver | 6.5 /sec | 0.2 /sec |
+  | glass-to-glass | ~100-143 ms | **~15-37 ms** |
+  | ring read latency | 40-120 ms | **1-9 ms** |
+
+  A config *file* still carrying the key loads fine — unknown keys are
+  ignored and the key disappears on the next config write. A `POST
+  /api/v1/set` naming it does **not**: the multi-field preflight rejects the
+  whole batch with `404 unknown config field` on the first unrecognised key,
+  so a stored "apply my profile" batch that still carries `shmThrottle`
+  applies none of its other fields. Strip it from saved batches before
+  upgrading.
+
+- **Removed the ring-full recovery IDR entirely**, for GOP as well as GDR.
+  It fired precisely when the ring was full, so the largest frame in the
+  stream could not be delivered anyway -- measured on a SSC338Q with the
+  consumer stopped, 13 IDRs in 12 s, none of which reached anyone. Recovery
+  is now the operator-selected GOP cadence, or an explicit request:
+  `/request/idr`, or waybeam-link's §3.9 `RECOVERY_REQUEST`.
+
+  Known gap, stated rather than hidden: waybeam-link's §3.9 currently arms
+  only on stream latch, not on mid-stream damage, and `venc.recovery_enabled`
+  defaults false. Until that is wired to the receiver's existing damage
+  signal, a mid-flight ring-full drop on a **plain-GOP** stream has no
+  automatic heal until the next GOP boundary. GDR (`resilience=racing`), the
+  flight configuration, heals within one refresh cycle as before.
+
+- **Ring header v2 -- offset 88 changed meaning.** `throttle_permille`
+  (`1000` = unclamped) becomes `low_water_slots`: the lowest ring occupancy,
+  **in slots**, reached in the producer's last 200 ms window. `sizeof` stays
+  192 and nothing before offset 88 moves, but **the polarity inverts** (a
+  LOW number is now the healthy end), so this is a deliberate hard version
+  break: consumers validate `version` and refuse to attach rather than
+  silently misread a healthy ring as a catastrophic clamp.
+
+  Low-water rather than peak, and that is the measured choice: on a Star6E
+  at 100 fps into an 8-slot ring with a healthy consumer, the ring routinely
+  spikes 2-3 slots inside a window and drains again, so a peak reading calls
+  that congestion 15-25% of the time with nothing wrong. Low-water asks
+  whether the ring failed to drain at *any* point, which is what separates a
+  transient burst from standing backlog. The consumer cannot derive it
+  itself -- it can sample occupancy any time, but the low-water mark
+  *between* its own reads is producer-side knowledge.
+
+  **The healthy reading is 1, not 0, and it is reported in slots for exactly
+  that reason.** The sample is taken immediately after the frame is written,
+  so a consumer that is keeping up still leaves one frame queued -- which is
+  why the clamp this replaced recovered at `<= 1` slot and engaged at `>= 2`.
+  Whether a permille encoding round-trips that 1 depends on the geometry: at
+  the 8 slots every venc backend currently creates it does (125 permille
+  exactly), but at 16 it does not -- 62.5 truncates to 62, which converts back
+  to 0, a healthy ring indistinguishable from a drained one. The header does
+  not fix `slot_count`, so an encoding whose fidelity varies with it is the
+  wrong choice regardless of what today's producers pick. Raw slots have no
+  such dependence, and a consumer wanting a fraction already has `slot_count`
+  at header offset 8.
+
+- **Producer drops that are not congestion are now visible to the consumer.**
+  Only `full_drops` ever reached the ring header. A frame the producer could
+  not build at all -- an oversize access unit, or one whose SDK packet table
+  was incomplete -- simply vanished: the malformed-AU path counted nothing
+  anywhere (one stderr WARN, latched, then silence), and the producer-side
+  oversize counters lived in process-local ring stats no consumer could
+  reach. With venc no longer self-healing, nobody downstream could tell a
+  frame had gone missing.
+
+  Header offset 96 now carries `other_drops`, kept strictly apart from
+  `full_drops`: congestion the consumer is causing calls for slowing down,
+  a frame the producer could not build does not. Malformed access units also
+  get a transport-independent per-output counter (they happen on RTP too),
+  and both surface as `otherDrops`/`badAuDrops` on `transport/status`.
+
+- **Bootstrap IDRs are counted but never coalesced.** The 100 ms spacing gate
+  exists to absorb storms from producers asking for a *fresher* picture (the
+  scene detector, `/api/v1/idr`), where losing one costs nothing because
+  another is already in flight. A bootstrap IDR is a different event: output
+  enable, a destination change, a live fps rebind and recorder start each hand
+  the stream to a receiver — or a file — that has seen no parameter set, so a
+  coalesced request leaves it with nothing to start from while the caller is
+  told the apply succeeded. On a GDR craft, which emits no periodic IDRs at
+  all, "nothing to start from" is permanent: a recording with no IRAP anywhere
+  in it seeks to nothing and plays from nothing.
+
+  `idr_rate_limit_force()` honors those unconditionally, still books them in
+  `/api/v1/idr/stats`, and re-arms the spacing window so an ordinary request
+  right behind a bootstrap still coalesces — a bootstrap must not open a hole
+  for a storm. Applied at all four sites on both SigmaStar backends. Only a
+  *real* fps rebind qualifies: `apply_fps()` returns 0 for its unchanged-fps
+  early return too, and firing on that turned a ground re-posting an unchanged
+  profile into ungated keyframes at the caller's write rate.
+
+  A failed bootstrap IDR is **not** fatal to the apply. The work it accompanies
+  has already succeeded — in `apply_server` the socket is repointed before the
+  request — so failing the apply would send venc into a rollback that re-enters
+  the same failing call and can commit the new `outgoing.server` while the
+  socket sits on the old one. It is logged instead, and both backends now
+  genuinely behave the same way.
+
+- **Every frame-shm producer measures its own ring.** The low-water tracker
+  moved from a per-backend file static onto the output, because
+  `venc_frame_ring_create()` publishes the `VHLT` health marker unconditionally:
+  a ring nobody measured still advertised a live gauge sitting at its
+  create-time `0` — the *healthiest* value in the range — so "not measured" was
+  indistinguishable from "the consumer is keeping up perfectly". That affected
+  CV610 (which measured nothing at all) and Star6E dual-stream ch1, whose
+  second ring a shared tracker could not represent. `badAuDrops` is likewise
+  reported on every transport now, not only `frame-shm`, since a malformed
+  packet table happens on RTP too and there is no ring header to see it through
+  there.
+
+- **`GET /api/v1/transport/status`**: `throttlePermille` and
+  `effectiveBitrateKbps` removed, `ringLowWaterSlots` added on the
+  `frame-shm` branch. Read `video0.bitrate` from `/api/v1/config`; nothing
+  scales it any more.
+
+- Sidecar `TRANSPORT_INFO`: `throttle_permille` returns to `_pad[2]`.
+  Trailer stays 16 bytes; later trailers keep their offsets.
+
+- Debug OSD: the `thr<n>%` bitrate annotation becomes `ring<n>`, showing
+  ring low-water in slots when it stayed above the healthy 1-slot band, so a
+  stuttering picture separates "the consumer is behind" from "the encoder is
+  behind".
+
+### Folded in: the work first staged as `0.68.1`
+
+This began as a separate release, "venc stops injecting IDRs of its own
+accord" (contract `0.18.6` -> `0.18.7`). It never shipped under that number —
+`0.68.1` and `0.68.2` below were released while it was in review — so it is
+recorded here as part of `0.69.0`, the release that actually carries it.
+
+Several items below were superseded again by `0.69.0` above: the ring-full
+recovery IDR they kept for plain GOP is now removed outright, and the
+throttle-clamp deadband they tuned is gone with the clamp. Kept for the
+reasoning and the device measurements, which still stand.
+
+- **`video0.bitrate`, `video0.qpDelta` and `video0.maxIBytes`/`maxPBytes` no
+  longer request an IDR after applying** (Star6E and Maruko). These are all
+  decoder-neutral rate-control state, absorbed mid-GOP by the rate
+  controller; the frame-shm throttle clamp relied on exactly that for as long
+  as it existed (`0.69.0` above removed the clamp, so that corroboration is
+  historical — the SDK behaviour it rested on is unchanged). A controller that wants a resync point calls `/request/idr`
+  explicitly. CV610 never IDR'd on these paths.
+
+  Device-measured on a SSC338Q (IMX335 1920x1080@60, H.265 CBR, GDR via the
+  `racing` preset) using the venc recorder as a bitstream tap, ten live
+  writes spaced 300 ms, counting IRAP access units:
+
+  | field | before | after |
+  |---|---:|---:|
+  | `video0.qpDelta` | 11 | 1 |
+  | `video0.maxIBytes` | 11 | 1 |
+  | `video0.bitrate` | 11 | **11** |
+
+  The residual 1 is the recorder's own start IDR — a do-nothing control arm
+  on each binary recorded exactly that one and nothing else, and with the
+  `racing` preset the stream is GDR, so there are no periodic IDRs to
+  confound the count.
+
+- **The bitrate row above is a no-op on the wire, deliberately kept.**
+  `MI_VENC_SetChnAttr` emits an IDR by itself on Star6E, and
+  `MI_VENC_RcParam_t` carries no bitrate field on either SigmaStar backend,
+  so there is no rate-only actuator to switch to and the keyframe survives.
+  Two real defects are still fixed by removing the request: it consumed a
+  slot in the shared 100 ms IDR gate, so a genuine recovery request (a
+  ring-full drop, or `/request/idr` from waybeam-link) landing within
+  100 ms of a bitrate write was silently swallowed; and it inflated
+  `/api/v1/idr/stats` with one honored IDR per bitrate write that the write
+  did not cause, which is what made the counters read as though bitrate
+  writes were the IDR source. Calling `SetChnAttr` less often is left as a
+  follow-up.
+
+- **Maruko's `/request/idr` now goes through the shared per-channel gate.**
+  `maruko_request_idr()` called the vendor request directly, making it the
+  only IDR source on any backend that was neither rate-limited nor counted:
+  an HTTP caller could issue unbounded back-to-back IDRs and
+  `/api/v1/idr/stats` reported none of them. Compile-tested only; Maruko
+  hardware was unreachable.
+
+- **Contract corrections, no code change.** The `/api/v1/dual/set` `bitrate`
+  row claimed venc issues an IDR; `dual_apply_bitrate()` only updates the
+  channel attribute and never has. The `/api/v1/idr/stats` example reported
+  `min_spacing_us: 250000` against a compile-time
+  `IDR_RATE_LIMIT_MIN_SPACING_US` of `100000`.
+
+- **The frame-shm ring-full recovery IDR is now reserved for GOP streams.**
+  A drop told venc its ring overflowed, not that any decoder lost sync. On a
+  GDR stream that distinction is decisive: a rolling intra refresh repairs a
+  chain break within one cycle for free, so the recovery IDR bought only the
+  gap until the sweep reached the damage -- and paid for it with the largest
+  frame the encoder makes, pushed into a ring that was by definition full.
+  On a plain GOP stream there is no other heal and the IDR is genuinely a
+  lifesaver, so that case keeps it, paced by the existing 1 s holdoff.
+
+  (Superseded within this same release train: `0.69.0` below removed the
+  ring-full recovery IDR outright, for plain GOP as well as GDR, so the helper
+  named next never appeared in a shipped binary. The reasoning is kept because
+  it is the argument `0.69.0` then extended.)
+
+  `venc_frame_drop_needs_idr()` folds this with the existing SVC-T enhance
+  exemption so all three backends share one definition. No configuration:
+  venc already knows which kind of stream it is producing.
+
+  Device-measured on a SSC338Q with the ring consumer stopped for 12 s (ring
+  pinned at 100%, 8/8 slots, ~900 drops):
+
+  | stream | IRAP access units |
+  |---|---:|
+  | GDR (`resilience=racing`), before | 13 |
+  | GDR, after | **1** |
+  | GOP (`resilience=off`), after | **kept** |
+
+  The single remaining IRAP is the recorder's own start IDR; a do-nothing
+  control arm recorded exactly that one.
+
+- **The ring-fill clamp deadbands its own writes.** *(Superseded by `0.69.0`
+  above, which removed the clamp entirely; the deadband no longer exists.)*
+  It re-programmed the
+  encoder on every permille change, as often as every 200 ms — and each
+  programmed rate change costs an IDR, so a clamp chasing an oscillating
+  fill signal keyframed the link it was trying to unclog. Movement below
+  100 permille (10%) no longer re-programs. Reach is preserved in both
+  directions: both rails are exempt, and the comparison is against the last
+  *applied* value so suppressed movement accumulates. Device-confirmed —
+  with the consumer stopped the clamp still walked to its floor (permille
+  50, 1909 kbps).
+
+- **The fps-rebind IDR has one owner instead of three.** Output enable
+  emitted two back-to-back requests (its own plus `apply_fps`'s, coalesced
+  only by luck of the 100 ms gate — and coalescing the *recovery* IDR
+  behind an unrelated one is exactly what that gate should not do); output
+  disable emitted one *after* the output was already off; the startup idle
+  transition emitted one with no consumer at all. Only the live
+  `video0.fps` write needs one, because the rebind re-creates the encoder
+  channel, so that is where it now lives. Enable emits exactly one,
+  disable none.
+
+- **Every Maruko IDR source is now counted; the coalescible ones are paced.**
+  `maruko_request_idr()` called the vendor request directly, and the
+  output-enable and server-change paths bypassed the gate too, so Maruko's
+  `/request/idr` was the only IDR source on any backend that was neither
+  rate-limited nor visible in `/api/v1/idr/stats`.
 ## [0.68.2] - 2026-08-26
 
 CV610 / IMX662 colour. Both changes device-verified on `.181`.

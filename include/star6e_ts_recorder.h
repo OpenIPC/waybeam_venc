@@ -42,7 +42,6 @@ typedef struct {
 	uint64_t segment_bytes;
 
 	/* IDR request callback for segment rotation (NULL if not wired) */
-	int (*request_idr)(void);
 } Star6eTsRecorderState;
 
 /** Zero-initialize TS recorder state.

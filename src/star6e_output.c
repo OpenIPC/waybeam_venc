@@ -48,35 +48,23 @@ int star6e_output_stream_packet_info_complete(
 	return 1;
 }
 
-static void star6e_output_recover_dropped_access_unit(Star6eOutput *output,
-	const MI_VENC_Stream_t *stream)
-{
-	uint8_t flags = 0;
-
-	if (!output || !stream)
-		return;
-	if (output->svct_active &&
-	    stream->h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF)
-		flags |= VENC_FRAME_FLAG_ENHANCE;
-	if (venc_frame_drop_breaks_chain(flags) && output->request_idr &&
-	    venc_frame_drop_idr_due(&output->drop_idr_last_us,
-		wb_monotonic_us()) &&
-	    output->request_idr(output->idr_ctx) == 0)
-		output->drop_idr_last_us = 0;
-}
-
 int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream)
 {
 	if (star6e_output_stream_packet_info_complete(stream))
 		return 0;
-	if (output && !output->trunc_warned) {
-		output->trunc_warned = 1;
-		fprintf(stderr,
-			"WARN: Star6E packetInfo table is incomplete or invalid; "
-			"dropping whole access unit\n");
+	if (output) {
+		__atomic_add_fetch(&output->bad_au_drops, 1, __ATOMIC_RELAXED);
+		/* No-op off frame-shm; the per-output counter above is the
+		 * transport-independent record. */
+		venc_frame_ring_note_other_drop(output->frame_ring);
+		if (!output->trunc_warned) {
+			output->trunc_warned = 1;
+			fprintf(stderr,
+				"WARN: Star6E packetInfo table is incomplete "
+				"or invalid; dropping whole access unit\n");
+		}
 	}
-	star6e_output_recover_dropped_access_unit(output, stream);
 	return 1;
 }
 
@@ -955,19 +943,8 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 	    stream->h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF)
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
-	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0) {
-		if (venc_frame_drop_breaks_chain(meta.flags) &&
-		    output->request_idr &&
-		    venc_frame_drop_idr_due(&output->drop_idr_last_us,
-					    wb_monotonic_us()) &&
-		    output->request_idr(output->idr_ctx) == 0) {
-			/* Swallowed by the shared 100 ms limiter — roll the
-			 * holdoff back so the next drop retries, instead of
-			 * pacing a request that never happened. */
-			output->drop_idr_last_us = 0;
-		}
+	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0)
 		return 0;
-	}
 
 	for (i = 0; i < stream->count; ++i) {
 		const MI_VENC_Pack_t *pack = &stream->packet[i];
@@ -991,8 +968,6 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 				    pack->data + offset, length) != 0) {
 					venc_frame_ring_abort_write(
 						output->frame_ring);
-					star6e_output_recover_dropped_access_unit(
-						output, stream);
 					return 0;
 				}
 				total_bytes += length;
@@ -1006,8 +981,6 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 			if (venc_frame_ring_append(output->frame_ring,
 			    pack->data + pack->offset, length) != 0) {
 				venc_frame_ring_abort_write(output->frame_ring);
-				star6e_output_recover_dropped_access_unit(output,
-					stream);
 				return 0;
 			}
 			total_bytes += length;

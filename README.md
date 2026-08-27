@@ -385,7 +385,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.67.0","backend":"star6e","contract_version":"0.18.5","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.69.0","backend":"star6e","contract_version":"0.19.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -560,8 +560,9 @@ curl http://<device-ip>:<port>/api/v1/audio/status
 #### GET /api/v1/transport/status
 
 Live observability for the active video transport (UDP / Unix / SHM):
-fill percentage, backpressure flag, lifetime drop counters. Used by the
-WebUI status bar and external link controllers.
+fill percentage, backpressure flag, lifetime drop counters, and on
+`frame-shm://` the ring low-water gauge. Consumed by external link
+controllers; the WebUI does not call it.
 
 ```sh
 curl http://<device-ip>:<port>/api/v1/transport/status
@@ -1092,10 +1093,11 @@ uses a dedicated local UDP audio destination.
 preserved) into a POSIX shared-memory ring, bypassing RTP packetization
 entirely — no RTP state, no `sendmmsg`, no sidecar. It exists so a
 same-host consumer (waybeam-link) can apply per-frame FEC at frame
-boundaries instead of re-fragmenting pre-built RTP packets. The ring is a
-16-slot × 512 KB SPSC region (~8 MB); each slot carries an 8-byte
-`VencFrameMeta` header (`pts`, `codec`, `flags` — `flags` bit 0 marks an
-IDR) followed by the raw frame. On a full ring (consumer stalled or gone)
+boundaries instead of re-fragmenting pre-built RTP packets. The ring is an
+8-slot SPSC region — 384 KB per slot on Star6E and Maruko, 512 KB on CV610;
+each slot carries an 8-byte `VencFrameMeta` header (`pts`, `codec`, `flags`
+— `flags` bit 0 marks an IDR, bit 3 is reserved for the receiver-set
+SALVAGED flag) followed by the raw frame. On a full ring (consumer stalled or gone)
 the encoder drops the frame and keeps running — it never blocks. Like
 `shm://` it is video-only (a nonzero `audioPort` uses a dedicated local
 UDP audio destination) and cannot be switched to/from live (restart

@@ -30,7 +30,6 @@
 #include "venc_api.h"
 #include "venc_httpd.h"
 #include "venc_jpeg.h"
-#include "venc_shm_throttle.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -1971,23 +1970,6 @@ void maruko_pipeline_ref_pred_status(MarukoRefPredStatus *out)
 	pthread_mutex_unlock(&g_ref_pred_status_mutex);
 }
 
-/* frame-shm:// ring-full recovery: re-establish the reference chain the drop
- * just broke.  Gated by the shared per-channel IDR rate limiter so a
- * persistently full ring coalesces instead of firing keyframes into the ring
- * that is already congested.  Mirrors star6e_scene_request_idr(). */
-static int maruko_ring_request_idr(void *vctx)
-{
-	MarukoBackendContext *ctx = (MarukoBackendContext *)vctx;
-
-	if (!ctx)
-		return 0;
-	if (!idr_rate_limit_allow(ctx->venc_channel))
-		return 0;
-	maruko_mi_venc_request_idr(ctx->venc_device,
-		ctx->venc_channel, 1);
-	return 1;
-}
-
 static int maruko_apply_ref_pred(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	const MarukoBackendConfig *cfg)
 {
@@ -2543,8 +2525,6 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		return -1;
 	ctx->venc_started = 1;
 
-	ctx->output.request_idr = maruko_ring_request_idr;
-	ctx->output.idr_ctx = ctx;
 	maruko_update_output_resilience_flags(ctx);
 
 	MI_U32 venc_device = (MI_U32)ctx->venc_device;
@@ -3048,24 +3028,14 @@ static void *maruko_dual_stream_thread(void *arg)
 				usleep(1000);
 			continue;
 		}
-		if (!maruko_video_stream_packet_info_complete(&stream)) {
-			static int incomplete_warned;
-			if (!incomplete_warned) {
-				incomplete_warned = 1;
-				fprintf(stderr, "WARN: [maruko][dual] invalid packetInfo; "
-					"dropping whole access unit\n");
-			}
-			if (!(d->output.svct_active &&
-			    stream.h265Info.refType ==
-				MARUKO_REFTYPE_ENHANCE_P_NOTFORREF) &&
-			    venc_frame_drop_idr_due(&d->output.drop_idr_last_us,
-				wb_monotonic_us())) {
-				if (idr_rate_limit_allow(d->channel))
-					(void)maruko_mi_venc_request_idr(
-						ctx->venc_device, d->channel, 1);
-				else
-					d->output.drop_idr_last_us = 0;
-			}
+		/* Through the shared helper, as Star6E's ch1 is: the open-coded
+		 * version counted nothing, so a ch1 discard never reached
+		 * bad_au_drops and its one-shot warn had already latched.  (No
+		 * ring is involved here — maruko_output_init() rejects
+		 * frame-shm:// for the dual output — so this is a lost counter,
+		 * not a false-healthy gauge.) */
+		if (maruko_video_reject_incomplete_access_unit(&stream,
+		    &d->output)) {
 			(void)maruko_mi_venc_release_stream(ctx->venc_device,
 				d->channel, &stream);
 			continue;
@@ -4066,72 +4036,51 @@ static void maruko_patch_stream_to_trail_n(i6c_venc_strm *s)
  * g_osd_enc_bytes in star6e_runtime.c. */
 static uint64_t g_osd_enc_bytes;
 
-/* frame-shm ring-fill bitrate clamp state — byte-symmetric with the Star6E
- * side (src/star6e_runtime.c star6e_service_shm_throttle).  Both backends
- * share one control law on purpose: a per-backend divergence in shared
- * behaviour is a standing drift trap in this repo. */
-static VencShmThrottle g_shm_throttle;
-static int g_shm_throttle_ready;
-/* Last factor successfully programmed into the encoder. */
-static uint16_t g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+/* Recorder start — Star6E parity, see runtime_request_idr() in
+ * src/star6e_runtime.c.  These two sites previously called the SDK directly,
+ * so they were neither paced nor counted: the only IDR sources on any backend
+ * outside /api/v1/idr/stats, which is precisely what made the contract's
+ * "every source is paced and counted" claim false for Maruko. */
+static void maruko_recorder_start_idr(MarukoBackendContext *ctx)
+{
+	idr_rate_limit_force(ctx->venc_channel);
+	(void)maruko_mi_venc_request_idr(ctx->venc_device,
+		ctx->venc_channel, 1);
+}
 
-static void maruko_service_shm_throttle(MarukoOutput *output,
-	const VencConfig *vcfg)
+/* frame-shm ring low-water measurement — byte-symmetric with the Star6E side
+ * (src/star6e_runtime.c star6e_service_ring_low_water), state on the output
+ * for the same reason.  Both backends share one definition on purpose: a
+ * per-backend divergence in shared behaviour is a standing drift trap here. */
+static void maruko_service_ring_low_water(MarukoOutput *output)
 {
 	venc_frame_ring_fill_t fill;
 	uint64_t now_us;
-	uint16_t want;
-	int edge;
 
-	if (!output || !vcfg)
+	if (!output)
 		return;
 	if (maruko_output_frame_ring_fill(output, &fill) != 0) {
-		/* Release the clamp on a transport switch away from
-		 * frame-shm — see the star6e_runtime equivalent. */
-		g_shm_throttle_ready = 0;
-		output->throttle_permille = 0;  /* 0 = not reported */
-		if (g_applied_permille != VENC_SHM_THROTTLE_FULL_PERMILLE &&
-		    maruko_controls_set_output_throttle(
-			VENC_SHM_THROTTLE_FULL_PERMILLE) == 0)
-			g_applied_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
+		/* Transport switch away from frame-shm — see the
+		 * star6e_runtime equivalent. */
+		output->low_water_ready = 0;
+		venc_ring_low_water_reset(&output->low_water, 0);
 		return;
 	}
 
 	now_us = wb_monotonic_us();
-	if (!g_shm_throttle_ready) {
-		venc_shm_throttle_reset(&g_shm_throttle, now_us);
-		g_shm_throttle_ready = 1;
+	if (!output->low_water_ready) {
+		venc_ring_low_water_reset(&output->low_water, now_us);
+		output->low_water_ready = 1;
 	}
 
-	venc_shm_throttle_set_enabled(&g_shm_throttle,
-		vcfg->outgoing.shm_throttle, now_us);
-	venc_shm_throttle_observe(&g_shm_throttle, fill.used_slots,
-		fill.full_drops);
-	(void)venc_shm_throttle_tick(&g_shm_throttle, now_us);
+	venc_ring_low_water_observe(&output->low_water, fill.used_slots,
+		fill.slot_count);
+	if (venc_ring_low_water_tick(&output->low_water, now_us)) {
+		uint16_t slots =
+			venc_ring_low_water_slots(&output->low_water);
 
-	/* Applied-value comparison, not tick()'s flag — see the
-	 * star6e_runtime equivalent for why the retry matters. */
-	want = venc_shm_throttle_permille(&g_shm_throttle);
-	if (want != g_applied_permille &&
-	    maruko_controls_set_output_throttle(want) == 0)
-		g_applied_permille = want;
-	output->throttle_permille = want;
-	/* Publish into the ring header so the consumer can see that the
-	 * producer has already reduced its own rate -- below 1000 is
-	 * direct evidence that the consumer's rate model is optimistic
-	 * (protocols/frame-shm.md). */
-	venc_frame_ring_set_throttle(output->frame_ring, want);
-
-	edge = venc_shm_throttle_floor_edge(&g_shm_throttle);
-	if (edge > 0)
-		fprintf(stderr,
-			"WARNING: [maruko] shm throttle pinned at floor %u%% "
-			"— the consumer is not draining\n",
-			VENC_SHM_THROTTLE_FLOOR_PERMILLE / 10);
-	else if (edge < 0)
-		/* stderr for the same buffering reason as star6e_runtime. */
-		fprintf(stderr,
-			"> [maruko] shm throttle left the floor, recovering\n");
+		venc_frame_ring_set_low_water(output->frame_ring, slots);
+	}
 }
 
 static uint32_t maruko_osd_box_px(float v, uint32_t canvas, uint32_t net)
@@ -4272,15 +4221,16 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		 * stutters points at the radio, not here). */
 		{
 			/* See the star6e_runtime equivalent. */
-			char osd_thr[16];
-			unsigned int thr = ctx->output.throttle_permille;
+			char osd_ring[16];
+			unsigned int lw = venc_ring_low_water_slots(
+				&ctx->output.low_water);
 
-			osd_thr[0] = '\0';
-			if (thr > 0 && thr < VENC_SHM_THROTTLE_FULL_PERMILLE)
-				snprintf(osd_thr, sizeof(osd_thr), " thr%u%%",
-					thr / 10);
+			osd_ring[0] = '\0';
+			if (lw > 1)
+				snprintf(osd_ring, sizeof(osd_ring), " ring%u",
+					lw);
 			debug_osd_text(ctx->debug_osd, 4, "br", "%u/%uk%s",
-				osd_kbps, ctx->cfg.venc_max_rate, osd_thr);
+				osd_kbps, ctx->cfg.venc_max_rate, osd_ring);
 		}
 
 		{
@@ -4458,12 +4408,16 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		total_bytes = maruko_video_send_frame(&stream, &ctx->output,
 			&rt->rtp_state, &rt->param_sets, &ctx->cfg,
 			MARUKO_PKTZR_VERBOSE_ACTIVE(ctx) ? &frame_pktzr : NULL);
-
-		/* frame-shm ring-fill bitrate clamp — see the matching call
-		 * in star6e_runtime.c.  Unconditional by design. */
-		maruko_service_shm_throttle(&ctx->output,
-			maruko_controls_vcfg());
 	}
+
+	/* frame-shm ring low-water measurement — see the matching call in
+	 * star6e_runtime.c.  Deliberately OUTSIDE the output_enabled block:
+	 * gating it there froze the tracker mid-window on disable, so the
+	 * header kept publishing the last verdict (a full ring reads as
+	 * permanent standing backlog on a ring nobody is writing) and the
+	 * first frame after re-enable closed a "200 ms window" built from one
+	 * sample.  Star6E reaches its reset branch every frame regardless. */
+	maruko_service_ring_low_water(&ctx->output);
 
 	/* Mirror mode: write chn 0 frames to whichever recorder is active
 	 * before the stream is released.  In dual mode the chn 1 drain
@@ -4516,9 +4470,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 				if (is_hevc) {
 					if (star6e_recorder_start(&ctx->recorder,
 					    rec_dir) == 0)
-						(void)maruko_mi_venc_request_idr(
-							ctx->venc_device,
-							ctx->venc_channel, 1);
+						maruko_recorder_start_idr(ctx);
 				} else {
 					ctx->audio.rec_ring = ctx->audio.started
 						? &ctx->audio_recorder_ring
@@ -4528,9 +4480,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 					    ctx->audio.started
 						? &ctx->audio_recorder_ring
 						: NULL) == 0)
-						(void)maruko_mi_venc_request_idr(
-							ctx->venc_device,
-							ctx->venc_channel, 1);
+						maruko_recorder_start_idr(ctx);
 				}
 			}
 			if (stop_pending) {
@@ -4561,8 +4511,6 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			tinfo.fill_pct = ctx->output.last_fill_pct;
 			tinfo.in_pressure = ctx->output.in_pressure ? 1 : 0;
 			tinfo.pressure_drops = ctx->output.pressure_drops;
-			/* frame-shm only; 0 elsewhere = "not reported". */
-			tinfo.throttle_permille = ctx->output.throttle_permille;
 			tinfo.transport_drops = ctx->output.last_full_drops;
 			tinfo.packets_sent = ctx->output.last_writes;
 			tinfo_ptr = &tinfo;

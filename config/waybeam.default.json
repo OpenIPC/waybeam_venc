@@ -58,8 +58,7 @@
     "connectedUdp": true,
     "allowUnixEncoderStall": false,
     "audioPort": 5601,
-    "sidecarPort": 5602,
-    "shmThrottle": true
+    "sidecarPort": 5602
   },
   "discovery": {
     "enabled": true,

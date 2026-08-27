@@ -58,6 +58,10 @@ typedef struct {
 	int last_awb_mode;
 	uint32_t last_awb_ct;
 	char last_server[128];
+	/* Set by a test that needs to inspect the committed config from
+	 * inside an apply callback (see the commit-ordering test). */
+	const VencConfig *live_cfg;
+	int server_committed_at_callback;
 	uint16_t last_max_payload;
 	double last_zoom_pct;
 	double last_zoom_x;
@@ -313,6 +317,9 @@ static int test_apply_server(const char *uri)
 	g_api_cb_state.apply_server_calls++;
 	snprintf(g_api_cb_state.last_server, sizeof(g_api_cb_state.last_server),
 		"%s", uri ? uri : "");
+	if (g_api_cb_state.live_cfg && uri &&
+	    strcmp(g_api_cb_state.live_cfg->outgoing.server, uri) == 0)
+		g_api_cb_state.server_committed_at_callback = 1;
 	return g_api_cb_state.fail_server ? -1 : 0;
 }
 
@@ -1189,6 +1196,49 @@ static int test_single_set_url_decodes_outgoing_server(void)
 	return failures;
 }
 
+static int test_live_apply_sees_already_committed_config(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	/* apply_live_group_for_cfg() calls commit_config_locked() BEFORE it
+	 * dispatches to the apply callbacks.  A backend guard that asks "did
+	 * this value change?" by comparing the incoming argument against the
+	 * committed config therefore compares the new value against itself and
+	 * matches on EVERY call -- including a real change.
+	 *
+	 * That is not hypothetical: it shipped, and on Star6E it made
+	 * outgoing.server live changes a silent no-op -- the socket stayed on
+	 * the startup destination while /api/v1/config reported the new one.
+	 * A backend guard must compare against its own applied runtime state.
+	 *
+	 * Pin the ordering so the trap is visible to the next person who
+	 * writes such a guard. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_server = test_apply_server;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server), "%s",
+		"udp://127.0.0.1:5600");
+	g_api_cb_state.live_cfg = &cfg;
+
+	CHECK("commit-order rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.server=udp%3A%2F%2F127.0.0.1%3A5610",
+			&status, response, sizeof(response)) == 0);
+	CHECK("commit-order status", status == 200);
+	CHECK("commit-order callback invoked",
+		g_api_cb_state.apply_server_calls == 1);
+	CHECK("commit-order callback saw the NEW value already committed",
+		g_api_cb_state.server_committed_at_callback == 1);
+
+	g_api_cb_state.live_cfg = NULL;
+	return failures;
+}
+
 static int test_multi_set_url_decodes_values(void)
 {
 	int failures = 0;
@@ -2021,6 +2071,7 @@ int test_venc_api(void)
 	failures += test_live_set_endpoint_volatile_no_disk_write();
 	failures += test_restart_set_rejects_legacy_codec_field();
 	failures += test_single_set_url_decodes_outgoing_server();
+	failures += test_live_apply_sees_already_committed_config();
 	failures += test_multi_set_url_decodes_values();
 	failures += test_set_rejects_malformed_percent_escape();
 	failures += test_capabilities_emits_ui();

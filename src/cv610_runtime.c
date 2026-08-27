@@ -53,6 +53,15 @@ typedef struct {
 	int connected_udp;
 	OutputSocketQueue send_queue;
 	venc_frame_ring_t *frame_ring;
+	/* frame-shm ring low-water measurement.  Every frame-shm producer must
+	 * measure: venc_frame_ring_create() publishes the VHLT health marker
+	 * unconditionally, so a ring nobody measures still advertises a live
+	 * gauge sitting at its create-time 0 -- the healthiest value in the
+	 * range.  "Not measured" would be indistinguishable from "the consumer
+	 * is keeping up perfectly", to the rate controller that is now solely
+	 * responsible for reacting. */
+	VencRingLowWater low_water;
+	int low_water_ready;
 	RtpPacketizerState rtp;
 	H26xParamSets param_sets;
 	DebugOsdState *debug_osd;
@@ -66,7 +75,6 @@ typedef struct {
 	uint64_t bytes;
 	uint64_t output_drops;
 	uint64_t packets_sent;
-	uint64_t drop_idr_last_us;
 	uint8_t gdr_active;
 	uint8_t gdr_cycle_len;
 	uint8_t gdr_counter;
@@ -314,15 +322,38 @@ static int cv610_request_idr(void)
 		? 0 : -1;
 }
 
-/* Ring-drop recovery form: unlike the public callback, report whether the
- * request actually passed the shared limiter so the one-second holdoff can
- * retry a coalesced request on the next chain-breaking drop. */
-static int cv610_ring_request_idr(void)
+/* Star6E/Maruko parity — see star6e_service_ring_low_water().  venc measures
+ * egress pressure and publishes it; it never acts on it. */
+static void cv610_service_ring_low_water(Cv610RunnerContext *ctx)
 {
-	if (!idr_rate_limit_allow(CV610_VENC_CHN))
-		return 0;
-	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
-		? 1 : 0;
+	venc_frame_ring_fill_t fill;
+	uint64_t now_us;
+
+	if (!ctx)
+		return;
+	/* Clear the window when there is no ring, exactly as the SigmaStar
+	 * backends do: a carried-over low_slots of 0 would swallow the next
+	 * ring's first sample and publish "perfectly drained" over a ring
+	 * that is full.  Unreachable today (the context is created once per
+	 * process), kept symmetric so it stays that way. */
+	if (!ctx->frame_ring ||
+	    venc_frame_ring_get_fill(ctx->frame_ring, &fill) != 0) {
+		venc_ring_low_water_reset(&ctx->low_water, 0);
+		ctx->low_water_ready = 0;
+		return;
+	}
+
+	now_us = wb_monotonic_us();
+	if (!ctx->low_water_ready) {
+		venc_ring_low_water_reset(&ctx->low_water, now_us);
+		ctx->low_water_ready = 1;
+	}
+
+	venc_ring_low_water_observe(&ctx->low_water, fill.used_slots,
+		fill.slot_count);
+	if (venc_ring_low_water_tick(&ctx->low_water, now_us))
+		venc_frame_ring_set_low_water(ctx->frame_ring,
+			venc_ring_low_water_slots(&ctx->low_water));
 }
 
 static uint32_t cv610_query_live_fps(void)
@@ -351,13 +382,16 @@ static char *cv610_query_transport_status(void)
 			"\"fillPct\":%u,\"inPressure\":%s,"
 			"\"transportDrops\":%llu,\"pressureDrops\":0,"
 			"\"framesSent\":%llu,\"oversizeDrops\":%llu,"
-			"\"slotCount\":%u,\"usedSlots\":%u}}",
+			"\"slotCount\":%u,\"usedSlots\":%u,"
+			"\"ringLowWaterSlots\":%u,\"otherDrops\":%llu}}",
 			(unsigned)fill.fill_pct,
 			fill.fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT ? "true" : "false",
 			(unsigned long long)fill.full_drops,
 			(unsigned long long)fill.writes,
 			(unsigned long long)fill.oversize_drops,
-			(unsigned)fill.slot_count, (unsigned)fill.used_slots);
+			(unsigned)fill.slot_count, (unsigned)fill.used_slots,
+			(unsigned)venc_ring_low_water_slots(&ctx->low_water),
+			(unsigned long long)fill.other_drops);
 	} else if (ctx->socket_handle >= 0) {
 		uint8_t fill_pct = 0;
 		const char *transport = ctx->transport == VENC_OUTPUT_URI_UNIX
@@ -1248,15 +1282,10 @@ static int cv610_run(void *opaque)
 				}
 				write_ret = venc_frame_ring_write(ctx->frame_ring, &meta,
 					frame, (uint32_t)frame_len);
-				if (write_ret != 0) {
+				if (write_ret != 0)
 					__atomic_add_fetch(&ctx->output_drops, 1,
 						__ATOMIC_RELAXED);
-					if (venc_frame_drop_breaks_chain(meta.flags) &&
-					    venc_frame_drop_idr_due(&ctx->drop_idr_last_us,
-						wb_monotonic_us()) &&
-					    cv610_ring_request_idr() == 0)
-						ctx->drop_idr_last_us = 0;
-				}
+				cv610_service_ring_low_water(ctx);
 			} else if (ctx->socket_handle >= 0) {
 				/* cv610_output_write owns per-datagram drop accounting. */
 				(void)cv610_send_rtp_frame(ctx, frame, frame_len);

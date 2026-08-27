@@ -2,7 +2,6 @@
 
 #include "h26x_util.h"
 #include "hevc_rtp.h"
-#include "timing.h"
 #include "rtp_packetizer.h"
 #include "rtp_session.h"
 
@@ -50,35 +49,22 @@ int maruko_video_stream_packet_info_complete(const i6c_venc_strm *stream)
 	return 1;
 }
 
-static void maruko_recover_dropped_access_unit(const i6c_venc_strm *stream,
-	MarukoOutput *output)
-{
-	uint8_t flags = 0;
-
-	if (!stream || !output)
-		return;
-	if (output->svct_active &&
-	    stream->h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF)
-		flags |= VENC_FRAME_FLAG_ENHANCE;
-	if (venc_frame_drop_breaks_chain(flags) && output->request_idr &&
-	    venc_frame_drop_idr_due(&output->drop_idr_last_us,
-		wb_monotonic_us()) &&
-	    output->request_idr(output->idr_ctx) == 0)
-		output->drop_idr_last_us = 0;
-}
-
 int maruko_video_reject_incomplete_access_unit(const i6c_venc_strm *stream,
 	MarukoOutput *output)
 {
 	if (maruko_video_stream_packet_info_complete(stream))
 		return 0;
-	if (output && !output->trunc_warned) {
-		output->trunc_warned = 1;
-		fprintf(stderr,
-			"WARN: Maruko packetInfo table is incomplete or invalid; "
-			"dropping whole access unit\n");
+	if (output) {
+		__atomic_add_fetch(&output->bad_au_drops, 1, __ATOMIC_RELAXED);
+		/* No-op off frame-shm — see the Star6E equivalent. */
+		venc_frame_ring_note_other_drop(output->frame_ring);
+		if (!output->trunc_warned) {
+			output->trunc_warned = 1;
+			fprintf(stderr,
+				"WARN: Maruko packetInfo table is incomplete "
+				"or invalid; dropping whole access unit\n");
+		}
 	}
-	maruko_recover_dropped_access_unit(stream, output);
 	return 1;
 }
 
@@ -384,18 +370,8 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 	    stream->h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF)
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
-	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0) {
-		if (venc_frame_drop_breaks_chain(meta.flags) &&
-		    output->request_idr &&
-		    venc_frame_drop_idr_due(&output->drop_idr_last_us,
-					    wb_monotonic_us()) &&
-		    output->request_idr(output->idr_ctx) == 0) {
-			/* Swallowed by the shared 100 ms limiter — roll the
-			 * holdoff back so the next drop retries. */
-			output->drop_idr_last_us = 0;
-		}
+	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0)
 		return 0;
-	}
 
 	for (i = 0; i < stream->count; ++i) {
 		const i6c_venc_pack *pack = &stream->packet[i];
@@ -418,8 +394,6 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 				if (venc_frame_ring_append(frame_ring,
 				    pack->data + offset, length) != 0) {
 					venc_frame_ring_abort_write(frame_ring);
-					maruko_recover_dropped_access_unit(stream,
-						output);
 					return 0;
 				}
 				total_bytes += length;
@@ -433,7 +407,6 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 			if (venc_frame_ring_append(frame_ring,
 			    pack->data + pack->offset, length) != 0) {
 				venc_frame_ring_abort_write(frame_ring);
-				maruko_recover_dropped_access_unit(stream, output);
 				return 0;
 			}
 			total_bytes += length;
