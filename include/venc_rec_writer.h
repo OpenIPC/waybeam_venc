@@ -107,6 +107,19 @@ void venc_rec_writer_stop(VencRecWriter *w);
 void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
 	uint64_t *dropped);
 
+/* Wait for everything already queued to reach the sink, up to `grace_ms`,
+ * WITHOUT stopping the thread.  Whatever is still queued when the grace
+ * expires is abandoned and added to *dropped (may be NULL).
+ *
+ * The barrier a long-lived writer needs before its recorder closes: queued
+ * access units are written by file descriptor, so a close that races them
+ * sends the tail of one recording into nothing (or, worse, into the next
+ * file).  Bounded for the same reason stop_bounded is — this runs on the
+ * encode loop, and waiting out a stalled disk here would put the stall back
+ * on the live video path. */
+void venc_rec_writer_drain(VencRecWriter *w, unsigned grace_ms,
+	uint64_t *dropped);
+
 /* Observability.  `dropped` is the count of access units the queue refused
  * because it was full — silent drops would make a damaged recording look
  * like a clean one.  Any pointer may be NULL; a NULL writer zeroes them. */

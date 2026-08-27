@@ -10,6 +10,7 @@
 #include "sensor_select.h"
 #include "star6e_recorder.h"
 #include "star6e_ts_recorder.h"
+#include "venc_rec_writer.h"
 
 #include <signal.h>
 
@@ -66,6 +67,16 @@ typedef struct {
    * parity).  Active when recorder.fd >= 0.  At most one of recorder /
    * ts_recorder is active at a time; format dispatch happens at start. */
   Star6eRecorderState recorder;
+  /* Mirror-mode recording writes on this thread, not the encode loop: a
+   * blocking write(2) before maruko_mi_venc_release_stream() backs up the
+   * encoder output queue and stalls the LIVE stream.  Dual mode already
+   * drains chn 1 on its own thread and is unaffected.  Long-lived — record
+   * start/stop only open and close files, and every stop drains this first
+   * so a queued tail cannot land after its file has closed. */
+  VencRecWriter *rec_writer;
+  pthread_mutex_t rec_writer_lock;
+  uint64_t rec_dropped_frames;
+  uint32_t rec_writer_peak_depth;
   /* SCL crop base after optional binning and AR-matched precrop.  Stored
    * here so maruko_pipeline_apply_zoom can reposition the zoom rect on
    * live x/y pan without recomputing pipeline geometry. */

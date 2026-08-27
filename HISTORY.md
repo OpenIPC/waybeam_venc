@@ -1,5 +1,46 @@
 # History
 
+## [0.71.0] - 2026-08-27
+
+Star6E and Maruko mirror-mode recording moves off the encode loop, matching
+what 0.70.0 did for CV610. No contract change — `droppedFrames` and
+`writerPeakDepth` already exist.
+
+- **Same defect, same fix.** Both backends called the recorder from their
+  encode loop between the transport send and ReleaseStream, with a blocking
+  `write(2)`: `star6e_runtime.c` and `maruko_pipeline.c` both wrote, then
+  released. When storage blocks, the release is late, the encoder's output
+  queue backs up, and the LIVE stream stalls with it. Star6E's **dual** mode
+  already drained ch1 on its own thread and was never affected; mirror mode
+  was the gap.
+
+  Stated plainly: the *symptom* was measured on CV610, not on these two.
+  Star6E's bench SD is native MMC at 16 MB/s and absorbs everything short of
+  abuse; Maruko has no storage that can block at all. The fix lands on the
+  structural argument — identical call-site shape — plus CV610's measurement,
+  with a device no-regression pass on both.
+
+- **`star6e_output_stream_flatten()` and `maruko_video_stream_flatten()`.**
+  The writer needs its own copy, because SDK stream memory dies at
+  ReleaseStream. These also remove an existing cliff: both
+  `*_ts_recorder_write_stream()` flattened into a **512 KB automatic and
+  dropped the whole access unit** when it did not fit. At 19 Mbps an IRAP can
+  exceed that, and a silently dropped keyframe is the worst frame to lose.
+  Not an extra copy for the TS path, which was already flattening onto the
+  stack.
+
+- **`venc_rec_writer_drain()`** — a bounded barrier so a long-lived writer can
+  be flushed before its recorder closes. Queued access units are written by
+  descriptor, so a close racing them sends the tail of one recording into
+  nothing. Bounded because it runs on the encode loop.
+
+- A writer whose thread fails to start falls back to the synchronous path
+  rather than silently recording nothing.
+
+Device: star6e `.2.232` 61 fps stream and 61 fps recorder, 0 dropped, stop in
+0 s, 720 frames decoding clean with Opus. Maruko `.2.233` 4 segments / 1504
+frames / IDR delta 1, matching its synchronous baseline of 4 / 1501 / 1.
+
 ## [0.70.0] - 2026-08-27
 
 Snapshot and recording reach the CV610 backend, and the config file is read

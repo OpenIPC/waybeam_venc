@@ -40,6 +40,23 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 	ts = &ctx->backend.ts_recorder;
 	rec = &ctx->backend.recorder;
 
+	{
+		uint64_t dropped = ctx->backend.rec_dropped_frames;
+		uint32_t peak = ctx->backend.rec_writer_peak_depth;
+
+		/* Under the lock: the writer is freed from the encode loop at
+		 * teardown and this runs on the httpd thread.  The stored
+		 * values are the fallback so a finished recording still
+		 * reports what it shed. */
+		pthread_mutex_lock(&ctx->backend.rec_writer_lock);
+		if (ctx->backend.rec_writer)
+			venc_rec_writer_stats(ctx->backend.rec_writer, NULL,
+				&dropped, NULL, &peak);
+		pthread_mutex_unlock(&ctx->backend.rec_writer_lock);
+		out->dropped_frames = (uint32_t)dropped;
+		out->writer_peak_depth = peak;
+	}
+
 	if (star6e_ts_recorder_is_active(ts)) {
 		out->active = 1;
 		snprintf(out->format, sizeof(out->format), "ts");

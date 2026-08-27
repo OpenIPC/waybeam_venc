@@ -225,11 +225,57 @@ static void writer_destroy(VencRecWriter *w, uint64_t *dropped)
 	free(w);
 }
 
-void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
-	uint64_t *dropped)
+/* Caller must NOT hold the lock. */
+static int queue_wait_empty(VencRecWriter *w, unsigned grace_ms)
 {
 	unsigned waited = 0;
 
+	for (;;) {
+		int done;
+
+		pthread_mutex_lock(&w->lock);
+		done = (w->head == NULL);
+		pthread_mutex_unlock(&w->lock);
+		if (done)
+			return 1;
+		if (waited >= grace_ms)
+			return 0;
+		usleep(2000);
+		waited += 2;
+	}
+}
+
+void venc_rec_writer_drain(VencRecWriter *w, unsigned grace_ms,
+	uint64_t *dropped)
+{
+	if (!w)
+		return;
+
+	if (!queue_wait_empty(w, grace_ms)) {
+		/* Abandon the rest rather than hold the caller.  The entry the
+		 * writer thread already has in hand still completes — it holds
+		 * no lock, so it is not visible here and is not counted. */
+		pthread_mutex_lock(&w->lock);
+		for (;;) {
+			VencRecAu *e = queue_pop(w);
+
+			if (!e)
+				break;
+			w->dropped++;
+			au_free(e);
+		}
+		pthread_mutex_unlock(&w->lock);
+	}
+	if (dropped) {
+		pthread_mutex_lock(&w->lock);
+		*dropped = w->dropped;
+		pthread_mutex_unlock(&w->lock);
+	}
+}
+
+void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
+	uint64_t *dropped)
+{
 	if (!w)
 		return;
 
@@ -244,17 +290,7 @@ void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
 	}
 
 	/* Poll rather than pthread_timedjoin_np: musl does not have it. */
-	for (;;) {
-		int done;
-
-		pthread_mutex_lock(&w->lock);
-		done = (w->head == NULL);
-		pthread_mutex_unlock(&w->lock);
-		if (done || waited >= grace_ms)
-			break;
-		usleep(2000);
-		waited += 2;
-	}
+	(void)queue_wait_empty(w, grace_ms);
 
 	/* Whether it drained or timed out, `stopping` is set, so the thread
 	 * refuses new work and exits as soon as it finishes the AU in its
