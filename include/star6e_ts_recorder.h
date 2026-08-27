@@ -117,6 +117,20 @@ int star6e_ts_recorder_is_active(const Star6eTsRecorderState *state);
  * window, immediately after the new segment's opening IRAP. */
 int star6e_ts_recorder_is_recording(const Star6eTsRecorderState *state);
 
+/* Should the producer hand this access unit to the recorder writer?
+ *
+ * Both SigmaStar backends ask exactly this, once per encoded frame, and both
+ * used to ask it as "is either descriptor open" — which is false for the whole
+ * of a TS rotation and silently discarded every frame in that window.  It
+ * lives here, in a header the host suite links, so the answer is testable and
+ * cannot drift between the two call sites. */
+static inline int star6e_record_wants_frame(const Star6eTsRecorderState *ts,
+	const Star6eRecorderState *hevc)
+{
+	return star6e_ts_recorder_is_recording(ts) ||
+		star6e_recorder_is_recording(hevc);
+}
+
 /** Stop asking after this many unanswered requests and let rotation go back
  *  to waiting for a natural keyframe.  Without a bound, a mis-wired hook or a
  *  keyframe that never reads back as an IRAP would tax the live link with a

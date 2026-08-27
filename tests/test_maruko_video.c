@@ -1,6 +1,8 @@
 #include "maruko_video.h"
 #include "test_helpers.h"
+#include "venc_rec_writer.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* ── maruko_video_stream_flatten: the async recorder's copy ───────────── */
@@ -58,6 +60,51 @@ static int test_maruko_flatten_matches_the_star6e_contract(void)
 	return failures;
 }
 
+/* Same byte cap as the star6e helper, and it has to be tested separately —
+ * the two are independent implementations over different SDK types, and a
+ * guard present in one says nothing about the other. */
+static int test_maruko_flatten_refuses_an_access_unit_over_the_queue_cap(void)
+{
+	i6c_venc_pack pack;
+	i6c_venc_strm stream;
+	size_t oversized = VENC_REC_WRITER_MAX_BYTES + 1;
+	uint8_t *big = malloc(oversized);
+	size_t len = 0;
+	int is_idr = -1;
+	int failures = 0;
+
+	CHECK("mk cap test allocated its stimulus", big != NULL);
+	if (!big)
+		return failures;
+	memset(big, 0x5A, oversized);
+
+	memset(&pack, 0, sizeof(pack));
+	memset(&stream, 0, sizeof(stream));
+	pack.data = big;
+	pack.length = (unsigned int)oversized;
+	pack.packNum = 0;
+	stream.packet = &pack;
+	stream.count = 1;
+
+	CHECK("mk flatten refuses an AU over the queue cap",
+		maruko_video_stream_flatten(&stream, &len, &is_idr) == NULL);
+	CHECK("mk refused AU reports no length", len == 0);
+
+	pack.length = (unsigned int)(VENC_REC_WRITER_MAX_BYTES - 1);
+	{
+		uint8_t *out = maruko_video_stream_flatten(&stream, &len,
+			&is_idr);
+
+		CHECK("mk flatten accepts an AU just under the cap",
+			out != NULL);
+		CHECK("mk accepted AU reports its length",
+			len == VENC_REC_WRITER_MAX_BYTES - 1);
+		free(out);
+	}
+	free(big);
+	return failures;
+}
+
 int test_maruko_video(void)
 {
 	MarukoOutput output;
@@ -67,6 +114,7 @@ int test_maruko_video(void)
 	int failures = 0;
 
 	failures += test_maruko_flatten_matches_the_star6e_contract();
+	failures += test_maruko_flatten_refuses_an_access_unit_over_the_queue_cap();
 	unsigned int info_cap;
 
 	memset(&output, 0, sizeof(output));

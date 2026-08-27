@@ -58,6 +58,12 @@
  * frame loop they serve, but referenced from pipeline start/stop above it. */
 static void mk_mirror_record_drain(MarukoBackendContext *ctx);
 static void mk_mirror_record_writer_start(MarukoBackendContext *ctx);
+/* Recorder flush budget inside maruko_pipeline_teardown_graph()'s watchdog.  2 s covers a full 4 MB queue on
+ * a healthy card several times over (~1.7 s of video at 19 Mbps, and it writes
+ * far faster than realtime), while leaving the MI teardown below the bulk of
+ * the deadline. */
+#define MARUKO_REC_TEARDOWN_GRACE_MS 2000
+
 static void mk_mirror_record_writer_stop(MarukoBackendContext *ctx);
 
 static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
@@ -3685,6 +3691,9 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	      * feed.  mirror (chn 0 → file) works fine under stab-fill. */
 	     (strcmp(ctx->cfg.record.mode, "dual") == 0 &&
 	      !g_stab_fill_graph))) {
+		/* Under the state lock like every other transition — see the
+		 * matching comment on star6e's boot auto-start. */
+		pthread_mutex_lock(&ctx->rec_state_lock);
 		if (strcmp(ctx->cfg.record.format, "hevc") == 0) {
 			if (star6e_recorder_start(&ctx->recorder,
 			    ctx->cfg.record.dir) == 0) {
@@ -3708,6 +3717,7 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 				"supported (ts|hevc) — recording disabled\n",
 				ctx->cfg.record.format);
 		}
+		pthread_mutex_unlock(&ctx->rec_state_lock);
 	}
 
 	ctx->output_enabled = 1;
@@ -4022,6 +4032,13 @@ static void mk_mirror_record_locks_init(MarukoBackendContext *ctx)
 	ctx->rec_locks_ready = 1;
 }
 
+/* Idempotent, so the runtime can insist on the ordering without caring whether
+ * configure_graph() already did it. */
+void mk_mirror_record_locks_init_public(MarukoBackendContext *ctx)
+{
+	mk_mirror_record_locks_init(ctx);
+}
+
 /* Called with rec_state_lock held, as a recording opens.  The writer spans
  * every recording, so without this the counters are process-lifetime and a
  * clean recording reports the previous one's drops. */
@@ -4068,8 +4085,15 @@ static void mk_mirror_record_writer_stop(MarukoBackendContext *ctx)
 	}
 	ctx->rec_writer = NULL;
 	pthread_mutex_unlock(&ctx->rec_writer_lock);
-	/* Unbounded: teardown only. */
-	venc_rec_writer_stop(w);
+	/* See below: bounded, because this teardown is watchdogged. */
+	/* BOUNDED, unlike star6e's teardown stop, and the difference is not
+	 * cosmetic: this runs inside maruko_pipeline_teardown_graph(), whose
+	 * watchdog reboots the craft after MARUKO_TEARDOWN_WATCHDOG_S.  An
+	 * unbounded flush of up to VENC_REC_WRITER_MAX_BYTES on the stalled
+	 * card this writer exists for could therefore turn an orderly shutdown
+	 * into a reboot.  Losing the tail of a recording is the better trade;
+	 * the grace is generous enough that a healthy card never hits it. */
+	venc_rec_writer_stop_bounded(w, MARUKO_REC_TEARDOWN_GRACE_MS, NULL);
 	pthread_mutex_destroy(&ctx->rec_state_lock);
 	pthread_mutex_destroy(&ctx->rec_writer_lock);
 	ctx->rec_locks_ready = 0;
@@ -4556,8 +4580,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	 * after the new segment's opening IRAP.  The HEVC recorder never
 	 * rotates, so for it the two questions are the same one. */
 	if (!ctx->dual && ctx->rec_writer &&
-	    (star6e_ts_recorder_is_recording(&ctx->ts_recorder) ||
-	     star6e_recorder_is_active(&ctx->recorder))) {
+	    star6e_record_wants_frame(&ctx->ts_recorder, &ctx->recorder)) {
 		size_t au_len = 0;
 		int au_idr = 0;
 		uint8_t *au = maruko_video_stream_flatten(&stream, &au_len,
@@ -4617,6 +4640,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			sizeof(rec_dir));
 		int stop_pending = venc_api_get_record_stop();
 		int is_hevc = (strcmp(ctx->cfg.record.format, "hevc") == 0);
+		int started = 0;
 		int is_ts   = (strcmp(ctx->cfg.record.format, "ts") == 0);
 
 		if ((start_pending || stop_pending) && !is_ts && !is_hevc) {
@@ -4629,34 +4653,39 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 				/* Stop both — only the format-matching one is
 				 * active, but keeping both calls is cheaper
 				 * than a branch and matches Star6E's pattern. */
-				/* Drain FIRST and outside rec_state_lock — the
+				/* Drain FIRST and outside rec_state_lock: the
 				 * drain waits on the writer thread, which needs
 				 * that same lock to finish.  Then hold it across
-				 * the close/reopen so an access unit the drain
-				 * timed out on cannot write into the file being
-				 * swapped. */
+				 * the close/reopen.  What that buys is precise:
+				 * an access unit the drain timed out on cannot
+				 * land on a descriptor being closed and
+				 * reopened.  It does NOT keep that access unit
+				 * out of the new file. */
 				mk_mirror_record_drain(ctx);
 				pthread_mutex_lock(&ctx->rec_state_lock);
 				star6e_recorder_stop(&ctx->recorder);
 				star6e_ts_recorder_stop(&ctx->ts_recorder);
 				ctx->audio.rec_ring = NULL;
 				if (is_hevc) {
-					if (star6e_recorder_start(&ctx->recorder,
-					    rec_dir) == 0)
-						maruko_recorder_start_idr(ctx);
+					started = star6e_recorder_start(
+						&ctx->recorder, rec_dir) == 0;
 				} else {
 					ctx->audio.rec_ring = ctx->audio.started
 						? &ctx->audio_recorder_ring
 						: NULL;
-					if (star6e_ts_recorder_start(
+					started = star6e_ts_recorder_start(
 					    &ctx->ts_recorder, rec_dir,
 					    ctx->audio.started
 						? &ctx->audio_recorder_ring
-						: NULL) == 0)
-						maruko_recorder_start_idr(ctx);
+						: NULL) == 0;
 				}
 				mk_mirror_record_start_counters(ctx);
 				pthread_mutex_unlock(&ctx->rec_state_lock);
+				/* Outside the lock, as star6e does it: the SDK
+				 * call blocks the writer thread's sink for no
+				 * reason if held. */
+				if (started)
+					maruko_recorder_start_idr(ctx);
 			}
 			if (stop_pending) {
 				mk_mirror_record_drain(ctx);
@@ -4853,7 +4882,8 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	maruko_pipeline_stop_dual(ctx);
 	/* Recorders run after stop_dual: in dual mode the drain thread
 	 * has already exited and is no longer issuing writes, so close()
-	 * cannot race with a write().  In mirror mode no thread holds it.
+	 * cannot race with a write().  In mirror mode the recorder writer
+	 * thread issues them, which is what the stop below joins.
 	 * Stop both — at most one is open, the inactive call is a no-op. */
 	/* Before the recorders close: the writer owns queued access units that
 	 * are written by descriptor, and this stop is unbounded so the tail

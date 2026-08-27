@@ -3,8 +3,14 @@
 ## [0.71.0] - 2026-08-27
 
 Star6E and Maruko mirror-mode recording moves off the encode loop, matching
-what 0.70.0 did for CV610. No contract change — `droppedFrames` and
-`writerPeakDepth` already exist.
+what 0.70.0 did for CV610. `contract_version` 0.20.0 -> **0.20.1**:
+`droppedFrames` and `writerPeakDepth` already existed, but this release widens
+what `droppedFrames` counts and makes both per-recording rather than
+per-process — see the contract change log.
+
+Review found two defects in the first cut of this work, both of which shipped
+past a green suite. They are described below with the fixes, because the reason
+they got through is more useful than the fixes are.
 
 - **Same defect, same fix.** Both backends called the recorder from their
   encode loop between the transport send and ReleaseStream, with a blocking
@@ -19,6 +25,37 @@ what 0.70.0 did for CV610. No contract change — `droppedFrames` and
   abuse; Maruko has no storage that can block at all. The fix lands on the
   structural argument — identical call-site shape — plus CV610's measurement,
   with a device no-regression pass on both.
+
+- **Moving the recorder to its own thread broke two things that had to be
+  fixed before it could ship.**
+
+  *The drain was not a barrier.* `venc_rec_writer_drain()` exists so a caller
+  can close the segment file the instant it returns. It waited for the queue to
+  empty — but the writer pops under the lock and runs the sink outside it, so
+  "queue empty" was true for the whole duration of a `write(2)`. The drain
+  returned on its clean-drain branch with the sink still writing, and the
+  caller closed the file under it: the tail of one recording landed in the next
+  file, over its PAT/PMT and opening IRAP. The frequency was inverted against
+  the design goal — rare on a healthy card, and on a stalling card, the only
+  case this thread exists for, it happened every time. Fixed with an
+  `in_flight` flag published before the unlock. On timeout an access unit is
+  still in the sink's hands by design, so each backend holds a
+  `rec_state_lock` across its close/reopen, which bounds a record transition
+  to one write rather than to the whole queue.
+
+  *Rotation silently dropped frames.* Segment rotation moved onto the writer
+  thread with it, and rotation holds `fd == -1` across `fdatasync`/`close`/
+  `open`. The producer gated on `fd >= 0`, so every frame in that window fell
+  to the synchronous fallback, hit its own `fd < 0` guard, and was discarded
+  and counted nowhere — right after the new segment's opening IRAP. Fixed by
+  asking the recorder a different question: `star6e_ts_recorder_is_recording()`
+  answers "is a recording in progress" and is deliberately untouched by
+  rotation, while `is_active()` goes on answering "is a file open right now".
+  Only the recorder can tell those apart, so that is where the answer lives.
+
+  Device-verified on the Star6E SD card, both binaries under an identical
+  amplified rotation window: 12 rotations produced 12 gaps of 36-87 ms
+  (~34 frames, reported by nothing) before, and none after.
 
 - **`star6e_output_stream_flatten()` and `maruko_video_stream_flatten()`.**
   The writer needs its own copy, because SDK stream memory dies at

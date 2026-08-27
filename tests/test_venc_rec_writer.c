@@ -359,12 +359,19 @@ static int test_writer_reset_counters_makes_them_per_recording(void)
 	CHECK("second recording inherits no queued count", queued == 0);
 
 	/* peak is reset to the LIVE depth, not to zero: a queue that is still
-	 * carrying entries has genuinely reached that depth in this recording. */
+	 * carrying entries has genuinely reached that depth in this recording.
+	 *
+	 * Asserted as >=, not ==: the sink is still draining, so depth decays
+	 * between the reset and this read.  An equality here passes on an idle
+	 * machine and fails whenever a 50 ms sink call happens to complete in
+	 * the gap — a flake that would eventually be "fixed" by deleting the
+	 * assertion.  The `> 0` half is what keeps it from being vacuous. */
 	{
 		uint32_t depth = 0;
 
 		venc_rec_writer_stats(w, NULL, NULL, &depth, &peak);
-		CHECK("peak restarts from the live depth", peak == depth);
+		CHECK("peak restarts from the live depth, not from zero",
+			peak >= depth && peak > 0);
 	}
 
 	venc_rec_writer_reset_counters(NULL);
@@ -382,7 +389,13 @@ static int test_writer_reset_counters_makes_them_per_recording(void)
  * cost of at most one write rather than the whole queue.
  *
  * Modelled here so the pattern itself is pinned: drop the lock from the sink
- * and this reports a write into a closed recorder (verified by mutation).
+ * and "still no write after the close" fails (verified by mutation).
+ *
+ * Be clear about what this does and does not cover.  The lock it exercises is
+ * declared in this file; the real rec_state_lock lives in the backend
+ * runtimes, which the host suite does not link.  So this is executable
+ * documentation of the pattern the backends must follow, plus genuine coverage
+ * of venc_rec_writer_drain()'s timeout path — not coverage of rec_state_lock.
  *
  * The lock must be taken AFTER the drain, never around it: the drain waits on
  * the writer thread, and the writer thread needs the same lock to finish. */
@@ -445,14 +458,93 @@ static int test_writer_state_lock_covers_the_drain_timeout(void)
 	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
 		(t1.tv_nsec - t0.tv_nsec) / 1000000;
 
-	CHECK("no write landed after the close", r.wrote_while_closed == 0);
 	/* Grace + one in-flight write, not the 1.2 s the queue would have
 	 * taken.  This is the bound the encode loop is paying for. */
 	CHECK("the close waited for one write, not the queue", elapsed_ms < 400);
 
+	/* The load-bearing assertion, and it has to come after the join: read
+	 * before it and it only says the sink has not got there YET.  (A check
+	 * at this point before the join survived every mutant tried against
+	 * it, which is what a harness-only assertion looks like.) */
 	venc_rec_writer_stop(w);
-	CHECK("still no write after the close", r.wrote_while_closed == 0);
+	CHECK("no write landed after the close", r.wrote_while_closed == 0);
 	pthread_mutex_destroy(&r.state_lock);
+	return failures;
+}
+
+/* The barrier must also RETURN when there is nothing to wait for.
+ *
+ * Nothing asserted this, so an `in_flight` stuck true — or a predicate that
+ * never reports idle — left every drain burning its full grace: 250 ms on the
+ * encode loop at each record transition on both SigmaStar backends, with the
+ * whole suite still green.  Over-waiting is not a safe failure here; it is the
+ * stall the writer thread exists to prevent, moved to a rarer event. */
+static int test_writer_drain_returns_promptly_when_idle(void)
+{
+	VencRecWriter *w = NULL;
+	BarrierSink s;
+	struct timespec t0, t1;
+	long long elapsed_ms;
+	uint64_t dropped = 99;
+	int failures = 0;
+
+	memset(&s, 0, sizeof(s));
+	s.delay_us = 1000;   /* a healthy card: 1 ms a frame */
+
+	CHECK("idle drain writer start",
+		venc_rec_writer_start(&w, barrier_sink, &s) == 0);
+
+	(void)venc_rec_writer_push(w, make_au(7, 512), 512, 900, 0);
+	usleep(50000);   /* let it finish; the writer is now genuinely idle */
+
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	venc_rec_writer_drain(w, 3000, &dropped);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
+		(t1.tv_nsec - t0.tv_nsec) / 1000000;
+
+	/* Against a 3 s grace: a drain that cannot see idle would take all of
+	 * it.  Anything under a tenth of the grace can only be the early
+	 * return. */
+	CHECK("idle drain returns without burning the grace", elapsed_ms < 300);
+	CHECK("idle drain abandoned nothing", dropped == 0);
+	CHECK("idle drain delivered the frame", s.calls == 1);
+
+	/* And a second drain on a writer that never had work at all. */
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	venc_rec_writer_drain(w, 3000, NULL);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
+		(t1.tv_nsec - t0.tv_nsec) / 1000000;
+	CHECK("drain on an empty queue is immediate", elapsed_ms < 300);
+
+	venc_rec_writer_stop(w);
+	return failures;
+}
+
+/* The header says *dropped is ASSIGNED, not accumulated into.  That sentence
+ * was corrected in the same change that added this function, so it should be
+ * held to. */
+static int test_writer_drain_assigns_dropped_rather_than_accumulating(void)
+{
+	VencRecWriter *w = NULL;
+	BarrierSink s;
+	uint64_t dropped = 1000;   /* deliberately non-zero going in */
+	int failures = 0;
+
+	memset(&s, 0, sizeof(s));
+	s.delay_us = 0;
+
+	CHECK("assign drain writer start",
+		venc_rec_writer_start(&w, barrier_sink, &s) == 0);
+	(void)venc_rec_writer_push(w, make_au(3, 256), 256, 900, 0);
+	venc_rec_writer_drain(w, 2000, &dropped);
+
+	/* Nothing was refused, so the writer's total is 0.  An implementation
+	 * that accumulated would leave the caller's 1000 in place. */
+	CHECK("drain assigns the total, it does not add to it", dropped == 0);
+
+	venc_rec_writer_stop(w);
 	return failures;
 }
 
@@ -469,5 +561,7 @@ int test_venc_rec_writer(void)
 	failures += test_writer_drain_is_bounded_and_counts_the_abandoned();
 	failures += test_writer_reset_counters_makes_them_per_recording();
 	failures += test_writer_state_lock_covers_the_drain_timeout();
+	failures += test_writer_drain_returns_promptly_when_idle();
+	failures += test_writer_drain_assigns_dropped_rather_than_accumulating();
 	return failures;
 }

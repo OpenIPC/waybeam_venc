@@ -85,13 +85,20 @@ static const char *stop_reason_str(Star6eRecorderStopReason reason)
 static void stop_with_reason(Star6eTsRecorderState *state,
 	Star6eRecorderStopReason reason)
 {
-	if (!state || state->fd < 0)
+	if (!state)
+		return;
+	/* Cleared before the fd test, not after it: a stop that lands while fd
+	 * is already -1 (mid-rotation, or after a failed reopen) must still end
+	 * the recording, or a producer would go on handing frames to a dead
+	 * recorder.  Today the state lock makes that unreachable; the invariant
+	 * should not depend on the caller's locking. */
+	__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
+	if (state->fd < 0)
 		return;
 
 	fdatasync(state->fd);
 	close(state->fd);
 	state->fd = -1;
-	__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
 	state->last_stop_reason = reason;
 
 	fprintf(stderr, "[ts_recorder] stopped (%s): %s (%u frames, %llu bytes, %u segments)\n",

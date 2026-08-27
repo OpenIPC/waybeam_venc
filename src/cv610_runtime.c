@@ -495,7 +495,11 @@ static void cv610_record_status_callback(VencRecordStatus *out)
 		out->writer_peak_depth = peak;
 	}
 
-	if (star6e_ts_recorder_is_active(&ctx->ts_recorder)) {
+	/* is_RECORDING, not is_active: rotation runs on the writer thread here
+	 * too (see the take_idr_request hand-off in the drain loop) and holds
+	 * fd == -1 across it, so the descriptor is not the right question for a
+	 * reader on the httpd thread. */
+	if (star6e_ts_recorder_is_recording(&ctx->ts_recorder)) {
 		out->active = 1;
 		snprintf(out->format, sizeof(out->format), "ts");
 		star6e_ts_recorder_status(&ctx->ts_recorder,

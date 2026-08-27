@@ -211,4 +211,6 @@ typedef struct {
 
 void maruko_pipeline_ref_pred_status(MarukoRefPredStatus *out);
 
+void mk_mirror_record_locks_init_public(MarukoBackendContext *ctx);
+
 #endif /* MARUKO_PIPELINE_H */

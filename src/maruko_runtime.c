@@ -41,14 +41,18 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 	rec = &ctx->backend.recorder;
 
 	{
-		uint64_t dropped = ctx->backend.rec_dropped_frames;
-		uint32_t peak = ctx->backend.rec_writer_peak_depth;
+		uint64_t dropped;
+		uint32_t peak;
 
 		/* Under the lock: the writer is freed from the encode loop at
 		 * teardown and this runs on the httpd thread.  The stored
 		 * values are the fallback so a finished recording still
 		 * reports what it shed. */
 		pthread_mutex_lock(&ctx->backend.rec_writer_lock);
+		/* Inside the lock, not just the store: a 64-bit load on ARM32 is
+		 * two instructions and can straddle the encode loop's update. */
+		dropped = ctx->backend.rec_dropped_frames;
+		peak = ctx->backend.rec_writer_peak_depth;
 		if (ctx->backend.rec_writer)
 			venc_rec_writer_stats(ctx->backend.rec_writer, NULL,
 				&dropped, NULL, &peak);
@@ -58,7 +62,10 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 		out->writer_peak_depth = peak;
 	}
 
-	if (star6e_ts_recorder_is_active(ts)) {
+	/* is_RECORDING, not is_active: a rotation holds fd == -1 on the writer
+	 * thread, and reporting that as "not recording" makes a healthy
+	 * recording blink off once per segment. */
+	if (star6e_ts_recorder_is_recording(ts)) {
 		out->active = 1;
 		snprintf(out->format, sizeof(out->format), "ts");
 		star6e_ts_recorder_status(ts,
@@ -150,6 +157,12 @@ static int maruko_runner_init(void *opaque)
 	maruko_reset_scene(backend);
 	venc_api_register(&ctx->vcfg, "maruko", maruko_controls_callbacks(), NULL);
 	g_maruko_runner_ctx = ctx;
+	/* Explicit, not positional: the callback below takes rec_writer_lock on
+	 * the httpd thread, which is already accepting.  Maruko happened to get
+	 * this right via mk_mirror_record_writer_start() inside
+	 * configure_graph(); saying so here means a later reorder cannot
+	 * silently undo it. */
+	mk_mirror_record_locks_init_public(&ctx->backend);
 	venc_api_set_record_status_fn(maruko_record_status_callback);
 	venc_api_set_record_http_control_supported(true);
 	if (ctx->vcfg.video0.qp_delta != 0 &&

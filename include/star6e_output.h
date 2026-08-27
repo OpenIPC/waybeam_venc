@@ -249,9 +249,12 @@ int star6e_output_stream_packet_info_complete(
  *  writers refuse it — a partial table means the pack boundaries are unknown
  *  and half an access unit is worse than none.
  *
- *  Sized from the stream itself rather than a fixed buffer, so unlike the
- *  512 KB automatic in star6e_ts_recorder_write_stream() it cannot drop a
- *  large IRAP on the floor. */
+ *  Sized from the stream itself rather than a fixed buffer, so it does not
+ *  inherit the 512 KB cliff of the automatic in
+ *  star6e_ts_recorder_write_stream().  It is not unbounded, though: an access
+ *  unit larger than VENC_REC_WRITER_MAX_BYTES is refused here rather than
+ *  copied, because the writer queue would reject it at its cap anyway.  The
+ *  caller counts that refusal — see rec_flatten_failures. */
 uint8_t *star6e_output_stream_flatten(const MI_VENC_Stream_t *stream,
 	size_t *out_len, int *out_is_idr);
 

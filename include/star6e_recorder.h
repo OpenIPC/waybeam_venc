@@ -23,6 +23,14 @@ typedef enum {
 
 typedef struct {
 	int fd;
+	/* Set by start(), cleared by every stop.  This recorder does not
+	 * rotate, so unlike the TS one it never has a transient fd == -1 — but
+	 * it DOES stop itself from the recorder writer thread on ENOSPC or a
+	 * write error, while the encode loop and the httpd thread read the
+	 * descriptor.  A plain int store racing two unsynchronised loads leaves
+	 * the producer pushing into a closed recorder, where the frames are
+	 * discarded and counted nowhere.  Accessed atomically for that. */
+	int recording;
 	uint64_t bytes_written;
 	uint32_t frames_written;
 	uint32_t sync_interval_frames;
@@ -92,6 +100,13 @@ void star6e_recorder_stop(Star6eRecorderState *state);
 
 /** Return 1 if actively recording, 0 otherwise. */
 int star6e_recorder_is_active(const Star6eRecorderState *state);
+
+/* "A recording is in progress."  For this recorder that is the same *moment*
+ * as is_active() — there is no rotation to open a gap — but it is the safe
+ * one to ask from another thread, and it is the predicate a producer should
+ * gate on so the two recorders are asked the same question.  Contrast
+ * star6e_ts_recorder_is_recording(), where the two genuinely differ. */
+int star6e_recorder_is_recording(const Star6eRecorderState *state);
 
 /** Get current recording status.  Any output pointer may be NULL. */
 void star6e_recorder_status(const Star6eRecorderState *state,

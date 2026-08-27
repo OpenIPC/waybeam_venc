@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -580,6 +581,118 @@ static int test_ts_is_recording_clears_when_rotation_cannot_reopen(void)
 	return failures;
 }
 
+/* The rotation invariant, tested through the REAL rotation path.
+ *
+ * The construct-the-state test above pins which field each accessor reads.  It
+ * cannot pin what check_rotation() leaves behind, and that is the actual
+ * invariant: a mutant that clears `recording` for the duration of the
+ * close/reopen — which IS the bug this all exists to fix — satisfies every
+ * quiescent assertion.
+ *
+ * I claimed the window was too short to sample from another thread.  That was
+ * wrong: a spin-sampling reader lands inside it on a large fraction of reads,
+ * so two rotations are enough to catch a producer that would drop.  What the
+ * sampler asks is exactly what the encode loop asks, once per frame:
+ * star6e_record_wants_frame(). */
+typedef struct {
+	Star6eTsRecorderState *ts;
+	Star6eRecorderState   *hevc;
+	int                    stop;
+	unsigned long          samples;
+	unsigned long          would_drop;   /* must stay 0 */
+} RotationSampler;
+
+static void *rotation_sampler(void *arg)
+{
+	RotationSampler *s = arg;
+
+	while (!__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE)) {
+		s->samples++;
+		if (!star6e_record_wants_frame(s->ts, s->hevc))
+			s->would_drop++;
+	}
+	return NULL;
+}
+
+static int test_ts_rotation_never_makes_a_producer_drop(void)
+{
+	Star6eTsRecorderState state;
+	Star6eRecorderState hevc;
+	RotationSampler s;
+	pthread_t th;
+	uint8_t video[500];
+	int failures = 0;
+	int i;
+
+	memset(video, 0xAB, sizeof(video));
+	star6e_recorder_init(&hevc);          /* never started: TS-only recording */
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
+	CHECK("rotdrop start ok",
+		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
+
+	state.max_seconds = 0;
+	state.max_bytes = 1;            /* rotate on every IRAP */
+	state.rotation_due_since = 1;   /* skip the grace window */
+
+	memset(&s, 0, sizeof(s));
+	s.ts = &state;
+	s.hevc = &hevc;
+	CHECK("rotdrop sampler start",
+		pthread_create(&th, NULL, rotation_sampler, &s) == 0);
+
+	/* Every IRAP cuts a segment, so this is 40 real close/reopen windows
+	 * with a reader spinning on the producer's own question throughout. */
+	for (i = 0; i < 40; i++)
+		(void)star6e_ts_recorder_write_video(&state, video,
+			sizeof(video), (uint64_t)i * 1500, 1);
+
+	__atomic_store_n(&s.stop, 1, __ATOMIC_RELEASE);
+	pthread_join(th, NULL);
+
+	CHECK("rotdrop rotations happened", state.segments >= 40);
+	CHECK("rotdrop sampler actually sampled", s.samples > 1000);
+	/* The whole point: not one sample, across 40 rotations, told the
+	 * producer to throw a frame away. */
+	CHECK("rotation never tells the producer to drop", s.would_drop == 0);
+
+	star6e_ts_recorder_stop(&state);
+	CHECK("rotdrop stops the recording",
+		!star6e_record_wants_frame(&state, &hevc));
+	return failures;
+}
+
+/* A start that fails must not leave a producer thinking a recording is
+ * running.  Nothing exercised a failing start, so the ordering that makes the
+ * flag safe — published only after open_new_segment() succeeds — was a comment
+ * with no test under it. */
+static int test_ts_failed_start_leaves_nothing_recording(void)
+{
+	Star6eTsRecorderState state;
+	Star6eRecorderState hevc;
+	int failures = 0;
+
+	star6e_recorder_init(&hevc);
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
+
+	CHECK("failed start is reported",
+		star6e_ts_recorder_start(&state, "/nonexistent/path/xyz",
+			NULL) != 0);
+	CHECK("failed start records nothing",
+		!star6e_ts_recorder_is_recording(&state));
+	CHECK("failed start opens no file",
+		!star6e_ts_recorder_is_active(&state));
+	CHECK("failed start leaves the producer gate shut",
+		!star6e_record_wants_frame(&state, &hevc));
+
+	/* And a good start after a failed one still works. */
+	CHECK("start after a failed start succeeds",
+		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
+	CHECK("start after a failed start records",
+		star6e_record_wants_frame(&state, &hevc));
+	star6e_ts_recorder_stop(&state);
+	return failures;
+}
+
 int test_star6e_ts_recorder(void)
 {
 	int failures = 0;
@@ -604,6 +717,8 @@ int test_star6e_ts_recorder(void)
 	failures += test_ts_take_idr_request_null_safe();
 	failures += test_ts_is_recording_survives_rotation_but_not_a_stop();
 	failures += test_ts_is_recording_clears_when_rotation_cannot_reopen();
+	failures += test_ts_rotation_never_makes_a_producer_drop();
+	failures += test_ts_failed_start_leaves_nothing_recording();
 
 	cleanup_test_dir();
 	return failures;

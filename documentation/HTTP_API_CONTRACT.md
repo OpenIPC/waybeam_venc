@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.20.0`
+- `contract_version`: `0.20.1`
 - `status`: `active`
 
 ## Governance Rules
@@ -80,7 +80,7 @@ Response `200`:
   "ok": true,
   "data": {
     "app_version": "0.71.0",
-    "contract_version": "0.20.0",
+    "contract_version": "0.20.1",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1859,12 +1859,31 @@ in Notes. As of `contract_version: 0.20.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.20.1` (`/api/v1/record/status` — `droppedFrames` widened and scoped):
+  - **`droppedFrames` now counts every recording frame that did not reach the
+    file, not only the ones the queue refused.** An access unit the SDK-typed
+    flatten rejects — an incomplete `packetInfo` table, or one over the queue's
+    byte cap — never reaches the queue at all, and counting only the queue's
+    refusals let those pass silently. The field's promise is that a damaged
+    recording cannot look like a clean one, so it has to include them.
+    Widening, not narrowing: no frame that used to be counted stops being.
+  - **`droppedFrames` and `writerPeakDepth` are per-RECORDING, not
+    per-process.** On the SigmaStar backends the writer thread outlives any
+    one recording, so both were accumulating for the life of the daemon: a
+    clean recording reported the previous one's drops, and one shed frame
+    poisoned every recording that followed. They are reset when a recording
+    starts. CV610 already behaved this way — its writer is created per
+    recording — so this makes the three backends agree.
+  - Note the denominators still differ slightly by backend: CV610 hands the
+    transport's already-flattened buffer to the recorder and so has no flatten
+    step of its own to fail.
 - `0.20.0` (additive — snapshot and recording reach CV610):
   - **`/api/v1/record/status` gains `droppedFrames` and `writerPeakDepth`.**
     Recording writes now run on their own thread behind a bounded 4 MB queue,
     so a stalling disk sheds recording frames instead of stalling the live
     video path. `droppedFrames` counts what the queue refused — a silent drop
-    would make a damaged recording look like a clean one. `writerPeakDepth` is
+    would make a damaged recording look like a clean one. (Widened in `0.20.1`
+    to every frame that did not reach the file.) `writerPeakDepth` is
     the high-water queue depth, which reads 0-1 when storage keeps up.
     Both are 0 on backends that still write synchronously.
   - **`record.max_seconds` / `max_mb` now work on a GDR craft.** Segment

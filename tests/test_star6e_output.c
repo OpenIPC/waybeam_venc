@@ -1,4 +1,5 @@
 #include "star6e_output.h"
+#include "venc_rec_writer.h"
 #include "timing.h"
 
 #include "output_socket.h"
@@ -1958,6 +1959,54 @@ static int test_star6e_flatten_refuses_what_the_writers_refuse(void)
 	return failures;
 }
 
+/* An access unit larger than the writer queue's byte cap is refused here
+ * rather than copied, because push() would reject it at the cap anyway.  The
+ * refusal has to be counted by the caller, which is why it is safe — but an
+ * absent guard is invisible without this: it just means a doomed
+ * multi-megabyte malloc+memcpy per oversized frame on a 64 MB SoC. */
+static int test_flatten_refuses_an_access_unit_over_the_queue_cap(void)
+{
+	MI_VENC_Stream_t stream;
+	MI_VENC_Pack_t pack;
+	size_t oversized = VENC_REC_WRITER_MAX_BYTES + 1;
+	uint8_t *big = malloc(oversized);
+	size_t len = 0;
+	int is_idr = -1;
+	int failures = 0;
+
+	CHECK("cap test allocated its stimulus", big != NULL);
+	if (!big)
+		return failures;
+	memset(big, 0x5A, oversized);
+
+	memset(&pack, 0, sizeof(pack));
+	memset(&stream, 0, sizeof(stream));
+	pack.data = big;
+	pack.length = (MI_U32)oversized;
+	pack.packNum = 0;
+	stream.packet = &pack;
+	stream.count = 1;
+
+	CHECK("flatten refuses an AU over the queue cap",
+		star6e_output_stream_flatten(&stream, &len, &is_idr) == NULL);
+	CHECK("refused AU reports no length", len == 0);
+
+	/* Control: one byte under the cap is accepted, so the refusal is the
+	 * cap and not simply "large streams fail". */
+	pack.length = (MI_U32)(VENC_REC_WRITER_MAX_BYTES - 1);
+	{
+		uint8_t *out = star6e_output_stream_flatten(&stream, &len,
+			&is_idr);
+
+		CHECK("flatten accepts an AU just under the cap", out != NULL);
+		CHECK("accepted AU reports its length",
+			len == VENC_REC_WRITER_MAX_BYTES - 1);
+		free(out);
+	}
+	free(big);
+	return failures;
+}
+
 int test_star6e_output(void)
 {
 	int failures = 0;
@@ -1998,6 +2047,7 @@ int test_star6e_output(void)
 	failures += test_star6e_output_frame_ring_truncation_abort();
 	failures += test_star6e_output_packet_info_validation();
 	failures += test_star6e_flatten_concatenates_nals_in_order();
+	failures += test_flatten_refuses_an_access_unit_over_the_queue_cap();
 	failures += test_star6e_flatten_detects_idr();
 	failures += test_star6e_flatten_handles_a_frame_over_512k();
 	failures += test_star6e_flatten_refuses_what_the_writers_refuse();

@@ -613,14 +613,19 @@ static void record_status_callback(VencRecordStatus *out)
 	ps = &g_runner_ctx->ps;
 
 	{
-		uint64_t dropped = ps->rec_dropped_frames;
-		uint32_t peak = ps->rec_writer_peak_depth;
+		uint64_t dropped;
+		uint32_t peak;
 
 		/* Under the lock: the writer is freed from the encode loop at
 		 * teardown and this runs on the httpd thread.  The stored
 		 * values are the fallback so a finished recording still
 		 * reports what it shed. */
 		pthread_mutex_lock(&ps->rec_writer_lock);
+		/* Inside the lock, not just the store: a 64-bit load on ARM32 is
+		 * two instructions and can straddle the encode loop's two-store
+		 * update just as easily. */
+		dropped = ps->rec_dropped_frames;
+		peak = ps->rec_writer_peak_depth;
 		if (ps->rec_writer)
 			venc_rec_writer_stats(ps->rec_writer, NULL, &dropped,
 				NULL, &peak);
@@ -630,7 +635,16 @@ static void record_status_callback(VencRecordStatus *out)
 		out->writer_peak_depth = peak;
 	}
 
-	if (star6e_ts_recorder_is_active(&ps->ts_recorder)) {
+	/* is_RECORDING, not is_active — same reason as the producer gate: a
+	 * rotation holds fd == -1 on the writer thread, and reporting that as
+	 * "not recording" makes a healthy recording blink off once per segment,
+	 * with stop_reason "manual" because start() seeds it that way.
+	 *
+	 * Deliberately NOT taken under rec_state_lock: this runs holding
+	 * rec_writer_lock above, and rec_state_lock is ordered ABOVE that one
+	 * (the encode loop takes state -> writer).  Taking it here would invert
+	 * the order and deadlock against a record start. */
+	if (star6e_ts_recorder_is_recording(&ps->ts_recorder)) {
 		out->active = 1;
 		snprintf(out->format, sizeof(out->format), "ts");
 		star6e_ts_recorder_status(&ps->ts_recorder,
@@ -1135,6 +1149,11 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	    strcmp(vcfg->record.mode, "dual-stream") != 0 &&
 	    strcmp(vcfg->record.mode, "off") != 0 &&
 	    vcfg->record.dir[0]) {
+		/* Under the state lock like every other transition.  The writer
+		 * thread is already running by now, and although nothing has
+		 * pushed yet, having one of four transition sites follow a
+		 * different rule is how the next bug gets in. */
+		pthread_mutex_lock(&ps->rec_state_lock);
 		if (strcmp(vcfg->record.format, "hevc") == 0) {
 			star6e_recorder_start(&ps->recorder, vcfg->record.dir);
 		} else {
@@ -1144,6 +1163,7 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 				vcfg->record.dir,
 				vcfg->audio.enabled ? &ps->audio_ring : NULL);
 		}
+		pthread_mutex_unlock(&ps->rec_state_lock);
 	}
 
 	return 0;
@@ -1456,8 +1476,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * opening IRAP.  The HEVC recorder never rotates, so for it the two
 	 * questions are the same one. */
 	if (!ps->dual && ps->rec_writer &&
-	    (star6e_ts_recorder_is_recording(&ps->ts_recorder) ||
-	     star6e_recorder_is_active(&ps->recorder))) {
+	    star6e_record_wants_frame(&ps->ts_recorder, &ps->recorder)) {
 		size_t au_len = 0;
 		int au_idr = 0;
 		uint8_t *au = star6e_output_stream_flatten(&stream, &au_len,
@@ -1536,13 +1555,19 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			} else if (!ps->dual) {
 				/* Mirror mode: act directly on the recorders.
 				 *
-				 * Drain FIRST and outside rec_state_lock — the
-				 * drain waits on the writer thread, and the
-				 * writer thread needs that same lock to finish.
-				 * Taking it here would deadlock.  Then hold it
-				 * across the close/reopen so an access unit the
-				 * drain timed out on cannot write into the file
-				 * being swapped. */
+				 * Drain FIRST and outside rec_state_lock: the
+				 * drain waits on the writer thread, which needs
+				 * that same lock to finish, so holding it here
+				 * would guarantee the 250 ms timeout on every
+				 * transition (and would deadlock outright if the
+				 * drain were ever made unbounded).
+				 *
+				 * Then hold it across the close/reopen.  What
+				 * that buys is precise: an access unit the drain
+				 * timed out on cannot land on a descriptor being
+				 * closed and reopened.  It does NOT keep that
+				 * access unit out of the new file — it is still
+				 * written, ahead of the requested IDR. */
 				mirror_record_drain(ps);
 				pthread_mutex_lock(&ps->rec_state_lock);
 				star6e_recorder_stop(&ps->recorder);
