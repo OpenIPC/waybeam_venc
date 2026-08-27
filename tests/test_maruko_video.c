@@ -3,6 +3,61 @@
 
 #include <string.h>
 
+/* ── maruko_video_stream_flatten: the async recorder's copy ───────────── */
+
+static int test_maruko_flatten_matches_the_star6e_contract(void)
+{
+	i6c_venc_pack packs[2];
+	i6c_venc_strm stream;
+	uint8_t d0[16], d1[8];
+	uint8_t *out;
+	size_t len = 0;
+	int is_idr = -1;
+	int failures = 0;
+	int i;
+
+	for (i = 0; i < 16; i++) d0[i] = (uint8_t)(0x10 + i);
+	for (i = 0; i < 8; i++)  d1[i] = (uint8_t)(0xA0 + i);
+
+	memset(packs, 0, sizeof(packs));
+	memset(&stream, 0, sizeof(stream));
+	packs[0].data = d0; packs[0].length = 16; packs[0].packNum = 2;
+	packs[0].packetInfo[0].offset = 0; packs[0].packetInfo[0].length = 4;
+	packs[0].packetInfo[1].offset = 8; packs[0].packetInfo[1].length = 4;
+	packs[1].data = d1; packs[1].length = 8; packs[1].offset = 2;
+	packs[1].packNum = 0;
+	stream.packet = packs; stream.count = 2;
+
+	out = maruko_video_stream_flatten(&stream, &len, &is_idr);
+	CHECK("mk flatten returned a buffer", out != NULL);
+	CHECK("mk flatten length", len == 4 + 4 + 6);
+	if (out && len == 14) {
+		CHECK("mk flatten span 1", memcmp(out, d0, 4) == 0);
+		CHECK("mk flatten span 2", memcmp(out + 4, d0 + 8, 4) == 0);
+		CHECK("mk flatten fallback offset",
+			memcmp(out + 8, d1 + 2, 6) == 0);
+	} else {
+		CHECK("mk flatten payload reachable", 0);
+	}
+	CHECK("mk flatten no IRAP", is_idr == 0);
+	free(out);
+
+	packs[0].packetInfo[0].packType.h265Nalu = 20;
+	out = maruko_video_stream_flatten(&stream, &len, &is_idr);
+	CHECK("mk flatten idr_n_lp detected", out && is_idr == 1);
+	free(out);
+
+	/* A partly-valid stream must be refused whole, not truncated. */
+	packs[1].packNum = (unsigned int)(sizeof(packs[1].packetInfo) /
+		sizeof(packs[1].packetInfo[0])) + 1;
+	CHECK("mk flatten refuses a partly-valid stream",
+		maruko_video_stream_flatten(&stream, &len, &is_idr) == NULL);
+
+	CHECK("mk flatten NULL stream",
+		maruko_video_stream_flatten(NULL, &len, &is_idr) == NULL);
+	return failures;
+}
+
 int test_maruko_video(void)
 {
 	MarukoOutput output;
@@ -10,6 +65,8 @@ int test_maruko_video(void)
 	i6c_venc_strm stream;
 	uint8_t data[16] = { 0 };
 	int failures = 0;
+
+	failures += test_maruko_flatten_matches_the_star6e_contract();
 	unsigned int info_cap;
 
 	memset(&output, 0, sizeof(output));

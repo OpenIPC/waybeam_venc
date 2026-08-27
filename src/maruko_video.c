@@ -6,6 +6,7 @@
 #include "rtp_session.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 
@@ -15,6 +16,103 @@ typedef struct {
 	MarukoOutput *output;
 	venc_ring_t *ring;
 } MarukoRtpWriteContext;
+
+/* Two passes — size, then copy — rather than a growing buffer: the sizes are
+ * already known and an IRAP can be megabytes, so a realloc loop would copy it
+ * repeatedly on the encode loop.  Mirrors star6e_output_stream_flatten(). */
+static size_t maruko_stream_payload_bytes(const i6c_venc_strm *stream,
+	int *out_is_idr)
+{
+	size_t total = 0;
+	unsigned int i;
+
+	if (out_is_idr)
+		*out_is_idr = 0;
+	for (i = 0; i < stream->count; ++i) {
+		const i6c_venc_pack *pack = &stream->packet[i];
+		unsigned int k;
+
+		if (!pack->data)
+			continue;
+		if (pack->packNum == 0) {
+			if (pack->length > pack->offset)
+				total += pack->length - pack->offset;
+			continue;
+		}
+		for (k = 0; k < (unsigned int)pack->packNum; ++k) {
+			unsigned int off = pack->packetInfo[k].offset;
+			unsigned int len = pack->packetInfo[k].length;
+			unsigned int nalu;
+
+			if (len == 0 || off >= pack->length ||
+			    len > (pack->length - off))
+				continue;
+			nalu = (unsigned int)pack->packetInfo[k].packType.h265Nalu;
+			if ((nalu == 19 || nalu == 20) && out_is_idr)
+				*out_is_idr = 1;
+			total += len;
+		}
+	}
+	return total;
+}
+
+uint8_t *maruko_video_stream_flatten(const i6c_venc_strm *stream,
+	size_t *out_len, int *out_is_idr)
+{
+	uint8_t *buf;
+	size_t total;
+	size_t off_out = 0;
+	unsigned int i;
+	int is_idr = 0;
+
+	if (out_len)
+		*out_len = 0;
+	if (out_is_idr)
+		*out_is_idr = 0;
+	if (!maruko_video_stream_packet_info_complete(stream))
+		return NULL;
+
+	total = maruko_stream_payload_bytes(stream, &is_idr);
+	if (total == 0)
+		return NULL;
+	buf = malloc(total);
+	if (!buf)
+		return NULL;
+
+	for (i = 0; i < stream->count; ++i) {
+		const i6c_venc_pack *pack = &stream->packet[i];
+		unsigned int k;
+
+		if (!pack->data)
+			continue;
+		if (pack->packNum == 0) {
+			if (pack->length > pack->offset) {
+				size_t len = pack->length - pack->offset;
+
+				memcpy(buf + off_out, pack->data + pack->offset,
+					len);
+				off_out += len;
+			}
+			continue;
+		}
+		for (k = 0; k < (unsigned int)pack->packNum; ++k) {
+			unsigned int off = pack->packetInfo[k].offset;
+			unsigned int len = pack->packetInfo[k].length;
+
+			if (len == 0 || off >= pack->length ||
+			    len > (pack->length - off))
+				continue;
+			memcpy(buf + off_out, pack->data + off, len);
+			off_out += len;
+		}
+	}
+
+	if (out_len)
+		*out_len = off_out;
+	if (out_is_idr)
+		*out_is_idr = is_idr;
+	return buf;
+}
 
 int maruko_video_stream_packet_info_complete(const i6c_venc_strm *stream)
 {

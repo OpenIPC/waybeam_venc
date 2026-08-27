@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <sched.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -15,6 +16,108 @@
 
 #define STAR6E_RTP_HEADER_SIZE 12
 /* STAR6E_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in star6e.h. */
+
+/* Walk the pack list once per pass: size, then copy.  Two passes rather than
+ * a realloc loop because the sizes are already known and an IRAP can be
+ * megabytes — a growing buffer would copy it repeatedly on the encode loop. */
+static size_t stream_payload_bytes(const MI_VENC_Stream_t *stream,
+	int *out_is_idr)
+{
+	size_t total = 0;
+	unsigned int i;
+
+	if (out_is_idr)
+		*out_is_idr = 0;
+	for (i = 0; i < stream->count; ++i) {
+		const MI_VENC_Pack_t *pack = &stream->packet[i];
+		unsigned int k;
+
+		if (!pack->data)
+			continue;
+		if (pack->packNum == 0) {
+			if (pack->length > pack->offset)
+				total += pack->length - pack->offset;
+			continue;
+		}
+		for (k = 0; k < (unsigned int)pack->packNum; ++k) {
+			MI_U32 off = pack->packetInfo[k].offset;
+			MI_U32 len = pack->packetInfo[k].length;
+			unsigned int nalu;
+
+			if (len == 0 || off >= pack->length ||
+			    len > (pack->length - off))
+				continue;
+			/* IDR_W_RADL (19) and IDR_N_LP (20), matching the
+			 * synchronous writer's test exactly. */
+			nalu = (unsigned int)pack->packetInfo[k].packType.h265Nalu;
+			if ((nalu == 19 || nalu == 20) && out_is_idr)
+				*out_is_idr = 1;
+			total += len;
+		}
+	}
+	return total;
+}
+
+uint8_t *star6e_output_stream_flatten(const MI_VENC_Stream_t *stream,
+	size_t *out_len, int *out_is_idr)
+{
+	uint8_t *buf;
+	size_t total;
+	size_t off_out = 0;
+	unsigned int i;
+	int is_idr = 0;
+
+	if (out_len)
+		*out_len = 0;
+	if (out_is_idr)
+		*out_is_idr = 0;
+	/* Same refusal as the synchronous writers: an incomplete packetInfo
+	 * table means the pack boundaries are unknown, and half an access unit
+	 * is worse than none. */
+	if (!star6e_output_stream_packet_info_complete(stream))
+		return NULL;
+
+	total = stream_payload_bytes(stream, &is_idr);
+	if (total == 0)
+		return NULL;
+	buf = malloc(total);
+	if (!buf)
+		return NULL;
+
+	for (i = 0; i < stream->count; ++i) {
+		const MI_VENC_Pack_t *pack = &stream->packet[i];
+		unsigned int k;
+
+		if (!pack->data)
+			continue;
+		if (pack->packNum == 0) {
+			if (pack->length > pack->offset) {
+				size_t len = pack->length - pack->offset;
+
+				memcpy(buf + off_out, pack->data + pack->offset,
+					len);
+				off_out += len;
+			}
+			continue;
+		}
+		for (k = 0; k < (unsigned int)pack->packNum; ++k) {
+			MI_U32 off = pack->packetInfo[k].offset;
+			MI_U32 len = pack->packetInfo[k].length;
+
+			if (len == 0 || off >= pack->length ||
+			    len > (pack->length - off))
+				continue;
+			memcpy(buf + off_out, pack->data + off, len);
+			off_out += len;
+		}
+	}
+
+	if (out_len)
+		*out_len = off_out;
+	if (out_is_idr)
+		*out_is_idr = is_idr;
+	return buf;
+}
 
 int star6e_output_stream_packet_info_complete(
 	const MI_VENC_Stream_t *stream)

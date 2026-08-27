@@ -233,6 +233,25 @@ int star6e_output_frame_ring_fill(
 int star6e_output_stream_packet_info_complete(
 	const MI_VENC_Stream_t *stream);
 
+/** Flatten a VENC stream's NAL payload into ONE malloc'd Annex-B access unit.
+ *
+ *  For the asynchronous recorder: the SDK's stream memory is only valid until
+ *  ReleaseStream, so anything that writes it on another thread must own a copy
+ *  first.  Returns the buffer (the caller, or the writer queue it is handed
+ *  to, owns and frees it) or NULL if there is nothing valid to record.
+ *
+ *  *out_len gets the byte count and *out_is_idr whether any VCL NAL was an
+ *  IRAP (types 19/20), which segment rotation needs.  A stream whose
+ *  packetInfo table is incomplete is refused, exactly as the synchronous
+ *  writers refuse it — a partial table means the pack boundaries are unknown
+ *  and half an access unit is worse than none.
+ *
+ *  Sized from the stream itself rather than a fixed buffer, so unlike the
+ *  512 KB automatic in star6e_ts_recorder_write_stream() it cannot drop a
+ *  large IRAP on the floor. */
+uint8_t *star6e_output_stream_flatten(const MI_VENC_Stream_t *stream,
+	size_t *out_len, int *out_is_idr);
+
 /** Reject an incomplete AU before output/recording. Returns 1 when rejected,
  * emits a one-time warning, and requests paced recovery for reference frames. */
 int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
