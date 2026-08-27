@@ -183,6 +183,13 @@ int star6e_ts_recorder_start(Star6eTsRecorderState *state, const char *dir,
 	state->space_check_countdown = RECORDER_SPACE_CHECK_INTERVAL;
 	state->last_stop_reason = RECORDER_STOP_MANUAL;
 	state->segment_bytes = 0;
+	/* Part of the per-recording reset like everything above it: a stop and
+	 * restart inside the same second must not inherit the old recording's
+	 * pacing anchor and suppress the new one's first rotation request. */
+	state->idr_request_last_sec = 0;
+	state->idr_requests_unanswered = 0;
+	state->rotation_due_since = 0;
+	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
 	clock_gettime(CLOCK_MONOTONIC, &state->start_time);
 
 	if (open_new_segment(state) != 0)
@@ -248,14 +255,42 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	 * door.  This is operator-configured rotation, not a congestion
 	 * response, and it is the only thing that asks. */
 	if (!is_idr) {
+		/* Bounded: an unanswered ask degrades back to waiting for a
+		 * natural keyframe rather than becoming a permanent 1 Hz
+		 * keyframe tax on the live link. */
+		if (state->idr_requests_unanswered >= TS_RECORDER_MAX_IDR_REQUESTS)
+			return 0;
 		clock_gettime(CLOCK_MONOTONIC, &now);
-		if (state->request_idr &&
-		    now.tv_sec != state->last_rotate_idr_request_sec) {
-			state->last_rotate_idr_request_sec = now.tv_sec;
-			(void)state->request_idr();
+		/* Give a keyframing stream a chance to rotate on its own before
+		 * asking for anything.  Costs at most one second of overshoot
+		 * on a GDR craft; saves a keyframe per rotation on every stream
+		 * that never needed the request. */
+		if (state->rotation_due_since == 0) {
+			state->rotation_due_since = now.tv_sec;
+			return 0;
+		}
+		if (now.tv_sec - state->rotation_due_since < 1)
+			return 0;
+		/* An elapsed-interval test, not "a different second": X.999 and
+		 * X+1.001 are different seconds 2 ms apart, and on a backend
+		 * whose request path is un-coalesced that is two back-to-back
+		 * keyframes.  `unanswered == 0` doubles as the never-asked
+		 * sentinel, so tv_sec == 0 in the first second after boot is
+		 * not mistaken for one. */
+		if (state->idr_requests_unanswered == 0 ||
+		    now.tv_sec - state->idr_request_last_sec >= 1) {
+			state->idr_request_last_sec = now.tv_sec;
+			state->idr_requests_unanswered++;
+			__atomic_store_n(&state->idr_request_pending, 1,
+				__ATOMIC_RELAXED);
 		}
 		return 0;
 	}
+
+	/* An IRAP arrived, so any outstanding ask was answered. */
+	state->idr_request_last_sec = 0;
+	state->idr_requests_unanswered = 0;
+	state->rotation_due_since = 0;
 
 	/* Close current segment, open new one */
 	fdatasync(state->fd);
@@ -270,7 +305,6 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 
 	/* The frame about to be written IS the IDR — either a natural one or
 	 * the answer to the request above — so the new segment opens on it. */
-	state->last_rotate_idr_request_sec = 0;
 	return 0;
 }
 

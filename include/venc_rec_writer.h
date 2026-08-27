@@ -90,8 +90,22 @@ int venc_rec_writer_push(VencRecWriter *w, uint8_t *au, size_t len,
 
 /* Drain everything already queued, join the thread, and free the writer.
  * Safe on NULL.  After this returns, the sink is guaranteed not to run
- * again, so the recorder it writes to can be closed. */
+ * again, so the recorder it writes to can be closed.
+ *
+ * UNBOUNDED: it waits for the whole queue to reach the disk.  Only safe to
+ * call from a thread that is allowed to block for seconds — i.e. teardown,
+ * not the encode loop.  Use venc_rec_writer_stop_bounded() there. */
 void venc_rec_writer_stop(VencRecWriter *w);
+
+/* As above, but give up after `grace_ms` and abandon whatever is still
+ * queued, adding it to *dropped (may be NULL).
+ *
+ * This is the stop for the encode loop.  Waiting for a stalled disk to
+ * accept 4 MB would put the stall straight back on the live video path at
+ * every record/stop — the exact failure this module removes, just relocated
+ * to a rarer event.  Losing the tail of a recording is the correct trade. */
+void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
+	uint64_t *dropped);
 
 /* Observability.  `dropped` is the count of access units the queue refused
  * because it was full — silent drops would make a damaged recording look

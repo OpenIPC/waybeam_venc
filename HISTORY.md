@@ -85,6 +85,32 @@ against `0.19.0` sees strictly more capability and no changed response shape.
   identical there by construction (`star6e_runtime.c`,
   `maruko_pipeline.c`) and wiring them needs their own device runs.
 
+- **Rotation asks the right channel, from the right place, at the right rate.**
+  An adversarial review of the first cut found the rotation hook was wrong
+  three ways, all on the two backends that had not been on hardware: it fired
+  *inside* the SDK's GetStream/ReleaseStream window, which no other IDR call
+  site on any backend does; a single shared `int (*)(void)` could not name the
+  channel, so under `record.mode=dual` it keyframed the LIVE stream while the
+  ch1 recording rotated on nothing (a defect `star6e_runtime.c` already
+  carried a fix for at record-start); and on Star6E it resolved to the
+  *forced* path, which re-arms the rate limiter and would swallow a scene or
+  operator keyframe arriving in the next 100 ms.
+
+  The callback is gone. `check_rotation()` now raises a flag and the backend
+  services it after its own ReleaseStream, coalesced, on the channel that
+  actually feeds that recorder. Requests are bounded
+  (`TS_RECORDER_MAX_IDR_REQUESTS`) so an unanswered ask degrades to the old
+  wait-for-a-keyframe behaviour instead of becoming a permanent 1 Hz keyframe
+  tax, paced by elapsed interval rather than "a different second", and reset
+  per recording.
+
+  They are also **grace-delayed by one second**, which is a measured
+  correction rather than a precaution: on Maruko at `resilience=off` with a
+  1 s GOP, `max_seconds=15` over 50 s took the honored-IDR count from **1 to
+  4** — three needless keyframes for three rotations that happened naturally
+  anyway. With the grace, Maruko is back to **4 segments, 1501 frames, delta
+  1**, identical to 0.69.0.
+
 - **`record.max_seconds` / `max_mb` were inert on a GDR craft.** Rotation can
   only cut on an IRAP or the new segment decodes from nothing, and the check
   simply returned early when the frame was not one — correct, but it assumed

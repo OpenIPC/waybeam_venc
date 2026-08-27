@@ -118,9 +118,12 @@ int venc_jpeg_backend_init(const VencJpegConfig *cfg)
 	attr.venc_attr.type = OT_PT_JPEG;
 	attr.venc_attr.max_pic_width = w;
 	attr.venc_attr.max_pic_height = h;
-	/* Worst case for a high-qfactor still is well under 3/2 of the raw
-	 * luma+chroma; the main channel uses the same 64-byte alignment. */
-	attr.venc_attr.buf_size = ((w * h * 3 / 2) + 63) & ~63u;
+	/* 3/4, matching the main H.265 channel — this buffer is reserved out
+	 * of a 64 MB MMZ for the life of the process whether or not a snapshot
+	 * is ever taken, and 3/2 would hold ~3 MB at 1080p, double what the
+	 * video channel itself takes.  Device-measured worst case is 379.5 KB
+	 * (q=95, 720p), so 3/4 is still ample headroom. */
+	attr.venc_attr.buf_size = ((w * h * 3 / 4) + 63) & ~63u;
 	attr.venc_attr.is_by_frame = TD_TRUE;
 	attr.venc_attr.pic_width = w;
 	attr.venc_attr.pic_height = h;
@@ -229,12 +232,18 @@ int venc_jpeg_backend_capture(uint8_t **out_buf, size_t *out_len,
 	}
 	stream.pack_cnt = status.cur_packs;
 
+	/* Clamp what the SDK writes back.  The buffer is sized from
+	 * status.cur_packs, and iterating a larger pack_cnt would read past
+	 * it — star6e_jpeg.c already clamps for the same reason. */
 	if (ss_mpi_venc_get_stream(g_chn, &stream, 200) != TD_SUCCESS) {
 		fprintf(stderr, "[jpeg-cv610] get_stream(%d) failed\n", (int)g_chn);
 		free(stream.pack);
 		rc = -EIO;
 		goto stop;
 	}
+
+	if (stream.pack_cnt > status.cur_packs)
+		stream.pack_cnt = status.cur_packs;
 
 	for (i = 0; i < stream.pack_cnt; ++i) {
 		if (stream.pack[i].addr && stream.pack[i].len > stream.pack[i].offset)

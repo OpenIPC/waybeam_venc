@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Intrusive singly-linked FIFO of heap buffers.  A linked list rather than a
  * ring: entries are already individually malloc'd (the drain loop hands over
@@ -205,6 +206,64 @@ int venc_rec_writer_push(VencRecWriter *w, uint8_t *au, size_t len,
 	return 1;
 }
 
+/* Common tail: the thread has exited, so nothing else can touch the queue. */
+static void writer_destroy(VencRecWriter *w, uint64_t *dropped)
+{
+	for (;;) {
+		VencRecAu *e = queue_pop(w);
+
+		if (!e)
+			break;
+		w->dropped++;
+		au_free(e);
+	}
+	if (dropped)
+		*dropped = w->dropped;
+
+	pthread_cond_destroy(&w->cond);
+	pthread_mutex_destroy(&w->lock);
+	free(w);
+}
+
+void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
+	uint64_t *dropped)
+{
+	unsigned waited = 0;
+
+	if (!w)
+		return;
+
+	pthread_mutex_lock(&w->lock);
+	w->stopping = true;
+	pthread_cond_signal(&w->cond);
+	pthread_mutex_unlock(&w->lock);
+
+	if (!w->thread_started) {
+		writer_destroy(w, dropped);
+		return;
+	}
+
+	/* Poll rather than pthread_timedjoin_np: musl does not have it. */
+	for (;;) {
+		int done;
+
+		pthread_mutex_lock(&w->lock);
+		done = (w->head == NULL);
+		pthread_mutex_unlock(&w->lock);
+		if (done || waited >= grace_ms)
+			break;
+		usleep(2000);
+		waited += 2;
+	}
+
+	/* Whether it drained or timed out, `stopping` is set, so the thread
+	 * refuses new work and exits as soon as it finishes the AU in its
+	 * hand.  The join therefore waits for at most ONE sink call, not the
+	 * whole backlog; the rest is abandoned below and counted. */
+	pthread_join(w->thread, NULL);
+	writer_destroy(w, dropped);
+}
+
 void venc_rec_writer_stop(VencRecWriter *w)
 {
 	if (!w)
@@ -218,19 +277,7 @@ void venc_rec_writer_stop(VencRecWriter *w)
 	if (w->thread_started)
 		pthread_join(w->thread, NULL);
 
-	/* Anything the thread did not reach (it only exits on an empty queue,
-	 * so this is just belt and braces against a failed create). */
-	for (;;) {
-		VencRecAu *e = queue_pop(w);
-
-		if (!e)
-			break;
-		au_free(e);
-	}
-
-	pthread_cond_destroy(&w->cond);
-	pthread_mutex_destroy(&w->lock);
-	free(w);
+	writer_destroy(w, NULL);
 }
 
 void venc_rec_writer_stats(const VencRecWriter *w, uint64_t *queued,

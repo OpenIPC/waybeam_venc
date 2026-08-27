@@ -43,11 +43,37 @@ typedef struct {
 
 	/* Segment rotation can only cut on an IRAP, so on a stream that emits
 	 * none of its own (GDR / resilience=racing) it has to ask for one.
-	 * NULL leaves the pre-0.70.0 behaviour: rotation waits for a natural
-	 * keyframe and never fires if none comes.  Rate-limited by the second
-	 * below so a crossed threshold cannot turn into a per-frame request. */
-	int (*request_idr)(void);
-	time_t last_rotate_idr_request_sec;
+	 *
+	 * check_rotation() raises a FLAG rather than calling into the SDK
+	 * itself, and the backend services it after its ReleaseStream. Calling
+	 * from here would be wrong twice over:
+	 *   - it would land inside the SDK's GetStream/ReleaseStream window,
+	 *     which no existing IDR call site on any backend does;
+	 *   - a single shared hook cannot name the right channel. In
+	 *     record.mode=dual the recorder is fed by ch1 while the hook
+	 *     targets ch0, so the request would keyframe the LIVE stream and
+	 *     do nothing for the file. star6e_runtime.c already carries that
+	 *     fix for record-start; this avoids reintroducing it.
+	 *
+	 * The backend must use the COALESCED request path, not the forced one:
+	 * a periodic rotation is not a bootstrap event, and forcing would
+	 * re-arm the rate limiter and swallow a genuinely requested keyframe
+	 * arriving just after.
+	 *
+	 * Left unserviced, rotation keeps the pre-0.70.0 behaviour: it waits
+	 * for a natural keyframe and never fires if none comes. */
+	int idr_request_pending;          /* backend polls and clears */
+	time_t idr_request_last_sec;      /* pacing anchor */
+	uint32_t idr_requests_unanswered; /* 0 = none outstanding */
+	/* When the thresholds were FIRST seen crossed.  A keyframing stream
+	 * rotates on its own within a GOP, so asking immediately buys nothing
+	 * and costs a keyframe: measured on Maruko at resilience=off with a
+	 * 1 s GOP, max_seconds=15 over 50 s went from 1 honored IDR to 4 —
+	 * three needless keyframes on the live link for three rotations that
+	 * would have happened anyway.  Waiting one second before the first ask
+	 * lets such a stream rotate naturally and leaves the request for the
+	 * streams that genuinely never produce one. */
+	time_t rotation_due_since;
 } Star6eTsRecorderState;
 
 /** Zero-initialize TS recorder state.
@@ -73,6 +99,31 @@ void star6e_ts_recorder_stop(Star6eTsRecorderState *state);
 
 /** Return 1 if actively recording. */
 int star6e_ts_recorder_is_active(const Star6eTsRecorderState *state);
+
+/** Stop asking after this many unanswered requests and let rotation go back
+ *  to waiting for a natural keyframe.  Without a bound, a mis-wired hook or a
+ *  keyframe that never reads back as an IRAP would tax the live link with a
+ *  forced keyframe every second for the whole recording — and the file would
+ *  still grow unbounded, which is the defect this feature exists to fix. */
+#define TS_RECORDER_MAX_IDR_REQUESTS 8
+
+/** Take a pending rotation IDR request, if any.
+ *
+ *  Call AFTER the SDK's ReleaseStream, and issue a COALESCED IDR request on
+ *  the channel that feeds THIS recorder — ch1 under record.mode=dual, not the
+ *  main channel. Returns 1 when a request is due (and clears it), 0 otherwise.
+ *
+ *  Atomic because on backends whose recorder runs on the async writer thread
+ *  the flag is raised there and consumed on the encode loop. */
+static inline int star6e_ts_recorder_take_idr_request(
+	Star6eTsRecorderState *state)
+{
+	if (!state ||
+	    !__atomic_load_n(&state->idr_request_pending, __ATOMIC_RELAXED))
+		return 0;
+	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
+	return 1;
+}
 
 /** Get recording status. Any output pointer may be NULL. */
 void star6e_ts_recorder_status(const Star6eTsRecorderState *state,

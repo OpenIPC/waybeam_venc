@@ -3061,6 +3061,18 @@ static void *maruko_dual_stream_thread(void *arg)
 		(void)maruko_mi_venc_release_stream(ctx->venc_device,
 			d->channel, &stream);
 
+		/* Rotation asked for a keyframe.  Serviced after the release so
+		 * the SDK call is outside the GetStream/ReleaseStream window,
+		 * COALESCED because a periodic rotation is not a bootstrap
+		 * event, and on ch1 — the channel that actually feeds this
+		 * file.  A shared hook would have aimed it at ch0 and keyframed
+		 * the live stream instead. */
+		if (d->ts_recorder &&
+		    star6e_ts_recorder_take_idr_request(d->ts_recorder) &&
+		    idr_rate_limit_allow(d->channel))
+			(void)maruko_mi_venc_request_idr(ctx->venc_device,
+				d->channel, 1);
+
 		total_count++;
 		if (stat.curPacks >= 2)
 			behind_count++;
@@ -3615,14 +3627,6 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 		}
 		star6e_ts_recorder_init(&ctx->ts_recorder, rate, (uint8_t)ch,
 			ts_codec);
-		/* Segment rotation can only cut on an IRAP.  Under
-		 * resilience=racing the stream emits none, so without this
-		 * record.maxSeconds / maxMB are inert and the file grows
-		 * unbounded.  Rate-limited to one request per second inside
-		 * check_rotation().  Taken from the controls table rather than
-		 * a new export — it is the same function /request/idr uses. */
-		ctx->ts_recorder.request_idr =
-			maruko_controls_callbacks()->request_idr;
 	}
 	star6e_recorder_init(&ctx->recorder);
 	if (ctx->cfg.record.max_seconds > 0)
@@ -4447,6 +4451,15 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	unsigned int pack_count = stream.count;
 	(void)maruko_mi_venc_release_stream(ctx->venc_device,
 		ctx->venc_channel, &stream);
+
+	/* Rotation asked for a keyframe.  After the release, coalesced, on the
+	 * channel feeding this file.  Dual mode services its own recorder on
+	 * the ch1 thread. */
+	if (!ctx->dual &&
+	    star6e_ts_recorder_take_idr_request(&ctx->ts_recorder) &&
+	    idr_rate_limit_allow(ctx->venc_channel))
+		(void)maruko_mi_venc_request_idr(ctx->venc_device,
+			ctx->venc_channel, 1);
 
 	/* HTTP record control: drain the start/stop request flags so they
 	 * never accumulate across reinit, then act only when this runtime
