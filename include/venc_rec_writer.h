@@ -98,7 +98,8 @@ int venc_rec_writer_push(VencRecWriter *w, uint8_t *au, size_t len,
 void venc_rec_writer_stop(VencRecWriter *w);
 
 /* As above, but give up after `grace_ms` and abandon whatever is still
- * queued, adding it to *dropped (may be NULL).
+ * queued.  *dropped (may be NULL) is SET to the writer's running total,
+ * abandoned frames included — it is assigned, not accumulated into.
  *
  * This is the stop for the encode loop.  Waiting for a stalled disk to
  * accept 4 MB would put the stall straight back on the live video path at
@@ -109,16 +110,34 @@ void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
 
 /* Wait for everything already queued to reach the sink, up to `grace_ms`,
  * WITHOUT stopping the thread.  Whatever is still queued when the grace
- * expires is abandoned and added to *dropped (may be NULL).
+ * expires is abandoned; *dropped (may be NULL) is SET to the writer's running
+ * total, abandoned frames included — it is assigned, not accumulated into.
  *
  * The barrier a long-lived writer needs before its recorder closes: queued
  * access units are written by file descriptor, so a close that races them
  * sends the tail of one recording into nothing (or, worse, into the next
  * file).  Bounded for the same reason stop_bounded is — this runs on the
  * encode loop, and waiting out a stalled disk here would put the stall back
- * on the live video path. */
+ * on the live video path.
+ *
+ * Note what "bounded" costs: on a CLEAN drain the sink is guaranteed not to
+ * be running when this returns, but on TIMEOUT an access unit is still in the
+ * sink's hands.  The caller must serialise its own close against the sink for
+ * that case — both SigmaStar backends hold a rec_state_lock across the
+ * close/reopen, which bounds the wait to one write instead of the queue. */
 void venc_rec_writer_drain(VencRecWriter *w, unsigned grace_ms,
 	uint64_t *dropped);
+
+/* Zero the lifetime counters (queued, dropped, peak depth).  `depth` is live
+ * state and is left alone.
+ *
+ * A long-lived writer spans many recordings, so without this the counters are
+ * process-lifetime: a clean recording inherits the previous one's drops, and
+ * one drain timeout poisons every later recording's count for good.  The
+ * field whose whole purpose is to stop a damaged recording looking clean
+ * would instead make a clean one look damaged.  Call it when a recording
+ * starts, with the queue already drained. */
+void venc_rec_writer_reset_counters(VencRecWriter *w);
 
 /* Observability.  `dropped` is the count of access units the queue refused
  * because it was full — silent drops would make a damaged recording look

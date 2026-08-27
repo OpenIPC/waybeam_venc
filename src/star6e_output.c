@@ -1,5 +1,7 @@
 #include "star6e_output.h"
 
+#include "venc_rec_writer.h"
+
 #include "output_socket.h"
 #include "timing.h"
 #include "venc_config.h"
@@ -78,7 +80,11 @@ uint8_t *star6e_output_stream_flatten(const MI_VENC_Stream_t *stream,
 		return NULL;
 
 	total = stream_payload_bytes(stream, &is_idr);
-	if (total == 0)
+	/* An access unit larger than the whole queue can never be recorded:
+	 * push() would reject it at the cap and free it again.  Refusing here
+	 * skips a multi-megabyte malloc+memcpy that exists only to be thrown
+	 * away — and on a 64 MB SoC that allocation is not free. */
+	if (total == 0 || total > VENC_REC_WRITER_MAX_BYTES)
 		return NULL;
 	buf = malloc(total);
 	if (!buf)

@@ -78,8 +78,22 @@ typedef struct {
 	 * start/stop only open and close files; the stop path drains this
 	 * first so a queued tail cannot land after its file has closed. */
 	VencRecWriter *rec_writer;
-	pthread_mutex_t rec_writer_lock;
+	pthread_mutex_t rec_writer_lock;   /* guards rec_writer + the counters */
+	/* Serialises the writer thread's sink against every recorder open and
+	 * close.  venc_rec_writer_drain() is bounded by design — on timeout it
+	 * abandons the queue WITHOUT waiting for the access unit already in the
+	 * sink's hands — so the drain alone cannot make a close safe.  Held by
+	 * the sink for one write and by every start/stop, which bounds a record
+	 * transition to a single access unit rather than to the whole queue. */
+	pthread_mutex_t rec_state_lock;
+	int rec_locks_ready;               /* both mutexes initialised */
 	uint64_t rec_dropped_frames;
+	/* Access units the SDK-typed flatten refused (an incomplete packetInfo
+	 * table, or one over the queue's byte cap).  Reported as part of
+	 * droppedFrames rather than as a field of its own: to an operator both
+	 * are the same fact — a frame that is not in the file — and a silent
+	 * one would make a damaged recording look clean. */
+	uint64_t rec_flatten_failures;
 	uint32_t rec_writer_peak_depth;
 	ImuState *imu;              /* NULL if IMU disabled */
 	MI_VENC_Pack_t *stream_packs;     /* pre-allocated for main loop */

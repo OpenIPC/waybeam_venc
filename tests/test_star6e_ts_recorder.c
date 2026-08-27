@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -479,6 +480,106 @@ static int test_ts_take_idr_request_null_safe(void)
 	return failures;
 }
 
+/* S2's primitive: a producer must be able to tell "recording in progress"
+ * apart from "a segment file is open at this instant".  They differ for the
+ * whole of a rotation, and a producer that cannot tell them apart drops every
+ * frame in that window — silently, right after the new segment's IRAP.
+ *
+ * Rotation is not observable from outside write_video() (it closes and
+ * reopens inside one call), so what is pinned here are the transitions at
+ * either end of it: a rotation that succeeds must NOT clear the flag; one
+ * that cannot reopen must. */
+static int test_ts_is_recording_survives_rotation_but_not_a_stop(void)
+{
+	Star6eTsRecorderState state;
+	uint8_t video[500];
+	int failures = 0;
+
+	memset(video, 0xAB, sizeof(video));
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
+	CHECK("is_recording false before start",
+		!star6e_ts_recorder_is_recording(&state));
+	CHECK("is_recording null safe",
+		!star6e_ts_recorder_is_recording(NULL));
+
+	CHECK("rec start ok",
+		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
+	CHECK("is_recording true after start",
+		star6e_ts_recorder_is_recording(&state) == 1);
+
+	state.max_seconds = 0;
+	state.max_bytes = 1;            /* rotation due immediately */
+	state.rotation_due_since = 1;   /* skip the grace window */
+
+	/* An IRAP cuts the segment: close + reopen, all inside this call. */
+	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
+		90000, 1);
+	CHECK("rotation happened", state.segments == 2);
+	CHECK("is_recording survives a rotation",
+		star6e_ts_recorder_is_recording(&state) == 1);
+	CHECK("is_active also true once the new segment is open",
+		star6e_ts_recorder_is_active(&state) == 1);
+
+	/* The two assertions above cannot tell the predicates apart: at every
+	 * quiescent point fd >= 0 and recording == 1 agree, so a is_recording()
+	 * that merely returned `fd >= 0` would satisfy them.  The state that
+	 * separates them exists only INSIDE write_video(), between close() and
+	 * open(), and lasts microseconds on tmpfs — too short to sample from
+	 * another thread with any reliability.  So construct it: this is
+	 * exactly what the encode loop sees while the writer thread rotates on
+	 * an SD card, and it is where every dropped frame in S2 came from. */
+	state.fd = -1;
+	state.recording = 1;
+	CHECK("mid-rotation: no file is open",
+		!star6e_ts_recorder_is_active(&state));
+	CHECK("mid-rotation: the recording is still running",
+		star6e_ts_recorder_is_recording(&state) == 1);
+	CHECK("rot restore", (state.fd = open(state.path, O_WRONLY)) >= 0);
+
+	star6e_ts_recorder_stop(&state);
+	CHECK("is_recording false after stop",
+		!star6e_ts_recorder_is_recording(&state));
+	return failures;
+}
+
+/* The other transition: a rotation whose reopen fails is a stop, not a gap.
+ * Making the directory unwritable mid-recording is the cheapest way to force
+ * open_new_segment() to fail on a path that already worked once. */
+static int test_ts_is_recording_clears_when_rotation_cannot_reopen(void)
+{
+	Star6eTsRecorderState state;
+	uint8_t video[500];
+	char subdir[320];
+	int failures = 0;
+
+	snprintf(subdir, sizeof(subdir), "%s/rotfail", g_test_dir);
+	(void)mkdir(subdir, 0755);
+
+	memset(video, 0xAB, sizeof(video));
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
+	CHECK("rotfail start ok",
+		star6e_ts_recorder_start(&state, subdir, NULL) == 0);
+	CHECK("rotfail recording true", star6e_ts_recorder_is_recording(&state) == 1);
+
+	state.max_seconds = 0;
+	state.max_bytes = 1;
+	state.rotation_due_since = 1;
+	CHECK("rotfail chmod", chmod(subdir, 0500) == 0);
+
+	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
+		90000, 1);
+
+	CHECK("rotfail no file open", !star6e_ts_recorder_is_active(&state));
+	CHECK("rotfail recording cleared",
+		!star6e_ts_recorder_is_recording(&state));
+	CHECK("rotfail reason recorded",
+		state.last_stop_reason == RECORDER_STOP_WRITE_ERROR);
+
+	(void)chmod(subdir, 0755);
+	star6e_ts_recorder_stop(&state);
+	return failures;
+}
+
 int test_star6e_ts_recorder(void)
 {
 	int failures = 0;
@@ -501,6 +602,8 @@ int test_star6e_ts_recorder(void)
 	failures += test_ts_rotation_state_resets_on_restart();
 	failures += test_ts_no_request_when_rotation_not_due();
 	failures += test_ts_take_idr_request_null_safe();
+	failures += test_ts_is_recording_survives_rotation_but_not_a_stop();
+	failures += test_ts_is_recording_clears_when_rotation_cannot_reopen();
 
 	cleanup_test_dir();
 	return failures;

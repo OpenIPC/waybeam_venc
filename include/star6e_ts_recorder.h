@@ -16,6 +16,14 @@
 
 typedef struct {
 	int fd;
+	/* Set by start(), cleared by every stop.  Deliberately NOT touched by
+	 * segment rotation, which closes and reopens `fd` inside a single
+	 * write_video() call.  `fd >= 0` therefore answers "is a file open
+	 * right now", which is false mid-rotation; this answers "is a
+	 * recording in progress", which is what a producer needs to decide
+	 * whether to hand a frame over.  Read from the encode loop while the
+	 * writer thread rotates, so it is accessed atomically. */
+	int recording;
 	uint64_t bytes_written;
 	uint32_t frames_written;
 	uint32_t segments;            /* number of .ts files produced */
@@ -99,6 +107,15 @@ void star6e_ts_recorder_stop(Star6eTsRecorderState *state);
 
 /** Return 1 if actively recording. */
 int star6e_ts_recorder_is_active(const Star6eTsRecorderState *state);
+
+/* "A recording is in progress", as opposed to is_active()'s "a segment file
+ * is open at this instant".  The two differ for the duration of a rotation.
+ *
+ * Producers must gate on THIS.  Rotation runs on the recorder writer thread
+ * and holds fd == -1 across fdatasync/close/open — tens to hundreds of ms on
+ * an SD card — and a producer gating on is_active() drops every frame in that
+ * window, immediately after the new segment's opening IRAP. */
+int star6e_ts_recorder_is_recording(const Star6eTsRecorderState *state);
 
 /** Stop asking after this many unanswered requests and let rotation go back
  *  to waiting for a natural keyframe.  Without a bound, a mis-wired hook or a

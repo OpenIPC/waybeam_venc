@@ -241,7 +241,10 @@ int star6e_output_stream_packet_info_complete(
  *  to, owns and frees it) or NULL if there is nothing valid to record.
  *
  *  *out_len gets the byte count and *out_is_idr whether any VCL NAL was an
- *  IRAP (types 19/20), which segment rotation needs.  A stream whose
+ *  IRAP, which segment rotation needs.  The IRAP test reads H.265 NAL types
+ *  (19/20) and is H.265-ONLY: on an H.264 stream those numbers mean something
+ *  else, so *out_is_idr would be meaningless.  Every SigmaStar craft encodes
+ *  H.265; a future H.264 path must extend this before recording works.  A stream whose
  *  packetInfo table is incomplete is refused, exactly as the synchronous
  *  writers refuse it — a partial table means the pack boundaries are unknown
  *  and half an access unit is worse than none.

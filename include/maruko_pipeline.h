@@ -12,6 +12,7 @@
 #include "star6e_ts_recorder.h"
 #include "venc_rec_writer.h"
 
+#include <pthread.h>
 #include <signal.h>
 
 struct DebugOsdState; /* forward declaration — see debug_osd.h */
@@ -74,8 +75,18 @@ typedef struct {
    * start/stop only open and close files, and every stop drains this first
    * so a queued tail cannot land after its file has closed. */
   VencRecWriter *rec_writer;
-  pthread_mutex_t rec_writer_lock;
+  pthread_mutex_t rec_writer_lock;   /* guards rec_writer + the counters */
+  /* Serialises the writer thread's sink against every recorder open and
+   * close.  venc_rec_writer_drain() is bounded by design — on timeout it
+   * abandons the queue WITHOUT waiting for the access unit already in the
+   * sink's hands — so the drain alone cannot make a close safe. */
+  pthread_mutex_t rec_state_lock;
+  int rec_locks_ready;               /* both mutexes initialised */
   uint64_t rec_dropped_frames;
+  /* Access units the SDK-typed flatten refused.  Reported as part of
+   * droppedFrames: to an operator both are the same fact — a frame that is
+   * not in the file. */
+  uint64_t rec_flatten_failures;
   uint32_t rec_writer_peak_depth;
   /* SCL crop base after optional binning and AR-matched precrop.  Stored
    * here so maruko_pipeline_apply_zoom can reposition the zoom rect on

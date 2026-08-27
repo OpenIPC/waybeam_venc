@@ -495,19 +495,25 @@ static void install_signal_handlers(void)
 
 static Star6eRunnerContext *g_runner_ctx;
 
-/* Runs on the writer thread, one access unit at a time, in order.  Both
- * writers no-op while their recorder is closed, and every stop drains this
- * queue first, so the sink cannot write into a file that has been closed. */
+/* Runs on the writer thread, one access unit at a time, in order.
+ *
+ * rec_state_lock is what actually makes a close safe.  Both writers no-op on
+ * a closed recorder, but "closed" has to be decided and acted on atomically
+ * with respect to this write: a drain that times out returns with an access
+ * unit still in flight here, and without the lock its write(2) would land on
+ * a descriptor the encode loop is closing and reopening. */
 static void mirror_record_sink(void *opaque, const uint8_t *au, size_t len,
 	uint64_t pts_90khz, int is_idr)
 {
 	Star6ePipelineState *ps = opaque;
 
+	pthread_mutex_lock(&ps->rec_state_lock);
 	if (star6e_ts_recorder_is_active(&ps->ts_recorder))
 		(void)star6e_ts_recorder_write_video(&ps->ts_recorder, au, len,
 			pts_90khz, is_idr);
 	else
 		(void)star6e_recorder_write_au(&ps->recorder, au, len);
+	pthread_mutex_unlock(&ps->rec_state_lock);
 }
 
 /* Barrier before any mirror-mode recorder close.  Queued access units are
@@ -517,14 +523,49 @@ static void mirror_record_sink(void *opaque, const uint8_t *au, size_t len,
  * which is the whole point of the writer. */
 static void mirror_record_drain(Star6ePipelineState *ps)
 {
-	venc_rec_writer_drain(ps->rec_writer, 250, &ps->rec_dropped_frames);
+	uint64_t dropped = 0;
+
+	venc_rec_writer_drain(ps->rec_writer, 250, &dropped);
+	/* rec_dropped_frames is read from the httpd thread; an unlocked 64-bit
+	 * store tears on ARM32. */
+	pthread_mutex_lock(&ps->rec_writer_lock);
+	ps->rec_dropped_frames = dropped;
+	pthread_mutex_unlock(&ps->rec_writer_lock);
+}
+
+/* Both mutexes, initialised before anything can reach them.  This runs ahead
+ * of venc_api_set_record_status_fn(), because httpd is already accepting by
+ * then: a /api/v1/record/status arriving in the gap would lock a mutex that
+ * had never been initialised, and the writer start would then re-initialise a
+ * mutex someone might be holding. */
+static void mirror_record_locks_init(Star6ePipelineState *ps)
+{
+	if (ps->rec_locks_ready)
+		return;
+	pthread_mutex_init(&ps->rec_writer_lock, NULL);
+	pthread_mutex_init(&ps->rec_state_lock, NULL);
+	ps->rec_locks_ready = 1;
+}
+
+/* Called with rec_state_lock held, as a recording opens.  The writer is
+ * long-lived and spans every recording, so without this the counters are
+ * process-lifetime: a clean recording would report the previous one's drops,
+ * and one drain timeout would poison every recording that followed. */
+static void mirror_record_start_counters(Star6ePipelineState *ps)
+{
+	pthread_mutex_lock(&ps->rec_writer_lock);
+	venc_rec_writer_reset_counters(ps->rec_writer);
+	ps->rec_dropped_frames = 0;
+	ps->rec_flatten_failures = 0;
+	ps->rec_writer_peak_depth = 0;
+	pthread_mutex_unlock(&ps->rec_writer_lock);
 }
 
 static void mirror_record_writer_start(Star6ePipelineState *ps)
 {
 	if (ps->rec_writer)
 		return;
-	pthread_mutex_init(&ps->rec_writer_lock, NULL);
+	mirror_record_locks_init(ps);
 	if (venc_rec_writer_start(&ps->rec_writer, mirror_record_sink, ps) != 0)
 		fprintf(stderr, "WARNING: recorder writer thread did not start; "
 			"mirror recording will write on the encode loop and can "
@@ -534,6 +575,13 @@ static void mirror_record_writer_start(Star6ePipelineState *ps)
 static void mirror_record_writer_stop(Star6ePipelineState *ps)
 {
 	VencRecWriter *w;
+
+	/* An init that failed before mirror_record_locks_init() leaves these
+	 * mutexes zeroed, and locking or destroying one of those is undefined
+	 * — on the teardown path of a failed start, which is exactly when it
+	 * would be hardest to diagnose. */
+	if (!ps->rec_locks_ready)
+		return;
 
 	pthread_mutex_lock(&ps->rec_writer_lock);
 	w = ps->rec_writer;
@@ -550,7 +598,9 @@ static void mirror_record_writer_stop(Star6ePipelineState *ps)
 	/* Unbounded: teardown only, where the video path is going away anyway
 	 * and the full flush is what gets the last seconds onto disk. */
 	venc_rec_writer_stop(w);
+	pthread_mutex_destroy(&ps->rec_state_lock);
 	pthread_mutex_destroy(&ps->rec_writer_lock);
+	ps->rec_locks_ready = 0;
 }
 
 static void record_status_callback(VencRecordStatus *out)
@@ -574,6 +624,7 @@ static void record_status_callback(VencRecordStatus *out)
 		if (ps->rec_writer)
 			venc_rec_writer_stats(ps->rec_writer, NULL, &dropped,
 				NULL, &peak);
+		dropped += ps->rec_flatten_failures;
 		pthread_mutex_unlock(&ps->rec_writer_lock);
 		out->dropped_frames = (uint32_t)dropped;
 		out->writer_peak_depth = peak;
@@ -946,6 +997,10 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	VencConfig *vcfg = &ctx->vcfg;
 
 	g_runner_ctx = ctx;
+	/* Before the status callback below: httpd is already accepting by the
+	 * time this function runs, and record_status_callback() takes
+	 * rec_writer_lock. */
+	mirror_record_locks_init(ps);
 	star6e_controls_bind(ps, vcfg);
 	star6e_iq_init();
 	venc_api_register(vcfg, "star6e", star6e_controls_callbacks(),
@@ -989,7 +1044,6 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	}
 
 	star6e_recorder_init(&ps->recorder);
-	mirror_record_writer_start(ps);
 	audio_ring_init(&ps->audio_ring);
 	{
 		/* Match the TS-mux codec to audio.codec.  Opus and PCM are the
@@ -1012,6 +1066,14 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		ps->ts_recorder.max_seconds = vcfg->record.max_seconds;
 	if (vcfg->record.max_mb > 0)
 		ps->ts_recorder.max_bytes = (uint64_t)vcfg->record.max_mb * 1024 * 1024;
+
+	/* After BOTH recorders are initialised.  The writer thread's sink
+	 * reads their state, and star6e_ts_recorder_init() is what sets
+	 * fd = -1 — before it, a calloc'd fd of 0 reads as an open file
+	 * (stdin).  Nothing is queued this early today, so this is ordering
+	 * discipline rather than a live bug; the alternative is a rule that
+	 * only holds until someone adds an earlier push. */
+	mirror_record_writer_start(ps);
 
 	/* Start dual VENC if mode is "dual" or "dual-stream".
 	 *
@@ -1387,8 +1449,14 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * flatten is not an extra cost for the TS path, which was already
 	 * flattening onto a 512 KB stack buffer.  Gated on a recorder actually
 	 * being open so an idle craft pays no malloc per frame. */
+	/* is_RECORDING, not is_active: the TS recorder rotates on the writer
+	 * thread and holds fd == -1 across fdatasync/close/open — tens to
+	 * hundreds of ms on an SD card.  Gating on the descriptor would drop
+	 * every frame in that window, uncounted, right after the new segment's
+	 * opening IRAP.  The HEVC recorder never rotates, so for it the two
+	 * questions are the same one. */
 	if (!ps->dual && ps->rec_writer &&
-	    (star6e_ts_recorder_is_active(&ps->ts_recorder) ||
+	    (star6e_ts_recorder_is_recording(&ps->ts_recorder) ||
 	     star6e_recorder_is_active(&ps->recorder))) {
 		size_t au_len = 0;
 		int au_idr = 0;
@@ -1404,6 +1472,13 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 					(uint32_t)rec_now.tv_sec,
 					(uint32_t)rec_now.tv_nsec),
 				au_idr);
+		} else {
+			/* A frame the flatten refused is a frame missing from
+			 * the file; counting it keeps that visible instead of
+			 * making a damaged recording look clean (S8). */
+			pthread_mutex_lock(&ps->rec_writer_lock);
+			ps->rec_flatten_failures++;
+			pthread_mutex_unlock(&ps->rec_writer_lock);
 		}
 	} else if (!ps->dual) {
 		/* No writer (its thread failed to start): fall back to the
@@ -1459,8 +1534,17 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 				ps->dual->rec_req_stop = 0;
 				ps->dual->rec_req_start = 1;
 			} else if (!ps->dual) {
-				/* Mirror mode: act directly on the recorders */
+				/* Mirror mode: act directly on the recorders.
+				 *
+				 * Drain FIRST and outside rec_state_lock — the
+				 * drain waits on the writer thread, and the
+				 * writer thread needs that same lock to finish.
+				 * Taking it here would deadlock.  Then hold it
+				 * across the close/reopen so an access unit the
+				 * drain timed out on cannot write into the file
+				 * being swapped. */
 				mirror_record_drain(ps);
+				pthread_mutex_lock(&ps->rec_state_lock);
 				star6e_recorder_stop(&ps->recorder);
 				star6e_ts_recorder_stop(&ps->ts_recorder);
 				ps->audio.rec_ring = NULL;
@@ -1473,6 +1557,8 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 						rec_dir,
 						vcfg->audio.enabled ? &ps->audio_ring : NULL);
 				}
+				mirror_record_start_counters(ps);
+				pthread_mutex_unlock(&ps->rec_state_lock);
 				/* Request IDR so the recording starts with a keyframe */
 				runtime_request_idr();
 			}
@@ -1485,9 +1571,11 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 				ps->dual->rec_req_stop = 1;
 			} else if (!ps->dual) {
 				mirror_record_drain(ps);
+				pthread_mutex_lock(&ps->rec_state_lock);
 				star6e_recorder_stop(&ps->recorder);
 				star6e_ts_recorder_stop(&ps->ts_recorder);
 				ps->audio.rec_ring = NULL;
+				pthread_mutex_unlock(&ps->rec_state_lock);
 			}
 			/* dual-stream: nothing to do */
 		}

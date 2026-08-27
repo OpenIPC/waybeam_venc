@@ -91,6 +91,7 @@ static void stop_with_reason(Star6eTsRecorderState *state,
 	fdatasync(state->fd);
 	close(state->fd);
 	state->fd = -1;
+	__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
 	state->last_stop_reason = reason;
 
 	fprintf(stderr, "[ts_recorder] stopped (%s): %s (%u frames, %llu bytes, %u segments)\n",
@@ -194,6 +195,10 @@ int star6e_ts_recorder_start(Star6eTsRecorderState *state, const char *dir,
 
 	if (open_new_segment(state) != 0)
 		return -1;
+
+	/* Published only once the first segment is actually open, so a failed
+	 * start never leaves a producer thinking a recording is running. */
+	__atomic_store_n(&state->recording, 1, __ATOMIC_RELEASE);
 
 	fprintf(stderr, "[ts_recorder] started: %s\n", state->path);
 	return 0;
@@ -299,6 +304,9 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	state->segment_bytes = 0;
 
 	if (open_new_segment(state) != 0) {
+		/* A rotation that cannot reopen is a stop, not a gap: clear the
+		 * recording flag so producers stop handing over frames. */
+		__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
 		state->last_stop_reason = RECORDER_STOP_WRITE_ERROR;
 		return -1;
 	}
@@ -399,6 +407,11 @@ void star6e_ts_recorder_stop(Star6eTsRecorderState *state)
 int star6e_ts_recorder_is_active(const Star6eTsRecorderState *state)
 {
 	return state && state->fd >= 0;
+}
+
+int star6e_ts_recorder_is_recording(const Star6eTsRecorderState *state)
+{
+	return state && __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
 }
 
 #if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)

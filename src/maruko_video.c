@@ -1,5 +1,7 @@
 #include "maruko_video.h"
 
+#include "venc_rec_writer.h"
+
 #include "h26x_util.h"
 #include "hevc_rtp.h"
 #include "rtp_packetizer.h"
@@ -73,7 +75,11 @@ uint8_t *maruko_video_stream_flatten(const i6c_venc_strm *stream,
 		return NULL;
 
 	total = maruko_stream_payload_bytes(stream, &is_idr);
-	if (total == 0)
+	/* An access unit larger than the whole queue can never be recorded:
+	 * push() would reject it at the cap and free it again.  Refusing here
+	 * skips a multi-megabyte malloc+memcpy that exists only to be thrown
+	 * away — and on a 89 MB SoC that allocation is not free. */
+	if (total == 0 || total > VENC_REC_WRITER_MAX_BYTES)
 		return NULL;
 	buf = malloc(total);
 	if (!buf)

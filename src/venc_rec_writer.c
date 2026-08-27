@@ -26,6 +26,14 @@ struct VencRecWriter {
 	bool             thread_started;
 	bool             stopping;
 
+	/* True from the moment an entry leaves the queue until its sink call
+	 * has returned.  The queue is popped UNDER the lock but the sink runs
+	 * OUTSIDE it, so `head == NULL` says nothing about whether a write is
+	 * still in progress — a drain that tested only the queue would return
+	 * while the sink still held the caller's fd.  The flag closes exactly
+	 * that window. */
+	bool             in_flight;
+
 	VencRecAu       *head;
 	VencRecAu       *tail;
 	uint32_t         depth;
@@ -82,12 +90,16 @@ static void *writer_thread(void *opaque)
 
 		/* The sink blocks on the disk — that is the entire point of this
 		 * thread — so it must not hold the lock, or push() would block
-		 * with it and the stall would reach the drain loop anyway. */
+		 * with it and the stall would reach the drain loop anyway.
+		 * Publish `in_flight` before dropping the lock so a waiter can
+		 * never observe the gap between the pop and the write. */
+		w->in_flight = true;
 		pthread_mutex_unlock(&w->lock);
 		if (w->sink)
 			w->sink(w->ctx, e->au, e->len, e->pts_90khz, e->is_idr);
 		au_free(e);
 		pthread_mutex_lock(&w->lock);
+		w->in_flight = false;
 	}
 	pthread_mutex_unlock(&w->lock);
 	return NULL;
@@ -225,7 +237,9 @@ static void writer_destroy(VencRecWriter *w, uint64_t *dropped)
 	free(w);
 }
 
-/* Caller must NOT hold the lock. */
+/* Wait until the writer thread is genuinely idle: nothing queued AND nothing
+ * being written.  Returns 1 if it reached that state, 0 on timeout.
+ * Caller must NOT hold the lock. */
 static int queue_wait_empty(VencRecWriter *w, unsigned grace_ms)
 {
 	unsigned waited = 0;
@@ -234,7 +248,7 @@ static int queue_wait_empty(VencRecWriter *w, unsigned grace_ms)
 		int done;
 
 		pthread_mutex_lock(&w->lock);
-		done = (w->head == NULL);
+		done = (w->head == NULL && !w->in_flight);
 		pthread_mutex_unlock(&w->lock);
 		if (done)
 			return 1;
@@ -252,9 +266,11 @@ void venc_rec_writer_drain(VencRecWriter *w, unsigned grace_ms,
 		return;
 
 	if (!queue_wait_empty(w, grace_ms)) {
-		/* Abandon the rest rather than hold the caller.  The entry the
-		 * writer thread already has in hand still completes — it holds
-		 * no lock, so it is not visible here and is not counted. */
+		/* Timed out: abandon the queue rather than hold the encode loop
+		 * for a stalled card.  An access unit already in the sink's hands
+		 * is NOT waited for here — bounding this path is the whole point
+		 * — so the caller must serialise its own teardown against the
+		 * sink.  Both SigmaStar backends do that with rec_state_lock. */
 		pthread_mutex_lock(&w->lock);
 		for (;;) {
 			VencRecAu *e = queue_pop(w);
@@ -314,6 +330,17 @@ void venc_rec_writer_stop(VencRecWriter *w)
 		pthread_join(w->thread, NULL);
 
 	writer_destroy(w, NULL);
+}
+
+void venc_rec_writer_reset_counters(VencRecWriter *w)
+{
+	if (!w)
+		return;
+	pthread_mutex_lock(&w->lock);
+	w->queued = 0;
+	w->dropped = 0;
+	w->peak_depth = w->depth;
+	pthread_mutex_unlock(&w->lock);
 }
 
 void venc_rec_writer_stats(const VencRecWriter *w, uint64_t *queued,

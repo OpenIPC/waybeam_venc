@@ -52,6 +52,7 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 		if (ctx->backend.rec_writer)
 			venc_rec_writer_stats(ctx->backend.rec_writer, NULL,
 				&dropped, NULL, &peak);
+		dropped += ctx->backend.rec_flatten_failures;
 		pthread_mutex_unlock(&ctx->backend.rec_writer_lock);
 		out->dropped_frames = (uint32_t)dropped;
 		out->writer_peak_depth = peak;
