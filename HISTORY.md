@@ -135,6 +135,20 @@ Device, after the per-recording rework (2026-08-28):
   device). 3 segments at `max_seconds=10`, 816 frames / 30.0 fps exactly,
   `droppedFrames` 0, every segment opening on an `I`, a full segment
   decoding to exactly 300 frames. Threads 6 -> 7 -> 6.
+- **cv610 `.2.181`**, 100 fps, GDR. On tmpfs: 3 segments at `max_seconds=10`,
+  3231 frames / 100.0 fps exactly, 0 dropped, every segment opening on an `I`,
+  a full segment decoding to 1100 frames. On the **real FAT32 USB volume**:
+  5 segments, 4518 frames / 100.03 fps, 0 dropped across 4 rotations, all five
+  segments opening on an `I`, a segment decoding to 1101 frames — and
+  `writerPeakDepth` 1 -> 5 -> 6 -> 7, the real rotation cost being absorbed by
+  the queue exactly as on the star6e card. Threads 6 -> 7 -> 6 on both.
+- **The CV610 self-stop leak is demonstrated, not asserted.** Same box, same
+  test (a 52 MB tmpfs filled to the free-space floor), shipped 0.70.0 versus
+  this build: both report `stopReason: disk_full`, but 0.70.0 leaves the
+  writer thread alive — 6 threads before, **7** still 24 s after the recorder
+  stopped itself — while this build tears it down inside one poll (7 -> 6).
+  That thread goes on receiving a copied, allocated access unit per encoded
+  frame, forever, because its gate is the handle alone.
 
 Both benches were restored to their master binaries and original config
 afterwards; no RF was raised for any of it (waybeam-link stayed down).
