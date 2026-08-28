@@ -199,6 +199,36 @@ sampler thread was never scheduled before the writes finished — which is a
 gate testing the machine rather than the code. It now waits for the sampler to
 reach a CPU first, and is 6/6 green under the same load.
 
+Re-verified on hardware AFTER those fixes, since three of the four touch the
+SigmaStar backends:
+
+- **star6e `.2.232`**, real SD card, 60 fps, GDR. Rotation at
+  `max_seconds=10`: 5 segments, 2658 frames / 59.93 fps, `droppedFrames` 0
+  across 4 rotations, every segment opening on an `I`, and `writerPeakDepth`
+  1 -> 20 — the same rotation signature as before the fixes. Self-stop on a
+  56 MB tmpfs, with the teardown now in its new position after the release:
+  threads 8 -> 9 -> 8 and `stopReason: disk_full` within one poll. Boot
+  auto-start: 3 segments, 0 dropped. Teardown **while recording**, three
+  cycles: 1.4-1.9 s against a watchdog that SIGKILLs at 3 s, with no
+  watchdog, sysrq or kill event in the log.
+- **maruko `.2.233`**, 30 fps. Rotation: 4 segments, 965 frames / 29.98 fps,
+  0 dropped, every segment opening on an `I`, a full segment decoding to
+  exactly 300 frames. Boot auto-start: 2 segments, 0 dropped. Teardown while
+  recording: 1756 ms twice, with uptime continuing to climb — the
+  `reboot(RB_AUTOBOOT)` watchdog never fired.
+- Threads 8 -> 9 -> 8 (star6e) and 6 -> 7 -> 6 (maruko) on every recording.
+
+**Maruko's self-stop cannot be exercised on that hardware, and this is
+permanent.** Its SD slot detects no card (the `ms_sdmmc` controller probes and
+`mmc0` exists, but `/sys/bus/mmc/devices/` stays empty), and the kernel has no
+SCSI bus and no `usb-storage`/`sd_mod`, so a USB drive cannot substitute
+either. With no block device, `star6e_recorder_free_space()` returns 0 on its
+ramfs and the disk-full guard is skipped entirely. What covers maruko instead:
+the detection predicate and the recorder's disk-full stop are shared code
+exercised by the host suite, and the three-line reaction is identical in shape
+to star6e's and CV610's, both of which are device-verified — CV610 as a direct
+A/B against the shipped build.
+
 ## [0.70.0] - 2026-08-27
 
 Snapshot and recording reach the CV610 backend, and the config file is read
