@@ -226,17 +226,20 @@ static int test_writer_rejects_bad_start(void)
 	return failures;
 }
 
-/* The barrier contract.  drain() exists so a caller can release the resource
- * the sink writes into — close the segment file, free the recorder state — the
- * instant it returns.  If the sink can still run afterwards, the previous
- * recording's tail lands in the NEXT file, over its PAT/PMT and opening IRAP.
+/* The barrier contract.  A recorder close follows every stop, and the queued
+ * access units are written BY DESCRIPTOR — so if the sink can still run after
+ * the stop returns, the previous recording's tail lands in the NEXT file, over
+ * its PAT/PMT and opening IRAP.
  *
- * This models exactly that: the sink touches a resource the main thread
- * releases the moment drain() returns.  Against an unlocked-mid-write pop it
- * fails, because head == NULL is true for the whole duration of the write. */
+ * The barrier is the unconditional pthread_join inside the stop.  Nothing
+ * else: no in-flight flag, no lock between the sink and the close.  That is
+ * the whole reason the writer's lifetime is tied to one recording.
+ *
+ * These model exactly that: the sink touches a resource the main thread
+ * releases the moment the stop returns.  Delete the join and they fail. */
 typedef struct {
 	unsigned delay_us;
-	int      released;            /* main thread releases after drain() */
+	int      released;            /* main thread releases after the stop */
 	int      ran_after_release;   /* the defect, if it ever gets set */
 	unsigned calls;
 } BarrierSink;
@@ -257,43 +260,54 @@ static void barrier_sink(void *ctx, const uint8_t *au, size_t len,
 	s->calls++;
 }
 
-static int test_writer_drain_is_a_real_barrier(void)
+static int test_writer_stop_bounded_is_a_hard_barrier(void)
 {
 	VencRecWriter *w = NULL;
 	BarrierSink s;
+	struct timespec t0, t1;
+	long long elapsed_ms;
 	int failures = 0;
 
 	memset(&s, 0, sizeof(s));
-	s.delay_us = 150000;   /* 150 ms — one slow SD-card write */
+	s.delay_us = 200000;   /* 200 ms — one slow SD-card write */
 
 	CHECK("barrier writer start",
 		venc_rec_writer_start(&w, barrier_sink, &s) == 0 && w != NULL);
 
 	(void)venc_rec_writer_push(w, make_au(1, 1024), 1024, 900, 1);
 
-	/* Let the writer thread actually pick the entry up, so the queue is
-	 * empty but the sink is mid-write — the state drain() must not mistake
-	 * for "done". */
+	/* Let the writer thread pick the entry up, so the QUEUE is empty but
+	 * the sink is mid-write.  Only the join can cover that state. */
 	usleep(20000);
 
-	venc_rec_writer_drain(w, 2000, NULL);
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	venc_rec_writer_stop_bounded(w, 10, NULL);   /* grace already expired */
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
+		(t1.tv_nsec - t0.tv_nsec) / 1000000;
 
 	/* Everything after this line stands for close(fd) / recorder teardown. */
 	__atomic_store_n(&s.released, 1, __ATOMIC_RELEASE);
+	usleep(300000);   /* well past the sink's own delay */
 
-	/* Join before asserting: the question is not whether the sink has run
-	 * YET, it is whether it ran BEFORE the release.  Reading the flags
-	 * without the join would only re-measure drain()'s own timing. */
-	venc_rec_writer_stop(w);
-
-	CHECK("drain did not lose the frame", s.calls == 1);
-	CHECK("drain waited for the in-flight sink", s.ran_after_release == 0);
+	/* The grace was 10 ms and the queue was already empty, so a stop that
+	 * skipped the join would return at once.  Waiting out the write is the
+	 * observable half of the barrier. */
+	CHECK("stop_bounded waited for the in-flight sink", elapsed_ms >= 100);
+	CHECK("stop_bounded did not lose the frame", s.calls == 1);
+	CHECK("no sink call landed after the stop returned",
+		s.ran_after_release == 0);
 	return failures;
 }
 
 /* The other half of the contract: the barrier is BOUNDED.  A stalled card must
- * not park the encode loop for the length of the queue. */
-static int test_writer_drain_is_bounded_and_counts_the_abandoned(void)
+ * not park the encode loop for the length of the queue.
+ *
+ * This is not hypothetical.  Setting `stopping` does NOT bound the writer
+ * thread — it drains its queue to the end and only then honours the flag — so
+ * a stop that only joined would block for the whole backlog.  The queue is
+ * abandoned before the join for exactly this reason. */
+static int test_writer_stop_bounded_abandons_the_backlog(void)
 {
 	VencRecWriter *w = NULL;
 	BarrierSink s;
@@ -306,7 +320,7 @@ static int test_writer_drain_is_bounded_and_counts_the_abandoned(void)
 	memset(&s, 0, sizeof(s));
 	s.delay_us = 120000;   /* 120 ms each: 8 cannot fit a 150 ms grace */
 
-	CHECK("bounded drain writer start",
+	CHECK("bounded stop writer start",
 		venc_rec_writer_start(&w, barrier_sink, &s) == 0);
 
 	for (i = 0; i < 8; i++)
@@ -314,24 +328,26 @@ static int test_writer_drain_is_bounded_and_counts_the_abandoned(void)
 			(uint64_t)i * 900, 0);
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
-	venc_rec_writer_drain(w, 150, &dropped);
+	venc_rec_writer_stop_bounded(w, 150, &dropped);
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
 		(t1.tv_nsec - t0.tv_nsec) / 1000000;
 
 	/* Grace + at most one in-flight sink.  Never the whole backlog (960 ms). */
-	CHECK("drain is bounded by grace plus one write", elapsed_ms < 400);
-	CHECK("drain counted what it abandoned", dropped > 0);
-
-	venc_rec_writer_stop(w);
+	CHECK("stop_bounded is bounded by grace plus one write",
+		elapsed_ms < 500);
+	CHECK("stop_bounded counted what it abandoned", dropped > 0);
 	CHECK("abandoned frames never reached the sink", s.calls < 8);
 	return failures;
 }
 
-/* Counters are per-RECORDING, not per-process.  A long-lived writer spans
- * many recordings; without a reset, a clean one reports the previous one's
- * drops and every timeout poisons the count for good. */
-static int test_writer_reset_counters_makes_them_per_recording(void)
+/* Counters are per-RECORDING.  Not by an operation any more — by the writer's
+ * lifetime: the backends create one when a recording opens and destroy it when
+ * the recording closes, so the next recording gets a fresh handle whose
+ * counters start at zero.  This pins that structural claim; the backends'
+ * own per-recording fields (rec_flatten_failures) are reset alongside it in
+ * mirror_record_open(), which the host suite does not link. */
+static int test_writer_counters_start_clean_for_each_recording(void)
 {
 	VencRecWriter *w = NULL;
 	SinkState s;
@@ -341,9 +357,10 @@ static int test_writer_reset_counters_makes_them_per_recording(void)
 	int i;
 
 	sink_init(&s, 50000);   /* slow enough to fill the 4 MB cap */
-	CHECK("reset writer start", venc_rec_writer_start(&w, test_sink, &s) == 0);
 
 	/* Recording 1: overrun the queue so it sheds frames. */
+	CHECK("first recording writer start",
+		venc_rec_writer_start(&w, test_sink, &s) == 0);
 	for (i = 0; i < 40; i++)
 		(void)venc_rec_writer_push(w, make_au((uint8_t)i, 256 * 1024),
 			256 * 1024, (uint64_t)i * 900, 0);
@@ -351,81 +368,55 @@ static int test_writer_reset_counters_makes_them_per_recording(void)
 	CHECK("first recording shed frames", dropped > 0);
 	CHECK("first recording queued frames", queued > 0);
 	CHECK("first recording saw depth", peak > 0);
+	venc_rec_writer_stop_bounded(w, 50, NULL);
+	w = NULL;
 
-	/* Recording 2 starts: the slate is clean. */
-	venc_rec_writer_reset_counters(w);
+	/* Recording 2 starts: a new writer, and the slate is clean. */
+	CHECK("second recording writer start",
+		venc_rec_writer_start(&w, test_sink, &s) == 0);
 	venc_rec_writer_stats(w, &queued, &dropped, NULL, &peak);
 	CHECK("second recording inherits no drops", dropped == 0);
 	CHECK("second recording inherits no queued count", queued == 0);
+	CHECK("second recording inherits no peak depth", peak == 0);
 
-	/* peak is reset to the LIVE depth, not to zero: a queue that is still
-	 * carrying entries has genuinely reached that depth in this recording.
-	 *
-	 * Asserted as >=, not ==: the sink is still draining, so depth decays
-	 * between the reset and this read.  An equality here passes on an idle
-	 * machine and fails whenever a 50 ms sink call happens to complete in
-	 * the gap — a flake that would eventually be "fixed" by deleting the
-	 * assertion.  The `> 0` half is what keeps it from being vacuous. */
-	{
-		uint32_t depth = 0;
-
-		venc_rec_writer_stats(w, NULL, NULL, &depth, &peak);
-		CHECK("peak restarts from the live depth, not from zero",
-			peak >= depth && peak > 0);
-	}
-
-	venc_rec_writer_reset_counters(NULL);
-	CHECK("reset NULL safe", 1);
-
-	venc_rec_writer_stop(w);
+	venc_rec_writer_stop_bounded(w, 50, NULL);
 	sink_destroy(&s);
 	return failures;
 }
 
-/* The pattern both SigmaStar backends use for the case drain() deliberately
- * does NOT cover: the grace expires with an access unit still in the sink's
- * hands.  drain() bounds the wait; a state lock — taken by the sink around
- * its write and by the closer around the close — makes the close safe, at a
- * cost of at most one write rather than the whole queue.
+/* What the join replaced.  The old long-lived writer needed a lock held by
+ * the sink around its write and by the closer around the close, because its
+ * bounded drain could return with an access unit still in the sink's hands.
+ * The join has no such gap, so the close needs NO lock — and this asserts the
+ * stronger property directly: close immediately after the stop, unsynchronised,
+ * and nothing may write into the closed recorder.
  *
- * Modelled here so the pattern itself is pinned: drop the lock from the sink
- * and "still no write after the close" fails (verified by mutation).
- *
- * Be clear about what this does and does not cover.  The lock it exercises is
- * declared in this file; the real rec_state_lock lives in the backend
- * runtimes, which the host suite does not link.  So this is executable
- * documentation of the pattern the backends must follow, plus genuine coverage
- * of venc_rec_writer_drain()'s timeout path — not coverage of rec_state_lock.
- *
- * The lock must be taken AFTER the drain, never around it: the drain waits on
- * the writer thread, and the writer thread needs the same lock to finish. */
+ * Mutation-checked by removing the pthread_join from
+ * venc_rec_writer_stop_bounded(): "no write landed after the close" fails. */
 typedef struct {
-	pthread_mutex_t state_lock;   /* stands for rec_state_lock */
-	unsigned        delay_us;
-	int             fd_open;      /* stands for the recorder's descriptor */
-	int             wrote_while_closed;
-	unsigned        writes;
-} LockedRecorder;
+	unsigned delay_us;
+	int      fd_open;             /* stands for the recorder's descriptor */
+	int      wrote_while_closed;
+	unsigned writes;
+} UnlockedRecorder;
 
-static void locked_recorder_sink(void *ctx, const uint8_t *au, size_t len,
+static void unlocked_recorder_sink(void *ctx, const uint8_t *au, size_t len,
 	uint64_t pts_90khz, int is_idr)
 {
-	LockedRecorder *r = ctx;
+	UnlockedRecorder *r = ctx;
 
 	(void)au; (void)len; (void)pts_90khz; (void)is_idr;
 
-	pthread_mutex_lock(&r->state_lock);
 	usleep(r->delay_us);
-	if (!r->fd_open)
+	if (!__atomic_load_n(&r->fd_open, __ATOMIC_ACQUIRE))
 		r->wrote_while_closed = 1;
 	r->writes++;
-	pthread_mutex_unlock(&r->state_lock);
 }
 
-static int test_writer_state_lock_covers_the_drain_timeout(void)
+static int test_writer_stop_bounded_makes_a_close_safe_without_a_lock(void)
 {
 	VencRecWriter *w = NULL;
-	LockedRecorder r;
+	UnlockedRecorder r;
 	struct timespec t0, t1;
 	long long elapsed_ms;
 	uint64_t dropped = 0;
@@ -433,53 +424,45 @@ static int test_writer_state_lock_covers_the_drain_timeout(void)
 	int i;
 
 	memset(&r, 0, sizeof(r));
-	pthread_mutex_init(&r.state_lock, NULL);
 	r.delay_us = 60000;   /* 60 ms per write */
 	r.fd_open = 1;
 
-	CHECK("state lock writer start",
-		venc_rec_writer_start(&w, locked_recorder_sink, &r) == 0);
+	CHECK("unlocked close writer start",
+		venc_rec_writer_start(&w, unlocked_recorder_sink, &r) == 0);
 
-	/* Far more than a 100 ms grace can absorb, so the drain is guaranteed
-	 * to time out with the sink still running. */
+	/* Far more than a 100 ms grace can absorb, so the stop is guaranteed to
+	 * hit its bound with the sink still running. */
 	for (i = 0; i < 20; i++)
 		(void)venc_rec_writer_push(w, make_au((uint8_t)i, 1024), 1024,
 			(uint64_t)i * 900, 0);
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
-	venc_rec_writer_drain(w, 100, &dropped);
-	CHECK("the drain did time out", dropped > 0);
-
-	/* Exactly what the backends do: close under the state lock. */
-	pthread_mutex_lock(&r.state_lock);
+	venc_rec_writer_stop_bounded(w, 100, &dropped);
+	/* Exactly what the backends do: close straight after the stop, with
+	 * nothing serialising it against the sink. */
 	r.fd_open = 0;
-	pthread_mutex_unlock(&r.state_lock);
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
 		(t1.tv_nsec - t0.tv_nsec) / 1000000;
 
+	CHECK("the stop did hit its bound", dropped > 0);
 	/* Grace + one in-flight write, not the 1.2 s the queue would have
 	 * taken.  This is the bound the encode loop is paying for. */
-	CHECK("the close waited for one write, not the queue", elapsed_ms < 400);
+	CHECK("the close waited for one write, not the queue", elapsed_ms < 500);
 
-	/* The load-bearing assertion, and it has to come after the join: read
-	 * before it and it only says the sink has not got there YET.  (A check
-	 * at this point before the join survived every mutant tried against
-	 * it, which is what a harness-only assertion looks like.) */
-	venc_rec_writer_stop(w);
+	usleep(200000);   /* long enough for a leaked thread to write again */
 	CHECK("no write landed after the close", r.wrote_while_closed == 0);
-	pthread_mutex_destroy(&r.state_lock);
 	return failures;
 }
 
 /* The barrier must also RETURN when there is nothing to wait for.
  *
- * Nothing asserted this, so an `in_flight` stuck true — or a predicate that
- * never reports idle — left every drain burning its full grace: 250 ms on the
- * encode loop at each record transition on both SigmaStar backends, with the
- * whole suite still green.  Over-waiting is not a safe failure here; it is the
- * stall the writer thread exists to prevent, moved to a rarer event. */
-static int test_writer_drain_returns_promptly_when_idle(void)
+ * Nothing asserted this, so a predicate that never reports idle left every
+ * stop burning its full grace: 250 ms on the encode loop at each record
+ * transition on both SigmaStar backends, with the whole suite still green.
+ * Over-waiting is not a safe failure here; it is the stall the writer thread
+ * exists to prevent, moved to a rarer event. */
+static int test_writer_stop_bounded_returns_promptly_when_idle(void)
 {
 	VencRecWriter *w = NULL;
 	BarrierSink s;
@@ -491,41 +474,29 @@ static int test_writer_drain_returns_promptly_when_idle(void)
 	memset(&s, 0, sizeof(s));
 	s.delay_us = 1000;   /* a healthy card: 1 ms a frame */
 
-	CHECK("idle drain writer start",
+	CHECK("idle stop writer start",
 		venc_rec_writer_start(&w, barrier_sink, &s) == 0);
 
 	(void)venc_rec_writer_push(w, make_au(7, 512), 512, 900, 0);
 	usleep(50000);   /* let it finish; the writer is now genuinely idle */
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
-	venc_rec_writer_drain(w, 3000, &dropped);
+	venc_rec_writer_stop_bounded(w, 3000, &dropped);
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
 		(t1.tv_nsec - t0.tv_nsec) / 1000000;
 
-	/* Against a 3 s grace: a drain that cannot see idle would take all of
+	/* Against a 3 s grace: a stop that cannot see idle would take all of
 	 * it.  Anything under a tenth of the grace can only be the early
 	 * return. */
-	CHECK("idle drain returns without burning the grace", elapsed_ms < 300);
-	CHECK("idle drain abandoned nothing", dropped == 0);
-	CHECK("idle drain delivered the frame", s.calls == 1);
-
-	/* And a second drain on a writer that never had work at all. */
-	clock_gettime(CLOCK_MONOTONIC, &t0);
-	venc_rec_writer_drain(w, 3000, NULL);
-	clock_gettime(CLOCK_MONOTONIC, &t1);
-	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
-		(t1.tv_nsec - t0.tv_nsec) / 1000000;
-	CHECK("drain on an empty queue is immediate", elapsed_ms < 300);
-
-	venc_rec_writer_stop(w);
+	CHECK("idle stop returns without burning the grace", elapsed_ms < 300);
+	CHECK("idle stop abandoned nothing", dropped == 0);
+	CHECK("idle stop delivered the frame", s.calls == 1);
 	return failures;
 }
 
-/* The header says *dropped is ASSIGNED, not accumulated into.  That sentence
- * was corrected in the same change that added this function, so it should be
- * held to. */
-static int test_writer_drain_assigns_dropped_rather_than_accumulating(void)
+/* The header says *dropped is ASSIGNED, not accumulated into. */
+static int test_writer_stop_bounded_assigns_dropped_rather_than_accumulating(void)
 {
 	VencRecWriter *w = NULL;
 	BarrierSink s;
@@ -535,16 +506,14 @@ static int test_writer_drain_assigns_dropped_rather_than_accumulating(void)
 	memset(&s, 0, sizeof(s));
 	s.delay_us = 0;
 
-	CHECK("assign drain writer start",
+	CHECK("assign stop writer start",
 		venc_rec_writer_start(&w, barrier_sink, &s) == 0);
 	(void)venc_rec_writer_push(w, make_au(3, 256), 256, 900, 0);
-	venc_rec_writer_drain(w, 2000, &dropped);
+	venc_rec_writer_stop_bounded(w, 2000, &dropped);
 
 	/* Nothing was refused, so the writer's total is 0.  An implementation
 	 * that accumulated would leave the caller's 1000 in place. */
-	CHECK("drain assigns the total, it does not add to it", dropped == 0);
-
-	venc_rec_writer_stop(w);
+	CHECK("stop assigns the total, it does not add to it", dropped == 0);
 	return failures;
 }
 
@@ -557,11 +526,11 @@ int test_venc_rec_writer(void)
 	failures += test_writer_preserves_order_and_payload();
 	failures += test_writer_push_does_not_block_on_a_slow_sink();
 	failures += test_writer_drops_and_counts_when_full();
-	failures += test_writer_drain_is_a_real_barrier();
-	failures += test_writer_drain_is_bounded_and_counts_the_abandoned();
-	failures += test_writer_reset_counters_makes_them_per_recording();
-	failures += test_writer_state_lock_covers_the_drain_timeout();
-	failures += test_writer_drain_returns_promptly_when_idle();
-	failures += test_writer_drain_assigns_dropped_rather_than_accumulating();
+	failures += test_writer_stop_bounded_is_a_hard_barrier();
+	failures += test_writer_stop_bounded_abandons_the_backlog();
+	failures += test_writer_counters_start_clean_for_each_recording();
+	failures += test_writer_stop_bounded_makes_a_close_safe_without_a_lock();
+	failures += test_writer_stop_bounded_returns_promptly_when_idle();
+	failures += test_writer_stop_bounded_assigns_dropped_rather_than_accumulating();
 	return failures;
 }

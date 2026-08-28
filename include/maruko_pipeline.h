@@ -71,17 +71,19 @@ typedef struct {
   /* Mirror-mode recording writes on this thread, not the encode loop: a
    * blocking write(2) before maruko_mi_venc_release_stream() backs up the
    * encoder output queue and stalls the LIVE stream.  Dual mode already
-   * drains chn 1 on its own thread and is unaffected.  Long-lived — record
-   * start/stop only open and close files, and every stop drains this first
-   * so a queued tail cannot land after its file has closed. */
+   * drains chn 1 on its own thread and is unaffected.
+   *
+   * PER-RECORDING: created after the recorder file is open and joined
+   * before it closes.  That join is the barrier — nothing else has to
+   * serialise the sink against a close, and the pointer being non-NULL IS
+   * "a recording is running", so the producer gate needs no recorder-state
+   * predicate.  NULL whenever nothing is recording. */
   VencRecWriter *rec_writer;
   pthread_mutex_t rec_writer_lock;   /* guards rec_writer + the counters */
-  /* Serialises the writer thread's sink against every recorder open and
-   * close.  venc_rec_writer_drain() is bounded by design — on timeout it
-   * abandons the queue WITHOUT waiting for the access unit already in the
-   * sink's hands — so the drain alone cannot make a close safe. */
-  pthread_mutex_t rec_state_lock;
-  int rec_locks_ready;               /* both mutexes initialised */
+  /* rec_writer_lock is initialised during graph configure and destroyed at
+   * teardown, so a teardown after a failed bring-up needs to know whether
+   * it ever ran. */
+  int rec_locks_ready;
   uint64_t rec_dropped_frames;
   /* Access units the SDK-typed flatten refused.  Reported as part of
    * droppedFrames: to an operator both are the same fact — a frame that is

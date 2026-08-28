@@ -47,8 +47,17 @@ extern "C" {
  * Threading: exactly one producer (the drain loop) and one consumer (the
  * writer thread).  The sink therefore runs on the writer thread, so the
  * recorder state it mutates must not be touched by the producer while the
- * writer is running — start the writer after opening the recorder, and stop
- * it (which drains and joins) before closing the recorder.
+ * writer is running.
+ *
+ * LIFETIME — one writer per RECORDING, not one per process.  Start it after
+ * the recorder file is open; stop it before closing that file.  Both stops
+ * end in an unconditional pthread_join, so on return the sink is guaranteed
+ * never to run again and the close needs no further serialisation.  A
+ * long-lived writer would need a separate barrier before every close, a lock
+ * between the sink and the close for the case that barrier cannot cover, and
+ * a counter reset at every start; tying the lifetime to the recording
+ * removes all three.  It also makes the handle itself the answer to "is a
+ * recording running", which is what the backends' producer gates test.
  */
 
 /* Called on the writer thread, once per queued access unit, in order. */
@@ -101,43 +110,17 @@ void venc_rec_writer_stop(VencRecWriter *w);
  * queued.  *dropped (may be NULL) is SET to the writer's running total,
  * abandoned frames included — it is assigned, not accumulated into.
  *
+ * Bounded by grace_ms PLUS at most one sink call: the queue is abandoned
+ * before the join, so the join waits only for the access unit already in the
+ * writer's hands.  The join still happens, so this is as hard a barrier as
+ * the unbounded stop — it just keeps less of the recording.
+ *
  * This is the stop for the encode loop.  Waiting for a stalled disk to
  * accept 4 MB would put the stall straight back on the live video path at
  * every record/stop — the exact failure this module removes, just relocated
  * to a rarer event.  Losing the tail of a recording is the correct trade. */
 void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
 	uint64_t *dropped);
-
-/* Wait for everything already queued to reach the sink, up to `grace_ms`,
- * WITHOUT stopping the thread.  Whatever is still queued when the grace
- * expires is abandoned; *dropped (may be NULL) is SET to the writer's running
- * total, abandoned frames included — it is assigned, not accumulated into.
- *
- * The barrier a long-lived writer needs before its recorder closes: queued
- * access units are written by file descriptor, so a close that races them
- * sends the tail of one recording into nothing (or, worse, into the next
- * file).  Bounded for the same reason stop_bounded is — this runs on the
- * encode loop, and waiting out a stalled disk here would put the stall back
- * on the live video path.
- *
- * Note what "bounded" costs: on a CLEAN drain the sink is guaranteed not to
- * be running when this returns, but on TIMEOUT an access unit is still in the
- * sink's hands.  The caller must serialise its own close against the sink for
- * that case — both SigmaStar backends hold a rec_state_lock across the
- * close/reopen, which bounds the wait to one write instead of the queue. */
-void venc_rec_writer_drain(VencRecWriter *w, unsigned grace_ms,
-	uint64_t *dropped);
-
-/* Zero the lifetime counters (queued, dropped, peak depth).  `depth` is live
- * state and is left alone.
- *
- * A long-lived writer spans many recordings, so without this the counters are
- * process-lifetime: a clean recording inherits the previous one's drops, and
- * one drain timeout poisons every later recording's count for good.  The
- * field whose whole purpose is to stop a damaged recording looking clean
- * would instead make a clean one look damaged.  Call it when a recording
- * starts, with the queue already drained. */
-void venc_rec_writer_reset_counters(VencRecWriter *w);
 
 /* Observability.  `dropped` is the count of access units the queue refused
  * because it was full — silent drops would make a damaged recording look

@@ -109,21 +109,24 @@ void star6e_ts_recorder_stop(Star6eTsRecorderState *state);
 int star6e_ts_recorder_is_active(const Star6eTsRecorderState *state);
 
 /* "A recording is in progress", as opposed to is_active()'s "a segment file
- * is open at this instant".  The two differ for the duration of a rotation.
- *
- * Producers must gate on THIS.  Rotation runs on the recorder writer thread
- * and holds fd == -1 across fdatasync/close/open — tens to hundreds of ms on
- * an SD card — and a producer gating on is_active() drops every frame in that
- * window, immediately after the new segment's opening IRAP. */
+ * is open at this instant".  The two differ for the duration of a rotation,
+ * which runs on the recorder writer thread and holds fd == -1 across
+ * fdatasync/close/open — tens to hundreds of ms on an SD card. */
 int star6e_ts_recorder_is_recording(const Star6eTsRecorderState *state);
 
-/* Should the producer hand this access unit to the recorder writer?
+/* Is a recording still meant to be running?
  *
- * Both SigmaStar backends ask exactly this, once per encoded frame, and both
- * used to ask it as "is either descriptor open" — which is false for the whole
- * of a TS rotation and silently discarded every frame in that window.  It
- * lives here, in a header the host suite links, so the answer is testable and
- * cannot drift between the two call sites. */
+ * The producer gate is the writer HANDLE, not this: the writer exists for
+ * exactly as long as the recording it feeds, so a rotation is invisible to it.
+ * What every backend's drain loop asks this once per frame is the opposite
+ * question — has the recorder stopped ITSELF?  A recorder that hits ENOSPC or
+ * a write error does so on the writer thread, and nothing but the drain loop
+ * is positioned to notice and tear the writer down.
+ *
+ * Which makes rotation-transparency load-bearing in a new way: this must NOT
+ * go false during a rotation, or the drain loop would end a healthy recording
+ * once per segment.  It lives here, in a header the host suite links, so that
+ * property is testable and cannot drift between the three call sites. */
 static inline int star6e_record_wants_frame(const Star6eTsRecorderState *ts,
 	const Star6eRecorderState *hevc)
 {

@@ -159,9 +159,8 @@ static int maruko_runner_init(void *opaque)
 	g_maruko_runner_ctx = ctx;
 	/* Explicit, not positional: the callback below takes rec_writer_lock on
 	 * the httpd thread, which is already accepting.  Maruko happened to get
-	 * this right via mk_mirror_record_writer_start() inside
-	 * configure_graph(); saying so here means a later reorder cannot
-	 * silently undo it. */
+	 * this right via configure_graph(); saying so here means a later
+	 * reorder cannot silently undo it. */
 	mk_mirror_record_locks_init_public(&ctx->backend);
 	venc_api_set_record_status_fn(maruko_record_status_callback);
 	venc_api_set_record_http_control_supported(true);

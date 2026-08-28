@@ -420,10 +420,22 @@ static void cv610_record_stop(Cv610RunnerContext *ctx, int bounded)
 	 * disk stall back on the encode loop at every stop — the very thing
 	 * the writer removes — so a stalled queue is abandoned instead: the
 	 * recording loses its tail, the live link loses nothing. */
-	if (bounded)
-		venc_rec_writer_stop_bounded(w, 250, &ctx->rec_dropped_frames);
-	else
+	if (bounded) {
+		uint64_t dropped = 0;
+
+		venc_rec_writer_stop_bounded(w, 250, &dropped);
+		/* Only if there WAS a writer: stop_bounded leaves *dropped at 0
+		 * for a NULL one, which would clobber the harvest above.  Stored
+		 * under the lock because the httpd thread reads it and an
+		 * unlocked 64-bit store tears on ARM32. */
+		if (w) {
+			pthread_mutex_lock(&ctx->rec_writer_lock);
+			ctx->rec_dropped_frames = dropped;
+			pthread_mutex_unlock(&ctx->rec_writer_lock);
+		}
+	} else {
 		venc_rec_writer_stop(w);
+	}
 	cv610_audio_set_record_ring(ctx->audio, NULL);
 	star6e_ts_recorder_stop(&ctx->ts_recorder);
 	star6e_recorder_stop(&ctx->recorder);
@@ -1608,6 +1620,15 @@ static int cv610_run(void *opaque)
 			 * here delays ss_mpi_venc_release_stream() below, which
 			 * backs up the encoder's output queue and stalls the LIVE
 			 * transport, not just the recording. */
+			/* A recorder that stopped ITSELF (disk full, write
+			 * error) does so on the writer thread, leaving this
+			 * gate queueing into a closed file and the status
+			 * reporting active.  Nothing else notices, so the
+			 * drain loop has to. */
+			if (ctx->rec_writer &&
+			    !star6e_record_wants_frame(&ctx->ts_recorder,
+					&ctx->recorder))
+				cv610_record_stop(ctx, 1);
 			if (ctx->rec_writer) {
 				struct timespec rec_now;
 

@@ -591,15 +591,20 @@ static int test_ts_is_recording_clears_when_rotation_cannot_reopen(void)
  *
  * I claimed the window was too short to sample from another thread.  That was
  * wrong: a spin-sampling reader lands inside it on a large fraction of reads,
- * so two rotations are enough to catch a producer that would drop.  What the
- * sampler asks is exactly what the encode loop asks, once per frame:
- * star6e_record_wants_frame(). */
+ * so two rotations are enough to catch it.  What the sampler asks is exactly
+ * what every backend's drain loop asks, once per frame:
+ * star6e_record_wants_frame().
+ *
+ * The consequence of a false reading is now a TEARDOWN, not a dropped frame.
+ * The drain loop reads this as "the recorder stopped itself" and joins the
+ * writer, so a predicate that blinked during a rotation would end a healthy
+ * recording once per segment instead of costing it a few frames. */
 typedef struct {
 	Star6eTsRecorderState *ts;
 	Star6eRecorderState   *hevc;
 	int                    stop;
 	unsigned long          samples;
-	unsigned long          would_drop;   /* must stay 0 */
+	unsigned long          would_tear_down;   /* must stay 0 */
 } RotationSampler;
 
 static void *rotation_sampler(void *arg)
@@ -609,7 +614,7 @@ static void *rotation_sampler(void *arg)
 	while (!__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE)) {
 		s->samples++;
 		if (!star6e_record_wants_frame(s->ts, s->hevc))
-			s->would_drop++;
+			s->would_tear_down++;
 	}
 	return NULL;
 }
@@ -651,9 +656,9 @@ static int test_ts_rotation_never_makes_a_producer_drop(void)
 
 	CHECK("rotdrop rotations happened", state.segments >= 40);
 	CHECK("rotdrop sampler actually sampled", s.samples > 1000);
-	/* The whole point: not one sample, across 40 rotations, told the
-	 * producer to throw a frame away. */
-	CHECK("rotation never tells the producer to drop", s.would_drop == 0);
+	/* The whole point: not one sample, across 40 rotations, told the drain
+	 * loop the recorder had stopped itself. */
+	CHECK("rotation never looks like a self-stop", s.would_tear_down == 0);
 
 	star6e_ts_recorder_stop(&state);
 	CHECK("rotdrop stops the recording",
@@ -681,7 +686,7 @@ static int test_ts_failed_start_leaves_nothing_recording(void)
 		!star6e_ts_recorder_is_recording(&state));
 	CHECK("failed start opens no file",
 		!star6e_ts_recorder_is_active(&state));
-	CHECK("failed start leaves the producer gate shut",
+	CHECK("failed start leaves nothing for the drain loop to keep alive",
 		!star6e_record_wants_frame(&state, &hevc));
 
 	/* And a good start after a failed one still works. */

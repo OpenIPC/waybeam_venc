@@ -1868,15 +1868,20 @@ in Notes. As of `contract_version: 0.20.0`:
     recording cannot look like a clean one, so it has to include them.
     Widening, not narrowing: no frame that used to be counted stops being.
   - **`droppedFrames` and `writerPeakDepth` are per-RECORDING, not
-    per-process.** On the SigmaStar backends the writer thread outlives any
-    one recording, so both were accumulating for the life of the daemon: a
-    clean recording reported the previous one's drops, and one shed frame
-    poisoned every recording that followed. They are reset when a recording
-    starts. CV610 already behaved this way — its writer is created per
-    recording — so this makes the three backends agree.
+    per-process.** All three backends now create the recorder writer when a
+    recording opens and destroy it when the recording closes, so the counters
+    are scoped by construction rather than reset by an operation. Previously
+    the SigmaStar writer outlived any one recording and both accumulated for
+    the life of the daemon: a clean recording reported the previous one's
+    drops, and one shed frame poisoned every recording that followed.
   - Note the denominators still differ slightly by backend: CV610 hands the
     transport's already-flattened buffer to the recorder and so has no flatten
     step of its own to fail.
+  - **A recorder that stops itself is now reported as stopped.** Disk-full and
+    write errors end a recording from the writer thread; every backend now
+    notices within one frame and reports `active: false` with the real
+    `stopReason`, instead of leaving `active: true` with `framesWritten`
+    frozen.
 - `0.20.0` (additive — snapshot and recording reach CV610):
   - **`/api/v1/record/status` gains `droppedFrames` and `writerPeakDepth`.**
     Recording writes now run on their own thread behind a bounded 4 MB queue,
