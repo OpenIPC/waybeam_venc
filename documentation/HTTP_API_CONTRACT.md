@@ -1877,11 +1877,6 @@ in Notes. As of `contract_version: 0.20.0`:
   - Note the denominators still differ slightly by backend: CV610 hands the
     transport's already-flattened buffer to the recorder and so has no flatten
     step of its own to fail.
-  - **A recorder that stops itself is now reported as stopped.** Disk-full and
-    write errors end a recording from the writer thread; every backend now
-    notices within one frame and reports `active: false` with the real
-    `stopReason`, instead of leaving `active: true` with `framesWritten`
-    frozen.
 - `0.20.0` (additive — snapshot and recording reach CV610):
   - **`/api/v1/record/status` gains `droppedFrames` and `writerPeakDepth`.**
     Recording writes now run on their own thread behind a bounded 4 MB queue,

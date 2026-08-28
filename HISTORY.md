@@ -74,12 +74,23 @@ through is more useful than the fixes are.
     abandons the queue before the join, which is what makes its documented
     bound (grace + one write) true. Maruko's teardown depends on that: its
     watchdog reboots the craft.
-  - **A recorder that stops itself was invisible.** Disk-full and write errors
-    stop the recorder from the writer thread; with the gate no longer reading
-    recorder state, nothing would notice, and the writer would go on queueing
-    into a closed file while `/api/v1/record/status` reported `active`. All
-    three backends now check `star6e_record_wants_frame()` once per frame and
-    tear the writer down when it goes false. CV610 had this gap since 0.70.0.
+  - **A recorder that stops itself needs someone to notice.** Disk-full and
+    write errors end a recording from the writer thread. The old gate handled
+    that implicitly, because it read recorder state; a gate that reads only
+    the writer handle does not, and would go on copying, allocating and
+    queueing a frame per encode into a dead writer indefinitely. So all three
+    backends now check `star6e_record_wants_frame()` once per frame and tear
+    the writer down when it goes false. CV610 has had this leak since 0.70.0,
+    where the gate was already the handle alone.
+
+    What was **not** wrong, and was checked rather than assumed: reporting.
+    Every backend's status callback already read `is_recording()`, so a
+    self-stop was always reported honestly. Device control on `.2.232` — a
+    56 MB tmpfs filled until the recorder stopped itself — has both the
+    pre-redesign and the per-recording binary reporting `active: false`,
+    `stopReason: disk_full` within one poll. The difference is the writer:
+    it lingers on the old build and is joined and freed on the new one
+    (thread count 9 -> 8).
 
   Rotation loss was never observed on the Star6E bench, and the reason is
   worth recording: the same `fdatasync`/`close`/`open` that opens the window
@@ -103,9 +114,30 @@ through is more useful than the fixes are.
   open in that case and write on the encode loop; CV610 has no such fallback
   and closes the recording instead of reporting a phantom one.
 
-Device: star6e `.2.232` 61 fps stream and 61 fps recorder, 0 dropped, stop in
-0 s, 720 frames decoding clean with Opus. Maruko `.2.233` 4 segments / 1504
-frames / IDR delta 1, matching its synchronous baseline of 4 / 1501 / 1.
+Device, after the per-recording rework (2026-08-28):
+
+- **star6e `.2.232`**, IMX415 1280x720@60, `resilience=racing` (GDR),
+  recording TS+Opus to the SD card. Manual record 69 s: 4149 frames /
+  59.93 fps against a nominal 60, `droppedFrames` 0. Rotation at
+  `max_seconds=20`: 4 segments in 66 s, 3971 frames / 59.95 fps,
+  `droppedFrames` 0 across all three rotations, and every segment opens on
+  an `I` frame — the forced IDR lands on a GDR craft at record start and at
+  each rotation. Boot auto-start: same, 2 segments, both opening on an `I`.
+  Full decode of a segment: 251 frames, no video errors.
+- **The writer's lifetime is directly observable.** Thread count 8 -> 9 on
+  record start and 9 -> 8 on stop, on every one of five recordings, and
+  9 -> 8 on a self-stop as well.
+- **`writerPeakDepth` measures the rotation window.** It reads 1 while
+  writing steadily and jumps to 12 and then 20 at rotations — the queue
+  absorbing the `fdatasync`/`close`/`open` stall that used to sit on the
+  encode loop, with no frame lost to it.
+- **maruko `.2.233`**, 30 fps, recording to tmpfs (this craft has no block
+  device). 3 segments at `max_seconds=10`, 816 frames / 30.0 fps exactly,
+  `droppedFrames` 0, every segment opening on an `I`, a full segment
+  decoding to exactly 300 frames. Threads 6 -> 7 -> 6.
+
+Both benches were restored to their master binaries and original config
+afterwards; no RF was raised for any of it (waybeam-link stayed down).
 
 ## [0.70.0] - 2026-08-27
 
