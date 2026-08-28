@@ -4067,7 +4067,9 @@ static int mk_mirror_record_open(MarukoBackendContext *ctx, const char *dir)
 {
 	int started;
 
-	if (!dir || !dir[0])
+	/* Same guard as the close: rec_writer_lock is taken below, and locking
+	 * a mutex that was never initialised is undefined. */
+	if (!dir || !dir[0] || !ctx->rec_locks_ready)
 		return 0;
 	/* Stop first: a start over a live recording must not leak the open fd,
 	 * and only one of the two recorders may ever be active. */

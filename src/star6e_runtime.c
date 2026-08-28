@@ -594,7 +594,9 @@ static void mirror_record_close(Star6ePipelineState *ps, unsigned grace_ms)
 static void mirror_record_open(Star6ePipelineState *ps, const VencConfig *vcfg,
 	const char *dir)
 {
-	if (!dir || !dir[0])
+	/* Same guard as the close: rec_writer_lock is taken below, and locking
+	 * a mutex that was never initialised is undefined. */
+	if (!dir || !dir[0] || !ps->rec_locks_ready)
 		return;
 	/* Stop first: a start over a live recording must not leak the open fd,
 	 * and only one of the two recorders may ever be active. */
@@ -607,7 +609,7 @@ static void mirror_record_open(Star6ePipelineState *ps, const VencConfig *vcfg,
 		if (vcfg->audio.enabled)
 			ps->audio.rec_ring = &ps->audio_ring;
 		if (star6e_ts_recorder_start(&ps->ts_recorder, dir,
-				vcfg->audio.enabled ? &ps->audio_ring : NULL) != 0) {
+				ps->audio.rec_ring) != 0) {
 			ps->audio.rec_ring = NULL;
 			return;
 		}
