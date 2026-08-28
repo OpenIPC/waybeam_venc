@@ -70,9 +70,10 @@ static void maruko_recorder_start_idr(MarukoBackendContext *ctx);
 /* Recorder flush budget inside maruko_pipeline_teardown_graph()'s watchdog.  2 s covers a full 4 MB queue on
  * a healthy card several times over (~1.7 s of video at 19 Mbps, and it writes
  * far faster than realtime), while leaving the MI teardown below the bulk of
- * the deadline.  BOUNDED even at teardown, unlike star6e: that watchdog
- * reboots the craft, so an unbounded flush on the stalled card this writer
- * exists for could turn an orderly shutdown into a reboot. */
+ * the deadline.  BOUNDED at teardown because maruko_pipeline_teardown_graph()
+ * calls reboot(RB_AUTOBOOT) when its watchdog expires; star6e bounds its own
+ * teardown for the same reason (a SIGKILL then sysrq-b at 3 s), just with a
+ * smaller budget. */
 #define MARUKO_REC_TEARDOWN_GRACE_MS 2000
 
 static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
@@ -4602,13 +4603,8 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	 * 512 KB stack buffer.  Gated so an idle craft pays no malloc per
 	 * frame.
 	 *
-	 * A recorder that stopped ITSELF (disk full, write error) does so on the
-	 * writer thread, leaving the gate below queueing into a closed file and
-	 * the status reporting active.  Nothing else notices, so the encode loop
-	 * has to. */
-	if (!ctx->dual && ctx->rec_writer &&
-	    !star6e_record_wants_frame(&ctx->ts_recorder, &ctx->recorder))
-		mk_mirror_record_close(ctx, MARUKO_REC_STOP_GRACE_MS);
+	 * A recorder that stopped ITSELF is torn down AFTER the release below,
+	 * not here — see that site for why. */
 
 	/* The writer pointer IS the gate: it exists for exactly as long as the
 	 * recording it feeds.  No recorder-state predicate, so a rotation —
@@ -4665,6 +4661,21 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	    idr_rate_limit_allow(ctx->venc_channel))
 		(void)maruko_mi_venc_request_idr(ctx->venc_device,
 			ctx->venc_channel, 1);
+
+	/* A recorder that stopped ITSELF (disk full, write error) does so on the
+	 * writer thread, so nothing but this loop is positioned to notice, and
+	 * the gate above would go on queueing into a dead writer indefinitely.
+	 *
+	 * AFTER the release, for the same reason the IDR request above is: this
+	 * ends in a join over the access unit still in the sink's hands, which
+	 * on the failing card that triggered the stop is a blocking write.
+	 * Inside the GetStream/ReleaseStream window that would hold the encoder's
+	 * output slot and stall the LIVE stream — the very coupling this writer
+	 * removes, reintroduced on the one path that only runs when storage is
+	 * already misbehaving. */
+	if (!ctx->dual && ctx->rec_writer &&
+	    !star6e_record_wants_frame(&ctx->ts_recorder, &ctx->recorder))
+		mk_mirror_record_close(ctx, MARUKO_REC_STOP_GRACE_MS);
 
 	/* HTTP record control: drain the start/stop request flags so they
 	 * never accumulate across reinit, then act only when this runtime

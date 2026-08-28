@@ -208,9 +208,23 @@ static int test_writer_takes_ownership_on_every_path(void)
 	CHECK("no sink call for rejected pushes", s.calls == 0);
 	sink_destroy(&s);
 
-	/* stop() on NULL is safe. */
-	venc_rec_writer_stop(NULL);
-	CHECK("stop NULL safe", 1);
+	/* Both stops on NULL are safe, and *dropped is still assigned.
+	 *
+	 * stop_bounded(NULL) is not a corner: every backend's record_close()
+	 * detaches the handle and calls it unconditionally, and record_open()
+	 * calls record_close() on entry — so this runs on every record start,
+	 * with no recording open.  It had no test.  (The previous
+	 * `CHECK("stop NULL safe", 1)` asserted a literal: if the call faulted
+	 * the process would die before reaching it.) */
+	{
+		uint64_t dropped = 1234;
+
+		venc_rec_writer_stop(NULL);
+		venc_rec_writer_stop_bounded(NULL, 250, &dropped);
+		CHECK("stop_bounded NULL leaves dropped untouched", dropped == 1234);
+		venc_rec_writer_stop_bounded(NULL, 0, NULL);
+		CHECK("both stops survive NULL", 1 == 1);
+	}
 	return failures;
 }
 
@@ -334,8 +348,12 @@ static int test_writer_stop_bounded_abandons_the_backlog(void)
 		(t1.tv_nsec - t0.tv_nsec) / 1000000;
 
 	/* Grace + at most one in-flight sink.  Never the whole backlog (960 ms). */
+	/* Grace (150) + at most one 120 ms sink = 270 theoretical; measured 241
+	 * idle and 241-251 at 4x CPU oversubscription.  The bound is 400, not
+	 * the old 500: a mutant that triples the grace lands at 480 and slipped
+	 * through, so the extra 100 ms of slack bought nothing but a hole. */
 	CHECK("stop_bounded is bounded by grace plus one write",
-		elapsed_ms < 500);
+		elapsed_ms < 400);
 	CHECK("stop_bounded counted what it abandoned", dropped > 0);
 	CHECK("abandoned frames never reached the sink", s.calls < 8);
 	return failures;
@@ -495,6 +513,72 @@ static int test_writer_stop_bounded_returns_promptly_when_idle(void)
 	return failures;
 }
 
+/* The other direction of the bound, and the half nothing asserted: within
+ * grace_ms, queued access units DO reach the sink.
+ *
+ * Every other bounded-stop assertion here is about abandoning, or about not
+ * over-waiting.  With only those, the production 250 ms grace could be cut to
+ * 30 ms — shedding seven-eighths of a stalled recording's tail at every stop,
+ * on all three backends — with the suite fully green.  Verified: a mutant that
+ * passes `grace_ms / 8` survived the old set, and is caught by this. */
+static int test_writer_stop_bounded_delivers_within_the_grace(void)
+{
+	VencRecWriter *w = NULL;
+	BarrierSink s;
+	uint64_t dropped = 99;
+	int failures = 0;
+	int i;
+
+	memset(&s, 0, sizeof(s));
+	s.delay_us = 40000;   /* 40 ms a frame: 6 frames need ~240 ms */
+
+	CHECK("delivery writer start",
+		venc_rec_writer_start(&w, barrier_sink, &s) == 0);
+	for (i = 0; i < 6; i++)
+		(void)venc_rec_writer_push(w, make_au((uint8_t)i, 1024), 1024,
+			(uint64_t)i * 900, 0);
+
+	/* 600 ms against 240 ms of work: 2.5x margin, so this asserts the grace
+	 * is honoured rather than that the machine is fast — but tight enough
+	 * that a mutant shrinking the grace to an eighth (75 ms) delivers one
+	 * frame instead of six and is caught. */
+	venc_rec_writer_stop_bounded(w, 600, &dropped);
+
+	CHECK("a grace that covers the queue delivers all of it", s.calls == 6);
+	CHECK("a covered queue sheds nothing", dropped == 0);
+	return failures;
+}
+
+/* The unbounded stop joins too.  Its barrier had no assertion behind it —
+ * removing that join was caught only as a heap-corruption abort, which tells
+ * a CI log grepping for failures nothing at all. */
+static int test_writer_stop_unbounded_is_also_a_barrier(void)
+{
+	VencRecWriter *w = NULL;
+	BarrierSink s;
+	int failures = 0;
+	int i;
+
+	memset(&s, 0, sizeof(s));
+	s.delay_us = 30000;   /* 30 ms a frame */
+
+	CHECK("unbounded stop writer start",
+		venc_rec_writer_start(&w, barrier_sink, &s) == 0);
+	for (i = 0; i < 5; i++)
+		(void)venc_rec_writer_push(w, make_au((uint8_t)i, 1024), 1024,
+			(uint64_t)i * 900, 0);
+
+	venc_rec_writer_stop(w);
+	/* Everything after this stands for close(fd). */
+	__atomic_store_n(&s.released, 1, __ATOMIC_RELEASE);
+	usleep(200000);
+
+	CHECK("the unbounded stop flushed the whole queue", s.calls == 5);
+	CHECK("no sink call landed after the unbounded stop",
+		s.ran_after_release == 0);
+	return failures;
+}
+
 /* The header says *dropped is ASSIGNED, not accumulated into. */
 static int test_writer_stop_bounded_assigns_dropped_rather_than_accumulating(void)
 {
@@ -531,6 +615,8 @@ int test_venc_rec_writer(void)
 	failures += test_writer_counters_start_clean_for_each_recording();
 	failures += test_writer_stop_bounded_makes_a_close_safe_without_a_lock();
 	failures += test_writer_stop_bounded_returns_promptly_when_idle();
+	failures += test_writer_stop_bounded_delivers_within_the_grace();
+	failures += test_writer_stop_unbounded_is_also_a_barrier();
 	failures += test_writer_stop_bounded_assigns_dropped_rather_than_accumulating();
 	return failures;
 }

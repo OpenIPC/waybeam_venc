@@ -603,6 +603,7 @@ typedef struct {
 	Star6eTsRecorderState *ts;
 	Star6eRecorderState   *hevc;
 	int                    stop;
+	int                    running;           /* published on entry */
 	unsigned long          samples;
 	unsigned long          would_tear_down;   /* must stay 0 */
 } RotationSampler;
@@ -611,6 +612,7 @@ static void *rotation_sampler(void *arg)
 {
 	RotationSampler *s = arg;
 
+	__atomic_store_n(&s->running, 1, __ATOMIC_RELEASE);
 	while (!__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE)) {
 		s->samples++;
 		if (!star6e_record_wants_frame(s->ts, s->hevc))
@@ -644,6 +646,24 @@ static int test_ts_rotation_never_makes_a_producer_drop(void)
 	s.hevc = &hevc;
 	CHECK("rotdrop sampler start",
 		pthread_create(&th, NULL, rotation_sampler, &s) == 0);
+
+	/* Wait for the sampler to actually be on a CPU before the writes start.
+	 * Without this the test fails on the MACHINE rather than on the code: on
+	 * an oversubscribed box the sampler can be scheduled zero times before
+	 * the 40 writes finish, and the samples floor below then trips on
+	 * correct code (measured: 6 of 8 runs at 4x oversubscription, with
+	 * samples reading 0).  A gate must not depend on the author's load. */
+	{
+		int spins = 0;
+
+		while (!__atomic_load_n(&s.running, __ATOMIC_ACQUIRE) &&
+		       spins < 50000) {
+			usleep(200);
+			spins++;
+		}
+		CHECK("rotdrop sampler reached a CPU",
+			__atomic_load_n(&s.running, __ATOMIC_ACQUIRE) == 1);
+	}
 
 	/* Every IRAP cuts a segment, so this is 40 real close/reopen windows
 	 * with a reader spinning on the producer's own question throughout. */

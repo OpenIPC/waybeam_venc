@@ -1123,18 +1123,17 @@ Recording format is determined by `record.format` config: `"ts"` (default, MPEG-
 with audio) or `"hevc"` (raw HEVC NAL stream). File rotation is controlled by
 `record.maxSeconds` and `record.maxMB` config fields.
 
-Backend gating: only the Star6E backend currently runs the runtime poll that
-honors HTTP-driven start/stop.  On Maruko, recording is config-driven only
-(set `record.enabled=true` + `record.mode="mirror"|"dual"` in `/etc/venc.json`)
-and `/api/v1/record/start` returns:
+Backend gating: **all three backends** run the runtime poll that honours
+HTTP-driven start/stop — Star6E and Maruko in their encode loops, CV610 in its
+drain loop.  A backend that does not register the poll answers
+`/api/v1/record/start` with
 
 ```json
 {"ok":false,"error":{"code":"not_implemented","message":"HTTP record control not available on this backend"}}
 ```
 
-with HTTP `501`.  This avoids the prior behaviour where the request returned
-`{"ok":true}` but no recording started.  Tracked as Phase 6.5 in
-`MARUKO_PARITY_PLAN.md`.
+and HTTP `501`, rather than the older behaviour of returning `{"ok":true}`
+while no recording started.  No shipped backend takes that path today.
 
 ### `GET /api/v1/record/stop`
 
@@ -1834,11 +1833,11 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.20.0`:
+in Notes. As of `contract_version: 0.20.1`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
-| `/api/v1/record/{start,stop}` | yes | **501** | Maruko has no runtime poll loop yet (Phase 6.5).  Config-driven recording (`record.enabled=true` + `record.mode="mirror"\|"dual"`) works. **CV610 from 0.20.0**, `record.mode=mirror` only: the drain loop polls the same start/stop flags. `dual`/`dual-stream` need a second VENC channel and are refused with a warning rather than silently recording ch0. |
+| `/api/v1/record/{start,stop}` | yes | yes | Maruko has polled the start/stop flags since it registered `venc_api_set_record_http_control_supported(true)`; the older **501** row was stale. Config-driven recording (`record.enabled=true` + `record.mode="mirror"\|"dual"`) works on both. **CV610 from 0.20.0**, `record.mode=mirror` only: the drain loop polls the same flags. `dual`/`dual-stream` need a second VENC channel and are refused with a warning rather than silently recording ch0. |
 | `/api/v1/record/status` | live counters | live counters | Both backends register a status callback against the live `Star6eTsRecorderState`; Maruko reflects daemon-config-driven recording (mirror/dual). **CV610 from 0.20.0** registers the same callback. |
 | `/api/v1/qr/*` | yes | **404** | Star6E-only VPE port1 luma tap. QR capability fields remain in the shared schema but report `supported:false` on Maruko. |
 | `/api/v1/recordings*` | yes | yes | File listing/download/delete works against `record.dir` regardless of which backend wrote the file. |

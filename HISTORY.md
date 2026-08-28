@@ -153,6 +153,52 @@ Device, after the per-recording rework (2026-08-28):
 Both benches were restored to their master binaries and original config
 afterwards; no RF was raised for any of it (waybeam-link stayed down).
 
+Three adversarial reviews then ran against the finished change — concurrency
+and lifetime, behaviour preservation, and test coverage. They cleared the
+design on the questions it rests on (no sink/close race on any path, no lock
+inversion, no use-after-free, format dispatch and status fields unchanged,
+rotation transparency holding) and found four things worth fixing:
+
+- **The self-stop teardown was inside the GetStream/ReleaseStream window** on
+  all three backends. It ends in a join over the access unit still in the
+  sink's hands, which on the failing card that triggered the stop is a
+  blocking write — so it held the encoder's output slot and stalled the live
+  stream, the exact coupling this writer removes, reintroduced on the one path
+  that only runs when storage is already misbehaving. Moved after the release,
+  beside the rotation IDR request that is there for the same reason. Two of
+  the three reviewers found this independently.
+- **Boot auto-start forced an IDR on the wrong channel in `record.mode=dual`.**
+  The shared open helper names chn 0, but in dual mode the file is fed by
+  chn 1 — so it injected a keyframe into the live stream, re-armed the rate
+  limiter so chn 1's own request was swallowed, and did nothing for the
+  recording. That is verbatim the trap documented in
+  `include/star6e_ts_recorder.h`. Dual mode now returns from the open helper
+  before the writer start and the IDR, which also makes the invariant the
+  producer gate rests on ("the handle is non-NULL exactly while a mirror
+  recording runs") true rather than nearly true.
+- **star6e's teardown flush was unbounded**, and the comment called it free.
+  It is not: the teardown watchdog SIGKILLs after 3 s and then writes
+  `sysrq-b`, so waiting out a stalled card there trades a lost recording tail
+  for an emergency reboot. Bounded at 500 ms, the same reasoning maruko
+  already used for its reboot watchdog.
+- **CV610 kept two defects of its own**, both predating this change and both
+  now fixed: its status callback read the 64-bit counters outside the lock
+  that the store side takes, and it had no readiness flag, so an init failure
+  before the recorders were set up reached `star6e_ts_recorder_stop()` on a
+  zeroed state whose `fd` of 0 passes the `fd < 0` test — `fdatasync`ing and
+  closing **stdin**.
+
+The test review proved three coverage holes with surviving mutants rather than
+asserting them, and all three are now closed: `stop_bounded(NULL, …)` had no
+test despite running on every record start; nothing asserted the *positive*
+half of the bounded contract, so the production 250 ms grace could have been
+cut to an eighth with the suite green; and the unbounded stop's barrier was
+caught only as a heap-corruption abort. It also showed the rotation sampler
+failing on **correct** code in 6 of 8 runs at 4x CPU oversubscription — the
+sampler thread was never scheduled before the writes finished — which is a
+gate testing the machine rather than the code. It now waits for the sampler to
+reach a CPU first, and is 6/6 green under the same load.
+
 ## [0.70.0] - 2026-08-27
 
 Snapshot and recording reach the CV610 backend, and the config file is read
