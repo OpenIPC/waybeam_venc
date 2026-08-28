@@ -1,5 +1,234 @@
 # History
 
+## [0.71.0] - 2026-08-28
+
+Star6E and Maruko mirror-mode recording moves off the encode loop, matching
+what 0.70.0 did for CV610. `contract_version` 0.20.0 -> **0.20.1**:
+`droppedFrames` and `writerPeakDepth` already existed, but this release widens
+what `droppedFrames` counts and makes both per-recording rather than
+per-process — see the contract change log.
+
+Review found two defects in the first cut of this work, both of which shipped
+past a green suite. Both were then fixed a second time, by deleting the
+mechanism they lived in — that story is below, because the reason they got
+through is more useful than the fixes are.
+
+- **Same defect, same fix.** Both backends called the recorder from their
+  encode loop between the transport send and ReleaseStream, with a blocking
+  `write(2)`: `star6e_runtime.c` and `maruko_pipeline.c` both wrote, then
+  released. When storage blocks, the release is late, the encoder's output
+  queue backs up, and the LIVE stream stalls with it. Star6E's **dual** mode
+  already drained ch1 on its own thread and was never affected; mirror mode
+  was the gap.
+
+  Stated plainly: the *symptom* was measured on CV610, not on these two.
+  Star6E's bench SD is native MMC at 16 MB/s and absorbs everything short of
+  abuse; Maruko has no storage that can block at all. The fix lands on the
+  structural argument — identical call-site shape — plus CV610's measurement,
+  with a device no-regression pass on both.
+
+- **Moving the recorder to its own thread broke two things, and the second
+  attempt at fixing them deleted the mechanism instead.**
+
+  *The drain was not a barrier.* A `venc_rec_writer_drain()` existed so a
+  caller could close the segment file the instant it returned. It waited for
+  the queue to empty — but the writer pops under the lock and runs the sink
+  outside it, so "queue empty" was true for the whole duration of a `write(2)`.
+  The drain returned with the sink still writing and the caller closed the file
+  under it: the tail of one recording landed in the next file, over its PAT/PMT
+  and opening IRAP. The frequency was inverted against the design goal — rare
+  on a healthy card, and on a stalling card, the only case this thread exists
+  for, every time.
+
+  *Rotation silently dropped frames.* Segment rotation moved onto the writer
+  thread with it, and rotation holds `fd == -1` across `fdatasync`/`close`/
+  `open`. The producer gated on `fd >= 0`, so every frame in that window fell
+  to the synchronous fallback, hit its own `fd < 0` guard, and was discarded
+  and counted nowhere — right after the new segment's opening IRAP.
+
+  Both were first patched in place: an `in_flight` flag to make the drain a
+  real barrier, a `rec_state_lock` for the case the bounded drain could not
+  cover, a `venc_rec_writer_reset_counters()` so a new recording did not
+  inherit the last one's drops, and an `is_recording()` predicate for the
+  producer gate. Three adversarial reviews then returned about a dozen
+  findings, and nearly every one had the same shape: a fix applied to one of
+  the several places a mechanism reached. That is the argument against the
+  mechanisms, not for more fixes.
+
+  **So the writer's lifetime is now tied to the recording it serves** — one
+  writer per recording on all three backends, as CV610 already did. It is
+  created after the recorder file is open and stopped before it closes, and
+  both stops end in an unconditional `pthread_join`. That join is the barrier;
+  nothing else is needed. `venc_rec_writer_drain()`, `in_flight`,
+  `venc_rec_writer_reset_counters()` and `rec_state_lock` are all deleted, the
+  counters are per-recording because the writer is, and the producer gate
+  becomes `rec_writer != NULL` — a handle that exists for exactly as long as
+  the recording, so a rotation is invisible to it and cannot cost a frame.
+
+  Two things the redesign surfaced that the patched version had wrong:
+
+  - **`venc_rec_writer_stop_bounded()` was not actually bounded.** Setting
+    `stopping` does not stop the writer thread short — it drains its queue to
+    the end and only then honours the flag — so the join could block for a
+    whole 4 MB backlog on the stalled card the writer exists for. It now
+    abandons the queue before the join, which is what makes its documented
+    bound (grace + one write) true. Maruko's teardown depends on that: its
+    watchdog reboots the craft.
+  - **A recorder that stops itself needs someone to notice.** Disk-full and
+    write errors end a recording from the writer thread. The old gate handled
+    that implicitly, because it read recorder state; a gate that reads only
+    the writer handle does not, and would go on copying, allocating and
+    queueing a frame per encode into a dead writer indefinitely. So all three
+    backends now check `star6e_record_wants_frame()` once per frame and tear
+    the writer down when it goes false. CV610 has had this leak since 0.70.0,
+    where the gate was already the handle alone.
+
+    What was **not** wrong, and was checked rather than assumed: reporting.
+    Every backend's status callback already read `is_recording()`, so a
+    self-stop was always reported honestly. Device control on `.2.232` — a
+    56 MB tmpfs filled until the recorder stopped itself — has both the
+    pre-redesign and the per-recording binary reporting `active: false`,
+    `stopReason: disk_full` within one poll. The difference is the writer:
+    it lingers on the old build and is joined and freed on the new one
+    (thread count 9 -> 8).
+
+  Rotation loss was never observed on the Star6E bench, and the reason is
+  worth recording: the same `fdatasync`/`close`/`open` that opens the window
+  also stalls the encoder, so no frames arrive to be dropped. Five runs there
+  — fixed and unfixed — all show the recorder writing exactly what the encoder
+  produced. On hardware where rotation is slow but does not stall the encoder,
+  the window is live. The case for the fix is the source-level defect plus a
+  mutation test, not a device measurement.
+
+- **`star6e_output_stream_flatten()` and `maruko_video_stream_flatten()`.**
+  The writer needs its own copy, because SDK stream memory dies at
+  ReleaseStream. These also remove an existing cliff: both
+  `*_ts_recorder_write_stream()` flattened into a **512 KB automatic and
+  dropped the whole access unit** when it did not fit. At 19 Mbps an IRAP can
+  exceed that, and a silently dropped keyframe is the worst frame to lose.
+  Not an extra copy for the TS path, which was already flattening onto the
+  stack.
+
+- A writer whose thread fails to start falls back to the synchronous path
+  rather than silently recording nothing. Star6E and Maruko keep the recording
+  open in that case and write on the encode loop; CV610 has no such fallback
+  and closes the recording instead of reporting a phantom one.
+
+Device, after the per-recording rework (2026-08-28):
+
+- **star6e `.2.232`**, IMX415 1280x720@60, `resilience=racing` (GDR),
+  recording TS+Opus to the SD card. Manual record 69 s: 4149 frames /
+  59.93 fps against a nominal 60, `droppedFrames` 0. Rotation at
+  `max_seconds=20`: 4 segments in 66 s, 3971 frames / 59.95 fps,
+  `droppedFrames` 0 across all three rotations, and every segment opens on
+  an `I` frame — the forced IDR lands on a GDR craft at record start and at
+  each rotation. Boot auto-start: same, 2 segments, both opening on an `I`.
+  Full decode of a segment: 251 frames, no video errors.
+- **The writer's lifetime is directly observable.** Thread count 8 -> 9 on
+  record start and 9 -> 8 on stop, on every one of five recordings, and
+  9 -> 8 on a self-stop as well.
+- **`writerPeakDepth` measures the rotation window.** It reads 1 while
+  writing steadily and jumps to 12 and then 20 at rotations — the queue
+  absorbing the `fdatasync`/`close`/`open` stall that used to sit on the
+  encode loop, with no frame lost to it.
+- **maruko `.2.233`**, 30 fps, recording to tmpfs (this craft has no block
+  device). 3 segments at `max_seconds=10`, 816 frames / 30.0 fps exactly,
+  `droppedFrames` 0, every segment opening on an `I`, a full segment
+  decoding to exactly 300 frames. Threads 6 -> 7 -> 6.
+- **cv610 `.2.181`**, 100 fps, GDR. On tmpfs: 3 segments at `max_seconds=10`,
+  3231 frames / 100.0 fps exactly, 0 dropped, every segment opening on an `I`,
+  a full segment decoding to 1100 frames. On the **real FAT32 USB volume**:
+  5 segments, 4518 frames / 100.03 fps, 0 dropped across 4 rotations, all five
+  segments opening on an `I`, a segment decoding to 1101 frames — and
+  `writerPeakDepth` 1 -> 5 -> 6 -> 7, the real rotation cost being absorbed by
+  the queue exactly as on the star6e card. Threads 6 -> 7 -> 6 on both.
+- **The CV610 self-stop leak is demonstrated, not asserted.** Same box, same
+  test (a 52 MB tmpfs filled to the free-space floor), shipped 0.70.0 versus
+  this build: both report `stopReason: disk_full`, but 0.70.0 leaves the
+  writer thread alive — 6 threads before, **7** still 24 s after the recorder
+  stopped itself — while this build tears it down inside one poll (7 -> 6).
+  That thread goes on receiving a copied, allocated access unit per encoded
+  frame, forever, because its gate is the handle alone.
+
+Both benches were restored to their master binaries and original config
+afterwards; no RF was raised for any of it (waybeam-link stayed down).
+
+Three adversarial reviews then ran against the finished change — concurrency
+and lifetime, behaviour preservation, and test coverage. They cleared the
+design on the questions it rests on (no sink/close race on any path, no lock
+inversion, no use-after-free, format dispatch and status fields unchanged,
+rotation transparency holding) and found four things worth fixing:
+
+- **The self-stop teardown was inside the GetStream/ReleaseStream window** on
+  all three backends. It ends in a join over the access unit still in the
+  sink's hands, which on the failing card that triggered the stop is a
+  blocking write — so it held the encoder's output slot and stalled the live
+  stream, the exact coupling this writer removes, reintroduced on the one path
+  that only runs when storage is already misbehaving. Moved after the release,
+  beside the rotation IDR request that is there for the same reason. Two of
+  the three reviewers found this independently.
+- **Boot auto-start forced an IDR on the wrong channel in `record.mode=dual`.**
+  The shared open helper names chn 0, but in dual mode the file is fed by
+  chn 1 — so it injected a keyframe into the live stream, re-armed the rate
+  limiter so chn 1's own request was swallowed, and did nothing for the
+  recording. That is verbatim the trap documented in
+  `include/star6e_ts_recorder.h`. Dual mode now returns from the open helper
+  before the writer start and the IDR, which also makes the invariant the
+  producer gate rests on ("the handle is non-NULL exactly while a mirror
+  recording runs") true rather than nearly true.
+- **star6e's teardown flush was unbounded**, and the comment called it free.
+  It is not: the teardown watchdog SIGKILLs after 3 s and then writes
+  `sysrq-b`, so waiting out a stalled card there trades a lost recording tail
+  for an emergency reboot. Bounded at 500 ms, the same reasoning maruko
+  already used for its reboot watchdog.
+- **CV610 kept two defects of its own**, both predating this change and both
+  now fixed: its status callback read the 64-bit counters outside the lock
+  that the store side takes, and it had no readiness flag, so an init failure
+  before the recorders were set up reached `star6e_ts_recorder_stop()` on a
+  zeroed state whose `fd` of 0 passes the `fd < 0` test — `fdatasync`ing and
+  closing **stdin**.
+
+The test review proved three coverage holes with surviving mutants rather than
+asserting them, and all three are now closed: `stop_bounded(NULL, …)` had no
+test despite running on every record start; nothing asserted the *positive*
+half of the bounded contract, so the production 250 ms grace could have been
+cut to an eighth with the suite green; and the unbounded stop's barrier was
+caught only as a heap-corruption abort. It also showed the rotation sampler
+failing on **correct** code in 6 of 8 runs at 4x CPU oversubscription — the
+sampler thread was never scheduled before the writes finished — which is a
+gate testing the machine rather than the code. It now waits for the sampler to
+reach a CPU first, and is 6/6 green under the same load.
+
+Re-verified on hardware AFTER those fixes, since three of the four touch the
+SigmaStar backends:
+
+- **star6e `.2.232`**, real SD card, 60 fps, GDR. Rotation at
+  `max_seconds=10`: 5 segments, 2658 frames / 59.93 fps, `droppedFrames` 0
+  across 4 rotations, every segment opening on an `I`, and `writerPeakDepth`
+  1 -> 20 — the same rotation signature as before the fixes. Self-stop on a
+  56 MB tmpfs, with the teardown now in its new position after the release:
+  threads 8 -> 9 -> 8 and `stopReason: disk_full` within one poll. Boot
+  auto-start: 3 segments, 0 dropped. Teardown **while recording**, three
+  cycles: 1.4-1.9 s against a watchdog that SIGKILLs at 3 s, with no
+  watchdog, sysrq or kill event in the log.
+- **maruko `.2.233`**, 30 fps. Rotation: 4 segments, 965 frames / 29.98 fps,
+  0 dropped, every segment opening on an `I`, a full segment decoding to
+  exactly 300 frames. Boot auto-start: 2 segments, 0 dropped. Teardown while
+  recording: 1756 ms twice, with uptime continuing to climb — the
+  `reboot(RB_AUTOBOOT)` watchdog never fired.
+- Threads 8 -> 9 -> 8 (star6e) and 6 -> 7 -> 6 (maruko) on every recording.
+
+**Maruko's self-stop cannot be exercised on that hardware, and this is
+permanent.** Its SD slot detects no card (the `ms_sdmmc` controller probes and
+`mmc0` exists, but `/sys/bus/mmc/devices/` stays empty), and the kernel has no
+SCSI bus and no `usb-storage`/`sd_mod`, so a USB drive cannot substitute
+either. With no block device, `star6e_recorder_free_space()` returns 0 on its
+ramfs and the disk-full guard is skipped entirely. What covers maruko instead:
+the detection predicate and the recorder's disk-full stop are shared code
+exercised by the host suite, and the three-line reaction is identical in shape
+to star6e's and CV610's, both of which are device-verified — CV610 as a direct
+A/B against the shipped build.
+
 ## [0.70.0] - 2026-08-27
 
 Snapshot and recording reach the CV610 backend, and the config file is read

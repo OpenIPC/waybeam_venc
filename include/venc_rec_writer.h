@@ -47,8 +47,17 @@ extern "C" {
  * Threading: exactly one producer (the drain loop) and one consumer (the
  * writer thread).  The sink therefore runs on the writer thread, so the
  * recorder state it mutates must not be touched by the producer while the
- * writer is running — start the writer after opening the recorder, and stop
- * it (which drains and joins) before closing the recorder.
+ * writer is running.
+ *
+ * LIFETIME — one writer per RECORDING, not one per process.  Start it after
+ * the recorder file is open; stop it before closing that file.  Both stops
+ * end in an unconditional pthread_join, so on return the sink is guaranteed
+ * never to run again and the close needs no further serialisation.  A
+ * long-lived writer would need a separate barrier before every close, a lock
+ * between the sink and the close for the case that barrier cannot cover, and
+ * a counter reset at every start; tying the lifetime to the recording
+ * removes all three.  It also makes the handle itself the answer to "is a
+ * recording running", which is what the backends' producer gates test.
  */
 
 /* Called on the writer thread, once per queued access unit, in order. */
@@ -98,7 +107,13 @@ int venc_rec_writer_push(VencRecWriter *w, uint8_t *au, size_t len,
 void venc_rec_writer_stop(VencRecWriter *w);
 
 /* As above, but give up after `grace_ms` and abandon whatever is still
- * queued, adding it to *dropped (may be NULL).
+ * queued.  *dropped (may be NULL) is SET to the writer's running total,
+ * abandoned frames included — it is assigned, not accumulated into.
+ *
+ * Bounded by grace_ms PLUS at most one sink call: the queue is abandoned
+ * before the join, so the join waits only for the access unit already in the
+ * writer's hands.  The join still happens, so this is as hard a barrier as
+ * the unbounded stop — it just keeps less of the recording.
  *
  * This is the stop for the encode loop.  Waiting for a stalled disk to
  * accept 4 MB would put the stall straight back on the live video path at

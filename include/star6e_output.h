@@ -233,6 +233,31 @@ int star6e_output_frame_ring_fill(
 int star6e_output_stream_packet_info_complete(
 	const MI_VENC_Stream_t *stream);
 
+/** Flatten a VENC stream's NAL payload into ONE malloc'd Annex-B access unit.
+ *
+ *  For the asynchronous recorder: the SDK's stream memory is only valid until
+ *  ReleaseStream, so anything that writes it on another thread must own a copy
+ *  first.  Returns the buffer (the caller, or the writer queue it is handed
+ *  to, owns and frees it) or NULL if there is nothing valid to record.
+ *
+ *  *out_len gets the byte count and *out_is_idr whether any VCL NAL was an
+ *  IRAP, which segment rotation needs.  The IRAP test reads H.265 NAL types
+ *  (19/20) and is H.265-ONLY: on an H.264 stream those numbers mean something
+ *  else, so *out_is_idr would be meaningless.  Every SigmaStar craft encodes
+ *  H.265; a future H.264 path must extend this before recording works.  A stream whose
+ *  packetInfo table is incomplete is refused, exactly as the synchronous
+ *  writers refuse it — a partial table means the pack boundaries are unknown
+ *  and half an access unit is worse than none.
+ *
+ *  Sized from the stream itself rather than a fixed buffer, so it does not
+ *  inherit the 512 KB cliff of the automatic in
+ *  star6e_ts_recorder_write_stream().  It is not unbounded, though: an access
+ *  unit larger than VENC_REC_WRITER_MAX_BYTES is refused here rather than
+ *  copied, because the writer queue would reject it at its cap anyway.  The
+ *  caller counts that refusal — see rec_flatten_failures. */
+uint8_t *star6e_output_stream_flatten(const MI_VENC_Stream_t *stream,
+	size_t *out_len, int *out_is_idr);
+
 /** Reject an incomplete AU before output/recording. Returns 1 when rejected,
  * emits a one-time warning, and requests paced recovery for reference frames. */
 int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,

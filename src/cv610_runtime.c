@@ -115,6 +115,13 @@ typedef struct {
 	 * the queue takes to flush — seconds on the stalled disk this exists
 	 * to survive. */
 	pthread_mutex_t rec_writer_lock;
+	/* rec_writer_lock and both recorders are initialised partway through
+	 * cv610_init(), which can fail before reaching them — and backend.c
+	 * calls the teardown regardless.  Without this, that teardown locks a
+	 * never-initialised mutex and calls star6e_ts_recorder_stop() on a
+	 * calloc'd state whose fd is 0, which passes the `fd < 0` test and
+	 * fdatasync/close()es STDIN.  star6e and maruko carry the same flag. */
+	int rec_locks_ready;
 	/* Kept in the context, not the writer: the counters have to outlive
 	 * the writer or a recording that shed frames reports droppedFrames:0
 	 * the moment it stops — exactly the silent-damage case the counter was
@@ -399,6 +406,12 @@ static void cv610_record_stop(Cv610RunnerContext *ctx, int bounded)
 {
 	VencRecWriter *w;
 
+	/* An init that failed before the recorders and the mutex were set up
+	 * leaves them zeroed; locking one of those is undefined, and a zeroed
+	 * recorder fd of 0 reads as an open file. */
+	if (!ctx->rec_locks_ready)
+		return;
+
 	/* Detach under the lock so a status poll already inside
 	 * venc_rec_writer_stats() finishes against a live writer, and any
 	 * later one sees NULL.  Harvest the counters first — they must
@@ -420,10 +433,22 @@ static void cv610_record_stop(Cv610RunnerContext *ctx, int bounded)
 	 * disk stall back on the encode loop at every stop — the very thing
 	 * the writer removes — so a stalled queue is abandoned instead: the
 	 * recording loses its tail, the live link loses nothing. */
-	if (bounded)
-		venc_rec_writer_stop_bounded(w, 250, &ctx->rec_dropped_frames);
-	else
+	if (bounded) {
+		uint64_t dropped = 0;
+
+		venc_rec_writer_stop_bounded(w, 250, &dropped);
+		/* Only if there WAS a writer: stop_bounded leaves *dropped at 0
+		 * for a NULL one, which would clobber the harvest above.  Stored
+		 * under the lock because the httpd thread reads it and an
+		 * unlocked 64-bit store tears on ARM32. */
+		if (w) {
+			pthread_mutex_lock(&ctx->rec_writer_lock);
+			ctx->rec_dropped_frames = dropped;
+			pthread_mutex_unlock(&ctx->rec_writer_lock);
+		}
+	} else {
 		venc_rec_writer_stop(w);
+	}
 	cv610_audio_set_record_ring(ctx->audio, NULL);
 	star6e_ts_recorder_stop(&ctx->ts_recorder);
 	star6e_recorder_stop(&ctx->recorder);
@@ -434,11 +459,19 @@ static void cv610_record_start(Cv610RunnerContext *ctx, const char *dir)
 	int want_audio;
 	int rc;
 
-	if (!dir || !dir[0])
+	if (!dir || !dir[0] || !ctx->rec_locks_ready)
 		return;
 	/* Stop first: a start over a live recording must not leak the open fd,
 	 * and only one of the two recorders may ever be active. */
 	cv610_record_stop(ctx, 1);
+
+	/* Before the open, not after it: these describe the recording being
+	 * started, and a start that FAILS must not leave the previous
+	 * recording's drop count standing as if it belonged to this one. */
+	pthread_mutex_lock(&ctx->rec_writer_lock);
+	ctx->rec_dropped_frames = 0;
+	ctx->rec_writer_peak_depth = 0;
+	pthread_mutex_unlock(&ctx->rec_writer_lock);
 
 	if (strcmp(ctx->config.record.format, "hevc") == 0) {
 		if (star6e_recorder_start(&ctx->recorder, dir) != 0)
@@ -481,12 +514,19 @@ static void cv610_record_status_callback(VencRecordStatus *out)
 		return;
 
 	{
-		uint64_t dropped = ctx->rec_dropped_frames;
-		uint32_t peak = ctx->rec_writer_peak_depth;
+		uint64_t dropped;
+		uint32_t peak;
 
 		/* Under the lock: cv610_record_stop() frees the writer from the
-		 * encode loop, and this runs on the httpd thread. */
+		 * encode loop, and this runs on the httpd thread.
+		 *
+		 * The stored fallbacks are read inside it too, not just the
+		 * writer: a 64-bit load on ARM32 is two instructions and can
+		 * straddle the encode loop's store as easily as the store can
+		 * tear.  star6e and maruko already do it this way. */
 		pthread_mutex_lock(&ctx->rec_writer_lock);
+		dropped = ctx->rec_dropped_frames;
+		peak = ctx->rec_writer_peak_depth;
 		if (ctx->rec_writer)
 			venc_rec_writer_stats(ctx->rec_writer, NULL, &dropped,
 				NULL, &peak);
@@ -495,7 +535,11 @@ static void cv610_record_status_callback(VencRecordStatus *out)
 		out->writer_peak_depth = peak;
 	}
 
-	if (star6e_ts_recorder_is_active(&ctx->ts_recorder)) {
+	/* is_RECORDING, not is_active: rotation runs on the writer thread here
+	 * too (see the take_idr_request hand-off in the drain loop) and holds
+	 * fd == -1 across it, so the descriptor is not the right question for a
+	 * reader on the httpd thread. */
+	if (star6e_ts_recorder_is_recording(&ctx->ts_recorder)) {
 		out->active = 1;
 		snprintf(out->format, sizeof(out->format), "ts");
 		star6e_ts_recorder_status(&ctx->ts_recorder,
@@ -1363,6 +1407,9 @@ static int cv610_init(void *opaque)
 	 * and channel count come from the config only so a mismatch shows up
 	 * as a bad TS rather than being silently papered over.  Zero rate ==
 	 * "no audio in the mux". */
+	/* Set after the mutex and star6e_recorder_init above, and immediately
+	 * before ts_recorder_init below — the last of the three. */
+	ctx->rec_locks_ready = 1;
 	star6e_ts_recorder_init(&ctx->ts_recorder,
 		ctx->config.audio.enabled ? ctx->config.audio.sample_rate : 0,
 		ctx->config.audio.enabled ? (uint8_t)ctx->config.audio.channels : 0,
@@ -1604,6 +1651,9 @@ static int cv610_run(void *opaque)
 			 * here delays ss_mpi_venc_release_stream() below, which
 			 * backs up the encoder's output queue and stalls the LIVE
 			 * transport, not just the recording. */
+			/* A recorder that stopped ITSELF (disk full, write
+			 * error) is torn down AFTER the release below, not
+			 * here — see that site for why. */
 			if (ctx->rec_writer) {
 				struct timespec rec_now;
 
@@ -1620,6 +1670,21 @@ static int cv610_run(void *opaque)
 		}
 		ret = ss_mpi_venc_release_stream(CV610_VENC_CHN, &stream);
 		free(stream.pack);
+
+		/* A recorder that stopped ITSELF (disk full, write error) does
+		 * so on the writer thread, so nothing but this loop is
+		 * positioned to notice, and the gate above would go on
+		 * queueing into a dead writer indefinitely.
+		 *
+		 * AFTER the release: this ends in a join over the access unit
+		 * still in the sink's hands, which on the failing medium that
+		 * triggered the stop is a blocking write.  Before the release
+		 * it would hold the encoder's output slot and stall the LIVE
+		 * transport — the coupling this writer exists to remove. */
+		if (ctx->rec_writer &&
+		    !star6e_record_wants_frame(&ctx->ts_recorder,
+				&ctx->recorder))
+			cv610_record_stop(ctx, 1);
 
 		/* Rotation asked for a keyframe.  Serviced here rather than
 		 * inside the recorder: after the release, coalesced (a periodic
@@ -1654,7 +1719,10 @@ static void cv610_teardown(void *opaque)
 	 * kernel-state channels and binds that make the next start fail with
 	 * EXIST.  star6e_runtime.c already orders it this way. */
 	audio_ring_destroy(&ctx->audio_ring);
-	pthread_mutex_destroy(&ctx->rec_writer_lock);
+	if (ctx->rec_locks_ready) {
+		pthread_mutex_destroy(&ctx->rec_writer_lock);
+		ctx->rec_locks_ready = 0;
+	}
 	cv610_output_stop(ctx);
 	debug_osd_destroy(ctx->debug_osd);
 	ctx->debug_osd = NULL;

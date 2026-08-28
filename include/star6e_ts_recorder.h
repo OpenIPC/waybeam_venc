@@ -16,6 +16,14 @@
 
 typedef struct {
 	int fd;
+	/* Set by start(), cleared by every stop.  Deliberately NOT touched by
+	 * segment rotation, which closes and reopens `fd` inside a single
+	 * write_video() call.  `fd >= 0` therefore answers "is a file open
+	 * right now", which is false mid-rotation; this answers "is a
+	 * recording in progress", which is what a producer needs to decide
+	 * whether to hand a frame over.  Read from the encode loop while the
+	 * writer thread rotates, so it is accessed atomically. */
+	int recording;
 	uint64_t bytes_written;
 	uint32_t frames_written;
 	uint32_t segments;            /* number of .ts files produced */
@@ -99,6 +107,32 @@ void star6e_ts_recorder_stop(Star6eTsRecorderState *state);
 
 /** Return 1 if actively recording. */
 int star6e_ts_recorder_is_active(const Star6eTsRecorderState *state);
+
+/* "A recording is in progress", as opposed to is_active()'s "a segment file
+ * is open at this instant".  The two differ for the duration of a rotation,
+ * which runs on the recorder writer thread and holds fd == -1 across
+ * fdatasync/close/open — tens to hundreds of ms on an SD card. */
+int star6e_ts_recorder_is_recording(const Star6eTsRecorderState *state);
+
+/* Is a recording still meant to be running?
+ *
+ * The producer gate is the writer HANDLE, not this: the writer exists for
+ * exactly as long as the recording it feeds, so a rotation is invisible to it.
+ * What every backend's drain loop asks this once per frame is the opposite
+ * question — has the recorder stopped ITSELF?  A recorder that hits ENOSPC or
+ * a write error does so on the writer thread, and nothing but the drain loop
+ * is positioned to notice and tear the writer down.
+ *
+ * Which makes rotation-transparency load-bearing in a new way: this must NOT
+ * go false during a rotation, or the drain loop would end a healthy recording
+ * once per segment.  It lives here, in a header the host suite links, so that
+ * property is testable and cannot drift between the three call sites. */
+static inline int star6e_record_wants_frame(const Star6eTsRecorderState *ts,
+	const Star6eRecorderState *hevc)
+{
+	return star6e_ts_recorder_is_recording(ts) ||
+		star6e_recorder_is_recording(hevc);
+}
 
 /** Stop asking after this many unanswered requests and let rotation go back
  *  to waiting for a natural keyframe.  Without a bound, a mis-wired hook or a

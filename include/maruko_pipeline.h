@@ -10,7 +10,9 @@
 #include "sensor_select.h"
 #include "star6e_recorder.h"
 #include "star6e_ts_recorder.h"
+#include "venc_rec_writer.h"
 
+#include <pthread.h>
 #include <signal.h>
 
 struct DebugOsdState; /* forward declaration — see debug_osd.h */
@@ -66,6 +68,28 @@ typedef struct {
    * parity).  Active when recorder.fd >= 0.  At most one of recorder /
    * ts_recorder is active at a time; format dispatch happens at start. */
   Star6eRecorderState recorder;
+  /* Mirror-mode recording writes on this thread, not the encode loop: a
+   * blocking write(2) before maruko_mi_venc_release_stream() backs up the
+   * encoder output queue and stalls the LIVE stream.  Dual mode already
+   * drains chn 1 on its own thread and is unaffected.
+   *
+   * PER-RECORDING: created after the recorder file is open and joined
+   * before it closes.  That join is the barrier — nothing else has to
+   * serialise the sink against a close, and the pointer being non-NULL IS
+   * "a recording is running", so the producer gate needs no recorder-state
+   * predicate.  NULL whenever nothing is recording. */
+  VencRecWriter *rec_writer;
+  pthread_mutex_t rec_writer_lock;   /* guards rec_writer + the counters */
+  /* rec_writer_lock is initialised during graph configure and destroyed at
+   * teardown, so a teardown after a failed bring-up needs to know whether
+   * it ever ran. */
+  int rec_locks_ready;
+  uint64_t rec_dropped_frames;
+  /* Access units the SDK-typed flatten refused.  Reported as part of
+   * droppedFrames: to an operator both are the same fact — a frame that is
+   * not in the file. */
+  uint64_t rec_flatten_failures;
+  uint32_t rec_writer_peak_depth;
   /* SCL crop base after optional binning and AR-matched precrop.  Stored
    * here so maruko_pipeline_apply_zoom can reposition the zoom rect on
    * live x/y pan without recomputing pipeline geometry. */
@@ -188,5 +212,7 @@ typedef struct {
 } MarukoRefPredStatus;
 
 void maruko_pipeline_ref_pred_status(MarukoRefPredStatus *out);
+
+void mk_mirror_record_locks_init_public(MarukoBackendContext *ctx);
 
 #endif /* MARUKO_PIPELINE_H */

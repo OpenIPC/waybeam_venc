@@ -206,8 +206,9 @@ int venc_rec_writer_push(VencRecWriter *w, uint8_t *au, size_t len,
 	return 1;
 }
 
-/* Common tail: the thread has exited, so nothing else can touch the queue. */
-static void writer_destroy(VencRecWriter *w, uint64_t *dropped)
+/* Discard everything still queued, counting each as a drop.  Caller holds the
+ * lock (or knows the thread has exited). */
+static void queue_abandon(VencRecWriter *w)
 {
 	for (;;) {
 		VencRecAu *e = queue_pop(w);
@@ -217,6 +218,12 @@ static void writer_destroy(VencRecWriter *w, uint64_t *dropped)
 		w->dropped++;
 		au_free(e);
 	}
+}
+
+/* Common tail: the thread has exited, so nothing else can touch the queue. */
+static void writer_destroy(VencRecWriter *w, uint64_t *dropped)
+{
+	queue_abandon(w);
 	if (dropped)
 		*dropped = w->dropped;
 
@@ -225,11 +232,32 @@ static void writer_destroy(VencRecWriter *w, uint64_t *dropped)
 	free(w);
 }
 
-void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
-	uint64_t *dropped)
+/* Wait for the queue to empty, up to grace_ms.  Returns 1 if it emptied, 0 on
+ * timeout.  Deliberately says nothing about the access unit already in the
+ * sink's hands — the pthread_join that follows every caller is what covers
+ * that one.  Caller must NOT hold the lock. */
+static int queue_wait_empty(VencRecWriter *w, unsigned grace_ms)
 {
 	unsigned waited = 0;
 
+	for (;;) {
+		int done;
+
+		pthread_mutex_lock(&w->lock);
+		done = (w->head == NULL);
+		pthread_mutex_unlock(&w->lock);
+		if (done)
+			return 1;
+		if (waited >= grace_ms)
+			return 0;
+		usleep(2000);
+		waited += 2;
+	}
+}
+
+void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
+	uint64_t *dropped)
+{
 	if (!w)
 		return;
 
@@ -244,22 +272,24 @@ void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
 	}
 
 	/* Poll rather than pthread_timedjoin_np: musl does not have it. */
-	for (;;) {
-		int done;
+	(void)queue_wait_empty(w, grace_ms);
 
-		pthread_mutex_lock(&w->lock);
-		done = (w->head == NULL);
-		pthread_mutex_unlock(&w->lock);
-		if (done || waited >= grace_ms)
-			break;
-		usleep(2000);
-		waited += 2;
-	}
+	/* Abandon whatever the grace did not cover, BEFORE the join.  `stopping`
+	 * alone does not bound the thread: it drains its queue to the end and
+	 * only then honours the flag, so joining over a full queue on the
+	 * stalled card this writer exists for would block for the whole backlog
+	 * — up to VENC_REC_WRITER_MAX_BYTES of writes — instead of grace_ms.
+	 * Emptying it here leaves the thread at most the access unit already in
+	 * its hands, which is the documented bound.
+	 *
+	 * The join below is UNCONDITIONAL, and that is what makes this function
+	 * a hard barrier: on return the sink is guaranteed never to run again,
+	 * so the caller may close the descriptor it writes by without any
+	 * further serialisation.  Every recorder close depends on it. */
+	pthread_mutex_lock(&w->lock);
+	queue_abandon(w);
+	pthread_mutex_unlock(&w->lock);
 
-	/* Whether it drained or timed out, `stopping` is set, so the thread
-	 * refuses new work and exits as soon as it finishes the AU in its
-	 * hand.  The join therefore waits for at most ONE sink call, not the
-	 * whole backlog; the rest is abandoned below and counted. */
 	pthread_join(w->thread, NULL);
 	writer_destroy(w, dropped);
 }

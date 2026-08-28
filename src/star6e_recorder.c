@@ -121,7 +121,12 @@ static const char *stop_reason_str(Star6eRecorderStopReason reason)
 static void stop_with_reason(Star6eRecorderState *state,
 	Star6eRecorderStopReason reason)
 {
-	if (!state || state->fd < 0)
+	if (!state)
+		return;
+	/* Cleared before the fd test: a stop that lands on an already-closed
+	 * recorder must still end the recording. */
+	__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
+	if (state->fd < 0)
 		return;
 
 	fdatasync(state->fd);
@@ -173,6 +178,8 @@ int star6e_recorder_start(Star6eRecorderState *state, const char *dir)
 	state->space_check_countdown = RECORDER_SPACE_CHECK_INTERVAL;
 	state->last_stop_reason = RECORDER_STOP_MANUAL;
 	clock_gettime(CLOCK_MONOTONIC, &state->start_time);
+	/* Published last, once the file is genuinely open. */
+	__atomic_store_n(&state->recording, 1, __ATOMIC_RELEASE);
 
 	fprintf(stderr, "[recorder] started: %s\n", state->path);
 	return 0;
@@ -413,6 +420,11 @@ void star6e_recorder_stop(Star6eRecorderState *state)
 int star6e_recorder_is_active(const Star6eRecorderState *state)
 {
 	return state && state->fd >= 0;
+}
+
+int star6e_recorder_is_recording(const Star6eRecorderState *state)
+{
+	return state && __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
 }
 
 void star6e_recorder_status(const Star6eRecorderState *state,

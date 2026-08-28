@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.20.0`
+- `contract_version`: `0.20.1`
 - `status`: `active`
 
 ## Governance Rules
@@ -79,8 +79,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.70.0",
-    "contract_version": "0.20.0",
+    "app_version": "0.71.0",
+    "contract_version": "0.20.1",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1123,18 +1123,17 @@ Recording format is determined by `record.format` config: `"ts"` (default, MPEG-
 with audio) or `"hevc"` (raw HEVC NAL stream). File rotation is controlled by
 `record.maxSeconds` and `record.maxMB` config fields.
 
-Backend gating: only the Star6E backend currently runs the runtime poll that
-honors HTTP-driven start/stop.  On Maruko, recording is config-driven only
-(set `record.enabled=true` + `record.mode="mirror"|"dual"` in `/etc/venc.json`)
-and `/api/v1/record/start` returns:
+Backend gating: **all three backends** run the runtime poll that honours
+HTTP-driven start/stop — Star6E and Maruko in their encode loops, CV610 in its
+drain loop.  A backend that does not register the poll answers
+`/api/v1/record/start` with
 
 ```json
 {"ok":false,"error":{"code":"not_implemented","message":"HTTP record control not available on this backend"}}
 ```
 
-with HTTP `501`.  This avoids the prior behaviour where the request returned
-`{"ok":true}` but no recording started.  Tracked as Phase 6.5 in
-`MARUKO_PARITY_PLAN.md`.
+and HTTP `501`, rather than the older behaviour of returning `{"ok":true}`
+while no recording started.  No shipped backend takes that path today.
 
 ### `GET /api/v1/record/stop`
 
@@ -1834,11 +1833,11 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.20.0`:
+in Notes. As of `contract_version: 0.20.1`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
-| `/api/v1/record/{start,stop}` | yes | **501** | Maruko has no runtime poll loop yet (Phase 6.5).  Config-driven recording (`record.enabled=true` + `record.mode="mirror"\|"dual"`) works. **CV610 from 0.20.0**, `record.mode=mirror` only: the drain loop polls the same start/stop flags. `dual`/`dual-stream` need a second VENC channel and are refused with a warning rather than silently recording ch0. |
+| `/api/v1/record/{start,stop}` | yes | yes | Maruko has polled the start/stop flags since it registered `venc_api_set_record_http_control_supported(true)`; the older **501** row was stale. Config-driven recording (`record.enabled=true` + `record.mode="mirror"\|"dual"`) works on both. **CV610 from 0.20.0**, `record.mode=mirror` only: the drain loop polls the same flags. `dual`/`dual-stream` need a second VENC channel and are refused with a warning rather than silently recording ch0. |
 | `/api/v1/record/status` | live counters | live counters | Both backends register a status callback against the live `Star6eTsRecorderState`; Maruko reflects daemon-config-driven recording (mirror/dual). **CV610 from 0.20.0** registers the same callback. |
 | `/api/v1/qr/*` | yes | **404** | Star6E-only VPE port1 luma tap. QR capability fields remain in the shared schema but report `supported:false` on Maruko. |
 | `/api/v1/recordings*` | yes | yes | File listing/download/delete works against `record.dir` regardless of which backend wrote the file. |
@@ -1859,12 +1858,31 @@ in Notes. As of `contract_version: 0.20.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.20.1` (`/api/v1/record/status` — `droppedFrames` widened and scoped):
+  - **`droppedFrames` now counts every recording frame that did not reach the
+    file, not only the ones the queue refused.** An access unit the SDK-typed
+    flatten rejects — an incomplete `packetInfo` table, or one over the queue's
+    byte cap — never reaches the queue at all, and counting only the queue's
+    refusals let those pass silently. The field's promise is that a damaged
+    recording cannot look like a clean one, so it has to include them.
+    Widening, not narrowing: no frame that used to be counted stops being.
+  - **`droppedFrames` and `writerPeakDepth` are per-RECORDING, not
+    per-process.** All three backends now create the recorder writer when a
+    recording opens and destroy it when the recording closes, so the counters
+    are scoped by construction rather than reset by an operation. Previously
+    the SigmaStar writer outlived any one recording and both accumulated for
+    the life of the daemon: a clean recording reported the previous one's
+    drops, and one shed frame poisoned every recording that followed.
+  - Note the denominators still differ slightly by backend: CV610 hands the
+    transport's already-flattened buffer to the recorder and so has no flatten
+    step of its own to fail.
 - `0.20.0` (additive — snapshot and recording reach CV610):
   - **`/api/v1/record/status` gains `droppedFrames` and `writerPeakDepth`.**
     Recording writes now run on their own thread behind a bounded 4 MB queue,
     so a stalling disk sheds recording frames instead of stalling the live
     video path. `droppedFrames` counts what the queue refused — a silent drop
-    would make a damaged recording look like a clean one. `writerPeakDepth` is
+    would make a damaged recording look like a clean one. (Widened in `0.20.1`
+    to every frame that did not reach the file.) `writerPeakDepth` is
     the high-water queue depth, which reads 0-1 when storage keeps up.
     Both are 0 on backends that still write synchronously.
   - **`record.max_seconds` / `max_mb` now work on a GDR craft.** Segment

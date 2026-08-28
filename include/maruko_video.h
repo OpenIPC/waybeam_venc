@@ -28,6 +28,13 @@ void maruko_video_init_rtp_state(MarukoRtpState *rtp,
  * the whole access unit rather than silently emit only the table prefix. */
 int maruko_video_stream_packet_info_complete(const i6c_venc_strm *stream);
 
+/** Flatten a Maruko VENC stream's NAL payload into ONE malloc'd Annex-B
+ *  access unit.  The i6c twin of star6e_output_stream_flatten(); see that
+ *  declaration for the contract.  Caller (or the writer queue it is handed
+ *  to) owns and frees the buffer. */
+uint8_t *maruko_video_stream_flatten(const i6c_venc_strm *stream,
+	size_t *out_len, int *out_is_idr);
+
 /** Reject an incomplete access unit before any consumer sees it. Returns 1
  * when rejected, emits a one-time warning, and requests paced recovery when
  * the dropped picture participates in the reference chain. */

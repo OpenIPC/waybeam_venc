@@ -54,6 +54,28 @@
 #include "rtp_session.h"
 #include "timing.h"
 
+/* Mirror-mode async recorder helpers — defined lower down, next to the
+ * frame loop they serve, but referenced from pipeline start/stop above it. */
+static int  mk_mirror_record_open(MarukoBackendContext *ctx, const char *dir);
+static void mk_mirror_record_close(MarukoBackendContext *ctx, unsigned grace_ms);
+static void mk_mirror_record_locks_init(MarukoBackendContext *ctx);
+static void maruko_recorder_start_idr(MarukoBackendContext *ctx);
+
+/* Grace for a mid-run record/stop.  Waiting out a stalled disk on the encode
+ * loop would put the stall straight back on the live video path, which is the
+ * whole thing this writer removes; losing the tail of a recording is the
+ * correct trade. */
+#define MARUKO_REC_STOP_GRACE_MS 250
+
+/* Recorder flush budget inside maruko_pipeline_teardown_graph()'s watchdog.  2 s covers a full 4 MB queue on
+ * a healthy card several times over (~1.7 s of video at 19 Mbps, and it writes
+ * far faster than realtime), while leaving the MI teardown below the bulk of
+ * the deadline.  BOUNDED at teardown because maruko_pipeline_teardown_graph()
+ * calls reboot(RB_AUTOBOOT) when its watchdog expires; star6e bounds its own
+ * teardown for the same reason (a SIGKILL then sysrq-b at 3 s), just with a
+ * smaller budget. */
+#define MARUKO_REC_TEARDOWN_GRACE_MS 2000
+
 static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
 {
 	if (!sc || sc->fd < 0) {
@@ -3629,6 +3651,7 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 			ts_codec);
 	}
 	star6e_recorder_init(&ctx->recorder);
+	mk_mirror_record_locks_init(ctx);
 	if (ctx->cfg.record.max_seconds > 0)
 		ctx->ts_recorder.max_seconds = ctx->cfg.record.max_seconds;
 	if (ctx->cfg.record.max_mb > 0)
@@ -3678,29 +3701,7 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	      * feed.  mirror (chn 0 → file) works fine under stab-fill. */
 	     (strcmp(ctx->cfg.record.mode, "dual") == 0 &&
 	      !g_stab_fill_graph))) {
-		if (strcmp(ctx->cfg.record.format, "hevc") == 0) {
-			if (star6e_recorder_start(&ctx->recorder,
-			    ctx->cfg.record.dir) == 0) {
-				printf("> [maruko] recording HEVC to %s (%s)\n",
-					ctx->cfg.record.dir,
-					ctx->cfg.record.mode);
-			}
-		} else if (strcmp(ctx->cfg.record.format, "ts") == 0) {
-			if (star6e_ts_recorder_start(&ctx->ts_recorder,
-			    ctx->cfg.record.dir,
-			    ctx->audio.started
-				? &ctx->audio_recorder_ring : NULL) == 0) {
-				printf("> [maruko] recording TS to %s (%s%s)\n",
-					ctx->cfg.record.dir,
-					ctx->cfg.record.mode,
-					ctx->audio.started ? " + audio" : "");
-			}
-		} else {
-			fprintf(stderr,
-				"WARNING: [maruko] record.format '%s' not "
-				"supported (ts|hevc) — recording disabled\n",
-				ctx->cfg.record.format);
-		}
+		(void)mk_mirror_record_open(ctx, ctx->cfg.record.dir);
 	}
 
 	ctx->output_enabled = 1;
@@ -3965,6 +3966,165 @@ static void maruko_pipeline_log_verbose_frame(MarukoBackendContext *ctx,
 		memset(&rt->pktzr_interval, 0, sizeof(rt->pktzr_interval));
 	}
 	fflush(stdout);
+}
+
+/* Runs on the writer thread, one access unit at a time, in order.
+ *
+ * No lock: the writer is started only after a recorder is open and joined
+ * before it closes (mk_mirror_record_open / mk_mirror_record_close), so the
+ * sink cannot run concurrently with an open or a close.  That is the whole
+ * reason the writer's lifetime is tied to the recording's. */
+static void mk_mirror_record_sink(void *opaque, const uint8_t *au, size_t len,
+	uint64_t pts_90khz, int is_idr)
+{
+	MarukoBackendContext *ctx = opaque;
+
+	if (star6e_ts_recorder_is_active(&ctx->ts_recorder))
+		(void)star6e_ts_recorder_write_video(&ctx->ts_recorder, au, len,
+			pts_90khz, is_idr);
+	else
+		(void)star6e_recorder_write_au(&ctx->recorder, au, len);
+}
+
+/* Initialised before anything can reach it — the status callback runs on the
+ * httpd thread and takes rec_writer_lock.  rec_locks_ready survives because
+ * init and destroy sit in different phases of the graph lifecycle: a teardown
+ * after a failed bring-up must not destroy a mutex that was never
+ * initialised. */
+static void mk_mirror_record_locks_init(MarukoBackendContext *ctx)
+{
+	if (ctx->rec_locks_ready)
+		return;
+	pthread_mutex_init(&ctx->rec_writer_lock, NULL);
+	ctx->rec_locks_ready = 1;
+}
+
+/* Idempotent, so the runtime can insist on the ordering without caring whether
+ * configure_graph() already did it. */
+void mk_mirror_record_locks_init_public(MarukoBackendContext *ctx)
+{
+	mk_mirror_record_locks_init(ctx);
+}
+
+/* End the current recording: detach and JOIN the writer, then close the
+ * recorders.  The join is the barrier — after it the sink is guaranteed not
+ * to run again, so the descriptor it writes by cannot be closed underneath
+ * it.  Safe to call when nothing is recording.
+ *
+ * grace_ms bounds how long a queued tail may hold the caller up; 0 means
+ * flush it all.  Maruko never passes 0: even teardown is watchdogged (see
+ * MARUKO_REC_TEARDOWN_GRACE_MS). */
+static void mk_mirror_record_close(MarukoBackendContext *ctx, unsigned grace_ms)
+{
+	VencRecWriter *w;
+
+	/* An init that failed before mk_mirror_record_locks_init() leaves the
+	 * mutex zeroed; locking or destroying one of those is undefined. */
+	if (!ctx->rec_locks_ready)
+		return;
+
+	/* Detach under the lock so a status poll already inside
+	 * venc_rec_writer_stats() finishes against a live writer and any later
+	 * one sees NULL.  Harvest the counters first — they must outlive the
+	 * writer they came from. */
+	pthread_mutex_lock(&ctx->rec_writer_lock);
+	w = ctx->rec_writer;
+	if (w) {
+		uint64_t dropped = 0;
+		uint32_t peak = 0;
+
+		venc_rec_writer_stats(w, NULL, &dropped, NULL, &peak);
+		ctx->rec_dropped_frames = dropped;
+		ctx->rec_writer_peak_depth = peak;
+	}
+	ctx->rec_writer = NULL;
+	pthread_mutex_unlock(&ctx->rec_writer_lock);
+
+	if (grace_ms) {
+		uint64_t dropped = 0;
+
+		venc_rec_writer_stop_bounded(w, grace_ms, &dropped);
+		/* Only if there WAS a writer: stop_bounded leaves *dropped at 0
+		 * for a NULL one, which would clobber the harvest above.  Stored
+		 * under the lock because the httpd thread reads it and an
+		 * unlocked 64-bit store tears on ARM32. */
+		if (w) {
+			pthread_mutex_lock(&ctx->rec_writer_lock);
+			ctx->rec_dropped_frames = dropped;
+			pthread_mutex_unlock(&ctx->rec_writer_lock);
+		}
+	} else {
+		venc_rec_writer_stop(w);
+	}
+	ctx->audio.rec_ring = NULL;
+	star6e_ts_recorder_stop(&ctx->ts_recorder);
+	star6e_recorder_stop(&ctx->recorder);
+}
+
+/* Begin a recording: open the recorder, then start the writer that feeds it.
+ * The single entry point for every start — boot auto-start and HTTP alike.
+ * Returns 1 when a file is open. */
+static int mk_mirror_record_open(MarukoBackendContext *ctx, const char *dir)
+{
+	int started;
+
+	/* Same guard as the close: rec_writer_lock is taken below, and locking
+	 * a mutex that was never initialised is undefined. */
+	if (!dir || !dir[0] || !ctx->rec_locks_ready)
+		return 0;
+	/* Stop first: a start over a live recording must not leak the open fd,
+	 * and only one of the two recorders may ever be active. */
+	mk_mirror_record_close(ctx, MARUKO_REC_STOP_GRACE_MS);
+
+	if (strcmp(ctx->cfg.record.format, "hevc") == 0) {
+		started = star6e_recorder_start(&ctx->recorder, dir) == 0;
+	} else if (strcmp(ctx->cfg.record.format, "ts") == 0) {
+		ctx->audio.rec_ring = ctx->audio.started
+			? &ctx->audio_recorder_ring : NULL;
+		started = star6e_ts_recorder_start(&ctx->ts_recorder, dir,
+			ctx->audio.rec_ring) == 0;
+		if (!started)
+			ctx->audio.rec_ring = NULL;
+	} else {
+		fprintf(stderr,
+			"WARNING: [maruko] record.format '%s' not "
+			"supported (ts|hevc) — recording disabled\n",
+			ctx->cfg.record.format);
+		return 0;
+	}
+	if (!started)
+		return 0;
+
+	printf("> [maruko] recording %s to %s (%s%s)\n",
+		ctx->cfg.record.format, dir, ctx->cfg.record.mode,
+		ctx->audio.rec_ring ? " + audio" : "");
+
+	/* After the file is open, so the sink never sees a closed recorder.
+	 *
+	 * The counters are zeroed in the same critical section: they describe
+	 * THIS recording, and a writer that lives exactly as long as the
+	 * recording has nothing to carry over — which is the point.
+	 *
+	 * A writer that fails to start leaves the recording OPEN: the producer
+	 * gate falls back to writing synchronously when rec_writer is NULL, so
+	 * the recording still lands — on the encode loop, which is what the
+	 * warning is about. */
+	pthread_mutex_lock(&ctx->rec_writer_lock);
+	ctx->rec_dropped_frames = 0;
+	ctx->rec_flatten_failures = 0;
+	ctx->rec_writer_peak_depth = 0;
+	if (venc_rec_writer_start(&ctx->rec_writer, mk_mirror_record_sink,
+			ctx) != 0)
+		fprintf(stderr, "WARNING: [maruko] recorder writer thread did "
+			"not start; mirror recording will write on the encode "
+			"loop and can stall the live stream on slow storage\n");
+	pthread_mutex_unlock(&ctx->rec_writer_lock);
+
+	/* Start the file on a keyframe.  Forced, not rate-limited: a GDR craft
+	 * (resilience=racing) emits no periodic IDR, so a request the limiter
+	 * coalesces away yields a file with no IRAP anywhere in it. */
+	maruko_recorder_start_idr(ctx);
+	return 1;
 }
 
 /* Process one ready frame: GetStream → per-frame work → ReleaseStream
@@ -4437,7 +4597,48 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	 * concurrent writes would interleave NAL units from two encoders.
 	 * At most one of recorder / ts_recorder is active (format dispatch
 	 * happens at start), so the inactive call is an fd<0 no-op. */
-	if (!ctx->dual) {
+	/* Mirror-mode recording.  The SDK's stream memory dies at the release
+	 * below, so the writer thread gets its own copy; the flatten is not an
+	 * extra cost for the TS path, which was already flattening onto a
+	 * 512 KB stack buffer.  Gated so an idle craft pays no malloc per
+	 * frame.
+	 *
+	 * A recorder that stopped ITSELF is torn down AFTER the release below,
+	 * not here — see that site for why. */
+
+	/* The writer pointer IS the gate: it exists for exactly as long as the
+	 * recording it feeds.  No recorder-state predicate, so a rotation —
+	 * which holds fd == -1 on the writer thread across fdatasync/close/open
+	 * — is invisible here and cannot cost a frame. */
+	if (!ctx->dual && ctx->rec_writer) {
+		size_t au_len = 0;
+		int au_idr = 0;
+		uint8_t *au = maruko_video_stream_flatten(&stream, &au_len,
+			&au_idr);
+
+		if (au) {
+			struct timespec rec_now;
+
+			clock_gettime(CLOCK_MONOTONIC, &rec_now);
+			(void)venc_rec_writer_push(ctx->rec_writer, au, au_len,
+				ts_mux_timespec_to_pts(
+					(uint32_t)rec_now.tv_sec,
+					(uint32_t)rec_now.tv_nsec),
+				au_idr);
+		} else {
+			/* A frame the flatten refused is a frame missing from
+			 * the file; counting it keeps that visible. */
+			pthread_mutex_lock(&ctx->rec_writer_lock);
+			ctx->rec_flatten_failures++;
+			pthread_mutex_unlock(&ctx->rec_writer_lock);
+		}
+	} else if (!ctx->dual) {
+		/* No writer.  Either nothing is recording — both calls below
+		 * no-op on a closed recorder — or the writer thread failed to
+		 * start, in which case this writes synchronously rather than
+		 * silently recording nothing.  With no writer thread, rotation
+		 * runs here on the encode loop, so fd is never transiently -1
+		 * from another thread and the descriptor IS the right gate. */
 		(void)maruko_ts_recorder_write_stream(&ctx->ts_recorder,
 			&stream);
 		(void)maruko_recorder_write_frame(&ctx->recorder, &stream);
@@ -4461,6 +4662,21 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		(void)maruko_mi_venc_request_idr(ctx->venc_device,
 			ctx->venc_channel, 1);
 
+	/* A recorder that stopped ITSELF (disk full, write error) does so on the
+	 * writer thread, so nothing but this loop is positioned to notice, and
+	 * the gate above would go on queueing into a dead writer indefinitely.
+	 *
+	 * AFTER the release, for the same reason the IDR request above is: this
+	 * ends in a join over the access unit still in the sink's hands, which
+	 * on the failing card that triggered the stop is a blocking write.
+	 * Inside the GetStream/ReleaseStream window that would hold the encoder's
+	 * output slot and stall the LIVE stream — the very coupling this writer
+	 * removes, reintroduced on the one path that only runs when storage is
+	 * already misbehaving. */
+	if (!ctx->dual && ctx->rec_writer &&
+	    !star6e_record_wants_frame(&ctx->ts_recorder, &ctx->recorder))
+		mk_mirror_record_close(ctx, MARUKO_REC_STOP_GRACE_MS);
+
 	/* HTTP record control: drain the start/stop request flags so they
 	 * never accumulate across reinit, then act only when this runtime
 	 * actually owns the recorder.  Maruko's chn 1 drain thread (dual
@@ -4473,6 +4689,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			sizeof(rec_dir));
 		int stop_pending = venc_api_get_record_stop();
 		int is_hevc = (strcmp(ctx->cfg.record.format, "hevc") == 0);
+		int started = 0;
 		int is_ts   = (strcmp(ctx->cfg.record.format, "ts") == 0);
 
 		if ((start_pending || stop_pending) && !is_ts && !is_hevc) {
@@ -4482,33 +4699,16 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 				"(ts|hevc)\n", ctx->cfg.record.format);
 		} else {
 			if (start_pending) {
-				/* Stop both — only the format-matching one is
-				 * active, but keeping both calls is cheaper
-				 * than a branch and matches Star6E's pattern. */
-				star6e_recorder_stop(&ctx->recorder);
-				star6e_ts_recorder_stop(&ctx->ts_recorder);
-				ctx->audio.rec_ring = NULL;
-				if (is_hevc) {
-					if (star6e_recorder_start(&ctx->recorder,
-					    rec_dir) == 0)
-						maruko_recorder_start_idr(ctx);
-				} else {
-					ctx->audio.rec_ring = ctx->audio.started
-						? &ctx->audio_recorder_ring
-						: NULL;
-					if (star6e_ts_recorder_start(
-					    &ctx->ts_recorder, rec_dir,
-					    ctx->audio.started
-						? &ctx->audio_recorder_ring
-						: NULL) == 0)
-						maruko_recorder_start_idr(ctx);
-				}
+				/* mk_mirror_record_open() closes any live
+				 * recording first, joining its writer, so the
+				 * old file's queued tail cannot land in the new
+				 * one. */
+				started = mk_mirror_record_open(ctx, rec_dir);
+				(void)started;
 			}
-			if (stop_pending) {
-				star6e_recorder_stop(&ctx->recorder);
-				star6e_ts_recorder_stop(&ctx->ts_recorder);
-				ctx->audio.rec_ring = NULL;
-			}
+			if (stop_pending)
+				mk_mirror_record_close(ctx,
+					MARUKO_REC_STOP_GRACE_MS);
 		}
 	}
 
@@ -4696,10 +4896,16 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	maruko_pipeline_stop_dual(ctx);
 	/* Recorders run after stop_dual: in dual mode the drain thread
 	 * has already exited and is no longer issuing writes, so close()
-	 * cannot race with a write().  In mirror mode no thread holds it.
+	 * cannot race with a write().  In mirror mode the recorder writer
+	 * thread issues them, which is what the stop below joins.
 	 * Stop both — at most one is open, the inactive call is a no-op. */
-	star6e_ts_recorder_stop(&ctx->ts_recorder);
-	star6e_recorder_stop(&ctx->recorder);
+	/* The join inside this is what makes the close safe; bounded because
+	 * this teardown is watchdogged. */
+	mk_mirror_record_close(ctx, MARUKO_REC_TEARDOWN_GRACE_MS);
+	if (ctx->rec_locks_ready) {
+		pthread_mutex_destroy(&ctx->rec_writer_lock);
+		ctx->rec_locks_ready = 0;
+	}
 	/* Audio teardown after recorder stop: the recorder pops from
 	 * audio_recorder_ring, so the recorder must be quiet before we
 	 * can destroy the ring or join the encode thread that pushes
