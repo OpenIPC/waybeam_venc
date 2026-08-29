@@ -1221,6 +1221,47 @@ static int test_restart_set_rejects_legacy_codec_field(void)
 			fclose(cf);
 		CHECK("contract_version_line_present", found);
 	}
+	{
+		/* README carries a worked /api/v1/version example, and it went
+		 * stale twice in one release cycle -- the pin above covers only
+		 * HTTP_API_CONTRACT.md, which is exactly why nobody noticed.
+		 * Pin both strings in it against the compiled values. */
+		FILE *rf = fopen("README.md", "r");
+		char line[512];
+		int found = 0;
+		char want_app[96], want_contract[96];
+		char ver[64] = {0};
+		FILE *vf = fopen("VERSION", "r");
+
+		/* Read VERSION rather than VENC_VERSION: the host test build
+		 * does not define it, and the file is the source of truth the
+		 * README example is supposed to track anyway. */
+		CHECK("version_file_readable", vf != NULL);
+		if (vf) {
+			if (fgets(ver, sizeof(ver), vf))
+				ver[strcspn(ver, "\r\n")] = '\0';
+			fclose(vf);
+		}
+		snprintf(want_app, sizeof(want_app), "\"app_version\":\"%s\"",
+			ver);
+		snprintf(want_contract, sizeof(want_contract),
+			"\"contract_version\":\"%s\"", VENC_CONTRACT_VERSION);
+
+		CHECK("readme_readable", rf != NULL);
+		while (rf && fgets(line, sizeof(line), rf)) {
+			if (!strstr(line, "\"app_version\":"))
+				continue;
+			found = 1;
+			CHECK("readme_app_version_matches_code",
+				strstr(line, want_app) != NULL);
+			CHECK("readme_contract_version_matches_code",
+				strstr(line, want_contract) != NULL);
+			break;
+		}
+		if (rf)
+			fclose(rf);
+		CHECK("readme_version_example_present", found);
+	}
 
 	/* 0.21.0 removed video0.maxIBytes/maxPBytes.  The contract promises a
 	 * controller still pushing them gets 404 "unknown config field" — on

@@ -424,6 +424,99 @@ static int test_writer_stop_cost_bounded_vs_unbounded(void)
 	return failures;
 }
 
+/* Static, not a stack local: on the deferred path the reaper writes this
+ * after the test function has already returned. */
+static int g_reaped;
+
+static void reap_flag_cb(void *ctx)
+{
+	(void)ctx;
+	__atomic_store_n(&g_reaped, 1, __ATOMIC_RELEASE);
+}
+
+/* The encode loop must never be parked on a sink that has stopped completing.
+ *
+ * venc_rec_writer_stop_bounded() abandons the backlog but then joins
+ * unconditionally, so an access unit already inside a write() on a stalled
+ * card holds the caller there for as long as the kernel does. Every backend
+ * calls a mid-run stop from its encode loop -- CV610 for the HTTP stop and the
+ * recorder self-stop, Star6E and Maruko likewise -- so that is live video
+ * stalled by a stopping recording, which is the coupling this writer exists to
+ * remove.
+ *
+ * Asserts wall-clock return, not a code path, against a sink deliberately
+ * blocked an order of magnitude past the grace -- and then that the close
+ * still happens, because deferring it must not mean dropping it. */
+static int test_writer_async_stop_never_joins_a_blocked_sink(void)
+{
+	VencRecWriter *w = NULL;
+	BarrierSink s;
+	struct timespec t0, t1;
+	long long elapsed_ms;
+	uint64_t dropped = 0;
+	int failures = 0;
+	int i;
+
+	memset(&s, 0, sizeof(s));
+	s.delay_us = 800000;   /* 800 ms: 16x the grace below */
+	__atomic_store_n(&g_reaped, 0, __ATOMIC_RELEASE);
+
+	CHECK("async stop writer start",
+		venc_rec_writer_start(&w, barrier_sink, &s) == 0);
+	for (i = 0; i < 4; i++)
+		(void)venc_rec_writer_push(w, make_au((uint8_t)i, 1024), 1024,
+			(uint64_t)i * 900, 0);
+	usleep(50000);   /* let the writer take one INTO the blocked sink */
+
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	venc_rec_writer_stop_bounded_async(w, 50, &dropped, reap_flag_cb, NULL);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
+		(t1.tv_nsec - t0.tv_nsec) / 1000000;
+
+	/* Grace for the drain + grace for the in-flight write, then hand off.
+	 * Nowhere near the sink's 800 ms. */
+	CHECK("async stop returned inside its deadline", elapsed_ms < 400);
+	CHECK("async stop abandoned the backlog", dropped > 0);
+	CHECK("close deferred while the sink is still blocked",
+		__atomic_load_n(&g_reaped, __ATOMIC_ACQUIRE) == 0);
+
+	/* Deferred, not dropped: the reaper still joins and closes. */
+	usleep(1200000);
+	CHECK("reaper ran the close once the sink returned",
+		__atomic_load_n(&g_reaped, __ATOMIC_ACQUIRE) == 1);
+	return failures;
+}
+
+/* The common case must not pay for the pathological one: with a sink that
+ * keeps up, the async stop joins inline and the close has already happened by
+ * the time it returns -- byte-identical ordering to the synchronous stop. */
+static int test_writer_async_stop_reaps_inline_when_healthy(void)
+{
+	VencRecWriter *w = NULL;
+	BarrierSink s;
+	uint64_t dropped = 0;
+	int failures = 0;
+	int i;
+
+	memset(&s, 0, sizeof(s));
+	s.delay_us = 0;
+	__atomic_store_n(&g_reaped, 0, __ATOMIC_RELEASE);
+
+	CHECK("inline reap writer start",
+		venc_rec_writer_start(&w, barrier_sink, &s) == 0);
+	for (i = 0; i < 4; i++)
+		(void)venc_rec_writer_push(w, make_au((uint8_t)i, 1024), 1024,
+			(uint64_t)i * 900, 0);
+
+	venc_rec_writer_stop_bounded_async(w, 250, &dropped, reap_flag_cb, NULL);
+	CHECK("healthy sink reaps before the stop returns",
+		__atomic_load_n(&g_reaped, __ATOMIC_ACQUIRE) == 1);
+	CHECK("healthy sink delivered the queue", s.calls == 4);
+	CHECK("healthy sink abandoned nothing", dropped == 0);
+	return failures;
+}
+
 /* Counters are per-RECORDING.  Not by an operation any more — by the writer's
  * lifetime: the backends create one when a recording opens and destroy it when
  * the recording closes, so the next recording gets a fresh handle whose
@@ -678,6 +771,8 @@ int test_venc_rec_writer(void)
 	failures += test_writer_stop_bounded_is_a_hard_barrier();
 	failures += test_writer_stop_bounded_abandons_the_backlog();
 	failures += test_writer_stop_cost_bounded_vs_unbounded();
+	failures += test_writer_async_stop_never_joins_a_blocked_sink();
+	failures += test_writer_async_stop_reaps_inline_when_healthy();
 	failures += test_writer_counters_start_clean_for_each_recording();
 	failures += test_writer_stop_bounded_makes_a_close_safe_without_a_lock();
 	failures += test_writer_stop_bounded_returns_promptly_when_idle();

@@ -93,6 +93,10 @@ typedef struct {
 	 * one would make a damaged recording look clean. */
 	uint64_t rec_flatten_failures;
 	uint32_t rec_writer_peak_depth;
+	/* Non-zero while a detached reaper still owns the recorders: it has not
+	 * joined a writer whose sink outlived the stop deadline, so their
+	 * descriptors are still live and a new recording must not reuse them. */
+	int rec_reap_pending;
 	ImuState *imu;              /* NULL if IMU disabled */
 	MI_VENC_Pack_t *stream_packs;     /* pre-allocated for main loop */
 	uint32_t stream_packs_cap;

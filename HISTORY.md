@@ -1,5 +1,51 @@
 # History
 
+## [0.73.2] - 2026-08-29
+
+A mid-run record/stop can no longer stall live video. `contract_version` stays
+**0.22.0** — no endpoint, payload or status change.
+
+- **`venc_rec_writer_stop_bounded()` was not actually time-bounded.** It
+  abandons the queued backlog, which bounds the *queue*, and then joins
+  unconditionally — so the access unit already inside the sink's `write()` held
+  the caller for as long as the kernel did. On a medium that has stopped
+  completing, that is unbounded.
+
+  That mattered more than the teardown case 0.73.1 documented: every backend
+  calls a mid-run stop **from its encode loop** — CV610 for the HTTP stop
+  (`cv610_runtime.c`) and for the recorder's own disk-full/write-error stop,
+  Star6E and Maruko likewise. So stopping a recording on a stalled card stalled
+  the live stream, which is precisely the coupling the async writer exists to
+  remove, reintroduced on the one path that only runs when storage is already
+  misbehaving.
+
+  New `venc_rec_writer_stop_bounded_async()` never joins past its deadline: one
+  grace to let the queued tail reach the disk, one to let the in-flight write
+  finish, and if the sink is still inside that write it hands the writer to a
+  detached reaper and returns. The reaper joins, frees, and only then runs the
+  caller's reap callback — which is where each backend now closes its
+  recorders, so on **both** paths the close still happens strictly after the
+  sink can never run again. `*dropped` is still filled synchronously, because
+  the abandon happens on the caller's thread.
+
+  Bounded by roughly 2 × grace (500 ms on CV610) instead of by the disk. The
+  healthy path is unchanged: the sink finishes inside the grace, the join is
+  immediate, and the reap runs inline before the call returns — byte-identical
+  ordering to the synchronous stop.
+
+- **Teardown deliberately still joins.** There is no later for a reaper to run
+  in, and the VENC/VPSS teardown below must not race a writer that still holds
+  a descriptor. It stays bounded (the backlog is abandoned first).
+
+- **A recording cannot start over recorders a reaper still owns.** When the
+  hand-off happens the previous recording's descriptors are still live, so
+  `record/start` is refused with a warning until the reap completes, rather
+  than racing the close. On a healthy card this is never observable — the stop
+  reaps inline.
+
+Found by the Qodo review on the upstream PR, which identified the encode-loop
+exposure the 0.73.1 note had understated.
+
 ## [0.73.1] - 2026-08-29
 
 Fixes found while reviewing the 0.68.0-0.73.0 range for upstream submission.
