@@ -666,11 +666,12 @@ supported way to bound IDR cost; `min_qp` and `max_qp` each break the rate
 contract outright once they bind. The measured behaviour is recorded here
 because the failure modes are large, silent, and easy to reach by accident.
 
-Figures are device measurements, six forced IDRs per point, sizes in bytes,
-rate measured over the wire. Star6E rows: SSC338Q, 1280x720@60, H.265 CBR
-19092 kbps, GDR `racing`. Maruko rows: Infinity6C bench, 1280x720@30, CBR
-1500 kbps, `resilience: off` (periodic IDRs). Both benches viewed a
-near-static scene — see the caveat on binding points below.
+Figures are device measurements, sizes in bytes, rate measured over the wire.
+Star6E rows: SSC338Q, 1280x720@60, H.265 CBR 19092 kbps, GDR `racing`, five
+forced IDRs per point (GDR emits none on its own). Maruko rows: Infinity6C
+bench, 1280x720@30, CBR 1500 kbps, `resilience: off`, ten periodic IDRs per
+point (none forced). Both benches viewed a near-static scene — see the caveat
+on binding points below.
 
 **`qp_delta` — moves bits between I and P, at constant rate.**
 
