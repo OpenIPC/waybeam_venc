@@ -905,6 +905,18 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 		return 0;
 	}
 
+	/* video0.intra_refresh_qp reaches MI_VENC_SetIntraRefresh on Star6E and
+	 * Maruko and is logged as applied ("intraRefresh: ... qp=10"), but the
+	 * SigmaStar encoder ignores it: sweeping it 10 / 36 / 48 on .232 moved
+	 * IRAP 80099 / 79791 / 79566 and the delivered rate not at all, and
+	 * 0 vs 10 on .233 moved IRAP 16485 / 16466.  A 38-QP span with no effect
+	 * is not a control, so only CV610 -- where it IS the I-frame lever --
+	 * advertises it.  (Which also means mode_default_qp()'s per-mode stripe
+	 * QP is inert on the SigmaStar parts.) */
+	if (backend_name && strcmp(backend_name, "cv610") != 0 &&
+	    strcmp(canonical_key, "video0.intra_refresh_qp") == 0)
+		return 0;
+
 	/* These controls have no Maruko implementation.  Keep them in the shared
 	 * schema so clients can render one dashboard, but advertise them honestly
 	 * and reject writes before they reach a missing callback or route.

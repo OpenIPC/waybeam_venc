@@ -743,9 +743,25 @@ overshoot.
 
 | Field | Star6E | Maruko | CV610 |
 |---|---|---|---|
-| `video0.qp_delta` | yes | yes | advertised, **no measured effect** |
-| `video0.min_qp` / `max_qp` | yes | not implemented | yes |
+| `video0.qp_delta` | yes | yes | **not offered** |
+| `video0.min_qp` / `max_qp` | yes | yes | yes |
+| `video0.intra_refresh_qp` | **inert, not offered** | **inert, not offered** | yes |
 | `outgoing.sidecar_port` | yes | yes | not implemented |
+
+`video0.intra_refresh_qp` is advertised on CV610 only. It reaches
+`MI_VENC_SetIntraRefresh` on Star6E and Maruko as well, and both log it as
+applied (`intraRefresh: ... qp=10`), but the SigmaStar encoder ignores it —
+swept across a 38-QP span with `qpDelta: 0` so it could not be masked:
+
+| `intraRefreshQp` | 10 | 36 (preset) | 48 |
+|---|---|---|---|
+| Star6E IRAP p50 | 80099 | 79791 | 79566 |
+| Star6E rate (Mbps) | 19.42 | 19.43 | 19.42 |
+| Maruko IRAP p50 | 16466 | 16485 | — |
+
+A consequence worth knowing: `mode_default_qp()`'s per-mode stripe QP —
+36 / 32 / 28, chosen so `robust` gets the cleanest recovery anchor — is
+therefore **inert on the SigmaStar backends** and only takes effect on CV610.
 
 `video0.qp_delta` is **not offered on CV610**: it is absent from the backend's
 supported-field list, and `cv610_validation.c` deliberately does not
