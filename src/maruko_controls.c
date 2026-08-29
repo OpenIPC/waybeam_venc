@@ -292,66 +292,6 @@ static int maruko_request_idr(void);
 static int maruko_request_idr_bootstrap(void);
 static uint32_t maruko_query_live_fps(void);
 
-static int maruko_apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
-{
-	i6c_venc_chn attr = {0};
-	MI_VENC_RcParam_t param = {0};
-	int pri;
-
-	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &attr) != 0)
-		return -1;
-	if (maruko_mi_venc_get_rc_param(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &param) != 0)
-		return -1;
-
-	switch (attr.rate.mode) {
-	case MARUKO_VENC_RC_H265_CBR:
-		param.stParamH265Cbr.u32MaxISize = max_i_bytes;
-		param.stParamH265Cbr.u32MaxPSize = max_p_bytes;
-		break;
-	case MARUKO_VENC_RC_H264_CBR:
-		param.stParamH264Cbr.u32MaxISize = max_i_bytes;
-		param.stParamH264Cbr.u32MaxPSize = max_p_bytes;
-		break;
-	case MARUKO_VENC_RC_H265_VBR:
-		param.stParamH265Vbr.u32MaxISize = max_i_bytes;
-		param.stParamH265Vbr.u32MaxPSize = max_p_bytes;
-		break;
-	case MARUKO_VENC_RC_H264_VBR:
-		param.stParamH264VBR.u32MaxISize = max_i_bytes;
-		param.stParamH264VBR.u32MaxPSize = max_p_bytes;
-		break;
-	case MARUKO_VENC_RC_H265_AVBR:
-		param.stParamH265Avbr.u32MaxISize = max_i_bytes;
-		param.stParamH265Avbr.u32MaxPSize = max_p_bytes;
-		break;
-	case MARUKO_VENC_RC_H264_AVBR:
-		param.stParamH264Avbr.u32MaxISize = max_i_bytes;
-		param.stParamH264Avbr.u32MaxPSize = max_p_bytes;
-		break;
-	default:
-		return -1;
-	}
-
-	if (maruko_mi_venc_set_rc_param(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &param) != 0)
-		return -1;
-
-	pri = (max_i_bytes > 0 || max_p_bytes > 0)
-		? E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
-		: E_MI_VENC_RC_PRIORITY_BITRATE_FIRST;
-	maruko_mi_venc_set_rc_priority(g_ctx.venc_dev, g_ctx.venc_chn, pri);
-
-	/* No IDR: frame-size caps are rate-control state.  Star6E parity —
-	 * see apply_max_frame_size() in src/star6e_controls.c. */
-	printf("> maxFrameSize changed: I=%u P=%u bytes, priority=%s\n",
-		max_i_bytes, max_p_bytes,
-		pri == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
-			? "framebits" : "bitrate");
-	return 0;
-}
-
 static int maruko_apply_fps(uint32_t fps)
 {
 	i6c_venc_chn attr = {0};
@@ -1541,7 +1481,6 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.query_iq_info = maruko_iq_query,
 	.apply_iq_param = maruko_iq_set,
 	.apply_max_payload_size = maruko_apply_max_payload_size,
-	.apply_max_frame_size = maruko_apply_max_frame_size,
 	.query_transport_status = maruko_query_transport_status,
 	.query_audio_status = maruko_query_audio_status,
 	.apply_zoom = maruko_apply_zoom,

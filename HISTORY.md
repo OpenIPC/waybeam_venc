@@ -1,5 +1,103 @@
 # History
 
+## [0.72.0] - 2026-08-29
+
+The per-frame size caps are removed. `contract_version` 0.20.1 -> **0.21.0**.
+**Breaking**: two config fields deleted, and a `GET /api/v1/set` or
+`/api/v1/live/set` naming either now fails the whole request.
+
+- **Removed `video0.maxIBytes` and `video0.maxPBytes`** from the config, the
+  capabilities payload, and the Star6E and Maruko backends, along with
+  `apply_max_frame_size()` and the now-unused `MI_VENC_SetRcPriority` binding
+  on both. CV610 never implemented them.
+
+  They never imposed the ceiling they named. Device-measured on a SSC338Q
+  (IMX335 1280x720@60, H.265 CBR, GDR via `racing`), 2026-08-28, with the
+  encoder's own bitstream as the tap and every step confirmed applied by
+  `apply_max_frame_size()`'s own `priority=framebits` log line:
+
+  | commanded `maxPBytes` | predicted | delivered |
+  |---:|---:|---:|
+  | 33144 B | 15909 kbps | 19333 kbps |
+  | 25000 B | 12000 kbps | 19319 kbps |
+  | 16000 B | 7680 kbps | 19285 kbps |
+  | 10000 B | 4800 kbps | 19319 kbps |
+  | 6000 B | 2880 kbps | 19327 kbps |
+
+  Flat across a 5.5x range; at 6000 B every one of 863 access units exceeded
+  the cap, mean 40247 bytes. `maxIBytes` stepped 91788 -> 26000 -> 8000 -> 2000
+  left IDR size at 66-81 KB across **16 sampled IDRs** — a 46x cap range. That
+  arm is the weaker of the two: the stream is GDR, so its IDRs are on-demand
+  artefacts of the measurement tap rather than a natural population. Three
+  controls make the result attributable: CBR tracked its 19092 kbps target to
+  within 1.3% (delivered 19285-19333, slightly over — the rate controller was
+  working), raising `video0.minQp` to 30 on the
+  same scene gave ~490 bytes/frame (the encoder can produce frames that small),
+  and every step was re-read from `/api/v1/get`. Startup application was not
+  the gap either. The **I-cap arm** was corroborated on a second Star6E rig in
+  OpenIPC/waybeam_venc#111 (2026-08-22, 10 Mbps: IDRs an identical 42-44 KB at
+  caps 2000 / 26000 / 8) — a closed, unmerged PR that probed the I-cap only, so
+  it does not corroborate the `maxPBytes` sweep above.
+
+  **Scope.** One SSC338Q, one SDK build, 720p60 H.265 CBR, GDR. Maruko was not
+  measured in this sweep; removal there is taken on parity with Star6E and is
+  the operator's call, not a Maruko measurement.
+
+  **The claim is bounded, and 0.45.0 is why.** That release recorded
+  `maxPBytes=2000` moving a Star6E from 5619 to 1868 kbps — real influence, 3x
+  below this sweep's floor of 6000 B, and this sweep did not re-test at 2000 B.
+  It reconciles rather than contradicts: 1868 kbps at the bench's 60 fps
+  (`.201`, IMX335 — the rate is recorded, the cadence is not, and the
+  conclusion is cadence-sensitive: at 120 fps the same numbers would bind) is
+  ~3892 B/frame against a 2000 B cap, ~1.95x over. That is a whole-stream mean
+  against a P-only cap, so it mixes in uncapped I frames and the true P mean is
+  lower — the error runs toward binding — and a mean cannot show that no frame
+  was under the cap. The 2000 B point has never had a per-AU census on either
+  backend.
+
+  The one Maruko datum comes not from #111's body but from the comment in which
+  its author **withdrew** that PR's "inert" wording: `maxIBytes=2000` moving a
+  Maruko IDR *median* 12195 -> 5866 B, ~3x over. A median is the stronger form
+  — at least half the IDRs exceeded the cap. The caps
+  *influence* below ~6000 B and *bind* nowhere they have been measured. It is
+  the not-binding that disqualifies them as a ceiling, not an absence of
+  effect.
+
+  **Upgrade note.** A config file still carrying the keys loads fine — unknown
+  keys are ignored and they disappear on the next config write. A `GET
+  /api/v1/set` **or** `GET /api/v1/live/set` **naming** them does not: the
+  multi-field preflight rejects the whole request with `404 unknown config
+  field` on the first unrecognised key, so a stored "apply my profile" batch
+  that still carries them applies none of its other fields.
+  `/api/v1/live/set` is the path a volatile-first controller hits first, and it
+  fails the same way. Strip them from saved batches, and from any controller
+  that pushes them, before upgrading.
+
+  **Deployment order is craft-side, not ground-side.** The controller that
+  pushed these caps (waybeam-link) runs on the *same box* as venc and talks to
+  `127.0.0.1:80`; ground nodes never pushed them. So on each craft, update the
+  controller BEFORE this venc. Get it backwards and the stale controller's cap
+  transaction 404s at the head of its queue forever — write-on-change never
+  advances past a request that never succeeds — which starves its bitrate, fps
+  and IDR pushes too, not just the caps. That exact starvation was already
+  observed on CV610, which answers 501 to these fields.
+
+  **What to use instead — and what has no replacement.** For I-frame size,
+  `video0.qpDelta` is the strongest lever left: a 68x range on the same rig
+  (-12 -> ~3.8 KB IDRs, 0 -> ~67-82 KB, +12 -> ~261 KB), and it does not
+  keyframe. (#111 read the opposite — "qpDelta barely moves IDR size, 43 KB at
+  0 and at -6" — measured before #255 was understood, and consistent with a
+  startup apply that never reached the encoder.) **It has an open defect of its
+  own**: issue #255 — applied from venc's startup path it logs success without
+  reaching the encoder, so a craft boots with IDRs up to ~20x larger than its
+  config asks for (at `qpDelta=-12`; ~4x at -6) and only a live write corrects
+  it. Fix #255 before depending on this to bound the IDR.
+
+  For **P-frame** size there is no direct replacement. `video0.minQp` is the
+  surviving rate lever — the control above measured it taking the same scene to
+  ~490 bytes/frame — but it is Star6E-only (venc rejects it on Maruko), so this
+  removal leaves Maruko with no per-frame size control at all.
+
 ## [0.71.0] - 2026-08-28
 
 Star6E and Maruko mirror-mode recording moves off the encode loop, matching

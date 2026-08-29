@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.20.1`
+- `contract_version`: `0.21.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -79,8 +79,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.71.0",
-    "contract_version": "0.20.1",
+    "app_version": "0.72.0",
+    "contract_version": "0.21.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -430,7 +430,7 @@ would wear flash and boot into the last adaptive transient.
 curl "http://<device-ip>/api/v1/live/set?video0.bitrate=4096"
 
 # Multi-set works identically (all fields must be live)
-curl "http://<device-ip>/api/v1/live/set?video0.maxIBytes=60000&video0.maxPBytes=12000"
+curl "http://<device-ip>/api/v1/live/set?video0.minQp=28&video0.maxQp=44"
 ```
 
 Semantics:
@@ -1833,7 +1833,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.20.1`:
+in Notes. As of `contract_version: 0.21.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1858,6 +1858,38 @@ in Notes. As of `contract_version: 0.20.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.21.0` (**breaking**, `video0.maxIBytes`/`video0.maxPBytes` removed): the
+    per-frame size caps are gone from the config, the capabilities payload and
+    both SigmaStar backends. They never imposed the ceiling they named.
+    Device-measured on a SSC338Q (1280x720@60, H.265 CBR, GDR): across
+    `maxPBytes` 33144 -> 25000 -> 16000 -> 10000 -> 6000 the delivered rate
+    moved under 0.3%, and at the 6000 B step an AU census found all 863 access
+    units over the cap (mean 40247 B). `maxIBytes` 91788 -> 26000 -> 8000 ->
+    2000 left IDR size at 66-81 KB across 16 sampled IDRs — the weaker of the
+    two arms, since a GDR stream's IDRs are requested on demand rather than
+    being a natural population; corroborated by #111's 42-44 KB at caps
+    2000 / 26000 / 8. Scope: one SSC338Q, one SDK build, 720p60 H.265 CBR, GDR
+    — Maruko was not measured, and removal there is taken on parity.
+    **Bounded claim.** `0.45.0` recorded `maxPBytes=2000` moving a Star6E from
+    5619 to 1868 kbps — real influence, 3x below this sweep's floor. But 1868
+    kbps at 60 fps is ~3892 B/frame against a 2000 B cap, ~1.95x over, and the
+    Maruko datum in #111 (`maxIBytes=2000` -> IDR median 12195 -> 5866) is ~3x
+    over. The caps influence below ~6000 B; they do not bind anywhere they have
+    been measured, which is what disqualifies them as a ceiling.
+    A config file still carrying the keys loads fine (unknown keys are ignored)
+    and they disappear on the next config write, but a `GET /api/v1/set` **or**
+    `GET /api/v1/live/set` **naming** them now fails the whole request with
+    `404 unknown config field` — and `/api/v1/live/set` is the path a
+    volatile-first controller hits first. Strip them from saved batches and
+    from any controller that pushes them.
+    For I-frame size use `video0.qpDelta` — a 68x range on the same rig, and
+    it does not keyframe. **Fix #255 before depending on it:** applied from
+    venc's own startup path it logs success without reaching the encoder, so
+    only a live write takes effect today. That is the same
+    logs-success-without-taking-effect shape as the caps removed here.
+    For **P-frame** size there is no direct replacement; `video0.minQp` is the
+    surviving rate lever and is Star6E-only, so this removal leaves Maruko
+    without a per-frame size control.
 - `0.20.1` (`/api/v1/record/status` — `droppedFrames` widened and scoped):
   - **`droppedFrames` now counts every recording frame that did not reach the
     file, not only the ones the queue refused.** An access unit the SDK-typed

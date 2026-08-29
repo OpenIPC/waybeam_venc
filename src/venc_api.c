@@ -444,9 +444,8 @@ static const FieldUi ui_pause_stab = {
 	"framing=off or zoom."
 };
 
-/* UI descriptors for the per-frame size caps (0.45.0).  Rendered as a
- * "Frame size caps" group purely from capabilities — the caps were API-only
- * until now (no static SECTIONS rows). */
+/* UI descriptors for the RC QP bounds.  Rendered purely from capabilities —
+ * these were API-only (no static SECTIONS rows). */
 static const FieldUi ui_min_qp = {
 	"Video", "Min QP", "number", 0, 51, 1, NULL,
 	"RC QP floor. 0 = leave the SDK default. Raising the floor caps quality and saves bitrate; LOWERING it lets CBR actually spend its budget on a simple scene instead of undershooting the target. Applied live."
@@ -463,20 +462,6 @@ static const FieldUi ui_slice_count = {
 	"as 1/N. The request is quantized to encoder row geometry; startup logs "
 	"the requested/applied mapping and validation tools report the VCL census. On Star6E, "
 	"1080p delivers only 1,2,3,4,5,6,9,17 and saturates at 17. Restart-only."
-};
-static const FieldUi ui_max_i_bytes = {
-	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
-	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
-	"When either cap is > 0 the RC priority switches to framebits-first so "
-	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
-	"An IDR is requested after each apply. Applied live."
-};
-static const FieldUi ui_max_p_bytes = {
-	"Video", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
-	"Hard per-frame cap on the encoded P-frame size in bytes. 0 = unlimited. "
-	"When either cap is > 0 the RC priority switches to framebits-first so "
-	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
-	"An IDR is requested after each apply. Applied live."
 };
 
 /* UI descriptors for the snapshot subsystem.  The whole section was API-only
@@ -556,8 +541,6 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, bitrate,         FT_UINT,   MUT_LIVE),
 	FIELD(video0, gop_size,        FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
-	FIELD_UI(video0, max_i_bytes,  FT_UINT,   MUT_LIVE, &ui_max_i_bytes),
-	FIELD_UI(video0, max_p_bytes,  FT_UINT,   MUT_LIVE, &ui_max_p_bytes),
 	FIELD_UI(video0, min_qp,       FT_UINT,   MUT_LIVE, &ui_min_qp),
 	FIELD_UI(video0, max_qp,       FT_UINT,   MUT_LIVE, &ui_max_qp),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
@@ -722,10 +705,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.rcMode", "video0.rc_mode" },
 	{ "video0.gopSize", "video0.gop_size" },
 	{ "video0.qpDelta", "video0.qp_delta" },
-	{ "video0.maxIBytes", "video0.max_i_bytes" },
 	{ "video0.minQp", "video0.min_qp" },
 	{ "video0.maxQp", "video0.max_qp" },
-	{ "video0.maxPBytes", "video0.max_p_bytes" },
 	{ "outgoing.maxPayloadSize", "outgoing.max_payload_size" },
 	{ "outgoing.audioPort", "outgoing.audio_port" },
 	{ "fpv.roiEnabled", "fpv.roi_enabled" },
@@ -1506,7 +1487,6 @@ typedef enum {
 	LIVE_GROUP_ISP_BIN,
 	LIVE_GROUP_SNAPSHOT_QUALITY,
 	LIVE_GROUP_PAUSE_STAB,
-	LIVE_GROUP_MAX_FRAME_SIZE,
 	LIVE_GROUP_QP_BOUNDS,
 	LIVE_GROUP_DETECT,
 	LIVE_GROUP_QR_WINDOW,
@@ -1687,9 +1667,6 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_SNAPSHOT_QUALITY;
 	if (strcmp(canonical_key, "video0.pause_stab") == 0)
 		return LIVE_GROUP_PAUSE_STAB;
-	if (strcmp(canonical_key, "video0.max_i_bytes") == 0 ||
-	    strcmp(canonical_key, "video0.max_p_bytes") == 0)
-		return LIVE_GROUP_MAX_FRAME_SIZE;
 	if (strcmp(canonical_key, "video0.min_qp") == 0 ||
 	    strcmp(canonical_key, "video0.max_qp") == 0)
 		return LIVE_GROUP_QP_BOUNDS;
@@ -1742,8 +1719,6 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "snapshot.quality";
 	case LIVE_GROUP_PAUSE_STAB:
 		return "video0.pauseStab";
-	case LIVE_GROUP_MAX_FRAME_SIZE:
-		return "video0.maxIBytes/maxPBytes";
 	case LIVE_GROUP_QP_BOUNDS:
 		return "video0.minQp/maxQp";
 	case LIVE_GROUP_DETECT:
@@ -1924,8 +1899,6 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality != NULL;
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab != NULL;
-	case LIVE_GROUP_MAX_FRAME_SIZE:
-		return g_cb->apply_max_frame_size != NULL;
 	case LIVE_GROUP_QP_BOUNDS:
 		return g_cb->apply_qp_bounds != NULL;
 	case LIVE_GROUP_DETECT:
@@ -2018,10 +1991,6 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_PAUSE_STAB:
 		dst->video0.pause_stab = src->video0.pause_stab;
-		break;
-	case LIVE_GROUP_MAX_FRAME_SIZE:
-		dst->video0.max_i_bytes = src->video0.max_i_bytes;
-		dst->video0.max_p_bytes = src->video0.max_p_bytes;
 		break;
 	case LIVE_GROUP_QP_BOUNDS:
 		dst->video0.min_qp = src->video0.min_qp;
@@ -2176,9 +2145,6 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality(cfg->snapshot.quality);
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab(cfg->video0.pause_stab);
-	case LIVE_GROUP_MAX_FRAME_SIZE:
-		return g_cb->apply_max_frame_size(cfg->video0.max_i_bytes,
-			cfg->video0.max_p_bytes);
 	case LIVE_GROUP_QP_BOUNDS:
 		/* Backends without RC QP bounds leave the hook NULL. */
 		if (!g_cb->apply_qp_bounds)
@@ -2907,7 +2873,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.20.1\","
+		"\"contract_version\":\"0.21.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);

@@ -627,8 +627,6 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->qp_delta = json_get_int(obj, "qpDelta", v->qp_delta);
 	if (v->qp_delta < -12) v->qp_delta = -12;
 	if (v->qp_delta > 12) v->qp_delta = 12;
-	v->max_i_bytes = (uint32_t)json_get_int(obj, "maxIBytes", (int)v->max_i_bytes);
-	v->max_p_bytes = (uint32_t)json_get_int(obj, "maxPBytes", (int)v->max_p_bytes);
 	v->min_qp = (uint32_t)json_get_int(obj, "minQp", (int)v->min_qp);
 	v->max_qp = (uint32_t)json_get_int(obj, "maxQp", (int)v->max_qp);
 	v->scene_threshold = (uint16_t)json_get_int(obj, "sceneThreshold",
@@ -1382,8 +1380,6 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "bitrate",        cfg->video0.bitrate,         0);
 	pp_field_double(p, 2, "gopSize",        cfg->video0.gop_size,        0);
 	pp_field_int(p,    2, "qpDelta",        cfg->video0.qp_delta,        0);
-	pp_field_uint(p,   2, "maxIBytes",      cfg->video0.max_i_bytes,     0);
-	pp_field_uint(p,   2, "maxPBytes",      cfg->video0.max_p_bytes,     0);
 	pp_field_uint(p,   2, "minQp",          cfg->video0.min_qp,          0);
 	pp_field_uint(p,   2, "maxQp",          cfg->video0.max_qp,          0);
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
@@ -1639,8 +1635,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "bitrate", cfg->video0.bitrate);
 		cJSON_AddNumberToObject(vid, "gopSize", cfg->video0.gop_size);
 		cJSON_AddNumberToObject(vid, "qpDelta", cfg->video0.qp_delta);
-		cJSON_AddNumberToObject(vid, "maxIBytes", cfg->video0.max_i_bytes);
-		cJSON_AddNumberToObject(vid, "maxPBytes", cfg->video0.max_p_bytes);
 		cJSON_AddNumberToObject(vid, "minQp", cfg->video0.min_qp);
 		cJSON_AddNumberToObject(vid, "maxQp", cfg->video0.max_qp);
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
