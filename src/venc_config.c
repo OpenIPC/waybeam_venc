@@ -659,6 +659,25 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 			(void)venc_config_apply_resilience_preset("off", v);
 		}
 	}
+	/* Per-field override on top of the preset, applied AFTER it because the
+	 * preset zeroes this field; non-zero wins (see include/intra_refresh.h).
+	 * This is the intra-refresh stripe QP — the quality of the GDR recovery
+	 * anchor, and on CV610 the only control that moves I-frame size at all.
+	 *
+	 * Deliberately NOT paired with an intraRefreshLines override: `lines` is
+	 * derived from the mode's target self-heal window (fast 150 ms /
+	 * balanced 500 ms / robust 1000 ms) and also drives the auto-GOP, so a
+	 * config could silently contradict the resilience name it declares.
+	 * Timing belongs to the preset; anchor cost is the tunable axis. */
+	{
+		int irqp = json_get_int(obj, "intraRefreshQp",
+			(int)v->intra_refresh_qp);
+		if (irqp < 0)
+			irqp = 0;
+		if (irqp > 51)
+			irqp = 51;
+		v->intra_refresh_qp = (uint8_t)irqp;
+	}
 
 	/* zoom_pct is derived from the framing preset (below) — no longer
 	 * parsed from JSON.  Only the live pan centre is read here. */
@@ -1386,6 +1405,7 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
 	pp_field_uint(p,   2, "sliceCount",     cfg->video0.slice_count,     0);
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
+	pp_field_uint(p,   2, "intraRefreshQp", cfg->video0.intra_refresh_qp, 0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
 	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              0);
 	pp_field_string(p, 2, "framing",           cfg->video0.framing,             0);
@@ -1641,6 +1661,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
 		cJSON_AddNumberToObject(vid, "sliceCount", cfg->video0.slice_count);
 		cJSON_AddStringToObject(vid, "resilience", cfg->video0.resilience);
+		cJSON_AddNumberToObject(vid, "intraRefreshQp",
+			cfg->video0.intra_refresh_qp);
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);
 		cJSON_AddStringToObject(vid, "framing", cfg->video0.framing);

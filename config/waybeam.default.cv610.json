@@ -12,6 +12,7 @@
     "qpDelta": -4,
     "sliceCount": 1,
     "resilience": "off",
+    "intraRefreshQp": 0,
     "framing": "off"
   },
   "outgoing": {

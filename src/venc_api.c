@@ -454,6 +454,18 @@ static const FieldUi ui_max_qp = {
 	"Video", "Max QP", "number", 0, 51, 1, NULL,
 	"RC QP ceiling. 0 = leave the SDK default. Raising the ceiling lets the encoder compress a scene change hard enough to stay inside the frame budget instead of emitting a burst frame. Applied live."
 };
+static const FieldUi ui_intra_refresh_qp = {
+	"Video", "Intra-refresh QP", "number", 0, 51, 1, NULL,
+	"QP of the GDR intra-refresh stripe — the quality of the recovery "
+	"anchor, and the bitrate it costs. 0 = the resilience preset's default "
+	"(fast 36 / balanced 32 / robust 28; robust runs lowest because lossy "
+	"links want the cleanest anchor). Lower = cleaner anchor, more bits. "
+	"On CV610 this is also the ONLY control that moves I-frame size, so it "
+	"trades forced-IDR size against anchor quality — they are one register. "
+	"Setting it below the scene's natural P QP collapses the I-frame instead "
+	"of growing it. Restart-only; needs resilience != off."
+};
+
 static const FieldUi ui_slice_count = {
 	"Video", "Slices per frame", "number", 1, VENC_SLICE_COUNT_MAX, 1, NULL,
 	"Independent H.265 slices per picture. 1 = off. Multi-slice "
@@ -606,6 +618,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD_UI(video0, slice_count,  FT_UINT,   MUT_RESTART, &ui_slice_count),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
+	FIELD_UI(video0, intra_refresh_qp, FT_UINT8, MUT_RESTART, &ui_intra_refresh_qp),
 	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
 	 * magnitude is part of the framing preset (derived zoom_pct), not a
 	 * settable field. */
@@ -732,6 +745,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
 	{ "video0.sliceCount", "video0.slice_count" },
+	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
 	{ "video0.stabCropPct", "video0.stab_crop_pct" },
@@ -845,8 +859,16 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"sensor.index", "sensor.mode",
 			"isp.keep_aspect",
 			"video0.fps", "video0.size",
-			"video0.bitrate", "video0.gop_size", "video0.qp_delta",
+			"video0.bitrate", "video0.gop_size",
 			"video0.slice_count", "video0.resilience",
+			/* video0.qp_delta is deliberately ABSENT.  CV610's CBR rate
+			 * controller stores gop_attr.normal_p.ip_qp_delta and ignores
+			 * it (measured; README), and the register that does move
+			 * I-frame size is intra refresh's request_i_qp, which is the
+			 * GDR recovery anchor owned by the resilience preset.  Driving
+			 * qpDelta into it would silently retune the anchor, so the
+			 * anchor is exposed under its own name instead. */
+			"video0.intra_refresh_qp",
 			/* Read by cv610_apply_qp_bounds(), live and at startup.
 			 * CBR cannot hold its target in a noise-dominated scene
 			 * without room to raise QP. */
@@ -883,13 +905,27 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 		return 0;
 	}
 
+	/* video0.intra_refresh_qp reaches MI_VENC_SetIntraRefresh on Star6E and
+	 * Maruko and is logged as applied ("intraRefresh: ... qp=10"), but the
+	 * SigmaStar encoder ignores it: sweeping it 10 / 36 / 48 on .232 moved
+	 * IRAP 80099 / 79791 / 79566 and the delivered rate not at all, and
+	 * 0 vs 10 on .233 moved IRAP 16485 / 16466.  A 38-QP span with no effect
+	 * is not a control, so only CV610 -- where it IS the I-frame lever --
+	 * advertises it.  (Which also means mode_default_qp()'s per-mode stripe
+	 * QP is inert on the SigmaStar parts.) */
+	if (backend_name && strcmp(backend_name, "cv610") != 0 &&
+	    strcmp(canonical_key, "video0.intra_refresh_qp") == 0)
+		return 0;
+
 	/* These controls have no Maruko implementation.  Keep them in the shared
 	 * schema so clients can render one dashboard, but advertise them honestly
-	 * and reject writes before they reach a missing callback or route. */
+	 * and reject writes before they reach a missing callback or route.
+	 *
+	 * video0.min_qp/max_qp left this list when maruko_apply_qp_bounds()
+	 * landed; Maruko is the same MI VENC RC as Star6E, so the bounds are
+	 * the same u32MinQp/u32MaxQp write. */
 	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
-	    (strncmp(canonical_key, "qr.", 3) == 0 ||
-	     strcmp(canonical_key, "video0.min_qp") == 0 ||
-	     strcmp(canonical_key, "video0.max_qp") == 0))
+	    strncmp(canonical_key, "qr.", 3) == 0)
 		return 0;
 
 	/* isp.awb_fps paces the Star6E userspace AWB loop (src/star6e_awb.c),

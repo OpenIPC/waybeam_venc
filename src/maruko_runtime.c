@@ -169,6 +169,15 @@ static int maruko_runner_init(void *opaque)
 		maruko_controls_callbacks()->apply_qp_delta(
 			ctx->vcfg.video0.qp_delta);
 	}
+	/* video0.minQp/maxQp are MUT_LIVE but must also take effect on a cold
+	 * boot: the config is read before the channel exists, so the live path
+	 * never runs for a value already in the file. */
+	if (ctx->vcfg.video0.min_qp > 0 || ctx->vcfg.video0.max_qp > 0) {
+		const VencApplyCallbacks *cb = maruko_controls_callbacks();
+		if (cb->apply_qp_bounds)
+			cb->apply_qp_bounds(ctx->vcfg.video0.min_qp,
+				ctx->vcfg.video0.max_qp);
+	}
 
 	return 0;
 }

@@ -477,12 +477,15 @@ static int test_field_support_by_backend(void)
 	CHECK("min qp supported star6e",
 		venc_api_field_supported_for_backend("star6e",
 			"video0.minQp") == 1);
-	CHECK("min qp unsupported maruko",
+	/* Maruko gained QP bounds with maruko_apply_qp_bounds(): same MI VENC
+	 * RC as Star6E, so the same u32MinQp/u32MaxQp write.  Device-verified
+	 * on .233 -- minQp 40 took the stream from 1.54 Mbps to 0.09. */
+	CHECK("min qp supported maruko",
 		venc_api_field_supported_for_backend("maruko",
-			"video0.minQp") == 0);
-	CHECK("max qp unsupported maruko",
+			"video0.minQp") == 1);
+	CHECK("max qp supported maruko",
 		venc_api_field_supported_for_backend("maruko",
-			"video0.max_qp") == 0);
+			"video0.max_qp") == 1);
 	CHECK("slice count supported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"video0.sliceCount") == 1);
