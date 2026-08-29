@@ -33,7 +33,7 @@
     "size": "auto",
     "bitrate": 8192,
     "gopSize": 1.0,
-    "qpDelta": -4,
+    "qpDelta": -12,
     "minQp": 0,
     "maxQp": 0,
     "sceneThreshold": 0,
