@@ -743,7 +743,7 @@ overshoot.
 
 | Field | Star6E | Maruko | CV610 |
 |---|---|---|---|
-| `video0.qp_delta` | yes | yes | yes — tracked against the measured P QP, see below |
+| `video0.qp_delta` | yes | yes | advertised, **no measured effect** |
 | `video0.min_qp` / `max_qp` | yes | not implemented | yes |
 | `outgoing.sidecar_port` | yes | yes | not implemented |
 
@@ -752,9 +752,9 @@ knob does not move the bitstream: across `-12`, `-4`, `0`, `+12`, applied both
 live and at channel create, and in both a saturated and an unsaturated CBR
 regime, IDR size held at 16.1-20.3 KB (<=1.2% spread) where Star6E spans 9x
 over the same range. IDR access units were confirmed well-formed
-(`19, 32, 33, 34, 39` — IDR_W_RADL + VPS/SPS/PPS/SEI).  `qp_delta` now works
-on CV610 anyway — it is served by a different mechanism, described at the end
-of this section — but not by this field.
+(`19, 32, 33, 34, 39` — IDR_W_RADL + VPS/SPS/PPS/SEI).  A working
+alternative does exist on CV610 — see `request_i_qp` below — but it is not
+this field.
 
 The cause is not venc's write. Reading the channel back through the SDK shows
 `ip_qp_delta=-4` correctly in force. On CV610 **every rate-control input to
@@ -816,44 +816,6 @@ running channel, succeeds if called between `create_chn` and `start_chn`, and
 then makes `ss_mpi_venc_set_intra_refresh` fail with the same error so venc
 does not start. On a GDR craft you can have intra refresh or debreath, not
 both.
-
-**How `video0.qpDelta` is implemented on CV610.** The portable `qpDelta` is
-*relative* — I QP = P QP + delta — and that is what keeps it meaningful as a
-scene moves. `request_i_qp` is *absolute*: hold it at 34 while the P QP drifts
-30 -> 42 and "I coarser than P" silently becomes "I finer than P". So the
-relative semantic is reconstructed rather than approximated. CV610 reports
-`mean_qp` per frame in `ot_venc_h265_stream_info` (SigmaStar does not — the
-sidecar's `qp` reads 0 there), so the encode loop tracks the P QP with an EMA
-and re-derives `request_i_qp = p_qp - qp_delta` about twice a second.
-
-Measured on .181, CBR 1500 kbps, 8 forced IDRs per point, no live tuning
-beyond the `qpDelta` write itself:
-
-| `qpDelta` | 0 | -2 | -4 | -6 | -8 | -10 |
-|---|---|---|---|---|---|---|
-| IRAP median | 22501 | 15725 | 12391 | 10655 | 9123 | 7930 |
-| rate (Mbps) | 1.48 | 1.50 | 1.51 | 1.51 | 1.50 | 1.50 |
-
-Monotonic, rate-neutral, and the same sign as Star6E and Maruko: more negative
-means a smaller I-frame. Cold boot honours it with no live write (config
-`qpDelta: -8` gave IRAP 9054 against the live-set 9123).
-
-**Only the `delta <= 0` half is reachable**, and this is a property of the
-hardware, not of the implementation. The collapse floor measured above is the
-P QP itself: 34 at 1500 kbps and 26 at 8000 kbps are exactly what the encoder
-reports as `mean_qp` at those rates. Asking for an I-frame finer than the
-P-frames asks the rate controller to fund bits the bitrate does not have, and
-it answers by collapsing rather than by spending. `request_i_qp` is therefore
-clamped at `p_qp`, so a positive `qpDelta` saturates at the `qpDelta: 0`
-behaviour (measured 22615 against 22501) instead of falling off the edge.
-
-Two consequences worth knowing. The knob only exists while intra refresh is on
-(`resilience` != `off`); with it off the value is stored, a warning is logged,
-and it takes effect on the next start. And because the target tracks the P QP,
-it follows the link: with waybeam-link driving the rate up the same
-`qpDelta: -4` resolved to `p_qp=31 -> request_i_qp=35` rather than the
-`p_qp=34 -> 38` seen standalone. That is the intended behaviour — it is what
-an absolute value could not do.
 
 The super-frame strategy (`ss_mpi_venc_set_super_frame_strategy`,
 `i_frame_bits_threshold`) also bounds the IDR — 16395 -> 5040 / 4414 / 4293 at

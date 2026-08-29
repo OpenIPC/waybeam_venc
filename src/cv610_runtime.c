@@ -89,13 +89,6 @@ typedef struct {
 	uint32_t requested_slice_count;
 	uint32_t intra_refresh_active;
 	uint32_t applied_gop_frames;
-	/* video0.qpDelta tracking — see cv610_qp_delta_retrack(). */
-	int      qp_delta_intent;
-	uint32_t p_qp_ema_x16;
-	uint8_t  p_qp_valid;
-	uint8_t  applied_req_i_qp_valid;
-	int      applied_req_i_qp;
-	uint32_t qp_track_countdown;
 	uint32_t ref_census_frames;
 	uint32_t ref_type_counts[OT_VENC_P_SLICE_BUTT];
 	uint32_t trail_n_patched;
@@ -177,12 +170,8 @@ static void cv610_publish_encoder_status(
 	pthread_mutex_unlock(&g_cv610_status_mutex);
 }
 
-/* The qp_delta field this used to carry is gone: gop_attr.normal_p.ip_qp_delta
- * is accepted by the SDK and then ignored by the CBR rate controller, so
- * writing it was a no-op dressed as a control.  video0.qpDelta is served by
- * cv610_qp_delta_retrack() instead. */
 static int cv610_update_venc_attr(uint32_t bitrate, uint32_t gop,
-	unsigned int fields)
+	int qp_delta, unsigned int fields)
 {
 	ot_venc_chn_attr attr;
 	td_s32 ret;
@@ -195,13 +184,15 @@ static int cv610_update_venc_attr(uint32_t bitrate, uint32_t gop,
 		attr.rc_attr.h265_cbr.bit_rate = bitrate;
 	if (fields & 2u)
 		attr.rc_attr.h265_cbr.gop = gop;
+	if (fields & 4u)
+		attr.gop_attr.normal_p.ip_qp_delta = qp_delta;
 	ret = ss_mpi_venc_set_chn_attr(CV610_VENC_CHN, &attr);
 	return ret == TD_SUCCESS ? 0 : -1;
 }
 
 static int cv610_apply_bitrate(uint32_t kbps)
 {
-	int ret = cv610_update_venc_attr(kbps, 0, 1u);
+	int ret = cv610_update_venc_attr(kbps, 0, 0, 1u);
 
 	if (ret == 0 && g_cv610_runner)
 		__atomic_store_n(&g_cv610_runner->live_bitrate, kbps,
@@ -250,106 +241,15 @@ static int cv610_apply_gop(uint32_t frames)
 			"would drop the stream out of GDR\n", (unsigned)frames);
 		return -1;
 	}
-	ret = cv610_update_venc_attr(0, frames, 2u);
+	ret = cv610_update_venc_attr(0, frames, 0, 2u);
 	if (ret == 0)
 		ctx->applied_gop_frames = frames;
 	return ret;
 }
 
-/* video0.qpDelta on CV610.
- *
- * The portable qpDelta is RELATIVE — I QP = P QP + delta — which is what
- * keeps it meaningful as a scene moves.  CV610 cannot express that directly:
- * gop_attr.normal_p.ip_qp_delta is stored and then ignored by the CBR rate
- * controller (measured; see the CV610 section of README.md), and the lever
- * that does work, intra_refresh.request_i_qp, is ABSOLUTE.  A fixed absolute
- * I QP silently inverts its meaning when the scene moves the P QP: hold it at
- * 34 while P drifts 30 -> 42 and "I coarser than P" becomes "I finer than P".
- *
- * So the relative semantic is reconstructed.  CV610 reports mean_qp per frame
- * in ot_venc_h265_stream_info (SigmaStar does not), so the encode loop tracks
- * the P QP and this re-derives request_i_qp against it.
- *
- * Sign matches SigmaStar: a more negative qpDelta means a HIGHER I QP and
- * therefore a SMALLER I-frame, so request_i_qp = p_qp - qp_delta.
- *
- * Only available while intra refresh is on (resilience != off) — that is the
- * only state in which request_i_qp exists. */
-#define CV610_P_QP_EMA_SHIFT   3u   /* alpha = 1/8 */
-#define CV610_QP_TRACK_FRAMES  60u  /* re-derive ~0.6 s at 100 fps */
-
-static void cv610_p_qp_observe(Cv610RunnerContext *ctx, uint32_t mean_qp)
-{
-	if (ctx == NULL || mean_qp == 0u || mean_qp > 51u)
-		return;   /* 0 = not reported; >51 = out of the field's range */
-	if (!ctx->p_qp_valid) {
-		ctx->p_qp_ema_x16 = mean_qp << 4;
-		ctx->p_qp_valid = 1u;
-		return;
-	}
-	ctx->p_qp_ema_x16 = (uint32_t)((int32_t)ctx->p_qp_ema_x16 +
-		(((int32_t)(mean_qp << 4) - (int32_t)ctx->p_qp_ema_x16) >>
-			CV610_P_QP_EMA_SHIFT));
-}
-
-static int cv610_qp_delta_retrack(Cv610RunnerContext *ctx)
-{
-	ot_venc_intra_refresh ir;
-	int p_qp, target;
-
-	if (ctx == NULL || !ctx->intra_refresh_active || !ctx->p_qp_valid)
-		return 0;
-	p_qp   = (int)((ctx->p_qp_ema_x16 + 8u) >> 4);
-	target = p_qp - ctx->qp_delta_intent;
-	if (target < 0)
-		target = 0;
-	if (target > 51)
-		target = 51;
-	/* Asking for an I QP below the P QP asks the rate controller to fund an
-	 * I-frame the bitrate cannot pay for; measured, it does not produce a
-	 * larger I-frame, it collapses to a floor (README).  Refuse to walk off
-	 * that edge — the reachable half of the range is delta <= 0. */
-	if (target < p_qp)
-		target = p_qp;
-	if (ctx->applied_req_i_qp_valid && target == ctx->applied_req_i_qp)
-		return 0;
-	memset(&ir, 0, sizeof(ir));
-	if (ss_mpi_venc_get_intra_refresh(CV610_VENC_CHN, &ir) != TD_SUCCESS)
-		return -1;
-	ir.request_i_qp = (td_u32)target;
-	if (ss_mpi_venc_set_intra_refresh(CV610_VENC_CHN, &ir) != TD_SUCCESS)
-		return -1;
-	fprintf(stderr, "[waybeam] CV610 qpDelta=%d: p_qp=%d -> request_i_qp=%d\n",
-		ctx->qp_delta_intent, p_qp, target);
-	ctx->applied_req_i_qp = target;
-	ctx->applied_req_i_qp_valid = 1u;
-	return 0;
-}
-
 static int cv610_apply_qp_delta(int delta)
 {
-	Cv610RunnerContext *ctx = g_cv610_runner;
-
-	if (ctx == NULL)
-		return -1;
-	ctx->qp_delta_intent = delta;
-	/* With intra refresh off there is no request_i_qp to steer, so the value
-	 * is stored and not applied.  Accepted rather than refused: resilience is
-	 * restart-only, so the only way to gain the lever is a restart, and the
-	 * startup seed applies the stored value then.  Refusing would raise a 500
-	 * ("rollback incomplete", which reads as damage) at every automated
-	 * writer that carries qpDelta in a shared craft config. */
-	if (!ctx->intra_refresh_active) {
-		fprintf(stderr, "[waybeam] WARNING: CV610 qpDelta=%d stored but not "
-			"in force: the I-frame QP is owned by intra refresh, which is "
-			"off (resilience=off)\n", delta);
-		return 0;
-	}
-	/* Not an error if the P QP is not yet observed: the encode loop applies
-	 * the new intent on its next re-derive. */
-	(void)cv610_qp_delta_retrack(ctx);
-	printf("> qpDelta changed to %d\n", delta);
-	return 0;
+	return cv610_update_venc_attr(0, 0, delta, 4u);
 }
 
 /* Captured on the first write so that 0 restores the driver's own default
@@ -1013,10 +913,6 @@ static int cv610_apply_encoder_config(Cv610RunnerContext *ctx,
 	ctx->slice_census_done = 0;
 	ctx->requested_slice_count = enc->slice.requested_count;
 	ctx->intra_refresh_active = enc->intra.enabled ? 1u : 0u;
-	/* Seed the qpDelta tracker from config.  video0.qpDelta is MUT_LIVE, so
-	 * without this a value already in the file would never be applied — the
-	 * live path only runs for a write that arrives after boot. */
-	ctx->qp_delta_intent = ctx->config.video0.qp_delta;
 	ctx->ref_census_frames = 0;
 	memset(ctx->ref_type_counts, 0, sizeof(ctx->ref_type_counts));
 	ctx->trail_n_patched = 0;
@@ -1691,18 +1587,6 @@ static int cv610_run(void *opaque)
 				}
 			}
 			is_idr = cv610_frame_is_idr(frame, frame_len);
-			/* video0.qpDelta is relative to the P QP, so track it from
-			 * the encoder's own per-frame report and re-derive
-			 * request_i_qp periodically.  IDRs are excluded: their QP is
-			 * the thing being steered. */
-			if (!is_idr)
-				cv610_p_qp_observe(ctx, stream.h265_info.mean_qp);
-			if (ctx->qp_track_countdown == 0u) {
-				ctx->qp_track_countdown = CV610_QP_TRACK_FRAMES;
-				(void)cv610_qp_delta_retrack(ctx);
-			} else {
-				ctx->qp_track_countdown--;
-			}
 			if (!ctx->slice_census_done &&
 			    ctx->requested_slice_count > 1) {
 				uint32_t vcl_nals = cv610_frame_vcl_nal_count(frame,
