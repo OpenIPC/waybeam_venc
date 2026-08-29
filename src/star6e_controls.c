@@ -194,6 +194,51 @@ static int apply_rc_qp_delta(const MI_VENC_ChnAttr_t *attr, MI_VENC_RcParam_t *p
 	}
 }
 
+/* Only CBR carries QP bounds we can steer; other modes leave them alone. */
+static int rc_qp_bound_ptrs(const MI_VENC_ChnAttr_t *attr,
+	MI_VENC_RcParam_t *param, uint32_t **pmin, uint32_t **pmax)
+{
+	if (!attr || !param)
+		return -1;
+	switch (attr->rate.mode) {
+	case I6_VENC_RATEMODE_H265CBR:
+		*pmin = &param->stParamH265Cbr.u32MinQp;
+		*pmax = &param->stParamH265Cbr.u32MaxQp;
+		return 0;
+	case I6_VENC_RATEMODE_H264CBR:
+		*pmin = &param->stParamH264Cbr.u32MinQp;
+		*pmax = &param->stParamH264Cbr.u32MaxQp;
+		return 0;
+	default:
+		return -1;
+	}
+}
+
+/* Everything we have asked the rate controller for, kept because
+ * MI_VENC_GetRcParam cannot be trusted to give it back.
+ *
+ * The SDK does not reflect a just-written s32IPQPDelta (or QP bound) in the
+ * next Get: it keeps returning driver defaults until the driver commits the
+ * pending block, measured on SSC338Q 2026-08-29 as somewhere between t+0s
+ * and t+5s after StartRecvPic.  A second read-modify-write inside that
+ * window therefore reads a stale 0 and writes it straight back, silently
+ * reverting the earlier apply -- both calls return success and both log it.
+ *
+ * That is issue #255.  Startup applies qpDelta and then apply_qp_bounds()
+ * reverts it, so every craft with minQp/maxQp configured flew with an
+ * effective IPQPDelta of 0 and ~20x larger IDRs (78-81 KB against 3.1-3.8 KB
+ * measured at 19 Mbps 720p60).  The deleted apply_max_frame_size() had the
+ * same shape and was how the bug first surfaced.
+ *
+ * So every RC write re-stages the whole intent rather than trusting the Get.
+ * Ordering and timing then cannot matter, which is the point: this hazard has
+ * already bitten twice through two different callers. */
+static struct {
+	int      qp_delta;
+	uint32_t min_qp;   /* 0 = driver default */
+	uint32_t max_qp;   /* 0 = driver default */
+} g_rc_intent;
+
 /* Exact-CBR compensation for >STAR6E_VENC_INPUT_FPS_MAX modes: the RC
  * budgets kbps at rc_fps (capped 120) while the bind delivers more frames,
  * so the wire rate is kbps * delivered/rc (~1.19x at 144).  Scale the
@@ -327,28 +372,6 @@ static int apply_pause_stab(bool paused)
 	return star6e_pipeline_set_pause_stab(paused);
 }
 
-static int apply_qp_delta(int delta)
-{
-	MI_VENC_ChnAttr_t attr = {0};
-	MI_VENC_RcParam_t param = {0};
-
-	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
-		return -1;
-	if (MI_VENC_GetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
-		return -1;
-	if (apply_rc_qp_delta(&attr, &param, delta) != 0)
-		return -1;
-	if (MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
-		return -1;
-	/* No IDR: a QP-delta change is rate-control state, absorbed mid-GOP.
-	 * Unlike apply_bitrate() this is a real reduction — MI_VENC_SetRcParam
-	 * does NOT implicitly keyframe, so the request removed here was the
-	 * only IDR source on this path.  Measured 2026-08-23: ten spaced
-	 * video0.qpDelta writes went from eleven IRAP access units to one. */
-	printf("> qpDelta changed to %d\n", delta);
-	return 0;
-}
-
 /* Driver-default QP bounds, captured on the first Get before any write so
  * a later 0 can restore them. The channel's rate mode is fixed for the
  * process lifetime (reinit is fork+exec), so one capture is enough. */
@@ -358,46 +381,81 @@ static struct {
 	uint32_t max_qp;
 } g_qp_defaults;
 
-static int apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
+/* Write the whole of g_rc_intent, never a patched Get result — see the note
+ * on g_rc_intent for why the Get cannot be trusted.  bounds_staged, when
+ * given, reports whether this rate mode carries QP bounds at all. */
+static int rc_commit_intent(int *bounds_staged)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_VENC_RcParam_t param = {0};
 	uint32_t *pmin, *pmax;
 
-	if (min_qp == 0 && max_qp == 0 && !g_qp_defaults.captured)
-		return 0;   /* never written — driver defaults already in force */
+	if (bounds_staged)
+		*bounds_staged = 0;
 	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
 		return -1;
 	if (MI_VENC_GetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
 		return -1;
+	if (apply_rc_qp_delta(&attr, &param, g_rc_intent.qp_delta) != 0)
+		return -1;
+	if (rc_qp_bound_ptrs(&attr, &param, &pmin, &pmax) == 0) {
+		/* Captured from the first Get, which still shows driver state:
+		 * nothing has been written to this channel yet. */
+		if (!g_qp_defaults.captured) {
+			g_qp_defaults.min_qp = *pmin;
+			g_qp_defaults.max_qp = *pmax;
+			g_qp_defaults.captured = 1;
+		}
+		*pmin = g_rc_intent.min_qp ? g_rc_intent.min_qp
+					   : g_qp_defaults.min_qp;
+		*pmax = g_rc_intent.max_qp ? g_rc_intent.max_qp
+					   : g_qp_defaults.max_qp;
+		if (bounds_staged)
+			*bounds_staged = 1;
+	}
+	return MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) == 0
+		? 0 : -1;
+}
 
-	/* Only the modes that carry QP bounds are handled; FIXQP has no rate
-	 * controller to bound. */
-	switch (attr.rate.mode) {
-	case I6_VENC_RATEMODE_H265CBR:
-		pmin = &param.stParamH265Cbr.u32MinQp;
-		pmax = &param.stParamH265Cbr.u32MaxQp;
-		break;
-	case I6_VENC_RATEMODE_H264CBR:
-		pmin = &param.stParamH264Cbr.u32MinQp;
-		pmax = &param.stParamH264Cbr.u32MaxQp;
-		break;
-	default:
+static int apply_qp_delta(int delta)
+{
+	int prev = g_rc_intent.qp_delta;
+
+	g_rc_intent.qp_delta = delta;
+	if (rc_commit_intent(NULL) != 0) {
+		g_rc_intent.qp_delta = prev;
 		return -1;
 	}
+	/* No IDR: a QP-delta change is rate-control state, absorbed mid-GOP.
+	 * Unlike apply_bitrate() this is a real reduction — MI_VENC_SetRcParam
+	 * does NOT implicitly keyframe, so the request removed here was the
+	 * only IDR source on this path.  Measured 2026-08-23: ten spaced
+	 * video0.qpDelta writes went from eleven IRAP access units to one. */
+	printf("> qpDelta changed to %d\n", delta);
+	return 0;
+}
 
-	if (!g_qp_defaults.captured) {
-		g_qp_defaults.min_qp = *pmin;
-		g_qp_defaults.max_qp = *pmax;
-		g_qp_defaults.captured = 1;
-	}
+static int apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
+{
+	uint32_t prev_min = g_rc_intent.min_qp;
+	uint32_t prev_max = g_rc_intent.max_qp;
+	int bounds_staged = 0;
+
+	if (min_qp == 0 && max_qp == 0 && !g_qp_defaults.captured)
+		return 0;   /* never written — driver defaults already in force */
+
 	/* 0 restores the captured driver default so bounds can be cleared
 	 * live, not just overridden. */
-	*pmin = min_qp ? min_qp : g_qp_defaults.min_qp;
-	*pmax = max_qp ? max_qp : g_qp_defaults.max_qp;
-
-	if (MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
+	g_rc_intent.min_qp = min_qp;
+	g_rc_intent.max_qp = max_qp;
+	if (rc_commit_intent(&bounds_staged) != 0 || !bounds_staged) {
+		/* !bounds_staged: this rate mode carries no QP bounds (FIXQP has
+		 * no rate controller to bound), so the request was not honoured
+		 * even though the write itself succeeded. */
+		g_rc_intent.min_qp = prev_min;
+		g_rc_intent.max_qp = prev_max;
 		return -1;
+	}
 	printf("> qpBounds changed: min=%u max=%u (0 = driver default %u/%u)\n",
 		min_qp, max_qp, g_qp_defaults.min_qp, g_qp_defaults.max_qp);
 	return 0;
