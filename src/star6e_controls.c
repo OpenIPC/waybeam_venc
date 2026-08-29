@@ -382,16 +382,14 @@ static struct {
 } g_qp_defaults;
 
 /* Write the whole of g_rc_intent, never a patched Get result — see the note
- * on g_rc_intent for why the Get cannot be trusted.  bounds_staged, when
- * given, reports whether this rate mode carries QP bounds at all. */
-static int rc_commit_intent(int *bounds_staged)
+ * on g_rc_intent for why the Get cannot be trusted.  require_bounds makes
+ * the call fail without writing when this rate mode has no QP bounds. */
+static int rc_commit_intent(int require_bounds)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_VENC_RcParam_t param = {0};
 	uint32_t *pmin, *pmax;
 
-	if (bounds_staged)
-		*bounds_staged = 0;
 	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
 		return -1;
 	if (MI_VENC_GetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
@@ -410,8 +408,14 @@ static int rc_commit_intent(int *bounds_staged)
 					   : g_qp_defaults.min_qp;
 		*pmax = g_rc_intent.max_qp ? g_rc_intent.max_qp
 					   : g_qp_defaults.max_qp;
-		if (bounds_staged)
-			*bounds_staged = 1;
+	} else if (require_bounds) {
+		/* This rate mode carries no QP bounds.  Return BEFORE the write:
+		 * master's apply_qp_bounds() bailed out of its switch without ever
+		 * calling SetRcParam, and a rejected request must not touch the
+		 * encoder.  Reachable — video0.rcMode selects VBR/AVBR, and the
+		 * API's rollback re-invokes the failing group, so writing here
+		 * would poke the hardware twice per refusal. */
+		return -1;
 	}
 	return MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) == 0
 		? 0 : -1;
@@ -422,7 +426,7 @@ static int apply_qp_delta(int delta)
 	int prev = g_rc_intent.qp_delta;
 
 	g_rc_intent.qp_delta = delta;
-	if (rc_commit_intent(NULL) != 0) {
+	if (rc_commit_intent(0) != 0) {
 		g_rc_intent.qp_delta = prev;
 		return -1;
 	}
@@ -439,8 +443,6 @@ static int apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
 {
 	uint32_t prev_min = g_rc_intent.min_qp;
 	uint32_t prev_max = g_rc_intent.max_qp;
-	int bounds_staged = 0;
-
 	if (min_qp == 0 && max_qp == 0 && !g_qp_defaults.captured)
 		return 0;   /* never written — driver defaults already in force */
 
@@ -448,10 +450,7 @@ static int apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
 	 * live, not just overridden. */
 	g_rc_intent.min_qp = min_qp;
 	g_rc_intent.max_qp = max_qp;
-	if (rc_commit_intent(&bounds_staged) != 0 || !bounds_staged) {
-		/* !bounds_staged: this rate mode carries no QP bounds (FIXQP has
-		 * no rate controller to bound), so the request was not honoured
-		 * even though the write itself succeeded. */
+	if (rc_commit_intent(1) != 0) {
 		g_rc_intent.min_qp = prev_min;
 		g_rc_intent.max_qp = prev_max;
 		return -1;

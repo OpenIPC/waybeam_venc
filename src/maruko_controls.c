@@ -245,14 +245,12 @@ static struct {
 } g_maruko_qp_defaults;
 
 /* Write the whole intent, never a patched Get result. */
-static int maruko_rc_commit_intent(int *bounds_staged)
+static int maruko_rc_commit_intent(int require_bounds)
 {
 	i6c_venc_chn attr = {0};
 	MI_VENC_RcParam_t param = {0};
 	uint32_t *pmin, *pmax;
 
-	if (bounds_staged)
-		*bounds_staged = 0;
 	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev, g_ctx.venc_chn, &attr) != 0)
 		return -1;
 	if (maruko_mi_venc_get_rc_param(g_ctx.venc_dev, g_ctx.venc_chn, &param) != 0)
@@ -269,8 +267,25 @@ static int maruko_rc_commit_intent(int *bounds_staged)
 						  : g_maruko_qp_defaults.min_qp;
 		*pmax = g_maruko_rc_intent.max_qp ? g_maruko_rc_intent.max_qp
 						  : g_maruko_qp_defaults.max_qp;
-		if (bounds_staged)
-			*bounds_staged = 1;
+		/* The API validator only compares min against max when BOTH are
+		 * non-zero, so a half-specified pair can still resolve to min > max
+		 * against the driver default.  CV610's sibling refuses this and says
+		 * why: "the SDK takes that without complaint and then behaves
+		 * erratically".  Maruko could not reach it before qp bounds were
+		 * wired up here, so guard it at the same time. */
+		if (*pmin > *pmax) {
+			fprintf(stderr, "ERROR: qpBounds min>max after resolving "
+				"defaults (%u/%u)\n", (unsigned)*pmin, (unsigned)*pmax);
+			return -1;
+		}
+	} else if (require_bounds) {
+		/* This rate mode carries no QP bounds.  Return BEFORE the write:
+		 * master's apply_qp_bounds() bailed out of its switch without ever
+		 * calling SetRcParam, and a rejected request must not touch the
+		 * encoder.  Reachable — video0.rcMode selects VBR/AVBR, and the
+		 * API's rollback re-invokes the failing group, so writing here
+		 * would poke the hardware twice per refusal. */
+		return -1;
 	}
 	return maruko_mi_venc_set_rc_param(g_ctx.venc_dev, g_ctx.venc_chn,
 		&param) == 0 ? 0 : -1;
@@ -345,7 +360,7 @@ static int maruko_apply_qp_delta(int delta)
 	int prev = g_maruko_rc_intent.qp_delta;
 
 	g_maruko_rc_intent.qp_delta = delta;
-	if (maruko_rc_commit_intent(NULL) != 0) {
+	if (maruko_rc_commit_intent(0) != 0) {
 		g_maruko_rc_intent.qp_delta = prev;
 		return -1;
 	}
@@ -365,8 +380,6 @@ static int maruko_apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
 {
 	uint32_t prev_min = g_maruko_rc_intent.min_qp;
 	uint32_t prev_max = g_maruko_rc_intent.max_qp;
-	int bounds_staged = 0;
-
 	if (min_qp == 0 && max_qp == 0 && !g_maruko_qp_defaults.captured)
 		return 0;   /* never written — driver defaults already in force */
 
@@ -374,9 +387,7 @@ static int maruko_apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
 	 * live, not just overridden. */
 	g_maruko_rc_intent.min_qp = min_qp;
 	g_maruko_rc_intent.max_qp = max_qp;
-	if (maruko_rc_commit_intent(&bounds_staged) != 0 || !bounds_staged) {
-		/* !bounds_staged: this rate mode carries no QP bounds, so the
-		 * request was not honoured even though the write succeeded. */
+	if (maruko_rc_commit_intent(1) != 0) {
 		g_maruko_rc_intent.min_qp = prev_min;
 		g_maruko_rc_intent.max_qp = prev_max;
 		return -1;
