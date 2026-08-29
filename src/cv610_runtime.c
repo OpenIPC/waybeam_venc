@@ -356,6 +356,18 @@ static int cv610_request_idr(void)
 		? 0 : -1;
 }
 
+/* Rotation's request, as distinct from the API's cv610_request_idr() above,
+ * whose 0 means "no error" and cannot tell a coalesced request from an issued
+ * one.  Returns 1 when the IDR was actually requested, 0 when the shared
+ * limiter coalesced it away, -1 on SDK failure. */
+static int cv610_rotate_idr(void)
+{
+	if (!idr_rate_limit_allow(CV610_VENC_CHN))
+		return 0;
+	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
+		? 1 : -1;
+}
+
 /* Recorder start is a BOOTSTRAP event, not a request for a fresher picture.
  * The file that just opened contains nothing, and the shipped CV610 config is
  * resilience=racing — a GDR craft emits no periodic IDR at all, so a request
@@ -1408,13 +1420,17 @@ static int cv610_init(void *opaque)
 	 * and channel count come from the config only so a mismatch shows up
 	 * as a bad TS rather than being silently papered over.  Zero rate ==
 	 * "no audio in the mux". */
-	/* Set after the mutex and star6e_recorder_init above, and immediately
-	 * before ts_recorder_init below — the last of the three. */
-	ctx->rec_locks_ready = 1;
 	star6e_ts_recorder_init(&ctx->ts_recorder,
 		ctx->config.audio.enabled ? ctx->config.audio.sample_rate : 0,
 		ctx->config.audio.enabled ? (uint8_t)ctx->config.audio.channels : 0,
 		TS_AUDIO_CODEC_OPUS);
+	/* AFTER all three — the mutex, star6e_recorder_init and
+	 * ts_recorder_init.  A calloc'd ts_recorder has fd == 0, which
+	 * cv610_record_stop() reads as an open file: setting the flag before
+	 * the init leaves a window where a stop would fdatasync(0)/close(0),
+	 * i.e. close STDIN.  No caller reaches it there today, but the flag
+	 * means "the things I guard are initialised" and must not lie. */
+	ctx->rec_locks_ready = 1;
 	if (ctx->config.record.max_seconds > 0)
 		ctx->ts_recorder.max_seconds = ctx->config.record.max_seconds;
 	if (ctx->config.record.max_mb > 0)
@@ -1692,8 +1708,10 @@ static int cv610_run(void *opaque)
 		 * rotation is not a bootstrap event), and on this backend the
 		 * flag is raised on the WRITER thread, so it is deliberately an
 		 * atomic hand-off rather than a direct SDK call from there. */
-		if (star6e_ts_recorder_take_idr_request(&ctx->ts_recorder))
-			(void)cv610_request_idr();
+		if (star6e_ts_recorder_take_idr_request(&ctx->ts_recorder) &&
+		    cv610_rotate_idr() == 0)
+			star6e_ts_recorder_requeue_idr_request(
+				&ctx->ts_recorder);
 		if (ret != TD_SUCCESS)
 			return -1;
 	}

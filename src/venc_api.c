@@ -1286,6 +1286,14 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		    cfg->video0.min_qp > cfg->video0.max_qp)
 			return "video0.min_qp must not exceed max_qp";
 	}
+	/* Same range as min_qp/max_qp beside it.  Without this the FT_UINT8
+	 * parser accepts 0..255, persists it, and echoes it back from GET,
+	 * while the config loader clamps to 51 on the next start -- so the API
+	 * reports a value the encoder will never use. */
+	if (strcmp(key, "video0.intra_refresh_qp") == 0) {
+		if (cfg->video0.intra_refresh_qp > 51)
+			return "video0.intra_refresh_qp must be 0..51";
+	}
 	if (strcmp(key, "snapshot.quality") == 0) {
 		/* JPEG q-factor range.  Backend clamps internally too, but
 		 * the validator gives a clean error response instead of a

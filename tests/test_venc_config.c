@@ -56,7 +56,7 @@ static int test_defaults(void)
 	CHECK("defaults_height_auto", cfg.video0.height == 0);
 	CHECK("defaults_bitrate", cfg.video0.bitrate == 8192);
 	CHECK("defaults_gop_size", cfg.video0.gop_size == 1.0);
-	CHECK("defaults_qp_delta", cfg.video0.qp_delta == -4);
+	CHECK("defaults_qp_delta", cfg.video0.qp_delta == -12);
 	CHECK("defaults_zoom_off", cfg.video0.zoom_pct == 0.0);
 	CHECK("defaults_zoom_x", cfg.video0.zoom_x == 0.5);
 	CHECK("defaults_zoom_y", cfg.video0.zoom_y == 0.5);

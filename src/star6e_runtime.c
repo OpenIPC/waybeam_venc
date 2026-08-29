@@ -754,12 +754,16 @@ static int runtime_request_idr_on(int chn)
 /* Segment rotation's request, as distinct from the bootstrap one above.
  * COALESCED, not forced: a periodic rotation is not a bootstrap event, and
  * forcing would also re-arm the rate limiter and swallow a scene-detector or
- * operator keyframe arriving in the next 100 ms. */
+ * operator keyframe arriving in the next 100 ms.
+ *
+ * Returns 1 when the IDR was actually requested, 0 when the shared limiter
+ * coalesced it away, -1 on SDK failure.  Callers servicing a rotation request
+ * MUST re-queue on 0 -- see star6e_ts_recorder_requeue_idr_request(). */
 static int runtime_rotate_idr_on(int chn)
 {
 	if (!idr_rate_limit_allow(chn))
 		return 0;
-	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
+	return MI_VENC_RequestIdr(chn, 1) == 0 ? 1 : -1;
 }
 
 /* Mirror-mode recorder: the file is fed by the main channel. */
@@ -1000,8 +1004,9 @@ static void *dual_rec_thread_fn(void *arg)
 		 * (see the comment above runtime_request_idr_on's ch1 caller):
 		 * aimed at ch0 it keyframes the LIVE stream and the recording
 		 * still rotates on nothing. */
-		if (star6e_ts_recorder_take_idr_request(d->ts_recorder))
-			(void)runtime_rotate_idr_on(d->channel);
+		if (star6e_ts_recorder_take_idr_request(d->ts_recorder) &&
+		    runtime_rotate_idr_on(d->channel) == 0)
+			star6e_ts_recorder_requeue_idr_request(d->ts_recorder);
 		total_count++;
 
 		/* Backpressure signal: the pre-GetStream Query found >= 2
@@ -1055,12 +1060,28 @@ static void *dual_rec_thread_fn(void *arg)
 
 static void dual_rec_thread_start(Star6eDualVenc *d)
 {
+	pthread_attr_t attr;
+	int have_attr;
+
 	d->rec_running = 1;
-	if (pthread_create(&d->rec_thread, NULL, dual_rec_thread_fn, d) != 0) {
+	/* dual_rec_thread_fn reaches star6e_ts_recorder_write_stream, whose
+	 * ~1.06 MB of automatic buffers overflows a musl default stack.  Star6E
+	 * is glibc so its 8 MB default already covers it; set it anyway so the
+	 * requirement travels with the code path rather than with the libc. */
+	have_attr = pthread_attr_init(&attr) == 0;
+	if (have_attr)
+		(void)pthread_attr_setstacksize(&attr,
+			STAR6E_TS_RECORDER_STREAM_STACK_BYTES);
+	if (pthread_create(&d->rec_thread, have_attr ? &attr : NULL,
+			dual_rec_thread_fn, d) != 0) {
+		if (have_attr)
+			pthread_attr_destroy(&attr);
 		fprintf(stderr, "[dual] ERROR: pthread_create failed for recording thread\n");
 		d->rec_running = 0;
 		return;
 	}
+	if (have_attr)
+		pthread_attr_destroy(&attr);
 	d->rec_started = 1;
 	printf("> Dual recording thread started (mode: %s)\n", d->mode);
 }
@@ -1567,8 +1588,9 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * and aimed at the channel that actually feeds this file.  Dual mode
 	 * services its own recorder on the ch1 thread instead. */
 	if (!ps->dual &&
-	    star6e_ts_recorder_take_idr_request(&ps->ts_recorder))
-		(void)runtime_rotate_idr_on(ps->venc_channel);
+	    star6e_ts_recorder_take_idr_request(&ps->ts_recorder) &&
+	    runtime_rotate_idr_on(ps->venc_channel) == 0)
+		star6e_ts_recorder_requeue_idr_request(&ps->ts_recorder);
 
 	/* A recorder that stopped ITSELF (disk full, write error) does so on the
 	 * writer thread, so nothing but this loop is positioned to notice, and

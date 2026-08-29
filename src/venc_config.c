@@ -112,7 +112,13 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.height = 0;
 	cfg->video0.bitrate = 8192;
 	cfg->video0.gop_size = 1.0;
-	cfg->video0.qp_delta = -4;
+	/* -12, matching config/waybeam.default{,.maruko}.json since 0.73.0.
+	 * Seeded here as well as shipped in the JSON because this is what a
+	 * config that OMITS qpDelta gets, and what GET /api/v1/defaults hands
+	 * back -- leaving it at -4 meant a craft could be silently reverted to
+	 * an IDR cost 9x higher than the shipped default.  Inert on CV610,
+	 * which does not read the field. */
+	cfg->video0.qp_delta = -12;
 
 	/* outgoing */
 	cfg->outgoing.enabled = false;

@@ -73,9 +73,10 @@ typedef void (*VencRecSinkFn)(void *ctx, const uint8_t *au, size_t len,
 
 /* Writer-thread stack.  The sink runs the TS muxer, whose
  * star6e_ts_recorder_write_video() holds a 551 KB automatic array
- * (ts_buf[3000 * 188]).  musl — every SigmaStar and CV610 target — gives a
- * new pthread 128 KB by default, so the default would overflow on the first
- * recorded frame.  glibc's 8 MB default is why a host test cannot catch it.
+ * (ts_buf[3000 * 188]).  Maruko and CV610 are musl targets, which give a new
+ * pthread 128 KB by default, so the default would overflow on the first
+ * recorded frame.  (Star6E is glibc; its 8 MB default is also why a host test
+ * cannot catch this.)
  * Lazily committed, so this costs nothing while idle. */
 #define VENC_REC_WRITER_STACK_BYTES (1024u * 1024u)
 

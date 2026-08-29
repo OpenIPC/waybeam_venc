@@ -432,6 +432,30 @@ void maruko_video_init_rtp_state(MarukoRtpState *rtp,
 	rtp_session_init(rtp, rtp_session_payload_type(codec), sensor_fps);
 }
 
+/* Abort a partially written ring slot because the access unit does not fit.
+ *
+ * oversize_drops -- mirrored into the ring header's other_drops -- is the
+ * machine-readable record, but until now nothing was logged, so the frame
+ * simply vanished: 0.73.0 removed the frame-size caps that were supposed to
+ * prevent it, and ring v2 removed the recovery IDR that used to heal the
+ * chain afterwards.
+ *
+ * Deliberately does NOT request an IDR.  An access unit that overflows the
+ * slot does so because the craft's bitrate genuinely exceeds it, which
+ * repeats every GOP -- asking each time would be exactly the automatic
+ * keyframing ring v2 removed. */
+static void maruko_video_abort_oversize(MarukoOutput *output)
+{
+	venc_frame_ring_abort_write(output->frame_ring);
+	if (output->oversize_warned)
+		return;
+	output->oversize_warned = 1;
+	fprintf(stderr,
+		"WARN: Maruko access unit exceeds the frame-shm slot "
+		"(%u bytes); dropping the whole frame\n",
+		(unsigned)output->frame_ring->slot_data_size);
+}
+
 static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 	MarukoOutput *output)
 {
@@ -505,7 +529,7 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 
 				if (venc_frame_ring_append(frame_ring,
 				    pack->data + offset, length) != 0) {
-					venc_frame_ring_abort_write(frame_ring);
+					maruko_video_abort_oversize(output);
 					return 0;
 				}
 				total_bytes += length;
@@ -518,7 +542,7 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 
 			if (venc_frame_ring_append(frame_ring,
 			    pack->data + pack->offset, length) != 0) {
-				venc_frame_ring_abort_write(frame_ring);
+				maruko_video_abort_oversize(output);
 				return 0;
 			}
 			total_bytes += length;

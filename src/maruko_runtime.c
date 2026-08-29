@@ -174,9 +174,17 @@ static int maruko_runner_init(void *opaque)
 	 * never runs for a value already in the file. */
 	if (ctx->vcfg.video0.min_qp > 0 || ctx->vcfg.video0.max_qp > 0) {
 		const VencApplyCallbacks *cb = maruko_controls_callbacks();
-		if (cb->apply_qp_bounds)
-			cb->apply_qp_bounds(ctx->vcfg.video0.min_qp,
-				ctx->vcfg.video0.max_qp);
+		/* Not (void): apply_qp_bounds() refuses on a VBR/AVBR rcMode,
+		 * and a rejected cold-boot apply would otherwise leave the
+		 * operator booting with no QP bound and no indication.  Same
+		 * reporting as the CV610 cold-boot apply. */
+		if (cb->apply_qp_bounds &&
+		    cb->apply_qp_bounds(ctx->vcfg.video0.min_qp,
+			    ctx->vcfg.video0.max_qp) != 0)
+			fprintf(stderr, "WARN: qpBounds from config not applied "
+				"(min=%u max=%u)\n",
+				(unsigned)ctx->vcfg.video0.min_qp,
+				(unsigned)ctx->vcfg.video0.max_qp);
 	}
 
 	return 0;

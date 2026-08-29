@@ -976,7 +976,7 @@ static int test_multi_set_rejects_duplicate_fields(void)
 			&status, response, sizeof(response)) == 0);
 	CHECK("multi dup status", status == 400);
 	CHECK("multi dup error", strstr(response, "duplicate field") != NULL);
-	CHECK("multi dup qp unchanged", cfg.video0.qp_delta == -4);
+	CHECK("multi dup qp unchanged", cfg.video0.qp_delta == -12);
 	CHECK("multi dup no apply", g_api_cb_state.apply_qp_delta_calls == 0);
 
 	return failures;
@@ -1770,6 +1770,83 @@ static int test_live_set_isp_bin_no_callback_returns_501(void)
 /* /api/v1/capabilities emits the data-driven `ui` block for fields that carry
  * UI metadata (video0.pause_stab), so the dashboard can render a control with
  * no static SECTIONS entry.  Core fields stay ui-less. */
+/* A resilience preset OWNS intra_refresh_mode/lines, but must NOT own
+ * intra_refresh_qp: that one is an explicit operator override where 0 already
+ * means "use the preset's default".
+ *
+ * venc_config_apply_resilience_preset() zeroes the field, and the restart-set
+ * path applies the preset to the staged config AFTER the request's own fields
+ * are staged -- then persists it.  So a resilience change silently discarded
+ * the override, returning 200 with no log.  On CV610 that field is the only
+ * working I-frame lever, which is why it is tested on that backend (it is
+ * also the only one that advertises it).
+ *
+ * Asserts the surviving VALUE, not that the code took some path, so it fails
+ * if the preserve is removed.  The third case is the do-nothing control: the
+ * fix must not invent a value where the operator set none. */
+static int test_resilience_preset_preserves_intra_refresh_qp(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	/* The real-world sequence: both fields are MUT_RESTART, and /api/v1/set
+	 * refuses to carry two of those in one request, so an operator sets the
+	 * override and then changes the preset.  Driven through the API on both
+	 * steps so the whole staging path is exercised. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+
+	CHECK("ir_qp set rc",
+		apply_set_query_http(&cfg, "cv610", &cb,
+			"video0.intraRefreshQp=44", &status, response,
+			sizeof(response)) == 0);
+	CHECK("ir_qp set status", status == 200);
+	CHECK("ir_qp set committed", cfg.video0.intra_refresh_qp == 44);
+	venc_api_clear_reinit();
+
+	CHECK("ir_qp preset change rc",
+		apply_set_query_http(&cfg, "cv610", &cb,
+			"video0.resilience=racing", &status, response,
+			sizeof(response)) == 0);
+	CHECK("ir_qp preset change status", status == 200);
+	CHECK("ir_qp preset change took",
+		strcmp(cfg.video0.resilience, "racing") == 0);
+	CHECK("ir_qp survives preset change",
+		cfg.video0.intra_refresh_qp == 44);
+	venc_api_clear_reinit();
+
+	/* Control: no override set, so the preset default (0) must stand --
+	 * the preserve must not invent a value the operator never chose. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+
+	CHECK("ir_qp control rc",
+		apply_set_query_http(&cfg, "cv610", &cb,
+			"video0.resilience=racing", &status, response,
+			sizeof(response)) == 0);
+	CHECK("ir_qp control stays preset default",
+		cfg.video0.intra_refresh_qp == 0);
+	venc_api_clear_reinit();
+
+	/* The range check added alongside: FT_UINT8 would otherwise take
+	 * 0..255, persist it, and echo back a value the encoder never uses. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+
+	(void)apply_set_query_http(&cfg, "cv610", &cb,
+		"video0.intraRefreshQp=200", &status, response,
+		sizeof(response));
+	CHECK("ir_qp out of range rejected", status == 409);
+	CHECK("ir_qp out of range not committed",
+		cfg.video0.intra_refresh_qp == 0);
+
+	return failures;
+}
+
 static int test_capabilities_emits_ui(void)
 {
 	int failures = 0;
@@ -2162,6 +2239,7 @@ int test_venc_api(void)
 	failures += test_live_apply_sees_already_committed_config();
 	failures += test_multi_set_url_decodes_values();
 	failures += test_set_rejects_malformed_percent_escape();
+	failures += test_resilience_preset_preserves_intra_refresh_qp();
 	failures += test_capabilities_emits_ui();
 	failures += test_capabilities_awb_fps_backend_gate();
 	failures += test_capabilities_routes_track_callbacks();

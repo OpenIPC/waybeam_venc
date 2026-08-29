@@ -141,6 +141,20 @@ static inline int star6e_record_wants_frame(const Star6eTsRecorderState *ts,
  *  still grow unbounded, which is the defect this feature exists to fix. */
 #define TS_RECORDER_MAX_IDR_REQUESTS 8
 
+/* Stack for any thread that calls star6e_ts_recorder_write_stream().
+ *
+ * That path holds nal_buf[512 KB] and then calls write_video(), which holds
+ * ts_buf[3000 * 188] = 551 KB — both live at once, ~1.06 MB.  That is why it
+ * is larger than VENC_REC_WRITER_STACK_BYTES: the writer thread only ever
+ * reaches write_video, this path reaches both.
+ *
+ * Maruko (arm-openipc-linux-musleabihf) and CV610 (musleabi) are musl
+ * targets, whose pthread default is 128 KB, so a default-stack thread on this
+ * path smashes on its first recorded frame.  Star6E is gnueabihf/glibc and
+ * gets 8 MB by default, which is why this went unnoticed there — and why a
+ * host test cannot catch it either.  Lazily committed: costs nothing idle. */
+#define STAR6E_TS_RECORDER_STREAM_STACK_BYTES (2u * 1024u * 1024u)
+
 /** Take a pending rotation IDR request, if any.
  *
  *  Call AFTER the SDK's ReleaseStream, and issue a COALESCED IDR request on
@@ -157,6 +171,26 @@ static inline int star6e_ts_recorder_take_idr_request(
 		return 0;
 	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
 	return 1;
+}
+
+/** Put back a request that take_idr_request() consumed but the caller could
+ *  not issue, because the shared 100 ms IDR limiter coalesced it away.
+ *
+ *  Without this the ask is simply lost, and check_rotation() has already
+ *  counted it against TS_RECORDER_MAX_IDR_REQUESTS.  Eight limiter
+ *  collisions therefore exhaust the budget and rotation degrades to waiting
+ *  for a natural keyframe -- which on a GDR craft (resilience=racing, the
+ *  shipped FPV config) never arrives, silently disabling max_seconds and
+ *  max_mb for the rest of the recording.
+ *
+ *  Re-raising instead retries on the next frame, so the request survives the
+ *  lockout window rather than the budget absorbing it. */
+static inline void star6e_ts_recorder_requeue_idr_request(
+	Star6eTsRecorderState *state)
+{
+	if (state)
+		__atomic_store_n(&state->idr_request_pending, 1,
+			__ATOMIC_RELAXED);
 }
 
 /** Get recording status. Any output pointer may be NULL. */

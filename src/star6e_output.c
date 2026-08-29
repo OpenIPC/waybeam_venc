@@ -186,6 +186,30 @@ int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
 	return 1;
 }
 
+/* Abort a partially written ring slot because the access unit does not fit.
+ *
+ * oversize_drops -- mirrored into the ring header's other_drops -- is the
+ * machine-readable record, but until now nothing was logged, so the frame
+ * simply vanished: 0.73.0 removed the frame-size caps that were supposed to
+ * prevent it, and ring v2 removed the recovery IDR that used to heal the
+ * chain afterwards.
+ *
+ * Deliberately does NOT request an IDR.  An access unit that overflows the
+ * slot does so because the craft's bitrate genuinely exceeds it, which
+ * repeats every GOP -- asking each time would be exactly the automatic
+ * keyframing ring v2 removed. */
+static void star6e_output_abort_oversize(Star6eOutput *output)
+{
+	venc_frame_ring_abort_write(output->frame_ring);
+	if (output->oversize_warned)
+		return;
+	output->oversize_warned = 1;
+	fprintf(stderr,
+		"WARN: Star6E access unit exceeds the frame-shm slot "
+		"(%u bytes); dropping the whole frame\n",
+		(unsigned)output->frame_ring->slot_data_size);
+}
+
 static uint16_t star6e_read_be16(const uint8_t *data)
 {
 	return (uint16_t)((uint16_t)data[0] << 8 | (uint16_t)data[1]);
@@ -1084,8 +1108,7 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 
 				if (venc_frame_ring_append(output->frame_ring,
 				    pack->data + offset, length) != 0) {
-					venc_frame_ring_abort_write(
-						output->frame_ring);
+					star6e_output_abort_oversize(output);
 					return 0;
 				}
 				total_bytes += length;
@@ -1098,7 +1121,7 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 
 			if (venc_frame_ring_append(output->frame_ring,
 			    pack->data + pack->offset, length) != 0) {
-				venc_frame_ring_abort_write(output->frame_ring);
+				star6e_output_abort_oversize(output);
 				return 0;
 			}
 			total_bytes += length;

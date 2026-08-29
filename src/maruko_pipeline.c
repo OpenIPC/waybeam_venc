@@ -3101,10 +3101,17 @@ static void *maruko_dual_stream_thread(void *arg)
 		 * file.  A shared hook would have aimed it at ch0 and keyframed
 		 * the live stream instead. */
 		if (d->ts_recorder &&
-		    star6e_ts_recorder_take_idr_request(d->ts_recorder) &&
-		    idr_rate_limit_allow(d->channel))
-			(void)maruko_mi_venc_request_idr(ctx->venc_device,
-				d->channel, 1);
+		    star6e_ts_recorder_take_idr_request(d->ts_recorder)) {
+			/* take_idr_request() has already cleared the flag, so a
+			 * request the limiter swallows must be put back or the
+			 * rotation is lost -- and its budget already spent. */
+			if (idr_rate_limit_allow(d->channel))
+				(void)maruko_mi_venc_request_idr(
+					ctx->venc_device, d->channel, 1);
+			else
+				star6e_ts_recorder_requeue_idr_request(
+					d->ts_recorder);
+		}
 
 		total_count++;
 		if (stat.curPacks >= 2)
@@ -3188,6 +3195,8 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	MI_VENC_CHN chn = 1;
 	uint32_t sensor_fps = ctx->sensor.fps;
 	uint32_t gop_frames;
+	pthread_attr_t thr_attr;
+	int have_attr;
 	int ret;
 
 	if (!mode)
@@ -3375,8 +3384,17 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	}
 
 	d->running = 1;
-	if (pthread_create(&d->thread, NULL, maruko_dual_stream_thread, d)
-	    != 0) {
+	/* maruko_dual_stream_thread reaches star6e_ts_recorder_write_stream
+	 * under record.mode=dual, whose ~1.06 MB of automatic buffers overflows
+	 * musl's 128 KB pthread default — and Maruko IS a musl target. */
+	have_attr = pthread_attr_init(&thr_attr) == 0;
+	if (have_attr)
+		(void)pthread_attr_setstacksize(&thr_attr,
+			STAR6E_TS_RECORDER_STREAM_STACK_BYTES);
+	if (pthread_create(&d->thread, have_attr ? &thr_attr : NULL,
+			maruko_dual_stream_thread, d) != 0) {
+		if (have_attr)
+			pthread_attr_destroy(&thr_attr);
 		/* Spawn failure: tear down everything we just allocated,
 		 * leaving ctx->dual NULL so the caller continues with
 		 * chn 0 only. */
@@ -3397,6 +3415,8 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	}
 	d->started_thread = 1;
 
+	if (have_attr)
+		pthread_attr_destroy(&thr_attr);
 	ctx->dual = d;
 	venc_api_dual_register(d->channel, d->bitrate, d->fps, d->gop);
 	return 0;
@@ -4684,10 +4704,15 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	 * channel feeding this file.  Dual mode services its own recorder on
 	 * the ch1 thread. */
 	if (!ctx->dual &&
-	    star6e_ts_recorder_take_idr_request(&ctx->ts_recorder) &&
-	    idr_rate_limit_allow(ctx->venc_channel))
-		(void)maruko_mi_venc_request_idr(ctx->venc_device,
-			ctx->venc_channel, 1);
+	    star6e_ts_recorder_take_idr_request(&ctx->ts_recorder)) {
+		/* Re-queue a coalesced ask -- see the ch1 site above. */
+		if (idr_rate_limit_allow(ctx->venc_channel))
+			(void)maruko_mi_venc_request_idr(ctx->venc_device,
+				ctx->venc_channel, 1);
+		else
+			star6e_ts_recorder_requeue_idr_request(
+				&ctx->ts_recorder);
+	}
 
 	/* A recorder that stopped ITSELF (disk full, write error) does so on the
 	 * writer thread, so nothing but this loop is positioned to notice, and

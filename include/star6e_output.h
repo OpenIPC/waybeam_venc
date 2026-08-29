@@ -160,6 +160,10 @@ typedef struct {
 	 * when packet metadata is incomplete or invalid — the frame is aborted,
 	 * never shipped truncated. */
 	uint8_t trunc_warned;
+	/* One WARN per pipeline start when an access unit does not fit a ring
+	 * slot.  Separate one-shot from trunc_warned: the two are different
+	 * faults and either must not mask the other. */
+	uint8_t oversize_warned;
 	/* Recovery for a MALFORMED access unit: the SDK handed us a packet
 	 * table we cannot ship, the whole picture is dropped, and the
 	 * decoder's reference chain stays broken until the next IDR — with a

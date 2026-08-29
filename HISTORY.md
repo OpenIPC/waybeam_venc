@@ -59,6 +59,64 @@ plus the documentation that contradicted the code. `contract_version` stays
   SDK accepts that and then behaves erratically. Maruko and CV610 already
   refused it; Star6E now does too.
 
+- **Maruko `record.mode=dual` no longer smashes its thread stack.** The chn 1
+  drain thread was created with a NULL attr, and its path holds
+  `nal_buf[512 KB]` and then `ts_buf[551 KB]` — ~1.06 MB live. Maruko is a
+  musl target (`arm-openipc-linux-musleabihf`, confirmed on the bench:
+  `/lib/ld-musl-armhf.so.1`), and musl gives a new pthread 128 KB, so this
+  overflowed on the first recorded frame. Both dual threads now set an
+  explicit 2 MB stack — larger than `VENC_REC_WRITER_STACK_BYTES`, because the
+  writer thread only ever reaches `write_video` while this path reaches both
+  buffers. Star6E is glibc and its 8 MB default already covered it, which is
+  why this went unnoticed; the constant is set there too so the requirement
+  travels with the code path rather than with the libc. The comment in
+  `venc_rec_writer.h` claiming musl for "every SigmaStar target" is corrected.
+
+- **A coalesced rotation request is no longer lost.**
+  `star6e_ts_recorder_take_idr_request()` clears the pending flag before the
+  caller knows whether the shared 100 ms IDR limiter will honour it, and
+  `check_rotation()` has already counted that ask against
+  `TS_RECORDER_MAX_IDR_REQUESTS`. Eight limiter collisions therefore exhausted
+  the budget and rotation degraded to waiting for a natural keyframe — which a
+  GDR craft (`resilience=racing`, the shipped FPV config) never produces,
+  silently disabling `max_seconds` and `max_mb` for the rest of the recording.
+  All five call sites across the three backends now re-queue.
+  `runtime_rotate_idr_on()` and the new `cv610_rotate_idr()` return 1/0/-1 so
+  "coalesced" is distinguishable from "issued"; `cv610_request_idr()` keeps its
+  API-callback contract unchanged.
+
+- **`video0.qpDelta`'s default is no longer split between the code and the
+  shipped JSON.** `venc_config_defaults()` still seeded `-4` while
+  `waybeam.default.json` and `.maruko.json` shipped `-12` since 0.73.0. A
+  config that omits `qpDelta` therefore got `-4`, and `GET /api/v1/defaults`
+  actively reverted a craft to it — an IDR cost roughly 9x the shipped
+  default. The seed is now `-12`. CV610's shipped config no longer carries the
+  key at all, since that backend does not read it.
+
+- **An oversize access unit is no longer a silent frame loss.** The ring
+  counts `oversize_drops` (mirrored into the header's `other_drops`) but
+  nothing was logged, while 0.73.0 removed the frame-size caps meant to
+  prevent it and ring v2 removed the recovery IDR that healed the chain. Both
+  SigmaStar backends now emit one WARN per pipeline start naming the slot
+  size. Deliberately no IDR request: an AU that overflows the slot does so
+  because the bitrate genuinely exceeds it, which repeats every GOP.
+
+- **`video0.intraRefreshQp` is range-checked at the API.** `FT_UINT8` accepted
+  0..255, persisted it and echoed it back, while the config loader clamped to
+  51 on the next start — so the API reported a value the encoder would never
+  use. Now rejected like `min_qp`/`max_qp`, with a regression test.
+
+- **A refused cold-boot QP-bounds apply is visible on Maruko.**
+  `apply_qp_bounds()` refuses on a VBR/AVBR `rcMode`, and the Maruko cold-boot
+  call discarded the result, so the operator booted with no QP bound and no
+  indication. Now warns, matching CV610.
+
+- **CV610 sets `rec_locks_ready` after the recorders it guards.** A calloc'd
+  `ts_recorder` has `fd == 0`, which `cv610_record_stop()` reads as an open
+  file, so the flag being set one statement early left a window where a stop
+  would `fdatasync(0)`/`close(0)` — closing STDIN. Unreachable today, but the
+  flag means "the things I guard are initialised" and must not lie.
+
 - **Documentation corrected against the code.** The field table claimed
   `min_qp`/`max_qp` were "Star6E + CV610 only" nine lines above a support
   matrix that correctly said all three (Maruko gained them in 0.73.0). The
