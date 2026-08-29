@@ -647,7 +647,9 @@ cleanly; the key is silently ignored.
 | `video0.size` | string | restart | Encode resolution: `"auto"` (default, uses sensor native), `"1920x1080"`, `"720p"`, `"1080p"` |
 | `video0.bitrate` | uint | live | Target bitrate in kbps |
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
-| `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |
+| `video0.qp_delta` | int | live | I-frame QP relative to P (-12..12). **More negative = smaller I-frames**, at constant bitrate. Inert on CV610 — see below |
+| `video0.min_qp` | uint | live | QP floor, i.e. a **bit ceiling** (0 = driver default). Star6E + CV610 only. Collapses the stream once it binds — see below |
+| `video0.max_qp` | uint | live | QP ceiling, i.e. a **bit floor** (0 = driver default). Star6E + CV610 only. Overshoots the target once it binds — see below |
 | `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `stab-fill`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
 | `video0.zoom_x` | double | live | Pan crop center X (`0.0` left to `1.0` right) — applies to `zoom-*` modes only |
 | `video0.zoom_y` | double | live | Pan crop center Y (`0.0` top to `1.0` bottom) — applies to `zoom-*` modes only |
@@ -656,6 +658,101 @@ cleanly; the key is silently ignored.
 | `video0.stab_kalman_r` | double | restart | Smoothness (Kalman measurement noise), shared by `stab`/`stab-fill` (`0.1..50.0`; higher = smoother but laggier; preset default 2.0) |
 | `video0.stab_recenter_speed` | uint | restart | `pauseStab` glide-home rate in frames (`0..3600`, `0` = default ramp). Inert during normal stabilization — the Kalman recentres |
 | `video0.pause_stab` | bool | live | Live pause for `stab`/`stab-fill` — glides the stabilized window / floating image back to centre (software ramp, no rebind). Runtime-only (not persisted); boots `false`. No effect under `off`/`zoom-*` |
+
+#### Rate-control QP knobs: `qp_delta`, `min_qp`, `max_qp`
+
+These three steer the CBR rate controller. `qp_delta` is safe and is the
+supported way to bound IDR cost; `min_qp` and `max_qp` each break the rate
+contract outright once they bind. The measured behaviour is recorded here
+because the failure modes are large, silent, and easy to reach by accident.
+
+Figures are device measurements, six forced IDRs per point, sizes in bytes,
+rate measured over the wire. Star6E rows: SSC338Q, 1280x720@60, H.265 CBR
+19092 kbps, GDR `racing`. Maruko rows: Infinity6C bench, 1280x720@30, CBR
+1500 kbps, `resilience: off` (periodic IDRs). Both benches viewed a
+near-static scene — see the caveat on binding points below.
+
+**`qp_delta` — moves bits between I and P, at constant rate.**
+
+| `qp_delta` | Star6E IRAP | Star6E P | Star6E rate | Maruko IRAP | Maruko P |
+|---|---|---|---|---|---|
+| `+12` | — | — | — | 76607 | 3398 |
+| `+6` | 197974 | 42988 | 19.53 Mbps | — | — |
+| `0` | 65022 | 43382 | 19.50 Mbps | 32096 | 4676 |
+| `-4` | 29429 | 44128 | 19.54 Mbps | 16575 | 5790 |
+| `-8` | 7668 | 43514 | 19.54 Mbps | — | — |
+| `-12` | 3622 | 43823 | 19.51 Mbps | 7739 | 7344 |
+
+Monotonic over a 55x span on Star6E and 9.9x on Maruko, while **delivered
+rate does not move** (19.50-19.54 Mbps across the whole Star6E sweep). It is
+a redistribution knob, not a rate knob: bits taken off the I-frame reappear
+in the P-frames, which is visible on Maruko where IDRs are a large share of
+the budget (P median rises 3398 -> 7344 as I falls 76607 -> 7739).
+
+That property is what makes it the right lever for bounding IDR cost on a
+per-frame-FEC link, and it is why it replaced the frame-size caps, which on
+Star6E were accepted and logged but never imposed a ceiling.
+
+Note the sign: `s32IPQPDelta` is not the I QP offset in the direction most
+people assume. Negative values raise the I-frame's QP relative to P, making
+I-frames **smaller**.
+
+**`min_qp` — a QP floor, therefore a bit ceiling.**
+
+| `min_qp` | 0 (driver default 12) | 20 | 24 | 26 | 28 | 30 | 40 |
+|---|---|---|---|---|---|---|---|
+| rate | 19.58 Mbps | 19.10 | **0.63** | 0.31 | 0.19 | 0.13 | 0.08 |
+
+Below the scene's natural QP it does nothing. At or above it, the encoder can
+no longer spend the budget and **CBR is abandoned**: the stream becomes
+effectively fixed-QP and the rate falls to whatever the scene costs at that
+QP — a 30x drop between 20 and 24 on this bench.
+
+**`max_qp` — a QP ceiling, therefore a bit floor.** Measured against a
+*1000 kbps* target, the regime where it binds:
+
+| `max_qp` | 0 (driver default 48) | 24 | 18 |
+|---|---|---|---|
+| delivered | 1.02 Mbps (on target) | **9.45 Mbps** | **75.03 Mbps** |
+
+Symmetric to `min_qp` and considerably more dangerous: if the encoder needs a
+QP above the ceiling to hit target, it is forced to spend the bits anyway.
+75x over a 1 Mbps target will take a radio link down.
+
+Its legitimate use is the opposite case — a noisy, high-gain scene where the
+encoder saturates its *own* default ceiling and overshoots. That is why CV610
+carries it (measured 3-7x target on the .181 bench with the lights off).
+
+**Binding points are scene- and bitrate-dependent.** The ~21-23 crossover
+above is this bench's static scene at 19 Mbps, not a constant. A moving scene
+needs a higher QP for the same rate, which moves the `min_qp` cliff up and the
+`max_qp` overshoot down. Never port a bound between crafts, scenes or
+bitrates without re-measuring.
+
+**Interaction.** `min_qp`/`max_qp` bound the P/global QP; `qp_delta` sets the
+I-frame offset from it. Star6E writes only the P bounds (`u32MinQp`/
+`u32MaxQp`) and leaves the I-frame bounds at the driver defaults, so the two
+are orthogonal in the healthy regime: across the whole `min_qp` and `max_qp`
+sweeps above, IRAP size stayed at 3.0-4.3 KB, i.e. `qp_delta` kept working
+even where the bounds had destroyed the rate contract. Set `qp_delta` for
+IDR cost; leave both bounds at 0 unless you have measured a specific
+overshoot.
+
+**Backend support** (as reported by `/api/v1/capabilities`):
+
+| Field | Star6E | Maruko | CV610 |
+|---|---|---|---|
+| `video0.qp_delta` | yes | yes | advertised, **no measured effect** |
+| `video0.min_qp` / `max_qp` | yes | not implemented | yes |
+| `outgoing.sidecar_port` | yes | yes | not implemented |
+
+CV610 accepts `qp_delta`, persists it, and reports `supported: true`, but the
+knob does not move the bitstream: across `-12`, `-4`, `0`, `+12`, applied both
+live and at channel create, and in both a saturated and an unsaturated CBR
+regime, IDR size held at 16.1-20.3 KB (<=1.2% spread) where Star6E spans 9x
+over the same range. IDR access units were confirmed well-formed
+(`19, 32, 33, 34, 39` — IDR_W_RADL + VPS/SPS/PPS/SEI). A CV610 craft
+therefore has no working I-frame sizing lever today.
 
 #### Framing: Stabilization & Digital Zoom
 
