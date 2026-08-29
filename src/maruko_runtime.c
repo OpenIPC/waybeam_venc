@@ -32,7 +32,6 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 	MarukoRunnerContext *ctx = g_maruko_runner_ctx;
 	Star6eTsRecorderState *ts;
 	Star6eRecorderState *rec;
-	Star6eRecorderStopReason sr = RECORDER_STOP_MANUAL;
 
 	memset(out, 0, sizeof(*out));
 	if (!ctx)
@@ -65,37 +64,55 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 	/* is_RECORDING, not is_active: a rotation holds fd == -1 on the writer
 	 * thread, and reporting that as "not recording" makes a healthy
 	 * recording blink off once per segment. */
-	if (star6e_ts_recorder_is_recording(ts)) {
-		out->active = 1;
-		snprintf(out->format, sizeof(out->format), "ts");
-		star6e_ts_recorder_status(ts,
-			&out->bytes_written, &out->frames_written,
-			&out->segments, NULL, NULL);
-		snprintf(out->path, sizeof(out->path), "%s", ts->path);
-		out->elapsed_ms = star6e_recorder_elapsed_ms(&ts->start_time);
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
-	} else if (star6e_recorder_is_active(rec)) {
-		const char *path = "";
-		out->active = 1;
-		snprintf(out->format, sizeof(out->format), "hevc");
-		star6e_recorder_status(rec, &out->bytes_written,
-			&out->frames_written, &path, NULL);
-		out->segments = 1;  /* HEVC recorder has no rotation */
-		snprintf(out->path, sizeof(out->path), "%s", path);
-		out->elapsed_ms = star6e_recorder_elapsed_ms(&rec->start_time);
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
-	} else {
-		const char *reason = "manual";
-		/* Whichever stopped most recently — both reasons are
-		 * disjoint because only one recorder is ever active. */
-		sr = ts->last_stop_reason != RECORDER_STOP_MANUAL
-			? ts->last_stop_reason : rec->last_stop_reason;
-		if (sr == RECORDER_STOP_DISK_FULL)
-			reason = "disk_full";
-		else if (sr == RECORDER_STOP_WRITE_ERROR)
-			reason = "write_error";
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "%s",
-			reason);
+	{
+		/* ONE coherent instant per recorder.  The fields below are
+		 * mutated by the writer thread during writes and segment
+		 * rotation: bytes_written is 64-bit on ARM32 and path is
+		 * rewritten wholesale on a rotation, so reading them in place
+		 * could tear outright, and reading active, counters and path at
+		 * three different instants could disagree with each other. */
+		Star6eRecorderSnapshot ts_snap, rec_snap;
+
+		star6e_ts_recorder_snapshot(ts, &ts_snap);
+		star6e_recorder_snapshot(rec, &rec_snap);
+
+		if (ts_snap.active) {
+			out->active = 1;
+			snprintf(out->format, sizeof(out->format), "ts");
+			out->bytes_written = ts_snap.bytes_written;
+			out->frames_written = ts_snap.frames_written;
+			out->segments = ts_snap.segments;
+			out->elapsed_ms = ts_snap.elapsed_ms;
+			snprintf(out->path, sizeof(out->path), "%s",
+				ts_snap.path);
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"none");
+		} else if (rec_snap.active) {
+			out->active = 1;
+			snprintf(out->format, sizeof(out->format), "hevc");
+			out->bytes_written = rec_snap.bytes_written;
+			out->frames_written = rec_snap.frames_written;
+			out->segments = 1;  /* HEVC recorder has no rotation */
+			out->elapsed_ms = rec_snap.elapsed_ms;
+			snprintf(out->path, sizeof(out->path), "%s",
+				rec_snap.path);
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"none");
+		} else {
+			/* Either recorder may hold the reason; a manual stop on
+			 * one does not mask a disk-full on the other. */
+			const char *reason = "manual";
+			Star6eRecorderStopReason sr = ts_snap.last_stop_reason;
+
+			if (sr == RECORDER_STOP_MANUAL)
+				sr = rec_snap.last_stop_reason;
+			if (sr == RECORDER_STOP_DISK_FULL)
+				reason = "disk_full";
+			else if (sr == RECORDER_STOP_WRITE_ERROR)
+				reason = "write_error";
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"%s", reason);
+		}
 	}
 }
 

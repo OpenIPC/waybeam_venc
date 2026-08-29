@@ -410,6 +410,21 @@ static void cv610_record_sink(void *opaque, const uint8_t *au, size_t len,
  * when it did not.  Closing the descriptors here rather than at the call site
  * is what makes the asynchronous stop safe: on both paths the sink is
  * guaranteed never to run again by the time this runs. */
+/* Bounded wait for a detached reaper to release the recorders.  Teardown only:
+ * a reaper that outlives the context would dereference it after backend.c has
+ * freed it. */
+#define REC_REAP_TEARDOWN_WAIT_MS 2000
+static void cv610_wait_reap(Cv610RunnerContext *ctx, unsigned ms)
+{
+	unsigned waited = 0;
+
+	while (__atomic_load_n(&ctx->rec_reap_pending, __ATOMIC_ACQUIRE) &&
+	       waited < ms) {
+		usleep(2000);
+		waited += 2;
+	}
+}
+
 static void cv610_record_reap(void *opaque)
 {
 	Cv610RunnerContext *ctx = opaque;
@@ -422,9 +437,11 @@ static void cv610_record_reap(void *opaque)
 /* Close whichever recorder is open and drop the audio tee.  Idempotent.
  *
  * Order matters: the writer thread is the only thread that touches recorder
- * state while recording, so it has to be drained and joined BEFORE either
- * recorder is closed. */
-/* `bounded` picks how long the queued tail may hold this caller up.
+ * state while recording, so it has to be joined BEFORE either recorder is
+ * closed -- which is why the closes live in cv610_record_reap() above, the
+ * one place that runs after the join on both the inline and deferred paths.
+ *
+ * `async` picks whether this may join at all.
  *
  * Mid-run (the encode loop) it must be bounded: an unbounded drain would put
  * the disk stall straight back on the live video path at every stop, which is
@@ -440,6 +457,25 @@ static void cv610_record_stop(Cv610RunnerContext *ctx, int async)
 	 * recorder fd of 0 reads as an open file. */
 	if (!ctx->rec_locks_ready)
 		return;
+
+	/* A detached reaper still owns the recorders from an earlier stop: it
+	 * has not joined the writer whose sink is still inside a write(), so
+	 * both descriptors are live.  Closing again here would close them under
+	 * that writer AND clear rec_reap_pending, letting the very next start
+	 * reuse a descriptor the abandoned writer is about to append to.  The
+	 * guard only means anything if nothing else clears it. */
+	if (__atomic_load_n(&ctx->rec_reap_pending, __ATOMIC_ACQUIRE)) {
+		if (async)
+			return;
+		/* Teardown has no "later", so wait it out rather than leave the
+		 * reaper running against a context about to be freed. */
+		cv610_wait_reap(ctx, REC_REAP_TEARDOWN_WAIT_MS);
+		if (__atomic_load_n(&ctx->rec_reap_pending, __ATOMIC_ACQUIRE)) {
+			fprintf(stderr, "WARN: recorder writer still holding the "
+				"file at teardown; skipping the close\n");
+			return;
+		}
+	}
 
 	/* Detach under the lock so a status poll already inside
 	 * venc_rec_writer_stats() finishes against a live writer, and any
@@ -600,40 +636,56 @@ static void cv610_record_status_callback(VencRecordStatus *out)
 	 * too (see the take_idr_request hand-off in the drain loop) and holds
 	 * fd == -1 across it, so the descriptor is not the right question for a
 	 * reader on the httpd thread. */
-	if (star6e_ts_recorder_is_recording(&ctx->ts_recorder)) {
-		out->active = 1;
-		snprintf(out->format, sizeof(out->format), "ts");
-		star6e_ts_recorder_status(&ctx->ts_recorder,
-			&out->bytes_written, &out->frames_written,
-			&out->segments, NULL, NULL);
-		snprintf(out->path, sizeof(out->path), "%s", ctx->ts_recorder.path);
-		out->elapsed_ms =
-			star6e_recorder_elapsed_ms(&ctx->ts_recorder.start_time);
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
-	} else if (star6e_recorder_is_active(&ctx->recorder)) {
-		out->active = 1;
-		snprintf(out->format, sizeof(out->format), "hevc");
-		star6e_recorder_status(&ctx->recorder,
-			&out->bytes_written, &out->frames_written, NULL, NULL);
-		snprintf(out->path, sizeof(out->path), "%s", ctx->recorder.path);
-		out->elapsed_ms =
-			star6e_recorder_elapsed_ms(&ctx->recorder.start_time);
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
-	} else {
-		/* Either recorder may hold the reason; a manual stop on one does
-		 * not mask a disk-full on the other. */
-		const char *reason = "manual";
-		Star6eRecorderStopReason sr = ctx->ts_recorder.last_stop_reason;
+	{
+		/* ONE coherent instant per recorder.  The fields below are
+		 * mutated by the writer thread during writes and segment
+		 * rotation: bytes_written is 64-bit on ARM32 and path is
+		 * rewritten wholesale on a rotation, so reading them in place
+		 * could tear outright, and reading active, counters and path at
+		 * three different instants could disagree with each other. */
+		Star6eRecorderSnapshot ts_snap, rec_snap;
 
-		if (sr == RECORDER_STOP_MANUAL)
-			sr = ctx->recorder.last_stop_reason;
-		if (sr == RECORDER_STOP_DISK_FULL)
-			reason = "disk_full";
-		else if (sr == RECORDER_STOP_WRITE_ERROR)
-			reason = "write_error";
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "%s", reason);
-		snprintf(out->format, sizeof(out->format), "%s",
-			ctx->config.record.format);
+		star6e_ts_recorder_snapshot(&ctx->ts_recorder, &ts_snap);
+		star6e_recorder_snapshot(&ctx->recorder, &rec_snap);
+
+		if (ts_snap.active) {
+			out->active = 1;
+			snprintf(out->format, sizeof(out->format), "ts");
+			out->bytes_written = ts_snap.bytes_written;
+			out->frames_written = ts_snap.frames_written;
+			out->segments = ts_snap.segments;
+			out->elapsed_ms = ts_snap.elapsed_ms;
+			snprintf(out->path, sizeof(out->path), "%s",
+				ts_snap.path);
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"none");
+		} else if (rec_snap.active) {
+			out->active = 1;
+			snprintf(out->format, sizeof(out->format), "hevc");
+			out->bytes_written = rec_snap.bytes_written;
+			out->frames_written = rec_snap.frames_written;
+			out->elapsed_ms = rec_snap.elapsed_ms;
+			snprintf(out->path, sizeof(out->path), "%s",
+				rec_snap.path);
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"none");
+		} else {
+			/* Either recorder may hold the reason; a manual stop on
+			 * one does not mask a disk-full on the other. */
+			const char *reason = "manual";
+			Star6eRecorderStopReason sr = ts_snap.last_stop_reason;
+
+			if (sr == RECORDER_STOP_MANUAL)
+				sr = rec_snap.last_stop_reason;
+			if (sr == RECORDER_STOP_DISK_FULL)
+				reason = "disk_full";
+			else if (sr == RECORDER_STOP_WRITE_ERROR)
+				reason = "write_error";
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"%s", reason);
+			snprintf(out->format, sizeof(out->format), "%s",
+				ctx->config.record.format);
+		}
 	}
 }
 
@@ -1746,11 +1798,13 @@ static int cv610_run(void *opaque)
 		 * positioned to notice, and the gate above would go on
 		 * queueing into a dead writer indefinitely.
 		 *
-		 * AFTER the release: this ends in a join over the access unit
-		 * still in the sink's hands, which on the failing medium that
-		 * triggered the stop is a blocking write.  Before the release
-		 * it would hold the encoder's output slot and stall the LIVE
-		 * transport — the coupling this writer exists to remove. */
+		 * AFTER the release: the stop is bounded but not free, and
+		 * before the release it would hold the encoder's output slot
+		 * and stall the LIVE transport — the coupling this writer
+		 * exists to remove.  Since 0.73.2 the stop no longer ends in an
+		 * unbounded join either: past its deadline the writer goes to a
+		 * detached reaper, so a medium that has stopped completing
+		 * cannot park this loop. */
 		if (ctx->rec_writer &&
 		    !star6e_record_wants_frame(&ctx->ts_recorder,
 				&ctx->recorder))

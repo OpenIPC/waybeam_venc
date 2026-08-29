@@ -50,9 +50,12 @@ extern "C" {
  * writer is running.
  *
  * LIFETIME — one writer per RECORDING, not one per process.  Start it after
- * the recorder file is open; stop it before closing that file.  Both stops
- * end in an unconditional pthread_join, so on return the sink is guaranteed
- * never to run again and the close needs no further serialisation.  A
+ * the recorder file is open; stop it before closing that file.  The two
+ * SYNCHRONOUS stops end in an unconditional pthread_join, so on return the
+ * sink is guaranteed never to run again and the close needs no further
+ * serialisation.  venc_rec_writer_stop_bounded_async() deliberately does not
+ * join past its deadline, which is exactly why the close moves into its
+ * on_exit callback rather than following the call.  A
  * long-lived writer would need a separate barrier before every close, a lock
  * between the sink and the close for the case that barrier cannot cover, and
  * a counter reset at every start; tying the lifetime to the recording

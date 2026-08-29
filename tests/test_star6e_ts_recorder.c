@@ -170,6 +170,80 @@ static int test_ts_recorder_status(void)
 	return failures;
 }
 
+/* A status poll runs on the httpd thread while the writer thread is inside
+ * write_video() and segment rotation.  Star6E used to document those reads as
+ * safe because the fields were "single words written by one thread" -- but
+ * bytes_written is 64-bit and these targets are ARM32, so an unsynchronised
+ * load can tear outright, and `path` is not a word at all: rotation rewrites
+ * the whole buffer.
+ *
+ * Asserts what a torn or mixed read would violate -- monotonic counters and a
+ * non-empty path whenever the snapshot says active -- and is written to be run
+ * under TSAN, which is what actually proves the absence of the race. */
+static void *status_writer_thread(void *arg)
+{
+	Star6eTsRecorderState *state = arg;
+	uint8_t video[512];
+	int i;
+
+	memset(video, 0x5A, sizeof(video));
+	for (i = 0; i < 400; i++)
+		(void)star6e_ts_recorder_write_video(state, video,
+			sizeof(video), (uint64_t)i * 3000, i == 0);
+	return NULL;
+}
+
+static int test_ts_recorder_status_snapshot_is_coherent(void)
+{
+	Star6eTsRecorderState state;
+	Star6eRecorderSnapshot snap;
+	pthread_t writer;
+	uint64_t last_bytes = 0;
+	uint32_t last_frames = 0;
+	int failures = 0;
+	int polls = 0;
+	int monotonic = 1;
+	int path_ok = 1;
+
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
+	/* Rotate often, so the poll races a path rewrite rather than only
+	 * counter bumps -- the rotation is the interesting window. */
+	state.max_bytes = 64 * 1024;
+	CHECK("snapshot start ok",
+		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
+
+	CHECK("snapshot writer spawn",
+		pthread_create(&writer, NULL, status_writer_thread, &state) == 0);
+
+	/* Poll until the writer has finished, not a fixed count: an unbounded
+	 * spin of 3000 iterations completes before the writer thread is even
+	 * scheduled, and then nothing is actually raced. */
+	while (last_frames < 400 && polls < 20000000) {
+		star6e_ts_recorder_snapshot(&state, &snap);
+		if (snap.bytes_written < last_bytes ||
+		    snap.frames_written < last_frames)
+			monotonic = 0;
+		if (snap.active && snap.path[0] == '\0')
+			path_ok = 0;
+		last_bytes = snap.bytes_written;
+		last_frames = snap.frames_written;
+		polls++;
+	}
+	pthread_join(writer, NULL);
+
+	CHECK("snapshot counters never went backwards", monotonic == 1);
+	CHECK("snapshot never reported active with an empty path", path_ok == 1);
+	CHECK("snapshot observed real progress", last_frames > 0);
+
+	star6e_ts_recorder_snapshot(&state, &snap);
+	CHECK("snapshot sees the writer's total",
+		snap.frames_written == 400);
+	star6e_ts_recorder_stop(&state);
+	star6e_ts_recorder_snapshot(&state, &snap);
+	CHECK("snapshot inactive after stop", snap.active == 0);
+	return failures;
+}
+
 static int test_ts_recorder_start_null(void)
 {
 	Star6eTsRecorderState state;
@@ -730,6 +804,7 @@ int test_star6e_ts_recorder(void)
 	failures += test_ts_recorder_with_audio();
 	failures += test_ts_recorder_not_active();
 	failures += test_ts_recorder_status();
+	failures += test_ts_recorder_status_snapshot_is_coherent();
 	failures += test_ts_recorder_start_null();
 	failures += test_ts_recorder_multi_frame();
 	failures += test_ts_rotation_requests_idr_when_not_idr();
