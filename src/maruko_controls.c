@@ -156,6 +156,11 @@ typedef struct {
 	MI_SYS_ChnPort_t venc_port;
 	volatile sig_atomic_t *output_enabled_ptr;
 	volatile uint32_t *stored_fps_ptr;
+	/* Destination the output socket is ACTUALLY pointed at -- see the note
+	 * in maruko_apply_server().  Never derive this from vcfg.  Held here
+	 * rather than as a file-scope global, matching
+	 * Star6eControlContext::applied_server. */
+	char applied_server[VENC_CONFIG_STRING_MAX];
 } MarukoControlContext;
 
 enum {
@@ -1271,10 +1276,6 @@ static int maruko_apply_output_enabled(bool on)
 /* ── Live server change (Step 3C) ────────────────────────────────────── */
 
 static MarukoOutput *g_maruko_output_ptr;
-/* Destination the output socket is ACTUALLY pointed at — see the note in
- * maruko_apply_server().  Never derive this from vcfg. */
-static char g_maruko_applied_server[VENC_CONFIG_STRING_MAX];
-
 static int maruko_apply_server(const char *uri)
 {
 	if (!g_maruko_output_ptr)
@@ -1283,13 +1284,13 @@ static int maruko_apply_server(const char *uri)
 	 * Compare what we actually applied, never vcfg: the config is
 	 * committed before this callback runs, so a vcfg comparison matches
 	 * even on a real change and would skip the repoint. */
-	if (uri && g_maruko_applied_server[0] &&
-	    strcmp(g_maruko_applied_server, uri) == 0)
+	if (uri && g_ctx.applied_server[0] &&
+	    strcmp(g_ctx.applied_server, uri) == 0)
 		return 0;
 	if (maruko_output_apply_server(g_maruko_output_ptr, uri) != 0)
 		return -1;
-	snprintf(g_maruko_applied_server,
-		sizeof(g_maruko_applied_server), "%s", uri);
+	snprintf(g_ctx.applied_server,
+		sizeof(g_ctx.applied_server), "%s", uri);
 
 	/* A new destination is a receiver that has never seen a parameter set,
 	 * so this is counted but never coalesced. */
@@ -1633,8 +1634,8 @@ void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
 	if (g_ctx.vcfg &&
 	    (backend->output.ring || backend->output.frame_ring ||
 	     backend->output.socket_handle >= 0))
-		snprintf(g_maruko_applied_server,
-			sizeof(g_maruko_applied_server), "%s",
+		snprintf(g_ctx.applied_server,
+			sizeof(g_ctx.applied_server), "%s",
 			g_ctx.vcfg->outgoing.server);
 }
 
