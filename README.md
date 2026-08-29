@@ -751,8 +751,42 @@ knob does not move the bitstream: across `-12`, `-4`, `0`, `+12`, applied both
 live and at channel create, and in both a saturated and an unsaturated CBR
 regime, IDR size held at 16.1-20.3 KB (<=1.2% spread) where Star6E spans 9x
 over the same range. IDR access units were confirmed well-formed
-(`19, 32, 33, 34, 39` — IDR_W_RADL + VPS/SPS/PPS/SEI). A CV610 craft
-therefore has no working I-frame sizing lever today.
+(`19, 32, 33, 34, 39` — IDR_W_RADL + VPS/SPS/PPS/SEI).
+
+The cause is not venc's write. Reading the channel back through the SDK shows
+`ip_qp_delta=-4` correctly in force. On CV610 **every rate-control input to
+I-frame size is stored and then ignored**, measured one at a time against the
+live channel:
+
+| Knob | Set to | IRAP median |
+|---|---|---|
+| (baseline) | — | 16042 |
+| `gop_attr.normal_p.ip_qp_delta` | -12 / 0 / +12 | 16245 / 16209 / 16161 |
+| `h265_cbr_param.max_i_proportion` | 5 / 10 / 20 / 40 | 16229 / 16205 / 16395 / 16250 |
+| `h265_cbr_param.min_i_qp` | 30 / 40 | 16079 / 16177 |
+| `h265_cbr_param.max_i_qp` | 20 / 15 | 16098 / 16010 |
+
+The last row is the decisive one: a *hard I-QP ceiling of 15* must bind, and
+the read-back confirms the driver took it (`i_qp=10..15`), yet the IDR did not
+move. `min_qp`/`max_qp` are not inert on CV610 — `max_qp=30` drove a 2.1x
+overshoot (16.4 -> 34.8 Mbps) — so the RC honours the P-side bounds and
+ignores the I-side ones.
+
+The one control that does work is the super-frame strategy, a post-encode
+re-encode trigger rather than an RC parameter
+(`ss_mpi_venc_set_super_frame_strategy`, `i_frame_bits_threshold`):
+
+| max IDR | disabled | 12 KiB | 8 KiB | 4 KiB |
+|---|---|---|---|---|
+| IRAP median | 16395 | 5040 | 4414 | 4293 |
+
+It is a re-encode threshold, not an exact cap — 4 KiB and 8 KiB both settle
+near 4.3 KB — but it is monotonic and it is the only working IDR-cost lever on
+CV610. venc does not use it today.
+
+Note also that CV610's `ip_qp_delta` field range is **`[-10, 30]`**, not
+venc's `-12..12`. A config carrying `qpDelta: -12` makes
+`ss_mpi_venc_create_chn` reject the attr and venc fails to start on CV610.
 
 #### Framing: Stabilization & Digital Zoom
 
