@@ -2909,10 +2909,10 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.21.0\","
+		"\"contract_version\":\"%s\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
-		"}}", VENC_VERSION, g_backend);
+		"}}", VENC_VERSION, VENC_CONTRACT_VERSION, g_backend);
 	return httpd_send_json(fd, 200, buf);
 }
 

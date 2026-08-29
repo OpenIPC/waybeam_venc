@@ -1198,6 +1198,30 @@ static int test_restart_set_rejects_legacy_codec_field(void)
 	CHECK("legacy codec error",
 		strstr(response, "unknown config field") != NULL);
 
+	/* The contract version the code serves must equal the one the contract
+	 * document declares.  Reads the file rather than a second literal, so a
+	 * doc-only bump (which is what shipped in 0.73.0) fails here. */
+	{
+		FILE *cf = fopen("documentation/HTTP_API_CONTRACT.md", "r");
+		char line[256];
+		int found = 0;
+
+		CHECK("contract_doc_readable", cf != NULL);
+		while (cf && fgets(line, sizeof(line), cf)) {
+			if (strncmp(line, "- `contract_version`: `", 23) != 0)
+				continue;
+			found = 1;
+			CHECK("contract_version_code_matches_doc",
+				strncmp(line + 23, VENC_CONTRACT_VERSION,
+					strlen(VENC_CONTRACT_VERSION)) == 0 &&
+				line[23 + strlen(VENC_CONTRACT_VERSION)] == '`');
+			break;
+		}
+		if (cf)
+			fclose(cf);
+		CHECK("contract_version_line_present", found);
+	}
+
 	/* 0.21.0 removed video0.maxIBytes/maxPBytes.  The contract promises a
 	 * controller still pushing them gets 404 "unknown config field" — on
 	 * BOTH set paths, and that a multi-field request naming one is rejected

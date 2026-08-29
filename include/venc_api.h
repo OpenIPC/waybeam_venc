@@ -1,6 +1,13 @@
 #ifndef VENC_API_H
 #define VENC_API_H
 
+
+/* The HTTP API contract version this build serves.  Must equal the version in
+ * documentation/HTTP_API_CONTRACT.md — tests/test_venc_api.c reads that file
+ * and fails if they drift.  0.73.0 shipped with the document on 0.22.0 and the
+ * code still answering 0.21.0, so every craft advertised a contract it was not
+ * serving. */
+#define VENC_CONTRACT_VERSION "0.22.0"
 #include "venc_config.h"
 
 #ifdef __cplusplus
