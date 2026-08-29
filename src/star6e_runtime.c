@@ -560,14 +560,25 @@ static void mirror_record_locks_ready(Star6ePipelineState *ps)
 	ps->rec_locks_ready = 1;
 }
 
-/* End the current recording: detach and JOIN the writer, then close the
- * recorders.  The join is the barrier — after it the sink is guaranteed not
- * to run again, so the descriptor it writes by cannot be closed underneath
- * it.  Safe to call when nothing is recording. */
 /* Runs once the writer has been joined and freed -- inline on the encode loop
  * when the sink finished inside the deadline, on the reaper thread when it did
  * not.  The closes live here so that on both paths they happen after the sink
  * is guaranteed never to run again. */
+/* Bounded wait for a detached reaper to release the recorders.  Teardown only:
+ * a reaper that outlives the context would dereference it after backend.c has
+ * freed it. */
+#define REC_REAP_TEARDOWN_WAIT_MS 2000
+static void star6e_wait_reap(Star6ePipelineState *ps, unsigned ms)
+{
+	unsigned waited = 0;
+
+	while (__atomic_load_n(&ps->rec_reap_pending, __ATOMIC_ACQUIRE) &&
+	       waited < ms) {
+		usleep(2000);
+		waited += 2;
+	}
+}
+
 static void mirror_record_reap(void *opaque)
 {
 	Star6ePipelineState *ps = opaque;
@@ -588,6 +599,25 @@ static void mirror_record_close_mode(Star6ePipelineState *ps, unsigned grace_ms,
 
 	if (!ps->rec_locks_ready)
 		return;
+
+	/* A detached reaper still owns the recorders from an earlier stop: it
+	 * has not joined the writer whose sink is still inside a write(), so
+	 * both descriptors are live.  Closing again here would close them under
+	 * that writer AND clear rec_reap_pending, letting the very next start
+	 * reuse a descriptor the abandoned writer is about to append to.  The
+	 * guard only means anything if nothing else clears it. */
+	if (__atomic_load_n(&ps->rec_reap_pending, __ATOMIC_ACQUIRE)) {
+		if (async)
+			return;
+		/* Teardown has no "later", so wait it out rather than leave the
+		 * reaper running against a context about to be freed. */
+		star6e_wait_reap(ps, REC_REAP_TEARDOWN_WAIT_MS);
+		if (__atomic_load_n(&ps->rec_reap_pending, __ATOMIC_ACQUIRE)) {
+			fprintf(stderr, "WARN: recorder writer still holding the "
+				"file at teardown; skipping the close\n");
+			return;
+		}
+	}
 
 	/* Detach under the lock so a status poll already inside
 	 * venc_rec_writer_stats() finishes against a live writer and any later
@@ -1662,13 +1692,21 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			ps->rec_flatten_failures++;
 			pthread_mutex_unlock(&ps->rec_writer_lock);
 		}
-	} else if (!ps->dual) {
+	} else if (!ps->dual &&
+		   !__atomic_load_n(&ps->rec_reap_pending, __ATOMIC_ACQUIRE)) {
 		/* No writer.  Either nothing is recording — both calls below
 		 * no-op on a closed recorder — or the writer thread failed to
 		 * start, in which case this writes synchronously rather than
 		 * silently recording nothing.  With no writer thread, rotation
 		 * runs here on the encode loop, so fd is never transiently -1
 		 * from another thread and the descriptor IS the right gate. */
+		/* NOT while a reap is pending: rec_writer is NULL from the
+		 * moment the async close detaches it, but the recorders stay
+		 * OPEN until the reaper joins the writer whose sink is still
+		 * inside a write().  Writing here would put that stalled write
+		 * straight onto the encode loop -- unbounded, and worse than
+		 * the stall the async close exists to remove -- while racing
+		 * the abandoned writer on the same fd and mux state. */
 		star6e_recorder_write_frame(&ps->recorder, &stream);
 		star6e_ts_recorder_write_stream(&ps->ts_recorder, &stream);
 	}
@@ -1695,13 +1733,13 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * writer thread, so nothing but this loop is positioned to notice, and
 	 * the gate above would go on queueing into a dead writer indefinitely.
 	 *
-	 * AFTER the release, for the same reason the IDR request above is: this
-	 * ends in a join over the access unit still in the sink's hands, which
-	 * on the failing card that triggered the stop is a blocking write.
-	 * Inside the GetStream/ReleaseStream window that would hold the encoder's
-	 * output slot and stall the LIVE stream — precisely the coupling the
-	 * writer thread exists to remove, reintroduced on the one path that only
-	 * runs when storage is already misbehaving.  Costs one frame of latency
+	 * AFTER the release, for the same reason the IDR request above is:
+	 * inside the GetStream/ReleaseStream window this would hold the
+	 * encoder's output slot and stall the LIVE stream — precisely the
+	 * coupling the writer thread exists to remove.  Since 0.73.2 the stop
+	 * itself no longer ends in an unbounded join: past its deadline the
+	 * writer is handed to a detached reaper, so a card that has stopped
+	 * completing cannot park this loop either.  Costs one frame of latency
 	 * in noticing, which the closed recorder discards anyway. */
 	if (!ps->dual && ps->rec_writer &&
 	    !star6e_record_wants_frame(&ps->ts_recorder, &ps->recorder))

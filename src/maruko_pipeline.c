@@ -4045,18 +4045,25 @@ void mk_mirror_record_locks_init_public(MarukoBackendContext *ctx)
 	mk_mirror_record_locks_init(ctx);
 }
 
-/* End the current recording: detach and JOIN the writer, then close the
- * recorders.  The join is the barrier — after it the sink is guaranteed not
- * to run again, so the descriptor it writes by cannot be closed underneath
- * it.  Safe to call when nothing is recording.
- *
- * grace_ms bounds how long a queued tail may hold the caller up; 0 means
- * flush it all.  Maruko never passes 0: even teardown is watchdogged (see
- * MARUKO_REC_TEARDOWN_GRACE_MS). */
 /* Runs once the writer has been joined and freed -- inline on the encode loop
  * when the sink finished inside the deadline, on the reaper thread when it did
  * not.  The closes live here so that on both paths they happen only after the
  * sink is guaranteed never to run again. */
+/* Bounded wait for a detached reaper to release the recorders.  Teardown only:
+ * a reaper that outlives the context would dereference it after backend.c has
+ * freed it. */
+#define REC_REAP_TEARDOWN_WAIT_MS 2000
+static void mk_wait_reap(MarukoBackendContext *ctx, unsigned ms)
+{
+	unsigned waited = 0;
+
+	while (__atomic_load_n(&ctx->rec_reap_pending, __ATOMIC_ACQUIRE) &&
+	       waited < ms) {
+		usleep(2000);
+		waited += 2;
+	}
+}
+
 static void mk_mirror_record_reap(void *opaque)
 {
 	MarukoBackendContext *ctx = opaque;
@@ -4078,6 +4085,25 @@ static void mk_mirror_record_close_mode(MarukoBackendContext *ctx,
 	 * mutex zeroed; locking or destroying one of those is undefined. */
 	if (!ctx->rec_locks_ready)
 		return;
+
+	/* A detached reaper still owns the recorders from an earlier stop: it
+	 * has not joined the writer whose sink is still inside a write(), so
+	 * both descriptors are live.  Closing again here would close them under
+	 * that writer AND clear rec_reap_pending, letting the very next start
+	 * reuse a descriptor the abandoned writer is about to append to.  The
+	 * guard only means anything if nothing else clears it. */
+	if (__atomic_load_n(&ctx->rec_reap_pending, __ATOMIC_ACQUIRE)) {
+		if (async)
+			return;
+		/* Teardown has no "later", so wait it out rather than leave the
+		 * reaper running against a context about to be freed. */
+		mk_wait_reap(ctx, REC_REAP_TEARDOWN_WAIT_MS);
+		if (__atomic_load_n(&ctx->rec_reap_pending, __ATOMIC_ACQUIRE)) {
+			fprintf(stderr, "WARN: recorder writer still holding the "
+				"file at teardown; skipping the close\n");
+			return;
+		}
+	}
 
 	/* Detach under the lock so a status poll already inside
 	 * venc_rec_writer_stats() finishes against a live writer and any later
@@ -4156,6 +4182,16 @@ static int mk_mirror_record_open(MarukoBackendContext *ctx, const char *dir)
 		return 0;
 	}
 
+	/* Before the open, not after it: these describe the recording being
+	 * started, and a start that FAILS must not leave the previous
+	 * recording's drop count standing as if it belonged to this one.
+	 * Star6E and CV610 both order it this way. */
+	pthread_mutex_lock(&ctx->rec_writer_lock);
+	ctx->rec_dropped_frames = 0;
+	ctx->rec_flatten_failures = 0;
+	ctx->rec_writer_peak_depth = 0;
+	pthread_mutex_unlock(&ctx->rec_writer_lock);
+
 	if (strcmp(ctx->cfg.record.format, "hevc") == 0) {
 		started = star6e_recorder_start(&ctx->recorder, dir) == 0;
 	} else if (strcmp(ctx->cfg.record.format, "ts") == 0) {
@@ -4178,15 +4214,6 @@ static int mk_mirror_record_open(MarukoBackendContext *ctx, const char *dir)
 	printf("> [maruko] recording %s to %s (%s%s)\n",
 		ctx->cfg.record.format, dir, ctx->cfg.record.mode,
 		ctx->audio.rec_ring ? " + audio" : "");
-
-	/* Zeroed BEFORE the dual bail-out below and before the writer starts:
-	 * they describe THIS recording, and mk_mirror_record_close() has
-	 * already harvested the previous writer's totals into them. */
-	pthread_mutex_lock(&ctx->rec_writer_lock);
-	ctx->rec_dropped_frames = 0;
-	ctx->rec_flatten_failures = 0;
-	ctx->rec_writer_peak_depth = 0;
-	pthread_mutex_unlock(&ctx->rec_writer_lock);
 
 	/* Dual: chn 1 feeds the file through its own drain thread, so the
 	 * mirror producer gate (!ctx->dual, see maruko_pipeline_process_stream)
@@ -4737,13 +4764,21 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			ctx->rec_flatten_failures++;
 			pthread_mutex_unlock(&ctx->rec_writer_lock);
 		}
-	} else if (!ctx->dual) {
+	} else if (!ctx->dual &&
+		   !__atomic_load_n(&ctx->rec_reap_pending, __ATOMIC_ACQUIRE)) {
 		/* No writer.  Either nothing is recording — both calls below
 		 * no-op on a closed recorder — or the writer thread failed to
 		 * start, in which case this writes synchronously rather than
 		 * silently recording nothing.  With no writer thread, rotation
 		 * runs here on the encode loop, so fd is never transiently -1
 		 * from another thread and the descriptor IS the right gate. */
+		/* NOT while a reap is pending: rec_writer is NULL from the
+		 * moment the async close detaches it, but the recorders stay
+		 * OPEN until the reaper joins the writer whose sink is still
+		 * inside a write().  Writing here would put that stalled write
+		 * straight onto the encode loop -- unbounded, and worse than
+		 * the stall the async close exists to remove -- while racing
+		 * the abandoned writer on the same fd and mux state. */
 		(void)maruko_ts_recorder_write_stream(&ctx->ts_recorder,
 			&stream);
 		(void)maruko_recorder_write_frame(&ctx->recorder, &stream);
@@ -4776,13 +4811,13 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	 * writer thread, so nothing but this loop is positioned to notice, and
 	 * the gate above would go on queueing into a dead writer indefinitely.
 	 *
-	 * AFTER the release, for the same reason the IDR request above is: this
-	 * ends in a join over the access unit still in the sink's hands, which
-	 * on the failing card that triggered the stop is a blocking write.
-	 * Inside the GetStream/ReleaseStream window that would hold the encoder's
-	 * output slot and stall the LIVE stream — the very coupling this writer
-	 * removes, reintroduced on the one path that only runs when storage is
-	 * already misbehaving. */
+	 * AFTER the release, for the same reason the IDR request above is:
+	 * inside the GetStream/ReleaseStream window this would hold the
+	 * encoder's output slot and stall the LIVE stream — precisely the
+	 * coupling the writer thread exists to remove.  Since 0.73.2 the stop
+	 * itself no longer ends in an unbounded join: past its deadline the
+	 * writer is handed to a detached reaper, so a card that has stopped
+	 * completing cannot park this loop either. */
 	if (!ctx->dual && ctx->rec_writer &&
 	    !star6e_record_wants_frame(&ctx->ts_recorder, &ctx->recorder))
 		mk_mirror_record_close(ctx, MARUKO_REC_STOP_GRACE_MS);

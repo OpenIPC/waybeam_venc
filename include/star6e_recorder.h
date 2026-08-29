@@ -139,6 +139,27 @@ int star6e_recorder_is_active(const Star6eRecorderState *state);
 int star6e_recorder_is_recording(const Star6eRecorderState *state);
 
 /** Get current recording status.  Any output pointer may be NULL. */
+/** Guard the status-visible fields of a Star6eRecorderState.
+ *
+ *  Any translation unit that mutates recording, the counters,
+ *  last_stop_reason, start_time or path MUST bracket the update with these:
+ *  a mutex only helps if every writer takes it, and maruko_recorder.c writes
+ *  the same fields from the dual-mode ch1 thread.
+ *
+ *  Never wrap write(), open(), close() or fdatasync() in them -- a status
+ *  poll must not be able to block on the disk. */
+static inline void star6e_recorder_status_lock(Star6eRecorderState *state)
+{
+	if (state && state->status_lock_ready)
+		pthread_mutex_lock(&state->status_lock);
+}
+
+static inline void star6e_recorder_status_unlock(Star6eRecorderState *state)
+{
+	if (state && state->status_lock_ready)
+		pthread_mutex_unlock(&state->status_lock);
+}
+
 /** Copy one coherent instant of the recorder's status.  Safe to call from a
  *  thread other than the writer; `out` is zeroed when `state` is NULL or not
  *  yet initialised. */

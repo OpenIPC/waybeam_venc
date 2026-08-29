@@ -31,6 +31,49 @@ Recorder status is now a coherent snapshot instead of an unsynchronised read.
   status callback before the recorders are initialised: the snapshot reports
   inactive rather than locking an uninitialised mutex.
 
+- **Two fatal defects in 0.73.2's own hand-off, found by the final review.**
+  Both were invisible to CI because no test exercises the deferred-reap window.
+
+  *The encode loop wrote into the recorders during the hand-off.* The producer
+  gate is `rec_writer != NULL`, and the async close nulls that immediately —
+  but the recorders stay OPEN until the reaper joins. Star6E's and Maruko's
+  no-writer fallback therefore wrote synchronously into the same descriptor the
+  abandoned writer was still inside: the stalled write straight back onto the
+  encode loop, unbounded, plus interleaved TS packets and a race on the mux
+  continuity counters. The fallback is now also gated on `rec_reap_pending`.
+  CV610 was never affected — it has no synchronous fallback.
+
+  *A second close during a hand-off reaped inline.* `stop_bounded_async(NULL,
+  …)` runs `on_exit` immediately, which is right in isolation but wrong while a
+  reaper is outstanding: it closed both descriptors under the live sink and
+  cleared `rec_reap_pending`, so the start guard that exists to prevent exactly
+  that then passed and the new recording reused a descriptor the abandoned
+  writer was about to append to. Every close now returns early while a reap is
+  pending; teardown instead waits it out (bounded), so a reaper cannot run
+  against a context `backend.c` has already freed.
+
+- **0.73.3's lock reached only two of the three writers.** `maruko_recorder.c`
+  mutates the same `Star6eRecorderState` fields from the dual-mode chn 1
+  thread, and could not take the guard because it was `static` in
+  `star6e_recorder.c`. It is now `static inline` in the header and Maruko's
+  five sites take it — a mutex only helps if every writer takes it.
+
+- **Coherence tightened.** `recording` is published inside the same section as
+  the counters, `write_video()` updates bytes and frames in one section rather
+  than two, and `open_new_segment()` builds the path into a local and publishes
+  path, segment count and byte total together — so a poll mid-rotation cannot
+  report the new file with the old count. The unconditional frame count is
+  preserved: making it conditional would have been a semantic change smuggled
+  in by a locking refactor.
+
+- **Stale comments** that this series' own earlier commits invalidated: three
+  backends still described the mid-run stop as ending in a blocking join,
+  `venc_rec_writer.h` still said "both stops" join unconditionally, and CV610
+  documented a parameter under its old name. Maruko now zeroes the
+  per-recording counters before the open attempt, as Star6E and CV610 already
+  did. The `/api/v1/version` example in `HTTP_API_CONTRACT.md` had gone stale by
+  three releases; the version pin now covers both docs, not just README.
+
 - **Test:** a writer thread driving `write_video()` with rotation every 64 KB
   while the main thread polls the snapshot, asserting counters never go
   backwards and that `active` never coincides with an empty path. Verified to
@@ -88,9 +131,10 @@ exposure the 0.73.1 note had understated.
 
 ## [0.73.1] - 2026-08-29
 
-Fixes found while reviewing the 0.68.0-0.73.0 range for upstream submission.
-Five behaviour bugs, all regressions or asymmetries introduced in that range,
-plus the documentation that contradicted the code. `contract_version` stays
+Fixes found while reviewing the 0.68.0-0.73.0 range for upstream submission:
+sixteen behaviour bugs, all regressions or asymmetries introduced in that
+range, plus the documentation that contradicted the code.  (Three review passes
+folded into this one unreleased version.) `contract_version` stays
 **0.22.0** — no field, endpoint or response shape changes.
 
 - **Restored recovery for a malformed access unit on every transport.** The

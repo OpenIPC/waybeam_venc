@@ -146,21 +146,22 @@ void star6e_ts_recorder_init(Star6eTsRecorderState *state,
 static int open_new_segment(Star6eTsRecorderState *state)
 {
 	uint8_t pat_pmt_buf[2 * TS_PACKET_SIZE];
+	char newpath[RECORDER_PATH_MAX];
 	size_t pat_pmt_len;
+	uint64_t pat_bytes = 0;
 	ssize_t ret;
 
-	/* Path under the lock (a reader may be copying it); the open() that
-	 * follows is deliberately outside -- only this thread writes it. */
-	ts_status_lock(state);
-	build_ts_path(state->path, sizeof(state->path), state->dir,
-		&state->mux);
-	ts_status_unlock(state);
+	/* Built into a LOCAL and published at the end together with segments
+	 * and bytes.  Writing it into state->path up front would let a status
+	 * poll pair the new path with the old segment count, and the open()
+	 * below must not run under the lock anyway. */
+	build_ts_path(newpath, sizeof(newpath), state->dir, &state->mux);
 
-	state->fd = open(state->path,
+	state->fd = open(newpath,
 		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (state->fd < 0) {
 		fprintf(stderr, "[ts_recorder] open %s failed: %s\n",
-			state->path, strerror(errno));
+			newpath, strerror(errno));
 		return -1;
 	}
 
@@ -178,14 +179,17 @@ static int open_new_segment(Star6eTsRecorderState *state)
 			state->fd = -1;
 			return -1;
 		}
-		ts_status_lock(state);
-		state->bytes_written += (uint64_t)ret;
-		ts_status_unlock(state);
-		state->segment_bytes = (uint64_t)ret;
+		pat_bytes = (uint64_t)ret;
+		state->segment_bytes = pat_bytes;
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &state->segment_start_time);
+
+	/* ONE publish: path, segment count and byte total change together, so
+	 * a poll mid-rotation cannot report the new file with the old count. */
 	ts_status_lock(state);
+	snprintf(state->path, sizeof(state->path), "%s", newpath);
+	state->bytes_written += pat_bytes;
 	state->segments++;
 	ts_status_unlock(state);
 
@@ -238,8 +242,12 @@ int star6e_ts_recorder_start(Star6eTsRecorderState *state, const char *dir,
 		return -1;
 
 	/* Published only once the first segment is actually open, so a failed
-	 * start never leaves a producer thinking a recording is running. */
+	 * start never leaves a producer thinking a recording is running -- and
+	 * under the lock, so a poll cannot pair active == 0 with the new path
+	 * and counters. */
+	ts_status_lock(state);
 	__atomic_store_n(&state->recording, 1, __ATOMIC_RELEASE);
+	ts_status_unlock(state);
 
 	fprintf(stderr, "[ts_recorder] started: %s\n", state->path);
 	return 0;
@@ -427,15 +435,23 @@ int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 			}
 			return -1;
 		}
-		ts_status_lock(state);
-		state->bytes_written += (uint64_t)written;
-		ts_status_unlock(state);
 		state->segment_bytes += (uint64_t)written;
+	} else {
+		written = 0;
 	}
 
+	/* ONE section for both counters: a poll landing between two separate
+	 * ones would report frame N's bytes with frame N-1's count.
+	 *
+	 * frames_written is incremented unconditionally, as it always was --
+	 * a frame that muxed to zero TS bytes still passed through the
+	 * recorder, and quietly making the count conditional here would be a
+	 * semantic change smuggled in by a locking refactor. */
 	ts_status_lock(state);
+	state->bytes_written += (uint64_t)written;
 	state->frames_written++;
 	ts_status_unlock(state);
+
 	state->frames_since_sync++;
 
 	if (state->sync_interval_frames > 0 &&

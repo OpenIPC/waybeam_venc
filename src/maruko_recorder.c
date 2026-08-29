@@ -72,7 +72,9 @@ static int check_disk_space(Star6eRecorderState *state)
 		fprintf(stderr,
 			"[maruko_recorder] disk space low (%llu bytes), "
 			"stopping\n", (unsigned long long)free_bytes);
+		star6e_recorder_status_lock(state);
 		state->last_stop_reason = RECORDER_STOP_DISK_FULL;
+		star6e_recorder_status_unlock(state);
 		fdatasync(state->fd);
 		close(state->fd);
 		state->fd = -1;
@@ -86,11 +88,15 @@ static void stop_with_error(Star6eRecorderState *state, int err)
 {
 	if (err == ENOSPC) {
 		fprintf(stderr, "[maruko_recorder] disk full (ENOSPC)\n");
+		star6e_recorder_status_lock(state);
 		state->last_stop_reason = RECORDER_STOP_DISK_FULL;
+		star6e_recorder_status_unlock(state);
 	} else {
 		fprintf(stderr, "[maruko_recorder] write error: %s\n",
 			strerror(err));
+		star6e_recorder_status_lock(state);
 		state->last_stop_reason = RECORDER_STOP_WRITE_ERROR;
+		star6e_recorder_status_unlock(state);
 	}
 	if (state->fd >= 0) {
 		fdatasync(state->fd);
@@ -184,8 +190,12 @@ int maruko_recorder_write_frame(Star6eRecorderState *state,
 		total += (size_t)written;
 	}
 
+	/* One section for both: a poll between two would report frame N's
+	 * bytes with frame N-1's count. */
+	star6e_recorder_status_lock(state);
 	state->bytes_written += total;
 	state->frames_written++;
+	star6e_recorder_status_unlock(state);
 	state->frames_since_sync++;
 
 	if (state->sync_interval_frames > 0 &&

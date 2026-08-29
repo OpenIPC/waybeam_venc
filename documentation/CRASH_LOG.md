@@ -4,7 +4,7 @@ Per-incident notes on hangs, D-state, and recovery actions on the bench.
 
 ## 2026-08-29 — Maruko `record.mode=dual` drain thread overflowed its stack
 
-**Bench:** `root@192.168.2.233` — SSC378QE (Maruko), musl
+**Bench:** SSC378QE (Maruko) lab unit, musl
 (`/lib/ld-musl-armhf.so.1`, `arm-openipc-linux-musleabihf`).
 
 **Build:** 0.73.1 review of the 0.67.3 -> 0.73.0 range. Found by inspection,

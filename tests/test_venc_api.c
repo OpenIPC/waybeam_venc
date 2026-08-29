@@ -1226,7 +1226,16 @@ static int test_restart_set_rejects_legacy_codec_field(void)
 		 * stale twice in one release cycle -- the pin above covers only
 		 * HTTP_API_CONTRACT.md, which is exactly why nobody noticed.
 		 * Pin both strings in it against the compiled values. */
-		FILE *rf = fopen("README.md", "r");
+		/* Both docs carry a worked /api/v1/version example.  The pin
+		 * originally covered README alone, and the contract doc's copy
+		 * promptly went stale by three releases -- which is the whole
+		 * argument for pinning rather than eye-checking. */
+		static const char *const version_docs[] = {
+			"README.md",
+			"documentation/HTTP_API_CONTRACT.md",
+		};
+		size_t di;
+		FILE *rf;
 		char line[512];
 		int found = 0;
 		char want_app[96], want_contract[96];
@@ -1247,20 +1256,39 @@ static int test_restart_set_rejects_legacy_codec_field(void)
 		snprintf(want_contract, sizeof(want_contract),
 			"\"contract_version\":\"%s\"", VENC_CONTRACT_VERSION);
 
-		CHECK("readme_readable", rf != NULL);
-		while (rf && fgets(line, sizeof(line), rf)) {
-			if (!strstr(line, "\"app_version\":"))
-				continue;
-			found = 1;
-			CHECK("readme_app_version_matches_code",
-				strstr(line, want_app) != NULL);
-			CHECK("readme_contract_version_matches_code",
-				strstr(line, want_contract) != NULL);
-			break;
+		/* Quoted values only, so the match survives either formatting:
+		 * README's compact JSON and the contract doc's pretty-printed
+		 * copy put different whitespace after the colon. */
+		snprintf(want_app, sizeof(want_app), "\"%s\"", ver);
+		snprintf(want_contract, sizeof(want_contract), "\"%s\"",
+			VENC_CONTRACT_VERSION);
+
+		for (di = 0; di < sizeof(version_docs) / sizeof(version_docs[0]);
+		     di++) {
+			int seen_app = 0, seen_contract = 0;
+
+			rf = fopen(version_docs[di], "r");
+			CHECK("version_doc_readable", rf != NULL);
+			while (rf && fgets(line, sizeof(line), rf)) {
+				if (!seen_app && strstr(line, "\"app_version\"")) {
+					seen_app = 1;
+					CHECK("doc_app_version_matches_VERSION",
+						strstr(line, want_app) != NULL);
+				}
+				if (!seen_contract &&
+				    strstr(line, "\"contract_version\"")) {
+					seen_contract = 1;
+					CHECK("doc_contract_version_matches_code",
+						strstr(line, want_contract) != NULL);
+				}
+				if (seen_app && seen_contract)
+					break;
+			}
+			if (rf)
+				fclose(rf);
+			found = seen_app && seen_contract;
+			CHECK("version_example_present_in_doc", found);
 		}
-		if (rf)
-			fclose(rf);
-		CHECK("readme_version_example_present", found);
 	}
 
 	/* 0.21.0 removed video0.maxIBytes/maxPBytes.  The contract promises a

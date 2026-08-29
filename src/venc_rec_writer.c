@@ -246,8 +246,9 @@ static void writer_destroy(VencRecWriter *w, uint64_t *dropped)
 
 /* Wait for the queue to empty, up to grace_ms.  Returns 1 if it emptied, 0 on
  * timeout.  Deliberately says nothing about the access unit already in the
- * sink's hands — the pthread_join that follows every caller is what covers
- * that one.  Caller must NOT hold the lock. */
+ * sink's hands — the join that follows covers that one for the synchronous
+ * stops; the async stop instead waits on `exited` and hands off.  Caller must
+ * NOT hold the lock. */
 static int queue_wait_empty(VencRecWriter *w, unsigned grace_ms)
 {
 	unsigned waited = 0;
@@ -370,8 +371,10 @@ void venc_rec_writer_stop_bounded_async(VencRecWriter *w, unsigned grace_ms,
 	/* Could not spawn the reaper.  Fall back to the blocking join rather
 	 * than leak the thread and the descriptor it holds: worse for latency,
 	 * but never unsafe. */
-	fprintf(stderr, "[rec_writer] reaper spawn failed (%s); joining inline\n",
-		strerror(errno));
+	/* pthread_create/pthread_attr_init return the error code and do NOT set
+	 * errno, so strerror(errno) here would print an unrelated stale value --
+	 * on the one path that reintroduces an unbounded join. */
+	fprintf(stderr, "[rec_writer] reaper spawn failed; joining inline\n");
 	pthread_join(w->thread, NULL);
 	writer_destroy(w, NULL);
 	if (on_exit)
