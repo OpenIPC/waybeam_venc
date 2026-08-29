@@ -29,9 +29,12 @@ different `SOC_BUILD=` flags. SigmaStar MI vendor libraries are loaded via
 own copies of libs that stock OpenIPC Infinity6C firmware does not.
 
 > **Note on naming.** The product, binary, config file, init script,
-> and release tarball are all named `waybeam`. The GitHub repository
-> is still `waybeam_venc` for historical URL stability — that is the
-> only place the old name survives.
+> release tarball and repository are all named `waybeam`. The repository
+> was renamed from `waybeam_venc`; GitHub redirects the old URL, so
+> existing clones, forks and remotes keep working without a change.
+> The old name still appears in historical documents, in some source
+> comments and internal test paths, and in the dashboard's page title
+> and exported config filename.
 
 ## Features
 
