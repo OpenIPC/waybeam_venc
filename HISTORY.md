@@ -1,5 +1,45 @@
 # History
 
+## [0.73.3] - 2026-08-29
+
+Recorder status is now a coherent snapshot instead of an unsynchronised read.
+`contract_version` stays **0.22.0** — the response shape is unchanged.
+
+- **`/api/v1/record/status` raced the writer thread on all three backends.**
+  The callbacks read `recording`, the counters, `segments`, `path`,
+  `start_time` and `last_stop_reason` in place while the writer mutated them
+  during writes and segment rotation. Star6E documented this as safe because
+  the fields were "single words written by one thread" — which did not hold on
+  two counts: `bytes_written` is **64-bit on ARM32**, so an unsynchronised load
+  can tear outright, and `path` is not a word at all, being rewritten wholesale
+  on every rotation. The separate reads could also disagree with each other:
+  `active` from one instant, counters from another, `path` from a third.
+
+  Both recorders gain a `status_lock` guarding exactly the status-visible
+  fields, plus `star6e_ts_recorder_snapshot()` / `star6e_recorder_snapshot()`
+  returning one coherent `Star6eRecorderSnapshot`. All three backends now build
+  their response from that.
+
+  The lock is held **only across field updates — never across `write()`,
+  `open()`, `fdatasync()` or `close()`**. A status poll must not be able to
+  block on the disk; that is the coupling 0.73.2 removed from the encode loop
+  and it must not reappear on the httpd thread. In `open_new_segment()` the
+  path is built under the lock and the `open()` deliberately follows outside
+  it.
+
+  A `status_lock_ready` flag covers the window where a backend publishes its
+  status callback before the recorders are initialised: the snapshot reports
+  inactive rather than locking an uninitialised mutex.
+
+- **Test:** a writer thread driving `write_video()` with rotation every 64 KB
+  while the main thread polls the snapshot, asserting counters never go
+  backwards and that `active` never coincides with an empty path. Verified to
+  be a real test rather than a decorative one: removing the writer-side
+  locking makes TSAN report the race at
+  `star6e_ts_recorder_write_video` and `star6e_ts_recorder_snapshot`.
+
+Completes the Qodo review of the upstream sync PR.
+
 ## [0.73.2] - 2026-08-29
 
 A mid-run record/stop can no longer stall live video. `contract_version` stays

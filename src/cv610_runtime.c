@@ -600,40 +600,56 @@ static void cv610_record_status_callback(VencRecordStatus *out)
 	 * too (see the take_idr_request hand-off in the drain loop) and holds
 	 * fd == -1 across it, so the descriptor is not the right question for a
 	 * reader on the httpd thread. */
-	if (star6e_ts_recorder_is_recording(&ctx->ts_recorder)) {
-		out->active = 1;
-		snprintf(out->format, sizeof(out->format), "ts");
-		star6e_ts_recorder_status(&ctx->ts_recorder,
-			&out->bytes_written, &out->frames_written,
-			&out->segments, NULL, NULL);
-		snprintf(out->path, sizeof(out->path), "%s", ctx->ts_recorder.path);
-		out->elapsed_ms =
-			star6e_recorder_elapsed_ms(&ctx->ts_recorder.start_time);
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
-	} else if (star6e_recorder_is_active(&ctx->recorder)) {
-		out->active = 1;
-		snprintf(out->format, sizeof(out->format), "hevc");
-		star6e_recorder_status(&ctx->recorder,
-			&out->bytes_written, &out->frames_written, NULL, NULL);
-		snprintf(out->path, sizeof(out->path), "%s", ctx->recorder.path);
-		out->elapsed_ms =
-			star6e_recorder_elapsed_ms(&ctx->recorder.start_time);
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
-	} else {
-		/* Either recorder may hold the reason; a manual stop on one does
-		 * not mask a disk-full on the other. */
-		const char *reason = "manual";
-		Star6eRecorderStopReason sr = ctx->ts_recorder.last_stop_reason;
+	{
+		/* ONE coherent instant per recorder.  The fields below are
+		 * mutated by the writer thread during writes and segment
+		 * rotation: bytes_written is 64-bit on ARM32 and path is
+		 * rewritten wholesale on a rotation, so reading them in place
+		 * could tear outright, and reading active, counters and path at
+		 * three different instants could disagree with each other. */
+		Star6eRecorderSnapshot ts_snap, rec_snap;
 
-		if (sr == RECORDER_STOP_MANUAL)
-			sr = ctx->recorder.last_stop_reason;
-		if (sr == RECORDER_STOP_DISK_FULL)
-			reason = "disk_full";
-		else if (sr == RECORDER_STOP_WRITE_ERROR)
-			reason = "write_error";
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "%s", reason);
-		snprintf(out->format, sizeof(out->format), "%s",
-			ctx->config.record.format);
+		star6e_ts_recorder_snapshot(&ctx->ts_recorder, &ts_snap);
+		star6e_recorder_snapshot(&ctx->recorder, &rec_snap);
+
+		if (ts_snap.active) {
+			out->active = 1;
+			snprintf(out->format, sizeof(out->format), "ts");
+			out->bytes_written = ts_snap.bytes_written;
+			out->frames_written = ts_snap.frames_written;
+			out->segments = ts_snap.segments;
+			out->elapsed_ms = ts_snap.elapsed_ms;
+			snprintf(out->path, sizeof(out->path), "%s",
+				ts_snap.path);
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"none");
+		} else if (rec_snap.active) {
+			out->active = 1;
+			snprintf(out->format, sizeof(out->format), "hevc");
+			out->bytes_written = rec_snap.bytes_written;
+			out->frames_written = rec_snap.frames_written;
+			out->elapsed_ms = rec_snap.elapsed_ms;
+			snprintf(out->path, sizeof(out->path), "%s",
+				rec_snap.path);
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"none");
+		} else {
+			/* Either recorder may hold the reason; a manual stop on
+			 * one does not mask a disk-full on the other. */
+			const char *reason = "manual";
+			Star6eRecorderStopReason sr = ts_snap.last_stop_reason;
+
+			if (sr == RECORDER_STOP_MANUAL)
+				sr = rec_snap.last_stop_reason;
+			if (sr == RECORDER_STOP_DISK_FULL)
+				reason = "disk_full";
+			else if (sr == RECORDER_STOP_WRITE_ERROR)
+				reason = "write_error";
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"%s", reason);
+			snprintf(out->format, sizeof(out->format), "%s",
+				ctx->config.record.format);
+		}
 	}
 }
 

@@ -4,6 +4,7 @@
 #include "star6e.h"
 
 #include <stddef.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -40,7 +41,36 @@ typedef struct {
 	struct timespec start_time;
 	char dir[RECORDER_PATH_MAX];
 	char path[RECORDER_PATH_MAX];
+
+	/* Guards the status-visible fields above (recording, counters,
+	 * last_stop_reason, start_time, path) so a poll on the httpd thread
+	 * gets ONE coherent instant instead of a mix.  bytes_written is 64-bit
+	 * and these targets are ARM32, so an unsynchronised load can also tear
+	 * outright; path is rewritten wholesale on a TS rotation.
+	 *
+	 * Held only across field updates -- NEVER across write(), open(),
+	 * fdatasync() or close().  A status poll must not be able to block on
+	 * the disk; that is the coupling the async writer exists to remove. */
+	pthread_mutex_t status_lock;
+	/* The status callback is published before the recorders are
+	 * initialised on some backends, so a poll can arrive before
+	 * status_lock exists.  Zero from the memset means "not yet": the
+	 * snapshot reports inactive rather than locking an uninitialised
+	 * mutex. */
+	int status_lock_ready;
 } Star6eRecorderState;
+
+/* One coherent instant of a recorder's status, for a reader on another
+ * thread.  Shared by both recorders; `segments` stays 0 for the raw one. */
+typedef struct {
+	int      active;
+	uint64_t bytes_written;
+	uint32_t frames_written;
+	uint32_t segments;
+	uint64_t elapsed_ms;
+	Star6eRecorderStopReason last_stop_reason;
+	char     path[RECORDER_PATH_MAX];
+} Star6eRecorderSnapshot;
 
 /** Milliseconds since a recorder's start_time on CLOCK_MONOTONIC.
  *  Both recorders stamp start_time at start and neither exposes elapsed
@@ -109,6 +139,12 @@ int star6e_recorder_is_active(const Star6eRecorderState *state);
 int star6e_recorder_is_recording(const Star6eRecorderState *state);
 
 /** Get current recording status.  Any output pointer may be NULL. */
+/** Copy one coherent instant of the recorder's status.  Safe to call from a
+ *  thread other than the writer; `out` is zeroed when `state` is NULL or not
+ *  yet initialised. */
+void star6e_recorder_snapshot(Star6eRecorderState *state,
+	Star6eRecorderSnapshot *out);
+
 void star6e_recorder_status(const Star6eRecorderState *state,
 	uint64_t *bytes_written, uint32_t *frames_written,
 	const char **path, Star6eRecorderStopReason *last_stop_reason);

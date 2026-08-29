@@ -758,41 +758,60 @@ static void record_status_callback(VencRecordStatus *out)
 	 * "not recording" makes a healthy recording blink off once per segment,
 	 * with stop_reason "manual" because start() seeds it that way.
 	 *
-	 * The recorder state read below is not locked against the writer
-	 * thread: it never was, and the fields are single words written by one
-	 * thread.  A status poll can catch a rotation mid-flight and report a
-	 * byte count a frame stale, which is the intended cost. */
-	if (star6e_ts_recorder_is_recording(&ps->ts_recorder)) {
-		out->active = 1;
-		snprintf(out->format, sizeof(out->format), "ts");
-		star6e_ts_recorder_status(&ps->ts_recorder,
-			&out->bytes_written, &out->frames_written,
-			&out->segments, NULL, NULL);
-		snprintf(out->path, sizeof(out->path), "%s", ps->ts_recorder.path);
-		out->elapsed_ms = star6e_recorder_elapsed_ms(&ps->ts_recorder.start_time);
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
-	} else if (star6e_recorder_is_active(&ps->recorder)) {
-		out->active = 1;
-		snprintf(out->format, sizeof(out->format), "hevc");
-		star6e_recorder_status(&ps->recorder,
-			&out->bytes_written, &out->frames_written,
-			NULL, NULL);
-		snprintf(out->path, sizeof(out->path), "%s", ps->recorder.path);
-		out->elapsed_ms = star6e_recorder_elapsed_ms(&ps->recorder.start_time);
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
-	} else {
-		/* Check both recorders for last stop reason */
-		const char *reason = "manual";
-		Star6eRecorderStopReason sr = ps->ts_recorder.last_stop_reason;
-		if (sr == RECORDER_STOP_MANUAL)
-			sr = ps->recorder.last_stop_reason;
-		if (sr == RECORDER_STOP_DISK_FULL)
-			reason = "disk_full";
-		else if (sr == RECORDER_STOP_WRITE_ERROR)
-			reason = "write_error";
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "%s", reason);
-		snprintf(out->format, sizeof(out->format), "%s",
-			g_runner_ctx->vcfg.record.format);
+	 * The recorder state below IS synchronised against the writer thread --
+	 * see Star6eRecorderState::status_lock.  The old claim that these were
+	 * "single words written by one thread" did not hold: bytes_written is
+	 * 64-bit on ARM32, and path is rewritten wholesale on a rotation. */
+	{
+		/* ONE coherent instant per recorder.  The fields below are
+		 * mutated by the writer thread during writes and segment
+		 * rotation: bytes_written is 64-bit on ARM32 and path is
+		 * rewritten wholesale on a rotation, so reading them in place
+		 * could tear outright, and reading active, counters and path at
+		 * three different instants could disagree with each other. */
+		Star6eRecorderSnapshot ts_snap, rec_snap;
+
+		star6e_ts_recorder_snapshot(&ps->ts_recorder, &ts_snap);
+		star6e_recorder_snapshot(&ps->recorder, &rec_snap);
+
+		if (ts_snap.active) {
+			out->active = 1;
+			snprintf(out->format, sizeof(out->format), "ts");
+			out->bytes_written = ts_snap.bytes_written;
+			out->frames_written = ts_snap.frames_written;
+			out->segments = ts_snap.segments;
+			out->elapsed_ms = ts_snap.elapsed_ms;
+			snprintf(out->path, sizeof(out->path), "%s",
+				ts_snap.path);
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"none");
+		} else if (rec_snap.active) {
+			out->active = 1;
+			snprintf(out->format, sizeof(out->format), "hevc");
+			out->bytes_written = rec_snap.bytes_written;
+			out->frames_written = rec_snap.frames_written;
+			out->elapsed_ms = rec_snap.elapsed_ms;
+			snprintf(out->path, sizeof(out->path), "%s",
+				rec_snap.path);
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"none");
+		} else {
+			/* Either recorder may hold the reason; a manual stop on
+			 * one does not mask a disk-full on the other. */
+			const char *reason = "manual";
+			Star6eRecorderStopReason sr = ts_snap.last_stop_reason;
+
+			if (sr == RECORDER_STOP_MANUAL)
+				sr = rec_snap.last_stop_reason;
+			if (sr == RECORDER_STOP_DISK_FULL)
+				reason = "disk_full";
+			else if (sr == RECORDER_STOP_WRITE_ERROR)
+				reason = "write_error";
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"%s", reason);
+			snprintf(out->format, sizeof(out->format), "%s",
+				g_runner_ctx->vcfg.record.format);
+		}
 	}
 }
 

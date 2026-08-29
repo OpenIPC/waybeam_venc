@@ -7,6 +7,7 @@
 #include "ts_mux.h"
 
 #include <stddef.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -82,6 +83,17 @@ typedef struct {
 	 * lets such a stream rotate naturally and leaves the request for the
 	 * streams that genuinely never produce one. */
 	time_t rotation_due_since;
+
+	/* Guards the status-visible fields (recording, counters, segments,
+	 * last_stop_reason, start_time, path) so a poll on the httpd thread
+	 * gets ONE coherent instant.  bytes_written is 64-bit on ARM32 targets
+	 * and `path` is rewritten wholesale on every rotation, so neither is
+	 * the "single word written by one thread" the old comment assumed.
+	 *
+	 * Held only across field updates -- NEVER across write(), open(),
+	 * fdatasync() or close(). */
+	pthread_mutex_t status_lock;
+	int status_lock_ready;   /* 0 until _init(): see star6e_recorder.h */
 } Star6eTsRecorderState;
 
 /** Zero-initialize TS recorder state.
@@ -197,6 +209,12 @@ static inline void star6e_ts_recorder_requeue_idr_request(
 }
 
 /** Get recording status. Any output pointer may be NULL. */
+/** Copy one coherent instant of the recorder's status.  Safe to call from a
+ *  thread other than the writer; `out` is zeroed when `state` is NULL or not
+ *  yet initialised. */
+void star6e_ts_recorder_snapshot(Star6eTsRecorderState *state,
+	Star6eRecorderSnapshot *out);
+
 void star6e_ts_recorder_status(const Star6eTsRecorderState *state,
 	uint64_t *bytes_written, uint32_t *frames_written,
 	uint32_t *segments, const char **path,

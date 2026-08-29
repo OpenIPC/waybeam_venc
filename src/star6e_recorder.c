@@ -18,6 +18,20 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+/* Guard the status-visible fields.  Never wrap I/O in these -- see the note on
+ * status_lock in star6e_recorder.h. */
+static void rec_status_lock(Star6eRecorderState *state)
+{
+	if (state->status_lock_ready)
+		pthread_mutex_lock(&state->status_lock);
+}
+
+static void rec_status_unlock(Star6eRecorderState *state)
+{
+	if (state->status_lock_ready)
+		pthread_mutex_unlock(&state->status_lock);
+}
+
 void star6e_recorder_init(Star6eRecorderState *state)
 {
 	if (!state)
@@ -27,6 +41,8 @@ void star6e_recorder_init(Star6eRecorderState *state)
 	state->fd = -1;
 	state->sync_interval_frames = RECORDER_SYNC_DEFAULT_FRAMES;
 	state->last_stop_reason = RECORDER_STOP_MANUAL;
+	if (pthread_mutex_init(&state->status_lock, NULL) == 0)
+		state->status_lock_ready = 1;
 }
 
 uint64_t star6e_recorder_free_space(const char *path)
@@ -125,14 +141,18 @@ static void stop_with_reason(Star6eRecorderState *state,
 		return;
 	/* Cleared before the fd test: a stop that lands on an already-closed
 	 * recorder must still end the recording. */
+	rec_status_lock(state);
 	__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
+	rec_status_unlock(state);
 	if (state->fd < 0)
 		return;
 
 	fdatasync(state->fd);
 	close(state->fd);
 	state->fd = -1;
+	rec_status_lock(state);
 	state->last_stop_reason = reason;
+	rec_status_unlock(state);
 
 	fprintf(stderr, "[recorder] stopped (%s): %s (%u frames, %llu bytes)\n",
 		stop_reason_str(reason), state->path, state->frames_written,
@@ -156,28 +176,36 @@ int star6e_recorder_start(Star6eRecorderState *state, const char *dir)
 			"(%llu bytes free, need %llu)\n",
 			dir, (unsigned long long)free_bytes,
 			(unsigned long long)RECORDER_MIN_FREE_BYTES);
+		rec_status_lock(state);
 		state->last_stop_reason = RECORDER_STOP_DISK_FULL;
+		rec_status_unlock(state);
 		return -1;
 	}
 
 	snprintf(state->dir, sizeof(state->dir), "%s", dir);
+	rec_status_lock(state);
 	build_recording_path(state->path, sizeof(state->path), dir);
+	rec_status_unlock(state);
 
 	state->fd = open(state->path,
 		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (state->fd < 0) {
 		fprintf(stderr, "[recorder] open %s failed: %s\n",
 			state->path, strerror(errno));
+		rec_status_lock(state);
 		state->path[0] = '\0';
+		rec_status_unlock(state);
 		return -1;
 	}
 
+	rec_status_lock(state);
 	state->bytes_written = 0;
 	state->frames_written = 0;
 	state->frames_since_sync = 0;
 	state->space_check_countdown = RECORDER_SPACE_CHECK_INTERVAL;
 	state->last_stop_reason = RECORDER_STOP_MANUAL;
 	clock_gettime(CLOCK_MONOTONIC, &state->start_time);
+	rec_status_unlock(state);
 	/* Published last, once the file is genuinely open. */
 	__atomic_store_n(&state->recording, 1, __ATOMIC_RELEASE);
 
@@ -267,8 +295,10 @@ int star6e_recorder_write_au(Star6eRecorderState *state,
 		return -1;
 	}
 
+	rec_status_lock(state);
 	state->bytes_written += (uint64_t)written;
 	state->frames_written++;
+	rec_status_unlock(state);
 	state->frames_since_sync++;
 
 	if (state->sync_interval_frames > 0 &&
@@ -375,8 +405,10 @@ int star6e_recorder_write_frame(Star6eRecorderState *state,
 		total += (size_t)written;
 	}
 
+	rec_status_lock(state);
 	state->bytes_written += total;
 	state->frames_written++;
+	rec_status_unlock(state);
 	state->frames_since_sync++;
 
 	if (state->sync_interval_frames > 0 &&
@@ -425,6 +457,26 @@ int star6e_recorder_is_active(const Star6eRecorderState *state)
 int star6e_recorder_is_recording(const Star6eRecorderState *state)
 {
 	return state && __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
+}
+
+void star6e_recorder_snapshot(Star6eRecorderState *state,
+	Star6eRecorderSnapshot *out)
+{
+	if (!out)
+		return;
+	memset(out, 0, sizeof(*out));
+	if (!state || !state->status_lock_ready)
+		return;
+
+	pthread_mutex_lock(&state->status_lock);
+	out->active = __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
+	out->bytes_written = state->bytes_written;
+	out->frames_written = state->frames_written;
+	out->elapsed_ms = out->active
+		? star6e_recorder_elapsed_ms(&state->start_time) : 0;
+	out->last_stop_reason = state->last_stop_reason;
+	snprintf(out->path, sizeof(out->path), "%s", state->path);
+	pthread_mutex_unlock(&state->status_lock);
 }
 
 void star6e_recorder_status(const Star6eRecorderState *state,

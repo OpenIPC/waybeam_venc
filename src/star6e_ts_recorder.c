@@ -73,6 +73,19 @@ static int build_ts_path(char *path, size_t path_size, const char *dir,
 	return 0;
 }
 
+/* Guard the status-visible fields.  Never wrap I/O in these. */
+static void ts_status_lock(Star6eTsRecorderState *state)
+{
+	if (state->status_lock_ready)
+		pthread_mutex_lock(&state->status_lock);
+}
+
+static void ts_status_unlock(Star6eTsRecorderState *state)
+{
+	if (state->status_lock_ready)
+		pthread_mutex_unlock(&state->status_lock);
+}
+
 static const char *stop_reason_str(Star6eRecorderStopReason reason)
 {
 	if (reason == RECORDER_STOP_DISK_FULL)
@@ -92,7 +105,9 @@ static void stop_with_reason(Star6eTsRecorderState *state,
 	 * the recording, or a producer would go on handing frames to a dead
 	 * recorder.  Today the state lock makes that unreachable; the invariant
 	 * should not depend on the caller's locking. */
+	ts_status_lock(state);
 	__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
+	ts_status_unlock(state);
 	/* Drop any rotation ask still in flight; the recording it was for is
 	 * ending, and a re-queued one would otherwise fire into the next. */
 	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
@@ -102,7 +117,9 @@ static void stop_with_reason(Star6eTsRecorderState *state,
 	fdatasync(state->fd);
 	close(state->fd);
 	state->fd = -1;
+	ts_status_lock(state);
 	state->last_stop_reason = reason;
+	ts_status_unlock(state);
 
 	fprintf(stderr, "[ts_recorder] stopped (%s): %s (%u frames, %llu bytes, %u segments)\n",
 		stop_reason_str(reason), state->path, state->frames_written,
@@ -122,6 +139,8 @@ void star6e_ts_recorder_init(Star6eTsRecorderState *state,
 	state->max_seconds = TS_RECORDER_DEFAULT_MAX_SECONDS;
 	state->max_bytes = TS_RECORDER_DEFAULT_MAX_BYTES;
 	ts_mux_init(&state->mux, audio_rate, audio_channels, audio_codec);
+	if (pthread_mutex_init(&state->status_lock, NULL) == 0)
+		state->status_lock_ready = 1;
 }
 
 static int open_new_segment(Star6eTsRecorderState *state)
@@ -130,8 +149,12 @@ static int open_new_segment(Star6eTsRecorderState *state)
 	size_t pat_pmt_len;
 	ssize_t ret;
 
+	/* Path under the lock (a reader may be copying it); the open() that
+	 * follows is deliberately outside -- only this thread writes it. */
+	ts_status_lock(state);
 	build_ts_path(state->path, sizeof(state->path), state->dir,
 		&state->mux);
+	ts_status_unlock(state);
 
 	state->fd = open(state->path,
 		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -155,12 +178,16 @@ static int open_new_segment(Star6eTsRecorderState *state)
 			state->fd = -1;
 			return -1;
 		}
+		ts_status_lock(state);
 		state->bytes_written += (uint64_t)ret;
+		ts_status_unlock(state);
 		state->segment_bytes = (uint64_t)ret;
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &state->segment_start_time);
+	ts_status_lock(state);
 	state->segments++;
+	ts_status_unlock(state);
 
 	fprintf(stderr, "[ts_recorder] segment %u: %s\n",
 		state->segments, state->path);
@@ -181,12 +208,15 @@ int star6e_ts_recorder_start(Star6eTsRecorderState *state, const char *dir,
 	free_bytes = star6e_recorder_free_space(dir);
 	if (free_bytes > 0 && free_bytes < RECORDER_MIN_FREE_BYTES) {
 		fprintf(stderr, "[ts_recorder] insufficient space on %s\n", dir);
+		ts_status_lock(state);
 		state->last_stop_reason = RECORDER_STOP_DISK_FULL;
+		ts_status_unlock(state);
 		return -1;
 	}
 
 	snprintf(state->dir, sizeof(state->dir), "%s", dir);
 	state->audio_ring = audio_ring;
+	ts_status_lock(state);
 	state->bytes_written = 0;
 	state->frames_written = 0;
 	state->segments = 0;
@@ -202,6 +232,7 @@ int star6e_ts_recorder_start(Star6eTsRecorderState *state, const char *dir,
 	state->rotation_due_since = 0;
 	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
 	clock_gettime(CLOCK_MONOTONIC, &state->start_time);
+	ts_status_unlock(state);
 
 	if (open_new_segment(state) != 0)
 		return -1;
@@ -320,8 +351,10 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	if (open_new_segment(state) != 0) {
 		/* A rotation that cannot reopen is a stop, not a gap: clear the
 		 * recording flag so producers stop handing over frames. */
+		ts_status_lock(state);
 		__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
 		state->last_stop_reason = RECORDER_STOP_WRITE_ERROR;
+		ts_status_unlock(state);
 		return -1;
 	}
 
@@ -394,11 +427,15 @@ int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 			}
 			return -1;
 		}
+		ts_status_lock(state);
 		state->bytes_written += (uint64_t)written;
+		ts_status_unlock(state);
 		state->segment_bytes += (uint64_t)written;
 	}
 
+	ts_status_lock(state);
 	state->frames_written++;
+	ts_status_unlock(state);
 	state->frames_since_sync++;
 
 	if (state->sync_interval_frames > 0 &&
@@ -512,6 +549,27 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 		nal_buf, nal_len, pts, is_idr);
 }
 #endif
+
+void star6e_ts_recorder_snapshot(Star6eTsRecorderState *state,
+	Star6eRecorderSnapshot *out)
+{
+	if (!out)
+		return;
+	memset(out, 0, sizeof(*out));
+	if (!state || !state->status_lock_ready)
+		return;
+
+	pthread_mutex_lock(&state->status_lock);
+	out->active = __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
+	out->bytes_written = state->bytes_written;
+	out->frames_written = state->frames_written;
+	out->segments = state->segments;
+	out->elapsed_ms = out->active
+		? star6e_recorder_elapsed_ms(&state->start_time) : 0;
+	out->last_stop_reason = state->last_stop_reason;
+	snprintf(out->path, sizeof(out->path), "%s", state->path);
+	pthread_mutex_unlock(&state->status_lock);
+}
 
 void star6e_ts_recorder_status(const Star6eTsRecorderState *state,
 	uint64_t *bytes_written, uint32_t *frames_written,
