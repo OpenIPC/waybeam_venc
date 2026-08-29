@@ -627,6 +627,24 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->qp_delta = json_get_int(obj, "qpDelta", v->qp_delta);
 	if (v->qp_delta < -12) v->qp_delta = -12;
 	if (v->qp_delta > 12) v->qp_delta = 12;
+#ifdef PLATFORM_CV610
+	/* CV610's ip_qp_delta field is [-10, 30], narrower at the bottom than
+	 * the portable -12..12.  cv610_validate_config() enforces that, which
+	 * on the config-load path means a craft config carrying the perfectly
+	 * legal Star6E/Maruko value qpDelta:-12 does not start venc at all:
+	 *
+	 *   [venc_config] ERROR: invalid value in /etc/waybeam.json:
+	 *   CV610 video0.qp_delta must be between -10 and 30
+	 *
+	 * A shared craft config must not brick one backend's boot, so clamp
+	 * here and say so.  A LIVE set still gets the validator's hard error,
+	 * because there the caller is present to be told. */
+	if (v->qp_delta < -10) {
+		fprintf(stderr, "[venc_config] WARNING: video0.qpDelta %d is below "
+			"the CV610 range [-10, 30]; clamped to -10\n", v->qp_delta);
+		v->qp_delta = -10;
+	}
+#endif
 	v->min_qp = (uint32_t)json_get_int(obj, "minQp", (int)v->min_qp);
 	v->max_qp = (uint32_t)json_get_int(obj, "maxQp", (int)v->max_qp);
 	v->scene_threshold = (uint16_t)json_get_int(obj, "sceneThreshold",

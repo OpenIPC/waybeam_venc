@@ -785,8 +785,12 @@ near 4.3 KB — but it is monotonic and it is the only working IDR-cost lever on
 CV610. venc does not use it today.
 
 Note also that CV610's `ip_qp_delta` field range is **`[-10, 30]`**, not
-venc's `-12..12`. A config carrying `qpDelta: -12` makes
-`ss_mpi_venc_create_chn` reject the attr and venc fails to start on CV610.
+venc's `-12..12`, and `cv610_validation.c` enforces it as a hard config
+error. A `qpDelta: -12` that is perfectly legal on Star6E and Maruko
+therefore stops a CV610 craft from booting at all:
+
+    [venc_config] ERROR: invalid value in /etc/waybeam.json:
+    CV610 video0.qp_delta must be between -10 and 30
 
 #### Framing: Stabilization & Digital Zoom
 
