@@ -168,6 +168,14 @@ int maruko_video_reject_incomplete_access_unit(const i6c_venc_strm *stream,
 				"WARN: Maruko packetInfo table is incomplete "
 				"or invalid; dropping whole access unit\n");
 		}
+		/* Transport-independent, as on Star6E: this runs ahead of the
+		 * frame_ring/RTP branch.  Skip only the droppable SVC-T top
+		 * layer, which breaks no reference chain. */
+		if (output->request_idr &&
+		    !(output->svct_active &&
+		      stream->h265Info.refType ==
+			      MARUKO_REFTYPE_ENHANCE_P_NOTFORREF))
+			output->request_idr(output->idr_ctx);
 	}
 	return 1;
 }
@@ -424,6 +432,32 @@ void maruko_video_init_rtp_state(MarukoRtpState *rtp,
 	rtp_session_init(rtp, rtp_session_payload_type(codec), sensor_fps);
 }
 
+/* Abort a partially written ring slot because the access unit does not fit.
+ *
+ * The drop is counted -- stats.oversize_drops, and separately mirrored into
+ * the ring header's other_drops by venc_frame_ring_note_other_drop() -- but
+ * until now nothing was logged, so the frame
+ * simply vanished: 0.73.0 removed the frame-size caps that were supposed to
+ * prevent it, and ring v2 removed the recovery IDR that used to heal the
+ * chain afterwards.
+ *
+ * Deliberately does NOT request an IDR.  An access unit that overflows the
+ * slot does so because the craft's bitrate genuinely exceeds it, which
+ * repeats every GOP -- asking each time would be exactly the automatic
+ * keyframing ring v2 removed. */
+static void maruko_video_abort_oversize(MarukoOutput *output)
+{
+	venc_frame_ring_abort_write(output->frame_ring);
+	if (output->oversize_warned)
+		return;
+	output->oversize_warned = 1;
+	fprintf(stderr,
+		"WARN: Maruko access unit exceeds the frame-shm slot "
+		"(%u bytes of payload); dropping the whole frame\n",
+		(unsigned)(output->frame_ring->slot_data_size -
+			VENC_FRAME_META_SIZE));
+}
+
 static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 	MarukoOutput *output)
 {
@@ -497,7 +531,7 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 
 				if (venc_frame_ring_append(frame_ring,
 				    pack->data + offset, length) != 0) {
-					venc_frame_ring_abort_write(frame_ring);
+					maruko_video_abort_oversize(output);
 					return 0;
 				}
 				total_bytes += length;
@@ -510,7 +544,7 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 
 			if (venc_frame_ring_append(frame_ring,
 			    pack->data + pack->offset, length) != 0) {
-				venc_frame_ring_abort_write(frame_ring);
+				maruko_video_abort_oversize(output);
 				return 0;
 			}
 			total_bytes += length;

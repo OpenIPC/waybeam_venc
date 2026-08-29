@@ -295,9 +295,12 @@ static int cv610_apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
 	/* I-frames get the same CEILING -- raising only the P bound leaves the
 	 * I-frame free to blow the budget on its own, which in a noisy scene is
 	 * where the biggest frames come from.  Their FLOOR is deliberately left
-	 * alone: video0.qp_delta biases I-frames below the P QP (this craft ships
-	 * -4), and an I-frame floor would silently cancel it.  Star6E's
-	 * apply_qp_bounds() touches only the P bounds for the same reason. */
+	 * alone, so that an I-frame floor cannot silently cancel an I-frame bias.
+	 * (video0.qp_delta is not offered on this backend and is never written to
+	 * the encoder -- CV610's rate control stores every I-frame input and then
+	 * ignores it -- so the bias in question is whatever the driver applies.)
+	 * Star6E's apply_qp_bounds() touches only the P bounds for the same
+	 * reason. */
 	param.h265_cbr_param.max_i_qp = max_qp ? max_qp : g_cv610_qp_defaults.max_i_qp;
 
 	/* The API validator only compares min against max when BOTH are non-zero,
@@ -354,6 +357,18 @@ static int cv610_request_idr(void)
 		return 0;
 	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
 		? 0 : -1;
+}
+
+/* Rotation's request, as distinct from the API's cv610_request_idr() above,
+ * whose 0 means "no error" and cannot tell a coalesced request from an issued
+ * one.  Returns 1 when the IDR was actually requested, 0 when the shared
+ * limiter coalesced it away, -1 on SDK failure. */
+static int cv610_rotate_idr(void)
+{
+	if (!idr_rate_limit_allow(CV610_VENC_CHN))
+		return 0;
+	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
+		? 1 : -1;
 }
 
 /* Recorder start is a BOOTSTRAP event, not a request for a fresher picture.
@@ -1408,13 +1423,17 @@ static int cv610_init(void *opaque)
 	 * and channel count come from the config only so a mismatch shows up
 	 * as a bad TS rather than being silently papered over.  Zero rate ==
 	 * "no audio in the mux". */
-	/* Set after the mutex and star6e_recorder_init above, and immediately
-	 * before ts_recorder_init below — the last of the three. */
-	ctx->rec_locks_ready = 1;
 	star6e_ts_recorder_init(&ctx->ts_recorder,
 		ctx->config.audio.enabled ? ctx->config.audio.sample_rate : 0,
 		ctx->config.audio.enabled ? (uint8_t)ctx->config.audio.channels : 0,
 		TS_AUDIO_CODEC_OPUS);
+	/* AFTER all three — the mutex, star6e_recorder_init and
+	 * ts_recorder_init.  A calloc'd ts_recorder has fd == 0, which
+	 * cv610_record_stop() reads as an open file: setting the flag before
+	 * the init leaves a window where a stop would fdatasync(0)/close(0),
+	 * i.e. close STDIN.  No caller reaches it there today, but the flag
+	 * means "the things I guard are initialised" and must not lie. */
+	ctx->rec_locks_ready = 1;
 	if (ctx->config.record.max_seconds > 0)
 		ctx->ts_recorder.max_seconds = ctx->config.record.max_seconds;
 	if (ctx->config.record.max_mb > 0)
@@ -1692,8 +1711,10 @@ static int cv610_run(void *opaque)
 		 * rotation is not a bootstrap event), and on this backend the
 		 * flag is raised on the WRITER thread, so it is deliberately an
 		 * atomic hand-off rather than a direct SDK call from there. */
-		if (star6e_ts_recorder_take_idr_request(&ctx->ts_recorder))
-			(void)cv610_request_idr();
+		if (star6e_ts_recorder_take_idr_request(&ctx->ts_recorder) &&
+		    cv610_rotate_idr() == 0)
+			star6e_ts_recorder_requeue_idr_request(
+				&ctx->ts_recorder);
 		if (ret != TD_SUCCESS)
 			return -1;
 	}
@@ -1709,7 +1730,13 @@ static void cv610_teardown(void *opaque)
 	g_cv610_runner = NULL;
 	/* Before cv610_audio_stop(): the tee points into ctx->audio_ring, and
 	 * the recorder is the only reader of it. */
-	cv610_record_stop(ctx, 0);   /* full flush: shutting down anyway */
+	/* BOUNDED, even at teardown.  An unbounded stop drains the whole queue
+	 * against the disk before the join, and CV610's medium can stall or
+	 * vanish under load — a hang here never reaches the VENC/VPSS teardown
+	 * below, which is exactly the leak the comment beneath describes, and
+	 * this backend has no watchdog to cut it short.  Losing the tail of a
+	 * recording on shutdown is the correct trade. */
+	cv610_record_stop(ctx, 1);
 	cv610_audio_stop(ctx->audio);
 	ctx->audio = NULL;
 	/* AFTER cv610_audio_stop(), which is what joins the capture thread.

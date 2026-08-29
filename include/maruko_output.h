@@ -112,6 +112,15 @@ typedef struct {
 	/* One WARN per init when packet metadata is incomplete or invalid (frame
 	 * aborted, never shipped truncated). */
 	uint8_t trunc_warned;
+	/* One WARN per init when an access unit does not fit a ring slot.
+	 * Separate one-shot from trunc_warned — different faults. */
+	uint8_t oversize_warned;
+	/* Recovery for a MALFORMED access unit — byte-symmetric with
+	 * Star6eOutput::request_idr, see the rationale there.  An encoder
+	 * fault, not egress pressure, so it fires on every transport
+	 * including udp:// and unix://.  NULL disables recovery. */
+	void (*request_idr)(void *ctx);
+	void *idr_ctx;
 } MarukoOutput;
 
 /** Initialize UDP or Unix socket output from a parsed URI. */

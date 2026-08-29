@@ -160,9 +160,30 @@ typedef struct {
 	 * when packet metadata is incomplete or invalid — the frame is aborted,
 	 * never shipped truncated. */
 	uint8_t trunc_warned;
-	/* Ring-full drops split by whether they actually broke the chain.
+	/* One WARN per pipeline start when an access unit does not fit a ring
+	 * slot.  Separate one-shot from trunc_warned: the two are different
+	 * faults and either must not mask the other. */
+	uint8_t oversize_warned;
+	/* Recovery for a MALFORMED access unit: the SDK handed us a packet
+	 * table we cannot ship, the whole picture is dropped, and the
+	 * decoder's reference chain stays broken until the next IDR — with a
+	 * long GOP, seconds.
+	 *
+	 * This is an encoder-side event, NOT egress pressure, so it is not the
+	 * self-actuation ring v2 removed.  The ring header draws the same line
+	 * itself: other_drops is kept apart from full_drops because it "is not
+	 * congestion at all and slowing down fixes nothing".  It therefore
+	 * fires on EVERY transport, including udp:// and unix://, which have
+	 * no ring and were never congested.
+	 *
 	 * A non-referenced (SVC-T) frame is droppable by construction, so
-	 * those cost exactly one frame and must NOT trigger an IDR. */
+	 * losing one costs exactly one frame and must NOT trigger an IDR.
+	 *
+	 * Paced by the shared 100 ms per-channel IDR limiter inside the
+	 * callback, so this coalesces against the scene detector's requests.
+	 * NULL disables recovery. */
+	void (*request_idr)(void *ctx);
+	void *idr_ctx;
 } Star6eOutput;
 
 typedef struct {
@@ -259,7 +280,8 @@ uint8_t *star6e_output_stream_flatten(const MI_VENC_Stream_t *stream,
 	size_t *out_len, int *out_is_idr);
 
 /** Reject an incomplete AU before output/recording. Returns 1 when rejected,
- * emits a one-time warning, and requests paced recovery for reference frames. */
+ * emits a one-time warning, counts the drop, and — on every transport —
+ * requests paced recovery when the dropped picture was a reference frame. */
 int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream);
 

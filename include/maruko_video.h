@@ -36,8 +36,9 @@ uint8_t *maruko_video_stream_flatten(const i6c_venc_strm *stream,
 	size_t *out_len, int *out_is_idr);
 
 /** Reject an incomplete access unit before any consumer sees it. Returns 1
- * when rejected, emits a one-time warning, and requests paced recovery when
- * the dropped picture participates in the reference chain. */
+ * when rejected, emits a one-time warning, counts the drop, and — on every
+ * transport — requests paced recovery when the dropped picture participates
+ * in the reference chain. */
 int maruko_video_reject_incomplete_access_unit(const i6c_venc_strm *stream,
 	MarukoOutput *output);
 

@@ -408,6 +408,18 @@ static int rc_commit_intent(int require_bounds)
 					   : g_qp_defaults.min_qp;
 		*pmax = g_rc_intent.max_qp ? g_rc_intent.max_qp
 					   : g_qp_defaults.max_qp;
+		/* The API validator only compares min against max when BOTH are
+		 * non-zero, so a half-specified pair can still resolve to
+		 * min > max against the driver default.  The SDK takes that
+		 * without complaint and then behaves erratically, so reject it
+		 * here rather than write it.  Same guard as
+		 * maruko_apply_qp_bounds() and cv610_apply_qp_bounds(). */
+		if (*pmin > *pmax) {
+			fprintf(stderr, "ERROR: qpBounds min>max after resolving "
+				"defaults (%u/%u)\n", (unsigned)*pmin,
+				(unsigned)*pmax);
+			return -1;
+		}
 	} else if (require_bounds) {
 		/* This rate mode carries no QP bounds.  Return BEFORE the write:
 		 * master's apply_qp_bounds() bailed out of its switch without ever

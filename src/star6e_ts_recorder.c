@@ -93,6 +93,9 @@ static void stop_with_reason(Star6eTsRecorderState *state,
 	 * recorder.  Today the state lock makes that unreachable; the invariant
 	 * should not depend on the caller's locking. */
 	__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
+	/* Drop any rotation ask still in flight; the recording it was for is
+	 * ending, and a re-queued one would otherwise fire into the next. */
+	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
 	if (state->fd < 0)
 		return;
 
@@ -299,7 +302,11 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 		return 0;
 	}
 
-	/* An IRAP arrived, so any outstanding ask was answered. */
+	/* An IRAP arrived, so any outstanding ask was answered.  Clear the
+	 * pending flag too: since a coalesced ask is now re-queued rather than
+	 * dropped, one can still be in flight here, and issuing it after the
+	 * rotation would keyframe the live channel for nothing. */
+	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
 	state->idr_request_last_sec = 0;
 	state->idr_requests_unanswered = 0;
 	state->rotation_due_since = 0;

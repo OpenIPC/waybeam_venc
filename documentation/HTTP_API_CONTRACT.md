@@ -177,7 +177,7 @@ Response `200`:
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
       "video0.slice_count": { "mutability": "restart_required", "supported": true },
       "video0.resilience": { "mutability": "restart_required", "supported": true },
-      "video0.intra_refresh_qp": { "mutability": "restart_required", "supported": true },
+      "video0.intra_refresh_qp": { "mutability": "restart_required", "supported": false },
       "video0.zoom_x": { "mutability": "live", "supported": true },
       "video0.zoom_y": { "mutability": "live", "supported": true },
       "video0.framing": { "mutability": "restart_required", "supported": true },
@@ -236,7 +236,10 @@ Absent `routes` means an older build: treat every route as possibly present
 and fall back to calling it.
 
 `supported` is backend-specific. Current Star6E and Maruko builds both expose
-scene detection, intra refresh, and digital zoom fields.
+scene detection and digital zoom fields, and drive intra refresh from the
+`video0.resilience` preset — but `video0.intraRefreshQp` is advertised on
+CV610 only, because the SigmaStar encoder stores it and ignores it. See the
+per-backend table above.
 
 A field MAY carry an optional `ui` object (data-driven field schema): when
 present the dashboard renders a control for it generically — no `dashboard.html`
@@ -472,7 +475,11 @@ Semantics:
 - Range: `-12..12`
 - Mutability: `live`
 - Alias: `video0.qpDelta`
-- Semantics: adjusts I-frame QP relative to P-frame; negative values lower I-frame QP (higher quality keyframes), positive values raise it.
+- Semantics: adjusts I-frame QP relative to P-frame. Note the sign: negative
+  values **raise** the I-frame's QP relative to P, making I-frames **smaller**;
+  positive values lower it, making them larger. Delivered rate does not move —
+  it is a redistribution knob, not a rate knob. See the measured sweep under
+  "Rate-control QP knobs" in `README.md`.
 
 ### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_kalman_q`, `video0.stab_kalman_r`, `video0.stab_recenter_speed`
 

@@ -1286,6 +1286,14 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		    cfg->video0.min_qp > cfg->video0.max_qp)
 			return "video0.min_qp must not exceed max_qp";
 	}
+	/* Same range as min_qp/max_qp beside it.  Without this the FT_UINT8
+	 * parser accepts 0..255, persists it, and echoes it back from GET,
+	 * while the config loader clamps to 51 on the next start -- so the API
+	 * reports a value the encoder will never use. */
+	if (strcmp(key, "video0.intra_refresh_qp") == 0) {
+		if (cfg->video0.intra_refresh_qp > 51)
+			return "video0.intra_refresh_qp must be 0..51";
+	}
 	if (strcmp(key, "snapshot.quality") == 0) {
 		/* JPEG q-factor range.  Backend clamps internally too, but
 		 * the validator gives a clean error response instead of a
@@ -1345,6 +1353,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.qp_delta",
 		"video0.min_qp",
 		"video0.max_qp",
+		"video0.intra_refresh_qp",
 		"video0.size",
 		"video0.scene_holdoff",
 		"video0.slice_count",
@@ -2617,9 +2626,19 @@ static int process_restart_set_query(const SetQueryParam *param,
 	 * be applied via lighter machinery (Phase 1+). */
 	if (strcmp(g_cfg->video0.resilience, new_cfg.video0.resilience) != 0) {
 		const VencConfigVideo old_v = g_cfg->video0;
+		/* The preset owns intra_refresh_mode/lines, but NOT
+		 * intra_refresh_qp: that one is an explicit operator override
+		 * where 0 already means "use the preset's default", and on
+		 * CV610 it is the only working I-frame lever.  Letting the
+		 * preset zero it here would discard a value staged in THIS
+		 * request, or one the craft already carried, with a 200 and no
+		 * log — and new_cfg is what gets persisted. */
+		const uint8_t staged_ir_qp = new_cfg.video0.intra_refresh_qp;
 
 		(void)venc_config_apply_resilience_preset(
 			new_cfg.video0.resilience, &new_cfg.video0);
+		if (staged_ir_qp)
+			new_cfg.video0.intra_refresh_qp = staged_ir_qp;
 
 		/* Classify the delta:
 		 *

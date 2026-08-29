@@ -173,8 +173,43 @@ int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
 				"WARN: Star6E packetInfo table is incomplete "
 				"or invalid; dropping whole access unit\n");
 		}
+		/* Transport-independent: this runs before the frame_ring/RTP
+		 * branch in star6e_output_send_frame(), because a malformed AU
+		 * is an encoder fault, not ring pressure.  Skip only the
+		 * droppable SVC-T top layer, which breaks no chain. */
+		if (output->request_idr &&
+		    !(output->svct_active &&
+		      stream->h265Info.refType ==
+			      STAR6E_REFTYPE_ENHANCE_P_NOTFORREF))
+			output->request_idr(output->idr_ctx);
 	}
 	return 1;
+}
+
+/* Abort a partially written ring slot because the access unit does not fit.
+ *
+ * The drop is counted -- stats.oversize_drops, and separately mirrored into
+ * the ring header's other_drops by venc_frame_ring_note_other_drop() -- but
+ * until now nothing was logged, so the frame
+ * simply vanished: 0.73.0 removed the frame-size caps that were supposed to
+ * prevent it, and ring v2 removed the recovery IDR that used to heal the
+ * chain afterwards.
+ *
+ * Deliberately does NOT request an IDR.  An access unit that overflows the
+ * slot does so because the craft's bitrate genuinely exceeds it, which
+ * repeats every GOP -- asking each time would be exactly the automatic
+ * keyframing ring v2 removed. */
+static void star6e_output_abort_oversize(Star6eOutput *output)
+{
+	venc_frame_ring_abort_write(output->frame_ring);
+	if (output->oversize_warned)
+		return;
+	output->oversize_warned = 1;
+	fprintf(stderr,
+		"WARN: Star6E access unit exceeds the frame-shm slot "
+		"(%u bytes of payload); dropping the whole frame\n",
+		(unsigned)(output->frame_ring->slot_data_size -
+			VENC_FRAME_META_SIZE));
 }
 
 static uint16_t star6e_read_be16(const uint8_t *data)
@@ -1075,8 +1110,7 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 
 				if (venc_frame_ring_append(output->frame_ring,
 				    pack->data + offset, length) != 0) {
-					venc_frame_ring_abort_write(
-						output->frame_ring);
+					star6e_output_abort_oversize(output);
 					return 0;
 				}
 				total_bytes += length;
@@ -1089,7 +1123,7 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 
 			if (venc_frame_ring_append(output->frame_ring,
 			    pack->data + pack->offset, length) != 0) {
-				venc_frame_ring_abort_write(output->frame_ring);
+				star6e_output_abort_oversize(output);
 				return 0;
 			}
 			total_bytes += length;

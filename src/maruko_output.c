@@ -42,6 +42,7 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	output->allow_unix_encoder_stall = allow_unix_encoder_stall ? 1 : 0;
 	output->send_errors = 0;
 	output->trunc_warned = 0;
+	output->oversize_warned = 0;
 	output->bad_au_drops = 0;
 	/* The window state too, not just the published scalar: a stale
 	 * low_water_ready would skip the reset on the next ring and let a
@@ -83,6 +84,7 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 	output->allow_unix_encoder_stall = 0;
 	output->send_errors = 0;
 	output->trunc_warned = 0;
+	output->oversize_warned = 0;
 	output->bad_au_drops = 0;
 	/* The window state too, not just the published scalar: a stale
 	 * low_water_ready would skip the reset on the next ring and let a
@@ -129,6 +131,7 @@ int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name)
 	output->allow_unix_encoder_stall = 0;
 	output->send_errors = 0;
 	output->trunc_warned = 0;
+	output->oversize_warned = 0;
 	output->bad_au_drops = 0;
 	/* The window state too, not just the published scalar: a stale
 	 * low_water_ready would skip the reset on the next ring and let a

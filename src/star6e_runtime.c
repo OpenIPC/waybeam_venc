@@ -539,11 +539,24 @@ static void mirror_record_sink(void *opaque, const uint8_t *au, size_t len,
  * rec_locks_ready survives because init and destroy live in different
  * runtime callbacks: teardown after a failed bring-up must not destroy a
  * mutex that was never initialised. */
+/* Only the mutex.  rec_locks_ready is NOT set here: it means "the things I
+ * guard are initialised", and on this backend the recorders are initialised
+ * ~45 lines later while venc_api_register() and
+ * venc_api_set_record_http_control_supported() publish the HTTP surface in
+ * between.  A calloc'd recorder has fd == 0, which star6e_recorder_is_active()
+ * reads as an open file, so a GET /api/v1/record/status landing in that window
+ * would report active:1 on a recording that does not exist.  Set the flag
+ * after the recorders instead -- see mirror_record_locks_ready(). */
 static void mirror_record_locks_init(Star6ePipelineState *ps)
 {
 	if (ps->rec_locks_ready)
 		return;
 	pthread_mutex_init(&ps->rec_writer_lock, NULL);
+}
+
+/* Publish the guard once both recorders are initialised. */
+static void mirror_record_locks_ready(Star6ePipelineState *ps)
+{
 	ps->rec_locks_ready = 1;
 }
 
@@ -636,9 +649,9 @@ static void mirror_record_open(Star6ePipelineState *ps, const VencConfig *vcfg,
 	 * — and, worse, would falsify the invariant the producer gate rests on
 	 * ("the handle is non-NULL exactly while a mirror recording runs").  The
 	 * IDR is skipped for the same reason: runtime_request_idr() names ch0,
-	 * and firing it here would inject a keyframe into the LIVE stream and
-	 * re-arm the rate limiter so ch1's own request is swallowed, while doing
-	 * nothing for the recording.  That is the trap named in
+	 * and firing it here would inject a keyframe into the LIVE stream while
+	 * doing nothing for the recording (the rate limiter is per-channel, so
+	 * it cannot swallow ch1's own request).  That is the trap named in
 	 * include/star6e_ts_recorder.h — a shared hook cannot name the right
 	 * channel.  ch1 requests its own on its start path. */
 	if (ps->dual)
@@ -754,12 +767,16 @@ static int runtime_request_idr_on(int chn)
 /* Segment rotation's request, as distinct from the bootstrap one above.
  * COALESCED, not forced: a periodic rotation is not a bootstrap event, and
  * forcing would also re-arm the rate limiter and swallow a scene-detector or
- * operator keyframe arriving in the next 100 ms. */
+ * operator keyframe arriving in the next 100 ms.
+ *
+ * Returns 1 when the IDR was actually requested, 0 when the shared limiter
+ * coalesced it away, -1 on SDK failure.  Callers servicing a rotation request
+ * MUST re-queue on 0 -- see star6e_ts_recorder_requeue_idr_request(). */
 static int runtime_rotate_idr_on(int chn)
 {
 	if (!idr_rate_limit_allow(chn))
 		return 0;
-	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
+	return MI_VENC_RequestIdr(chn, 1) == 0 ? 1 : -1;
 }
 
 /* Mirror-mode recorder: the file is fed by the main channel. */
@@ -1000,8 +1017,9 @@ static void *dual_rec_thread_fn(void *arg)
 		 * (see the comment above runtime_request_idr_on's ch1 caller):
 		 * aimed at ch0 it keyframes the LIVE stream and the recording
 		 * still rotates on nothing. */
-		if (star6e_ts_recorder_take_idr_request(d->ts_recorder))
-			(void)runtime_rotate_idr_on(d->channel);
+		if (star6e_ts_recorder_take_idr_request(d->ts_recorder) &&
+		    runtime_rotate_idr_on(d->channel) == 0)
+			star6e_ts_recorder_requeue_idr_request(d->ts_recorder);
 		total_count++;
 
 		/* Backpressure signal: the pre-GetStream Query found >= 2
@@ -1055,12 +1073,36 @@ static void *dual_rec_thread_fn(void *arg)
 
 static void dual_rec_thread_start(Star6eDualVenc *d)
 {
+	pthread_attr_t attr;
+	int have_attr;
+
 	d->rec_running = 1;
-	if (pthread_create(&d->rec_thread, NULL, dual_rec_thread_fn, d) != 0) {
+	/* dual_rec_thread_fn reaches star6e_ts_recorder_write_stream, whose
+	 * ~1.06 MB of automatic buffers overflows a musl default stack.  Star6E
+	 * is glibc so its 8 MB default already covers it; set it anyway so the
+	 * requirement travels with the code path rather than with the libc. */
+	have_attr = pthread_attr_init(&attr) == 0;
+	if (have_attr) {
+		size_t cur = 0;
+		/* RAISE only.  musl's 128 KB default must come up; glibc's 8 MB
+		 * must not come down -- this thread also runs SDK entry points
+		 * whose stack use is opaque, and lowering a platform that was
+		 * already safe buys nothing. */
+		if (pthread_attr_getstacksize(&attr, &cur) == 0 &&
+		    cur < STAR6E_TS_RECORDER_STREAM_STACK_BYTES)
+			(void)pthread_attr_setstacksize(&attr,
+				STAR6E_TS_RECORDER_STREAM_STACK_BYTES);
+	}
+	if (pthread_create(&d->rec_thread, have_attr ? &attr : NULL,
+			dual_rec_thread_fn, d) != 0) {
+		if (have_attr)
+			pthread_attr_destroy(&attr);
 		fprintf(stderr, "[dual] ERROR: pthread_create failed for recording thread\n");
 		d->rec_running = 0;
 		return;
 	}
+	if (have_attr)
+		pthread_attr_destroy(&attr);
 	d->rec_started = 1;
 	printf("> Dual recording thread started (mode: %s)\n", d->mode);
 }
@@ -1099,9 +1141,17 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	}
 	if (vcfg->video0.min_qp > 0 || vcfg->video0.max_qp > 0) {
 		const VencApplyCallbacks *cb = star6e_controls_callbacks();
-		if (cb->apply_qp_bounds)
-			cb->apply_qp_bounds(vcfg->video0.min_qp,
-				vcfg->video0.max_qp);
+		/* Not (void): apply_qp_bounds() refuses on a VBR/AVBR rcMode and
+		 * on an inverted pair, and a rejected cold-boot apply would
+		 * otherwise leave the operator booting with no QP bound and no
+		 * indication.  Same reporting as Maruko and CV610. */
+		if (cb->apply_qp_bounds &&
+		    cb->apply_qp_bounds(vcfg->video0.min_qp,
+			    vcfg->video0.max_qp) != 0)
+			fprintf(stderr, "WARN: qpBounds from config not applied "
+				"(min=%u max=%u)\n",
+				(unsigned)vcfg->video0.min_qp,
+				(unsigned)vcfg->video0.max_qp);
 	}
 
 	if (!ps->output_enabled) {
@@ -1110,6 +1160,15 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		printf("> Output disabled at startup, idling at %u fps\n",
 			STAR6E_CONTROLS_IDLE_FPS);
 	}
+
+	/* Let a malformed access unit re-establish the reference chain
+	 * locally, on whatever transport is configured.  Same rate-limited
+	 * primitive the scene detector uses, so both producers of forced IDRs
+	 * coalesce through one 100 ms window.  Set here rather than in the
+	 * pipeline because the callback is runtime-local, and after
+	 * star6e_output_init(), whose reset would clear it. */
+	ps->output.request_idr = star6e_scene_request_idr;
+	ps->output.idr_ctx = &ps->venc_channel;
 
 	star6e_recorder_init(&ps->recorder);
 	audio_ring_init(&ps->audio_ring);
@@ -1134,6 +1193,12 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		ps->ts_recorder.max_seconds = vcfg->record.max_seconds;
 	if (vcfg->record.max_mb > 0)
 		ps->ts_recorder.max_bytes = (uint64_t)vcfg->record.max_mb * 1024 * 1024;
+
+	/* Both recorders now hold fd == -1, so record/status can no longer read
+	 * a calloc'd fd == 0 as an open file, and a stop can no longer close
+	 * STDIN.  Published here rather than beside the mutex init for that
+	 * reason -- see mirror_record_locks_init(). */
+	mirror_record_locks_ready(ps);
 
 	/* Start dual VENC if mode is "dual" or "dual-stream".
 	 *
@@ -1558,8 +1623,9 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * and aimed at the channel that actually feeds this file.  Dual mode
 	 * services its own recorder on the ch1 thread instead. */
 	if (!ps->dual &&
-	    star6e_ts_recorder_take_idr_request(&ps->ts_recorder))
-		(void)runtime_rotate_idr_on(ps->venc_channel);
+	    star6e_ts_recorder_take_idr_request(&ps->ts_recorder) &&
+	    runtime_rotate_idr_on(ps->venc_channel) == 0)
+		star6e_ts_recorder_requeue_idr_request(&ps->ts_recorder);
 
 	/* A recorder that stopped ITSELF (disk full, write error) does so on the
 	 * writer thread, so nothing but this loop is positioned to notice, and

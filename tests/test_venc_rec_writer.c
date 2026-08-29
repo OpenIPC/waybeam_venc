@@ -359,6 +359,71 @@ static int test_writer_stop_bounded_abandons_the_backlog(void)
 	return failures;
 }
 
+/* The asymmetry that justifies which stop a TEARDOWN path may use, measured
+ * on one sink with one queue depth so the two numbers are comparable.
+ *
+ * venc_rec_writer_stop() sets `stopping` but never calls queue_abandon(), and
+ * the consumer only observes that flag when queue_pop() returns NULL -- so its
+ * join is bounded by the DISK, not by any grace.  cv610_teardown() used that
+ * form ("full flush: shutting down anyway"), which on a medium that stalls or
+ * disappears under load -- a documented CV610 failure mode -- meant teardown
+ * never reached the VENC/VPSS stop below it, leaking the kernel-state channels
+ * and binds that make the next start fail.  That backend has no watchdog to
+ * cut it short, so it now uses the bounded form like everything else.
+ *
+ * test_writer_stop_unbounded_is_also_a_barrier() already pins that the
+ * unbounded stop delivers everything, and
+ * test_writer_stop_bounded_abandons_the_backlog() that the bounded one does
+ * not.  Neither compares their COST, which is the property the teardown choice
+ * actually turns on. */
+static int test_writer_stop_cost_bounded_vs_unbounded(void)
+{
+	VencRecWriter *w = NULL;
+	BarrierSink s;
+	struct timespec t0, t1;
+	long long unbounded_ms, bounded_ms;
+	uint64_t dropped = 0;
+	int failures = 0;
+	int i;
+
+	/* Arm A: unbounded, 5 x 100 ms of queued sink work. */
+	memset(&s, 0, sizeof(s));
+	s.delay_us = 100000;
+	CHECK("cost arm A start", venc_rec_writer_start(&w, barrier_sink, &s) == 0);
+	for (i = 0; i < 5; i++)
+		(void)venc_rec_writer_push(w, make_au((uint8_t)i, 1024), 1024,
+			(uint64_t)i * 900, 0);
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	venc_rec_writer_stop(w);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	unbounded_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
+		(t1.tv_nsec - t0.tv_nsec) / 1000000;
+	CHECK("unbounded cost delivered the backlog", s.calls == 5);
+
+	/* Arm B: identical sink and depth, bounded by a 100 ms grace. */
+	w = NULL;
+	memset(&s, 0, sizeof(s));
+	s.delay_us = 100000;
+	CHECK("cost arm B start", venc_rec_writer_start(&w, barrier_sink, &s) == 0);
+	for (i = 0; i < 5; i++)
+		(void)venc_rec_writer_push(w, make_au((uint8_t)i, 1024), 1024,
+			(uint64_t)i * 900, 0);
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	venc_rec_writer_stop_bounded(w, 100, &dropped);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	bounded_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
+		(t1.tv_nsec - t0.tv_nsec) / 1000000;
+
+	/* The unbounded join tracks the backlog (~500 ms); the bounded one is
+	 * grace plus at most one in-flight write (~200 ms).  Compared as a ratio
+	 * rather than against absolute wall-clock, so host load moves both. */
+	CHECK("bounded stop cost far less than unbounded",
+		bounded_ms * 2 < unbounded_ms);
+	CHECK("bounded stop shed what it did not wait for", dropped > 0);
+	CHECK("unbounded stop waited for the whole backlog", unbounded_ms >= 400);
+	return failures;
+}
+
 /* Counters are per-RECORDING.  Not by an operation any more — by the writer's
  * lifetime: the backends create one when a recording opens and destroy it when
  * the recording closes, so the next recording gets a fresh handle whose
@@ -612,6 +677,7 @@ int test_venc_rec_writer(void)
 	failures += test_writer_drops_and_counts_when_full();
 	failures += test_writer_stop_bounded_is_a_hard_barrier();
 	failures += test_writer_stop_bounded_abandons_the_backlog();
+	failures += test_writer_stop_cost_bounded_vs_unbounded();
 	failures += test_writer_counters_start_clean_for_each_recording();
 	failures += test_writer_stop_bounded_makes_a_close_safe_without_a_lock();
 	failures += test_writer_stop_bounded_returns_promptly_when_idle();
