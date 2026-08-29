@@ -1195,6 +1195,35 @@ static int test_restart_set_rejects_legacy_codec_field(void)
 	CHECK("legacy codec error",
 		strstr(response, "unknown config field") != NULL);
 
+	/* 0.21.0 removed video0.maxIBytes/maxPBytes.  The contract promises a
+	 * controller still pushing them gets 404 "unknown config field" — on
+	 * BOTH set paths, and that a multi-field request naming one is rejected
+	 * WHOLE rather than partially applied.  That promise is what forces the
+	 * craft-side deploy order (controller before venc), so it is worth a
+	 * test rather than an assertion in prose. */
+	CHECK("removed cap rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"video0.maxIBytes=60000", &status, response,
+			sizeof(response)) == 0);
+	CHECK("removed cap status", status == 404);
+	CHECK("removed cap error",
+		strstr(response, "unknown config field") != NULL);
+
+	CHECK("removed cap alias rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"video0.maxPBytes=12000", &status, response,
+			sizeof(response)) == 0);
+	CHECK("removed cap alias status", status == 404);
+
+	/* Whole-request rejection: the surviving field must NOT be applied. */
+	cfg.video0.bitrate = 8192;
+	CHECK("removed cap batch rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"video0.bitrate=4096&video0.maxPBytes=12000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("removed cap batch status", status == 404);
+	CHECK("removed cap batch applied nothing", cfg.video0.bitrate == 8192);
+
 	return failures;
 }
 

@@ -123,8 +123,6 @@ typedef struct {
 	uint32_t bitrate;      /* kbps */
 	double gop_size;       /* seconds between keyframes; 0 = all-intra */
 	int qp_delta;              /* relative I/P QP delta, -12..12 */
-	uint32_t max_i_bytes;      /* per-frame I-frame size cap (bytes); 0=unlimited */
-	uint32_t max_p_bytes;      /* per-frame P-frame size cap (bytes); 0=unlimited */
 	uint32_t min_qp;           /* RC QP floor; 0 = leave the driver default */
 	uint32_t max_qp;           /* RC QP ceiling; 0 = leave the driver default */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */

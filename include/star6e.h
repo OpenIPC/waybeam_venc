@@ -459,17 +459,6 @@ typedef struct {
 	void *pRcParam;
 } MI_VENC_RcParam_t;
 
-/* Rate control priority — determines whether the encoder RC engine prioritises
- * hitting the bitrate target or respecting per-frame size limits (MaxISize /
- * MaxPSize).  FRAMEBITS_FIRST makes MaxISize/MaxPSize hard ceilings at the
- * cost of transient bitrate undershoot; BITRATE_FIRST (default) treats them
- * as soft hints.  mi_venc_datatype.h on both star6e and maruko. */
-typedef enum {
-	E_MI_VENC_RC_PRIORITY_BITRATE_FIRST = 1,
-	E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST,
-	E_MI_VENC_RC_PRIORITY_MAX,
-} MI_VENC_RcPriority_e;
-
 /* Intra refresh (GDR-style rolling stripe) — identical layout on star6e and
  * maruko (mi_venc_datatype.h:992 for both).  Only the function arity differs
  * (maruko adds VeDev), handled by the per-backend macros below. */
@@ -523,9 +512,6 @@ _Static_assert(sizeof(MI_VENC_ParamH265SliceSplit_t) == 8,
 #define MI_VENC_GetRoiCfg(chn, idx, cfg) g_mi_venc.fnGetRoiCfg(0, (chn), (idx), (cfg))
 #define MI_VENC_GetRcParam(chn, param) g_mi_venc.fnGetRcParam(0, (chn), (param))
 #define MI_VENC_SetRcParam(chn, param) g_mi_venc.fnSetRcParam(0, (chn), (param))
-#define MI_VENC_SetRcPriority(chn, pri) \
-	(g_mi_venc.fnSetRcPriority ? \
-		g_mi_venc.fnSetRcPriority(0, (chn), (int)(pri)) : -1)
 #elif defined(PLATFORM_STAR6E)
 #define MI_VENC_CreateChn(chn, attr)  g_mi_venc.fnCreateChn((chn), (attr))
 #define MI_VENC_DestroyChn(chn)       g_mi_venc.fnDestroyChn((chn))
@@ -540,11 +526,6 @@ _Static_assert(sizeof(MI_VENC_ParamH265SliceSplit_t) == 8,
 #define MI_VENC_SetChnAttr(chn, attr) g_mi_venc.fnSetChnAttr((chn), (attr))
 #define MI_VENC_GetRcParam(chn, p)    g_mi_venc.fnGetRcParam((chn), (p))
 #define MI_VENC_SetRcParam(chn, p)    g_mi_venc.fnSetRcParam((chn), (p))
-/* SDK: MI_VENC_SetRcPriority(VeChn, MI_VENC_RcPriority_e *) — pass the address
- * of a temporary holding the enum value, not the value itself. */
-#define MI_VENC_SetRcPriority(chn, pri) \
-	(g_mi_venc.fnSetRcPriority ? \
-		g_mi_venc.fnSetRcPriority((chn), &(MI_VENC_RcPriority_e){ (pri) }) : -1)
 #define MI_VENC_RequestIdr(chn, inst) g_mi_venc.fnRequestIdr((chn), (inst))
 #define MI_VENC_SetRoiCfg(chn, cfg)   g_mi_venc.fnSetRoiCfg((chn), (cfg))
 #define MI_VENC_GetRoiCfg(chn, idx, cfg) g_mi_venc.fnGetRoiCfg((chn), (idx), (cfg))
@@ -581,7 +562,6 @@ MI_S32 MI_VENC_GetChnAttr(MI_VENC_CHN chn, MI_VENC_ChnAttr_t* attr);
 MI_S32 MI_VENC_SetChnAttr(MI_VENC_CHN chn, MI_VENC_ChnAttr_t* attr);
 MI_S32 MI_VENC_GetRcParam(MI_VENC_CHN chn, MI_VENC_RcParam_t *param);
 MI_S32 MI_VENC_SetRcParam(MI_VENC_CHN chn, MI_VENC_RcParam_t *param);
-MI_S32 MI_VENC_SetRcPriority(MI_VENC_CHN chn, MI_VENC_RcPriority_e ePriority);
 MI_S32 MI_VENC_RequestIdr(MI_VENC_CHN chn, MI_BOOL instant);
 MI_S32 MI_VENC_SetRoiCfg(MI_VENC_CHN chn, MI_VENC_RoiCfg_t *cfg);
 MI_S32 MI_VENC_GetRoiCfg(MI_VENC_CHN chn, MI_U32 idx, MI_VENC_RoiCfg_t *cfg);

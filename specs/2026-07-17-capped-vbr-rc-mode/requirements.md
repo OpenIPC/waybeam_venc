@@ -1,5 +1,35 @@
 # Capped VBR RC mode (bounded bitrate + deterministic per-frame size)
 
+> ## CLOSED — WITHDRAWN 2026-08-29 (venc 0.72.0, contract 0.21.0)
+>
+> **The premise below does not hold on the hardware measured.** This spec is built on
+> `u32MaxISize`/`u32MaxPSize` + `MI_VENC_SetRcPriority(FRAMEBITS_FIRST)`
+> delivering a deterministic per-frame ceiling. Device measurement on a
+> SSC338Q (1280x720@60, H.265 CBR, GDR) shows they do not bind: across
+> `maxPBytes` 33144 -> 6000 bytes the delivered rate moved under 0.3%, and at
+> the 6000 B step an AU census found **all 863** access units over the cap.
+> `maxIBytes` 91788 -> 2000 left IDR size at 66-81 KB across 16 sampled IDRs —
+> the weaker arm, GDR IDRs being on-demand. The I-cap arm alone is corroborated
+> in OpenIPC/waybeam_venc#111. Scope: one SSC338Q, one SDK build, 720p60 H.265
+> CBR, GDR; Maruko was not measured.
+>
+> The caps *influence* frame size below ~6000 B (0.45.0 measured
+> `maxPBytes=2000` taking a Star6E from 5619 to 1868 kbps) but still overshoot
+> by ~2x, so they never provide the *determinism* this spec's acceptance gate
+> ("no frame exceeds its `maxIBytes`/`maxPBytes`", `plan.md`) requires. That
+> gate is unmeetable as written.
+>
+> Both fields were removed in 0.72.0, so the "Remaining work" below — exposing
+> a QP window on top of them — has no foundation left. **Surprise worth
+> carrying forward:** an SDK call that returns success and reports its value
+> back on read can still be a no-op; the only trustworthy check is the
+> encoded bitstream. What survives as an I-frame-size bound is
+> `video0.qpDelta` (68x range, IDR-free) — but fix open issue #255 first: it
+> is the same logs-success-without-taking-effect shape as the caps here.
+>
+> Kept as a record of the reasoning, not as a plan. Do not implement.
+
+
 **Status: SPEC — reconciled to PR #181 (2026-07-17).** Replaces the existing
 `vbr` mode with a link-matched rate-control mode.
 

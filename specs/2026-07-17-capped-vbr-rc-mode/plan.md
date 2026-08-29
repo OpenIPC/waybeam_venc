@@ -1,5 +1,10 @@
 # Plan: capped VBR RC mode
 
+> **CLOSED — WITHDRAWN 2026-08-29.** See `requirements.md`: the per-frame
+> caps this plan actuates were measured non-binding and removed in venc
+> 0.72.0. The acceptance gate below ("no frame exceeds its
+> `maxIBytes`/`maxPBytes`") is unmeetable on this hardware. Do not implement.
+
 Companion to `requirements.md`. **Reconciled to PR #181 (2026-07-17):** the
 per-frame ceiling mechanism is already implemented there
 (`u32MaxISize`/`u32MaxPSize` + `SetRcPriority(FRAMEBITS_FIRST)`, both

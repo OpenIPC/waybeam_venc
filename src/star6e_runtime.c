@@ -1103,12 +1103,6 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			cb->apply_qp_bounds(vcfg->video0.min_qp,
 				vcfg->video0.max_qp);
 	}
-	if (vcfg->video0.max_i_bytes > 0 || vcfg->video0.max_p_bytes > 0) {
-		const VencApplyCallbacks *cb = star6e_controls_callbacks();
-		if (cb->apply_max_frame_size)
-			cb->apply_max_frame_size(vcfg->video0.max_i_bytes,
-				vcfg->video0.max_p_bytes);
-	}
 
 	if (!ps->output_enabled) {
 		ps->stored_fps = vcfg->video0.fps;

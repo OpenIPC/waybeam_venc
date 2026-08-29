@@ -50,15 +50,11 @@ typedef struct {
 	 * not need to reject size-based requests. Returns 0 on success,
 	 * -1 if the backend has no live state to mutate. */
 	int (*apply_max_payload_size)(uint16_t size);
-	/* Live-update per-frame size caps (MaxISize/MaxPSize) in the RC param
-	 * struct and set RC priority to FRAMEBITS_FIRST when either is >0.
-	 * Both values in bytes; 0 = unlimited (restores BITRATE_FIRST). */
-	int (*apply_max_frame_size)(uint32_t max_i_bytes, uint32_t max_p_bytes);
 	/* Live-update the RC QP bounds (MinQp/MaxQp) in the RC param struct.
 	 * 0 leaves that bound at whatever the driver reported, so a config
-	 * that sets neither behaves exactly as before. Unlike the frame-size
-	 * caps these are the knobs the SDK rate controller actually honours:
-	 * the floor governs whether CBR can spend its budget on a simple
+	 * that sets neither behaves exactly as before. These are knobs the SDK
+	 * rate controller actually honours: the floor governs whether CBR can
+	 * spend its budget on a simple
 	 * scene, the ceiling governs how hard it may compress a scene change.
 	 * NULL on backends that do not implement it. */
 	int (*apply_qp_bounds)(uint32_t min_qp, uint32_t max_qp);

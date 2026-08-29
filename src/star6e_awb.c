@@ -9,7 +9,8 @@
 
 /* Struct layouts are the i6e MI_ISP ABI, copied from the SDK header
  * mi_isp_datatype.h.  Every CUS3A entry point takes a POINTER to its struct —
- * passing by value silently misreads (the SetRcPriority class of bug). */
+ * passing by value silently misreads.  A live instance of that bug once
+ * crashed the encoder on this SoC; see HISTORY.md 0.45.0. */
 
 typedef struct {
 	uint32_t Size;

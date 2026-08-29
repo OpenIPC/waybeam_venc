@@ -169,13 +169,6 @@ static int maruko_runner_init(void *opaque)
 		maruko_controls_callbacks()->apply_qp_delta(
 			ctx->vcfg.video0.qp_delta);
 	}
-	if ((ctx->vcfg.video0.max_i_bytes > 0 ||
-	     ctx->vcfg.video0.max_p_bytes > 0) &&
-	    maruko_controls_callbacks()->apply_max_frame_size) {
-		maruko_controls_callbacks()->apply_max_frame_size(
-			ctx->vcfg.video0.max_i_bytes,
-			ctx->vcfg.video0.max_p_bytes);
-	}
 
 	return 0;
 }
