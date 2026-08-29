@@ -885,11 +885,13 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 
 	/* These controls have no Maruko implementation.  Keep them in the shared
 	 * schema so clients can render one dashboard, but advertise them honestly
-	 * and reject writes before they reach a missing callback or route. */
+	 * and reject writes before they reach a missing callback or route.
+	 *
+	 * video0.min_qp/max_qp left this list when maruko_apply_qp_bounds()
+	 * landed; Maruko is the same MI VENC RC as Star6E, so the bounds are
+	 * the same u32MinQp/u32MaxQp write. */
 	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
-	    (strncmp(canonical_key, "qr.", 3) == 0 ||
-	     strcmp(canonical_key, "video0.min_qp") == 0 ||
-	     strcmp(canonical_key, "video0.max_qp") == 0))
+	    strncmp(canonical_key, "qr.", 3) == 0)
 		return 0;
 
 	/* isp.awb_fps paces the Star6E userspace AWB loop (src/star6e_awb.c),

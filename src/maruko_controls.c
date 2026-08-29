@@ -201,6 +201,81 @@ static int maruko_apply_rc_qp_delta(const i6c_venc_chn *attr, MI_VENC_RcParam_t 
 	}
 }
 
+/* Only CBR carries QP bounds we can steer; other modes leave them alone. */
+static int maruko_rc_qp_bound_ptrs(const i6c_venc_chn *attr,
+	MI_VENC_RcParam_t *param, uint32_t **pmin, uint32_t **pmax)
+{
+	if (!attr || !param)
+		return -1;
+	switch (attr->rate.mode) {
+	case MARUKO_VENC_RC_H265_CBR:
+		*pmin = &param->stParamH265Cbr.u32MinQp;
+		*pmax = &param->stParamH265Cbr.u32MaxQp;
+		return 0;
+	case MARUKO_VENC_RC_H264_CBR:
+		*pmin = &param->stParamH264Cbr.u32MinQp;
+		*pmax = &param->stParamH264Cbr.u32MaxQp;
+		return 0;
+	default:
+		return -1;
+	}
+}
+
+/* Everything we have asked the rate controller for.  Maruko is the same MI
+ * VENC RC as Star6E and therefore has the same hazard: MI_VENC_GetRcParam
+ * does not reflect a just-written value until the driver commits the block
+ * (~5 s after StartRecvPic on SSC338Q), so a second read-modify-write inside
+ * that window reads a stale 0 and writes it back.  Adding qp bounds gives
+ * Maruko a second RC writer for the first time, so it gets Star6E's fix at
+ * the same moment rather than inheriting the bug -- see g_rc_intent in
+ * src/star6e_controls.c and issue #255. */
+static struct {
+	int      qp_delta;
+	uint32_t min_qp;   /* 0 = driver default */
+	uint32_t max_qp;   /* 0 = driver default */
+} g_maruko_rc_intent;
+
+/* Driver-default QP bounds, captured on the first Get before any write so a
+ * later 0 can restore them.  The rate mode is fixed for the process lifetime
+ * (Maruko always respawns on reinit), so one capture is enough. */
+static struct {
+	int      captured;
+	uint32_t min_qp;
+	uint32_t max_qp;
+} g_maruko_qp_defaults;
+
+/* Write the whole intent, never a patched Get result. */
+static int maruko_rc_commit_intent(int *bounds_staged)
+{
+	i6c_venc_chn attr = {0};
+	MI_VENC_RcParam_t param = {0};
+	uint32_t *pmin, *pmax;
+
+	if (bounds_staged)
+		*bounds_staged = 0;
+	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev, g_ctx.venc_chn, &attr) != 0)
+		return -1;
+	if (maruko_mi_venc_get_rc_param(g_ctx.venc_dev, g_ctx.venc_chn, &param) != 0)
+		return -1;
+	if (maruko_apply_rc_qp_delta(&attr, &param, g_maruko_rc_intent.qp_delta) != 0)
+		return -1;
+	if (maruko_rc_qp_bound_ptrs(&attr, &param, &pmin, &pmax) == 0) {
+		if (!g_maruko_qp_defaults.captured) {
+			g_maruko_qp_defaults.min_qp = *pmin;
+			g_maruko_qp_defaults.max_qp = *pmax;
+			g_maruko_qp_defaults.captured = 1;
+		}
+		*pmin = g_maruko_rc_intent.min_qp ? g_maruko_rc_intent.min_qp
+						  : g_maruko_qp_defaults.min_qp;
+		*pmax = g_maruko_rc_intent.max_qp ? g_maruko_rc_intent.max_qp
+						  : g_maruko_qp_defaults.max_qp;
+		if (bounds_staged)
+			*bounds_staged = 1;
+	}
+	return maruko_mi_venc_set_rc_param(g_ctx.venc_dev, g_ctx.venc_chn,
+		&param) == 0 ? 0 : -1;
+}
+
 /* ── Basic controls (existing) ───────────────────────────────────────── */
 
 /* No IDR request on bitrate writes — see the matching note in
@@ -267,24 +342,48 @@ static int maruko_apply_gop(uint32_t gop_size)
 
 static int maruko_apply_qp_delta(int delta)
 {
-	i6c_venc_chn attr = {0};
-	MI_VENC_RcParam_t param = {0};
+	int prev = g_maruko_rc_intent.qp_delta;
 
-	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &attr) != 0)
+	g_maruko_rc_intent.qp_delta = delta;
+	if (maruko_rc_commit_intent(NULL) != 0) {
+		g_maruko_rc_intent.qp_delta = prev;
 		return -1;
-	if (maruko_mi_venc_get_rc_param(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &param) != 0)
-		return -1;
-	if (maruko_apply_rc_qp_delta(&attr, &param, delta) != 0)
-		return -1;
-	if (maruko_mi_venc_set_rc_param(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &param) != 0)
-		return -1;
+	}
 
 	/* No IDR: a QP-delta change is rate-control state, absorbed mid-GOP.
 	 * Star6E parity — see apply_qp_delta() in src/star6e_controls.c. */
 	printf("> qpDelta changed to %d\n", delta);
+	return 0;
+}
+
+/* CBR holds its target by raising QP; these bound how far it may go in each
+ * direction.  Both break the rate contract once they bind -- a floor above
+ * the scene's natural QP collapses the rate, a ceiling below it overshoots --
+ * so they default to 0 (driver default) and the README records the measured
+ * behaviour.  Star6E parity: apply_qp_bounds() in src/star6e_controls.c. */
+static int maruko_apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
+{
+	uint32_t prev_min = g_maruko_rc_intent.min_qp;
+	uint32_t prev_max = g_maruko_rc_intent.max_qp;
+	int bounds_staged = 0;
+
+	if (min_qp == 0 && max_qp == 0 && !g_maruko_qp_defaults.captured)
+		return 0;   /* never written — driver defaults already in force */
+
+	/* 0 restores the captured driver default so bounds can be cleared
+	 * live, not just overridden. */
+	g_maruko_rc_intent.min_qp = min_qp;
+	g_maruko_rc_intent.max_qp = max_qp;
+	if (maruko_rc_commit_intent(&bounds_staged) != 0 || !bounds_staged) {
+		/* !bounds_staged: this rate mode carries no QP bounds, so the
+		 * request was not honoured even though the write succeeded. */
+		g_maruko_rc_intent.min_qp = prev_min;
+		g_maruko_rc_intent.max_qp = prev_max;
+		return -1;
+	}
+	printf("> qpBounds changed: min=%u max=%u (0 = driver default %u/%u)\n",
+		min_qp, max_qp, g_maruko_qp_defaults.min_qp,
+		g_maruko_qp_defaults.max_qp);
 	return 0;
 }
 
@@ -1463,6 +1562,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_fps = maruko_apply_fps_live,
 	.apply_gop = maruko_apply_gop,
 	.apply_qp_delta = maruko_apply_qp_delta,
+	.apply_qp_bounds = maruko_apply_qp_bounds,
 	.apply_roi_qp = maruko_apply_roi_qp,
 	.apply_verbose = maruko_apply_verbose,
 	.apply_output_enabled = maruko_apply_output_enabled,
