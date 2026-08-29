@@ -18,8 +18,25 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.21.0`
+- `contract_version`: `0.22.0`
 - `status`: `active`
+
+## Per-Backend Field Support
+
+`supported` in `/api/v1/capabilities` is per backend and is not cosmetic — a
+`false` field is rejected by `GET /api/v1/set` and `/api/v1/live/set` with
+`501 not_implemented` rather than accepted and ignored.
+
+| Field | Star6E | Maruko | CV610 |
+|---|---|---|---|
+| `video0.qpDelta` | true | true | **false** |
+| `video0.minQp` / `maxQp` | true | true | true |
+| `video0.intraRefreshQp` | **false** | **false** | true |
+
+`video0.qpDelta` is `false` on CV610 and `video0.intraRefreshQp` is `false` on
+the SigmaStar backends because in each case the encoder accepts the value and
+does not act on it. Clients should read `supported` rather than assume a field
+present in the schema is live on the craft in front of them.
 
 ## Governance Rules
 - Non-breaking changes: add optional fields, add new endpoints, extend enum values.
@@ -105,7 +122,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1 },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "sliceCount": 1, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
+      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "sliceCount": 1, "resilience": "off", "intraRefreshQp": 0, "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "allowUnixEncoderStall": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -160,6 +177,7 @@ Response `200`:
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
       "video0.slice_count": { "mutability": "restart_required", "supported": true },
       "video0.resilience": { "mutability": "restart_required", "supported": true },
+      "video0.intra_refresh_qp": { "mutability": "restart_required", "supported": true },
       "video0.zoom_x": { "mutability": "live", "supported": true },
       "video0.zoom_y": { "mutability": "live", "supported": true },
       "video0.framing": { "mutability": "restart_required", "supported": true },

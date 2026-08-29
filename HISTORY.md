@@ -1,5 +1,69 @@
 # History
 
+## [0.73.0] - 2026-08-29
+
+`video0.qpDelta` now reaches the encoder on Star6E when QP bounds are also
+configured, Maruko gains `minQp`/`maxQp`, and CV610 gains `intraRefreshQp`
+while losing `qpDelta`. `contract_version` 0.21.0 -> **0.22.0** (additive
+field; two per-backend `supported` flags change).
+
+- **Fixed `video0.qpDelta` being silently reverted at startup (#255).**
+  `MI_VENC_GetRcParam` does not reflect a just-written value until the driver
+  commits the block — measured on SSC338Q as between t+0s and t+5s after
+  `StartRecvPic` — so a second read-modify-write inside that window read a
+  stale 0 and wrote it back. `apply_qp_bounds()` is exactly that shape and
+  runs immediately after `apply_qp_delta()`, so **every Star6E craft with
+  `minQp` or `maxQp` set flew with an effective IPQPDelta of 0**: IRAP
+  66497-81400 B against 3159-3743 B once fixed, on one binary with only
+  `minQp` differing. Both calls returned success and both logged it.
+
+  Every RC write now stages the whole intent instead of patching a `Get`
+  result, so ordering and timing cannot matter. The deleted
+  `apply_max_frame_size()` had the same shape and is how the bug first
+  surfaced — it bit through two different callers.
+
+- **Added `video0.minQp` / `video0.maxQp` on Maruko.** Same MI VENC rate
+  controller as Star6E, so the same `u32MinQp`/`u32MaxQp` write. Applied from
+  config at startup as well as live. Device-measured on Infinity6C: `minQp 40`
+  took the stream from 1.54 Mbps to 0.09, `maxQp 20` drove it to 45.31 Mbps,
+  and both cleared cleanly.
+
+  **Upgrade note**: these fields were always parsed, validated and persisted —
+  only HTTP writes and the `supported` flag were gated. A Maruko craft already
+  carrying `minQp` in a shared config has been booting with it inert and will
+  now apply it. Check craft configs before rolling out.
+
+- **Added `video0.intraRefreshQp`** (restart-only), the intra-refresh stripe
+  QP. It was already a config member consumed by `intra_refresh_compute()` as
+  `override_qp`, but was never parsed from JSON, so every craft ran
+  `mode_default_qp()`. `0` keeps the resilience preset's default.
+
+  Advertised on **CV610 only**, where it is the sole control that moves
+  I-frame size: 0 (preset 36) -> 15442 B, 44 -> 7773 B, 51 -> 4716 B at CBR
+  1500 kbps, rate flat. It reaches `MI_VENC_SetIntraRefresh` on the SigmaStar
+  parts too and is logged as applied, but the encoder ignores it — a 38-QP
+  sweep moved IRAP 0.7% and the delivered rate not at all. A consequence worth
+  knowing: `mode_default_qp()`'s per-mode stripe QP (36/32/28) is therefore
+  inert on Star6E and Maruko.
+
+  On CV610 this one register sets both the forced-IDR size and the GDR
+  recovery-anchor quality; they cannot be separated.
+
+- **Removed `video0.qpDelta` from CV610.** The CBR rate controller stores
+  `gop_attr.normal_p.ip_qp_delta` and ignores it — flat to <=1.2% across
+  -12..+12, live and at channel create, saturated and unsaturated. It is no
+  longer advertised, no longer range-checked (an inert field must not decide
+  whether a craft boots), and no longer written at channel create, where its
+  narrower [-10, 30] range made a shared config carrying the portable
+  `qpDelta: -12` fail `ss_mpi_venc_create_chn` outright.
+
+- **Default `qpDelta` is now -12 on Star6E and Maruko.** The shipped defaults
+  are `gopSize 1.0` with `resilience: off`, i.e. a real IDR every second; at
+  -4 that IDR is many times a P-frame. At -12 it is no larger than one
+  (Star6E 29429 -> 3622 B, Maruko 16575 -> 7739 B) at unchanged delivered
+  rate. CV610's default is left alone — `qpDelta` is inert there.
+
+
 ## [0.72.0] - 2026-08-29
 
 The per-frame size caps are removed. `contract_version` 0.20.1 -> **0.21.0**.
