@@ -34,8 +34,17 @@ const char *cv610_validate_config(const VencConfig *cfg)
 	if (cfg->video0.bitrate < VENC_BITRATE_MIN_KBPS ||
 		cfg->video0.bitrate > VENC_BITRATE_MAX_KBPS)
 		return "video0.bitrate is outside the supported range";
-	if (cfg->video0.qp_delta < -10 || cfg->video0.qp_delta > 30)
-		return "CV610 video0.qp_delta must be between -10 and 30";
+	/* video0.qp_delta is NOT range-checked here, and is absent from CV610's
+	 * supported-field list.  The backend cannot honour it -- the CBR rate
+	 * controller stores gop_attr.normal_p.ip_qp_delta and ignores it -- so an
+	 * inert field must not decide whether this craft boots.  Rejecting it
+	 * meant a shared craft config carrying the portable qpDelta:-12, legal on
+	 * Star6E and Maruko, stopped venc dead on CV610:
+	 *
+	 *   [venc_config] ERROR: invalid value in /etc/waybeam.json:
+	 *   CV610 video0.qp_delta must be between -10 and 30
+	 *
+	 * The I-frame lever CV610 does have is video0.intra_refresh_qp. */
 	/* Against the SELECTED mode's rate, which is what cv610_runtime.c turns
 	 * into a GOP length.  Once sensor.mode can force a mode, or a target
 	 * rate can be substituted, that is no longer video0.fps. */

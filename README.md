@@ -747,14 +747,15 @@ overshoot.
 | `video0.min_qp` / `max_qp` | yes | not implemented | yes |
 | `outgoing.sidecar_port` | yes | yes | not implemented |
 
-CV610 accepts `qp_delta`, persists it, and reports `supported: true`, but the
-knob does not move the bitstream: across `-12`, `-4`, `0`, `+12`, applied both
-live and at channel create, and in both a saturated and an unsaturated CBR
-regime, IDR size held at 16.1-20.3 KB (<=1.2% spread) where Star6E spans 9x
-over the same range. IDR access units were confirmed well-formed
-(`19, 32, 33, 34, 39` — IDR_W_RADL + VPS/SPS/PPS/SEI).  A working
-alternative does exist on CV610 — see `request_i_qp` below — but it is not
-this field.
+`video0.qp_delta` is **not offered on CV610**: it is absent from the backend's
+supported-field list, and `cv610_validation.c` deliberately does not
+range-check it, so a shared craft config carrying the portable `-12` still
+boots there. The knob cannot be honoured — across `-12`, `-4`, `0`, `+12`,
+applied both live and at channel create, and in both a saturated and an
+unsaturated CBR regime, IDR size held at 16.1-20.3 KB (<=1.2% spread) where
+Star6E spans 9x over the same range. IDR access units were confirmed
+well-formed (`19, 32, 33, 34, 39` — IDR_W_RADL + VPS/SPS/PPS/SEI). CV610's
+I-frame lever is `video0.intra_refresh_qp`, below.
 
 The cause is not venc's write. Reading the channel back through the SDK shows
 `ip_qp_delta=-4` correctly in force. On CV610 **every rate-control input to
@@ -777,10 +778,27 @@ ignores the I-side ones.
 
 **The working lever is the intra-refresh I-frame QP**,
 `ot_venc_intra_refresh.request_i_qp` — a rate-control input, not a re-encode,
-so it costs no extra encode pass. venc already carries the field it needs
-(`VencConfig.video0.intra_refresh_qp`, plumbed into `intra_refresh_compute()`
-as `override_qp`) but **never parses it from JSON**, so it is always 0 and
-every craft runs on `mode_default_qp()` — 36 for `racing`.
+so it costs no extra encode pass. It is exposed as **`video0.intraRefreshQp`**
+(restart-only), the per-field override `intra_refresh_compute()` already
+consumed as `override_qp` on all three backends; `0` keeps the resilience
+preset's default (fast 36 / balanced 32 / robust 28).
+
+**It is one register, and the resilience preset owns it too.** On a GDR craft
+this same value sets the recovery-anchor quality in every P-frame *and* the
+size of a forced IDR — they cannot be separated, so raising it to shrink IDRs
+also coarsens the anchor that GDR recovery depends on. That is why it is
+exposed under its own name rather than driven from `qp_delta`: an earlier
+attempt to map `qp_delta` onto it silently retuned every craft's anchor,
+including `fpv`/`robust` where the anchor matters most. Note also that the
+preset defaults are absolute constants on purpose — a recovery anchor should
+be reliably clean regardless of what the scene is doing, so it deliberately
+does not track the P QP.
+
+There is no matching `intraRefreshLines` override: `lines` is derived from the
+mode's target self-heal window (fast 150 ms / balanced 500 ms / robust
+1000 ms) and also drives the auto-GOP, so exposing it would let a config
+contradict the `resilience` name it declares. Timing belongs to the preset;
+anchor cost is the tunable axis.
 
 Measured on .181, 10 forced IDRs per point, re-programmed live, delivered rate
 constant at 1.49-1.51 Mbps throughout (CBR 1500 kbps):

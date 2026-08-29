@@ -170,8 +170,11 @@ static void cv610_publish_encoder_status(
 	pthread_mutex_unlock(&g_cv610_status_mutex);
 }
 
+/* No qp_delta field: gop_attr.normal_p.ip_qp_delta is stored by the SDK and
+ * ignored by the CBR rate controller, so writing it was a control that did
+ * nothing.  CV610's I-frame lever is video0.intraRefreshQp. */
 static int cv610_update_venc_attr(uint32_t bitrate, uint32_t gop,
-	int qp_delta, unsigned int fields)
+	unsigned int fields)
 {
 	ot_venc_chn_attr attr;
 	td_s32 ret;
@@ -184,15 +187,13 @@ static int cv610_update_venc_attr(uint32_t bitrate, uint32_t gop,
 		attr.rc_attr.h265_cbr.bit_rate = bitrate;
 	if (fields & 2u)
 		attr.rc_attr.h265_cbr.gop = gop;
-	if (fields & 4u)
-		attr.gop_attr.normal_p.ip_qp_delta = qp_delta;
 	ret = ss_mpi_venc_set_chn_attr(CV610_VENC_CHN, &attr);
 	return ret == TD_SUCCESS ? 0 : -1;
 }
 
 static int cv610_apply_bitrate(uint32_t kbps)
 {
-	int ret = cv610_update_venc_attr(kbps, 0, 0, 1u);
+	int ret = cv610_update_venc_attr(kbps, 0, 1u);
 
 	if (ret == 0 && g_cv610_runner)
 		__atomic_store_n(&g_cv610_runner->live_bitrate, kbps,
@@ -241,15 +242,10 @@ static int cv610_apply_gop(uint32_t frames)
 			"would drop the stream out of GDR\n", (unsigned)frames);
 		return -1;
 	}
-	ret = cv610_update_venc_attr(0, frames, 0, 2u);
+	ret = cv610_update_venc_attr(0, frames, 2u);
 	if (ret == 0)
 		ctx->applied_gop_frames = frames;
 	return ret;
-}
-
-static int cv610_apply_qp_delta(int delta)
-{
-	return cv610_update_venc_attr(0, 0, delta, 4u);
 }
 
 /* Captured on the first write so that 0 restores the driver's own default
@@ -716,7 +712,6 @@ static char *cv610_query_audio_status(void)
 static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.apply_bitrate = cv610_apply_bitrate,
 	.apply_gop = cv610_apply_gop,
-	.apply_qp_delta = cv610_apply_qp_delta,
 	.apply_verbose = cv610_apply_verbose,
 	.request_idr = cv610_request_idr,
 	.query_live_fps = cv610_query_live_fps,
@@ -1139,7 +1134,13 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	attr.rc_attr.h265_cbr.dst_frame_rate = ctx->pipeline.fps;
 	attr.rc_attr.h265_cbr.bit_rate = ctx->config.video0.bitrate;
 	attr.gop_attr.gop_mode = OT_VENC_GOP_MODE_NORMAL_P;
-	attr.gop_attr.normal_p.ip_qp_delta = ctx->config.video0.qp_delta;
+	/* normal_p.ip_qp_delta is deliberately left at 0.  The CBR rate
+	 * controller stores it and ignores it -- measured across -12..+12, live
+	 * and at create, with IDR size flat to <=1.2% -- so writing it bought
+	 * nothing, while its narrower [-10, 30] range made a shared craft config
+	 * carrying the portable qpDelta:-12 fail channel creation outright
+	 * (ss_mpi_venc_create_chn=0xa0088007).  CV610's I-frame lever is
+	 * intra refresh's request_i_qp, exposed as video0.intraRefreshQp. */
 
 	ret = ss_mpi_venc_create_chn(CV610_VENC_CHN, &attr);
 	if (ret != TD_SUCCESS) {

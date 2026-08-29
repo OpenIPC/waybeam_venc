@@ -627,24 +627,6 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->qp_delta = json_get_int(obj, "qpDelta", v->qp_delta);
 	if (v->qp_delta < -12) v->qp_delta = -12;
 	if (v->qp_delta > 12) v->qp_delta = 12;
-#ifdef PLATFORM_CV610
-	/* CV610's ip_qp_delta field is [-10, 30], narrower at the bottom than
-	 * the portable -12..12.  cv610_validate_config() enforces that, which
-	 * on the config-load path means a craft config carrying the perfectly
-	 * legal Star6E/Maruko value qpDelta:-12 does not start venc at all:
-	 *
-	 *   [venc_config] ERROR: invalid value in /etc/waybeam.json:
-	 *   CV610 video0.qp_delta must be between -10 and 30
-	 *
-	 * A shared craft config must not brick one backend's boot, so clamp
-	 * here and say so.  A LIVE set still gets the validator's hard error,
-	 * because there the caller is present to be told. */
-	if (v->qp_delta < -10) {
-		fprintf(stderr, "[venc_config] WARNING: video0.qpDelta %d is below "
-			"the CV610 range [-10, 30]; clamped to -10\n", v->qp_delta);
-		v->qp_delta = -10;
-	}
-#endif
 	v->min_qp = (uint32_t)json_get_int(obj, "minQp", (int)v->min_qp);
 	v->max_qp = (uint32_t)json_get_int(obj, "maxQp", (int)v->max_qp);
 	v->scene_threshold = (uint16_t)json_get_int(obj, "sceneThreshold",
@@ -676,6 +658,25 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 			safe_strcpy(v->resilience, sizeof(v->resilience), "off");
 			(void)venc_config_apply_resilience_preset("off", v);
 		}
+	}
+	/* Per-field override on top of the preset, applied AFTER it because the
+	 * preset zeroes this field; non-zero wins (see include/intra_refresh.h).
+	 * This is the intra-refresh stripe QP — the quality of the GDR recovery
+	 * anchor, and on CV610 the only control that moves I-frame size at all.
+	 *
+	 * Deliberately NOT paired with an intraRefreshLines override: `lines` is
+	 * derived from the mode's target self-heal window (fast 150 ms /
+	 * balanced 500 ms / robust 1000 ms) and also drives the auto-GOP, so a
+	 * config could silently contradict the resilience name it declares.
+	 * Timing belongs to the preset; anchor cost is the tunable axis. */
+	{
+		int irqp = json_get_int(obj, "intraRefreshQp",
+			(int)v->intra_refresh_qp);
+		if (irqp < 0)
+			irqp = 0;
+		if (irqp > 51)
+			irqp = 51;
+		v->intra_refresh_qp = (uint8_t)irqp;
 	}
 
 	/* zoom_pct is derived from the framing preset (below) — no longer
@@ -1404,6 +1405,7 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
 	pp_field_uint(p,   2, "sliceCount",     cfg->video0.slice_count,     0);
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
+	pp_field_uint(p,   2, "intraRefreshQp", cfg->video0.intra_refresh_qp, 0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
 	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              0);
 	pp_field_string(p, 2, "framing",           cfg->video0.framing,             0);
@@ -1659,6 +1661,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
 		cJSON_AddNumberToObject(vid, "sliceCount", cfg->video0.slice_count);
 		cJSON_AddStringToObject(vid, "resilience", cfg->video0.resilience);
+		cJSON_AddNumberToObject(vid, "intraRefreshQp",
+			cfg->video0.intra_refresh_qp);
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);
 		cJSON_AddStringToObject(vid, "framing", cfg->video0.framing);

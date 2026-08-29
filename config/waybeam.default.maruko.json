@@ -35,6 +35,7 @@
     "sceneHoldoff": 2,
     "sliceCount": 1,
     "resilience": "off",
+    "intraRefreshQp": 0,
     "zoomX": 0.5,
     "zoomY": 0.5,
     "framing": "off"
