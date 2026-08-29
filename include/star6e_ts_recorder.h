@@ -141,7 +141,10 @@ static inline int star6e_record_wants_frame(const Star6eTsRecorderState *ts,
  *  still grow unbounded, which is the defect this feature exists to fix. */
 #define TS_RECORDER_MAX_IDR_REQUESTS 8
 
-/* Stack for any thread that calls star6e_ts_recorder_write_stream().
+/* Stack for any thread that drains a VENC channel straight into the TS
+ * recorder: star6e_ts_recorder_write_stream() on Star6E, and its per-backend
+ * twin maruko_ts_recorder_write_stream() on Maruko (the Star6E adapter itself
+ * is compiled out there, but carries the identical buffer).
  *
  * That path holds nal_buf[512 KB] and then calls write_video(), which holds
  * ts_buf[3000 * 188] = 551 KB — both live at once, ~1.06 MB.  That is why it

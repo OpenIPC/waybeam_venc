@@ -15,7 +15,11 @@ large control surface.
 - Linear 1920x1080 modes at 30/60 fps RAW12 and 90/100 fps RAW10 are accepted
   (see "Sensor modes" below — the table in `src/cv610_modes.c` is the only
   place they are written down).
-- H.265 CBR, GOP, and I/P QP delta come from the existing `VencConfig` fields.
+- H.265 CBR and GOP come from the existing `VencConfig` fields. `video0.qpDelta`
+  is **not** among them: CV610's rate control stores every I-frame input and
+  then ignores it, so the field is not advertised for this backend and
+  `normal_p.ip_qp_delta` is left at 0. The I-frame lever here is
+  `video0.intraRefreshQp`.
 - Shared resilience presets drive row GDR and reference cadence with strict
   vendor readback; frame-SHM carries GDR/ENHANCE metadata and copied droppable
   NALs are marked TRAIL_N.
@@ -25,7 +29,7 @@ large control surface.
 - `frame-shm://` publishes the VFRM v2 whole-frame contract (ring header
   version 2 since 0.69.0; consumers must be rebuilt to match).
 - The shared HTTP/WebUI API advertises a CV610-specific capability mask and
-  applies bitrate, GOP, I/P QP delta, RTP payload size, and IDR requests live.
+  applies bitrate, GOP, RTP payload size, and IDR requests live.
 - Debug OSD reuses the shared palette, font, primitive rasterizer, panel, and
   CPU sampler through a CV610 CLUT4 hardware-region adapter.
 - Optional audio preserves the standalone streamer's verified inner-ACODEC ->

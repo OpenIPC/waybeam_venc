@@ -295,9 +295,12 @@ static int cv610_apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
 	/* I-frames get the same CEILING -- raising only the P bound leaves the
 	 * I-frame free to blow the budget on its own, which in a noisy scene is
 	 * where the biggest frames come from.  Their FLOOR is deliberately left
-	 * alone: video0.qp_delta biases I-frames below the P QP (this craft ships
-	 * -4), and an I-frame floor would silently cancel it.  Star6E's
-	 * apply_qp_bounds() touches only the P bounds for the same reason. */
+	 * alone, so that an I-frame floor cannot silently cancel an I-frame bias.
+	 * (video0.qp_delta is not offered on this backend and is never written to
+	 * the encoder -- CV610's rate control stores every I-frame input and then
+	 * ignores it -- so the bias in question is whatever the driver applies.)
+	 * Star6E's apply_qp_bounds() touches only the P bounds for the same
+	 * reason. */
 	param.h265_cbr_param.max_i_qp = max_qp ? max_qp : g_cv610_qp_defaults.max_i_qp;
 
 	/* The API validator only compares min against max when BOTH are non-zero,

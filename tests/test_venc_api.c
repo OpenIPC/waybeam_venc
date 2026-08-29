@@ -1819,16 +1819,17 @@ static int test_resilience_preset_preserves_intra_refresh_qp(void)
 		cfg.video0.intra_refresh_qp == 44);
 	venc_api_clear_reinit();
 
-	/* Control: no override set, so the preset default (0) must stand --
-	 * the preserve must not invent a value the operator never chose. */
-	venc_config_defaults(&cfg);
-	reset_api_cb_state();
-
-	CHECK("ir_qp control rc",
+	/* The preserve must not make the field STICKY: an explicit 0 still
+	 * means "use the preset's default", so an operator can undo their own
+	 * override.  (A bare "no override set" case would be a tautology --
+	 * defaults already leave it 0 and both the fixed and unfixed code
+	 * leave it 0 through a preset change.) */
+	CHECK("ir_qp explicit reset rc",
 		apply_set_query_http(&cfg, "cv610", &cb,
-			"video0.resilience=racing", &status, response,
+			"video0.intraRefreshQp=0", &status, response,
 			sizeof(response)) == 0);
-	CHECK("ir_qp control stays preset default",
+	CHECK("ir_qp explicit reset status", status == 200);
+	CHECK("ir_qp explicit reset clears the override",
 		cfg.video0.intra_refresh_qp == 0);
 	venc_api_clear_reinit();
 
@@ -1843,6 +1844,11 @@ static int test_resilience_preset_preserves_intra_refresh_qp(void)
 	CHECK("ir_qp out of range rejected", status == 409);
 	CHECK("ir_qp out of range not committed",
 		cfg.video0.intra_refresh_qp == 0);
+	/* Correct today only because request_reinit() runs after validation, so
+	 * a 409 stages nothing.  Clear it anyway: if the range check ever
+	 * regresses, a leaked g_reinit turns one failure into a cascade through
+	 * every test that follows. */
+	venc_api_clear_reinit();
 
 	return failures;
 }

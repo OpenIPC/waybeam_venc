@@ -610,7 +610,7 @@ const TOOLTIPS = {
 
 'video0.gopSize':'GOP interval in seconds. 0 = all-intra (every frame is keyframe). Applied live',
 
-'video0.qpDelta':'I/P frame QP delta (-12 to +12). Negative = better I-frame quality. Applied live',
+'video0.qpDelta':'I/P frame QP delta (-12 to +12). Negative = SMALLER I-frames (raises I-frame QP relative to P); rate is unchanged. Not offered on CV610. Applied live',
 
 'video0.sceneThreshold':'Scene-change IDR trigger threshold as ratio x100. 0 = off, 150 = 1.5x spike. Requires restart',
 

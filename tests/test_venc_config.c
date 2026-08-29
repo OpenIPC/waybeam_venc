@@ -894,6 +894,23 @@ static int test_sample_config_file(void)
 	if (ret != 0) return failures;
 
 	CHECK("sample_fps_30", cfg.video0.fps == 60);
+	{
+		/* The shipped JSON and the compiled seed must agree on every
+		 * field the JSON states.  They silently diverged on qpDelta
+		 * (seed -4, JSON -12), so a config that OMITTED the key got a
+		 * different value from one that shipped it, and
+		 * GET /api/v1/defaults reverted crafts to the seed.  Comparing
+		 * against a fresh defaults struct catches the next such split
+		 * instead of restating a constant. */
+		VencConfig seeded;
+		venc_config_defaults(&seeded);
+		CHECK("sample_qp_delta_matches_seed",
+			cfg.video0.qp_delta == seeded.video0.qp_delta);
+		CHECK("sample_bitrate_matches_seed",
+			cfg.video0.bitrate == seeded.video0.bitrate);
+		CHECK("sample_web_port_matches_seed",
+			cfg.system.web_port == seeded.system.web_port);
+	}
 	CHECK("sample_enabled", cfg.outgoing.enabled == false);
 	CHECK("sample_server", strcmp(cfg.outgoing.server, "") == 0);
 	CHECK("sample_stream_mode", strcmp(cfg.outgoing.stream_mode, "rtp") == 0);

@@ -188,8 +188,9 @@ int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
 
 /* Abort a partially written ring slot because the access unit does not fit.
  *
- * oversize_drops -- mirrored into the ring header's other_drops -- is the
- * machine-readable record, but until now nothing was logged, so the frame
+ * The drop is counted -- stats.oversize_drops, and separately mirrored into
+ * the ring header's other_drops by venc_frame_ring_note_other_drop() -- but
+ * until now nothing was logged, so the frame
  * simply vanished: 0.73.0 removed the frame-size caps that were supposed to
  * prevent it, and ring v2 removed the recovery IDR that used to heal the
  * chain afterwards.
@@ -206,8 +207,9 @@ static void star6e_output_abort_oversize(Star6eOutput *output)
 	output->oversize_warned = 1;
 	fprintf(stderr,
 		"WARN: Star6E access unit exceeds the frame-shm slot "
-		"(%u bytes); dropping the whole frame\n",
-		(unsigned)output->frame_ring->slot_data_size);
+		"(%u bytes of payload); dropping the whole frame\n",
+		(unsigned)(output->frame_ring->slot_data_size -
+			VENC_FRAME_META_SIZE));
 }
 
 static uint16_t star6e_read_be16(const uint8_t *data)

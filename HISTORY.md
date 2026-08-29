@@ -51,6 +51,10 @@ plus the documentation that contradicted the code. `contract_version` stays
   VENC/VPSS stop below it — leaking the kernel-state channels and binds that
   make the next start fail, and wedging the SoC when the init script rmmods
   MPP underneath. Now uses the same 250 ms bounded stop as every other path.
+  Note this narrows the window rather than closing it: `stop_bounded()` still
+  ends in an unconditional join, so the access unit already in the sink's hands
+  can still block on a medium that never completes. Bounding the whole backlog
+  is the part that was in venc's gift.
 
 - **Star6E rejects `min_qp > max_qp` instead of writing it.** The API
   validator only compares the two when *both* are non-zero, so a
@@ -116,6 +120,34 @@ plus the documentation that contradicted the code. `contract_version` stays
   file, so the flag being set one statement early left a window where a stop
   would `fdatasync(0)`/`close(0)` — closing STDIN. Unreachable today, but the
   flag means "the things I guard are initialised" and must not lie.
+
+- **Star6E gained the two guards its siblings already had.** A refused
+  cold-boot QP-bounds apply is now reported instead of discarded (it refuses on
+  a VBR/AVBR `rcMode`, so the craft flew with no bound and nothing in the log),
+  and `rec_locks_ready` is published after both recorders are initialised
+  rather than ~45 lines earlier — `venc_api_register()` and the record HTTP
+  control were being published inside that window, where a calloc'd recorder's
+  `fd == 0` reads as an open file and `GET /api/v1/record/status` would report
+  `active:1` on a recording that does not exist.
+
+- **Maruko `record.mode=dual` starts its file on a keyframe.** The dual
+  bail-out skipped the start IDR on the grounds that chn 1 asks for its own —
+  true on Star6E, where the drain thread does it, but Maruko has no such path
+  and its HTTP record controls are gated `!ctx->dual`, so nothing asked at all.
+  On a GDR craft that meant a recording with no IRAP anywhere in it. The
+  request is now issued on chn 1, the channel that actually feeds the file.
+
+- **A re-queued rotation request cannot outlive what it was for.** Now that a
+  coalesced ask is re-queued rather than dropped, one can still be in flight
+  when the IRAP arrives or the recording stops, so both sites clear the pending
+  flag — otherwise it would keyframe the live channel for a rotation that
+  already happened, or fire into the next recording.
+
+- **The dual-thread stack is raised, never lowered.** The explicit 2 MB is now
+  applied only when the platform default is smaller, so musl's 128 KB comes up
+  while Star6E keeps glibc's 8 MB — that thread also runs SDK entry points
+  whose stack use is opaque, and there was nothing to gain by reducing a
+  platform that was already safe.
 
 - **Documentation corrected against the code.** The field table claimed
   `min_qp`/`max_qp` were "Star6E + CV610 only" nine lines above a support

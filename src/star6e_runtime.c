@@ -539,11 +539,24 @@ static void mirror_record_sink(void *opaque, const uint8_t *au, size_t len,
  * rec_locks_ready survives because init and destroy live in different
  * runtime callbacks: teardown after a failed bring-up must not destroy a
  * mutex that was never initialised. */
+/* Only the mutex.  rec_locks_ready is NOT set here: it means "the things I
+ * guard are initialised", and on this backend the recorders are initialised
+ * ~45 lines later while venc_api_register() and
+ * venc_api_set_record_http_control_supported() publish the HTTP surface in
+ * between.  A calloc'd recorder has fd == 0, which star6e_recorder_is_active()
+ * reads as an open file, so a GET /api/v1/record/status landing in that window
+ * would report active:1 on a recording that does not exist.  Set the flag
+ * after the recorders instead -- see mirror_record_locks_ready(). */
 static void mirror_record_locks_init(Star6ePipelineState *ps)
 {
 	if (ps->rec_locks_ready)
 		return;
 	pthread_mutex_init(&ps->rec_writer_lock, NULL);
+}
+
+/* Publish the guard once both recorders are initialised. */
+static void mirror_record_locks_ready(Star6ePipelineState *ps)
+{
 	ps->rec_locks_ready = 1;
 }
 
@@ -636,9 +649,9 @@ static void mirror_record_open(Star6ePipelineState *ps, const VencConfig *vcfg,
 	 * — and, worse, would falsify the invariant the producer gate rests on
 	 * ("the handle is non-NULL exactly while a mirror recording runs").  The
 	 * IDR is skipped for the same reason: runtime_request_idr() names ch0,
-	 * and firing it here would inject a keyframe into the LIVE stream and
-	 * re-arm the rate limiter so ch1's own request is swallowed, while doing
-	 * nothing for the recording.  That is the trap named in
+	 * and firing it here would inject a keyframe into the LIVE stream while
+	 * doing nothing for the recording (the rate limiter is per-channel, so
+	 * it cannot swallow ch1's own request).  That is the trap named in
 	 * include/star6e_ts_recorder.h — a shared hook cannot name the right
 	 * channel.  ch1 requests its own on its start path. */
 	if (ps->dual)
@@ -1069,9 +1082,17 @@ static void dual_rec_thread_start(Star6eDualVenc *d)
 	 * is glibc so its 8 MB default already covers it; set it anyway so the
 	 * requirement travels with the code path rather than with the libc. */
 	have_attr = pthread_attr_init(&attr) == 0;
-	if (have_attr)
-		(void)pthread_attr_setstacksize(&attr,
-			STAR6E_TS_RECORDER_STREAM_STACK_BYTES);
+	if (have_attr) {
+		size_t cur = 0;
+		/* RAISE only.  musl's 128 KB default must come up; glibc's 8 MB
+		 * must not come down -- this thread also runs SDK entry points
+		 * whose stack use is opaque, and lowering a platform that was
+		 * already safe buys nothing. */
+		if (pthread_attr_getstacksize(&attr, &cur) == 0 &&
+		    cur < STAR6E_TS_RECORDER_STREAM_STACK_BYTES)
+			(void)pthread_attr_setstacksize(&attr,
+				STAR6E_TS_RECORDER_STREAM_STACK_BYTES);
+	}
 	if (pthread_create(&d->rec_thread, have_attr ? &attr : NULL,
 			dual_rec_thread_fn, d) != 0) {
 		if (have_attr)
@@ -1120,9 +1141,17 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	}
 	if (vcfg->video0.min_qp > 0 || vcfg->video0.max_qp > 0) {
 		const VencApplyCallbacks *cb = star6e_controls_callbacks();
-		if (cb->apply_qp_bounds)
-			cb->apply_qp_bounds(vcfg->video0.min_qp,
-				vcfg->video0.max_qp);
+		/* Not (void): apply_qp_bounds() refuses on a VBR/AVBR rcMode and
+		 * on an inverted pair, and a rejected cold-boot apply would
+		 * otherwise leave the operator booting with no QP bound and no
+		 * indication.  Same reporting as Maruko and CV610. */
+		if (cb->apply_qp_bounds &&
+		    cb->apply_qp_bounds(vcfg->video0.min_qp,
+			    vcfg->video0.max_qp) != 0)
+			fprintf(stderr, "WARN: qpBounds from config not applied "
+				"(min=%u max=%u)\n",
+				(unsigned)vcfg->video0.min_qp,
+				(unsigned)vcfg->video0.max_qp);
 	}
 
 	if (!ps->output_enabled) {
@@ -1164,6 +1193,12 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		ps->ts_recorder.max_seconds = vcfg->record.max_seconds;
 	if (vcfg->record.max_mb > 0)
 		ps->ts_recorder.max_bytes = (uint64_t)vcfg->record.max_mb * 1024 * 1024;
+
+	/* Both recorders now hold fd == -1, so record/status can no longer read
+	 * a calloc'd fd == 0 as an open file, and a stop can no longer close
+	 * STDIN.  Published here rather than beside the mutex init for that
+	 * reason -- see mirror_record_locks_init(). */
+	mirror_record_locks_ready(ps);
 
 	/* Start dual VENC if mode is "dual" or "dual-stream".
 	 *

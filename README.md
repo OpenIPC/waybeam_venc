@@ -245,7 +245,7 @@ omitted fields keep their compiled-in defaults.
 
 ```json
 {
-  "system":   { "webPort": 80, "overclockLevel": 0, "verbose": false },
+  "system":   { "webPort": 80, "overclockLevel": 1, "verbose": false },
   "sensor":   { "index": -1, "mode": -1 },
   "isp":      {
     "sensorBin": "",
@@ -256,7 +256,7 @@ omitted fields keep their compiled-in defaults.
   },
   "image":    { "mirror": false, "flip": false, "rotate": 0 },
   "video0":   {
-    "rcMode": "cbr", "fps": 30,
+    "rcMode": "cbr", "fps": 60,
     "bitrate": 8192, "gopSize": 1.0,
     "qpDelta": -12,
     "sceneThreshold": 0, "sceneHoldoff": 2,
@@ -272,11 +272,11 @@ omitted fields keep their compiled-in defaults.
   },
   "fpv":      {
     "roiEnabled": true, "roiQp": 0, "roiSteps": 2,
-    "roiCenter": 0.25, "noiseLevel": 0
+    "roiCenter": 0.4, "noiseLevel": 0
   },
   "audio":    {
-    "enabled": false, "sampleRate": 16000, "channels": 1,
-    "codec": "g711a", "volume": 80, "mute": false
+    "enabled": false, "sampleRate": 48000, "channels": 1,
+    "codec": "opus", "volume": 80, "mute": false
   },
   "imu":      {
     "enabled": false, "i2cDevice": "/dev/i2c-1", "i2cAddr": "0x68",
@@ -797,7 +797,14 @@ ignores the I-side ones.
 so it costs no extra encode pass. It is exposed as **`video0.intraRefreshQp`**
 (restart-only), the per-field override `intra_refresh_compute()` already
 consumed as `override_qp` on all three backends; `0` keeps the resilience
-preset's default (fast 36 / balanced 32 / robust 28).
+preset's default (fast 36 / balanced 32 / robust 28). Valid range is `0..51`,
+enforced by both the config loader and `/api/v1/set`.
+
+A non-zero value is an explicit operator override and **survives a
+`video0.resilience` change**: applying a preset would otherwise reset it to the
+preset default, silently discarding the setting with a `200` and no log entry.
+To go back to the preset's own anchor, set `video0.intraRefreshQp=0`
+explicitly.
 
 **It is one register, and the resilience preset owns it too.** On a GDR craft
 this same value sets the recovery-anchor quality in every P-frame *and* the

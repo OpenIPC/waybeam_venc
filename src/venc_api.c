@@ -1353,6 +1353,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.qp_delta",
 		"video0.min_qp",
 		"video0.max_qp",
+		"video0.intra_refresh_qp",
 		"video0.size",
 		"video0.scene_holdoff",
 		"video0.slice_count",

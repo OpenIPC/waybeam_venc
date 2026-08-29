@@ -3388,9 +3388,17 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	 * under record.mode=dual, whose ~1.06 MB of automatic buffers overflows
 	 * musl's 128 KB pthread default — and Maruko IS a musl target. */
 	have_attr = pthread_attr_init(&thr_attr) == 0;
-	if (have_attr)
-		(void)pthread_attr_setstacksize(&thr_attr,
-			STAR6E_TS_RECORDER_STREAM_STACK_BYTES);
+	if (have_attr) {
+		size_t cur = 0;
+		/* RAISE only.  musl's 128 KB default must come up; glibc's 8 MB
+		 * must not come down -- this thread also runs SDK entry points
+		 * whose stack use is opaque, and lowering a platform that was
+		 * already safe buys nothing. */
+		if (pthread_attr_getstacksize(&thr_attr, &cur) == 0 &&
+		    cur < STAR6E_TS_RECORDER_STREAM_STACK_BYTES)
+			(void)pthread_attr_setstacksize(&thr_attr,
+				STAR6E_TS_RECORDER_STREAM_STACK_BYTES);
+	}
 	if (pthread_create(&d->thread, have_attr ? &thr_attr : NULL,
 			maruko_dual_stream_thread, d) != 0) {
 		if (have_attr)
@@ -4145,13 +4153,22 @@ static int mk_mirror_record_open(MarukoBackendContext *ctx, const char *dir)
 	 * whole session.  The start IDR is skipped for the same reason:
 	 * maruko_recorder_start_idr() names ctx->venc_channel, i.e. chn 0, the
 	 * LIVE stream, so firing it here would inject a keyframe into the live
-	 * path and re-arm the limiter so chn 1's own request is swallowed,
-	 * while doing nothing for the recording.  That is the trap named in
+	 * path while doing nothing for the recording.  That is the trap named in
 	 * include/star6e_ts_recorder.h — a shared hook cannot name the right
-	 * channel.  Same guard as star6e_runtime.c's mirror_record_open();
-	 * chn 1 requests its own on its start path. */
-	if (ctx->dual)
+	 * channel.  Same guard as star6e_runtime.c's mirror_record_open().
+	 *
+	 * Unlike Star6E, Maruko has no separate chn-1 start path to issue the
+	 * keyframe (star6e_runtime.c's dual_rec_thread_fn does it there), and
+	 * the HTTP record controls are gated !ctx->dual — so this is the only
+	 * place that can ask.  Forced, not rate-limited: a GDR craft emits no
+	 * periodic IDR, so a request the limiter coalesces away yields a file
+	 * with no IRAP anywhere in it. */
+	if (ctx->dual) {
+		idr_rate_limit_force(ctx->dual->channel);
+		(void)maruko_mi_venc_request_idr(ctx->venc_device,
+			ctx->dual->channel, 1);
 		return 1;
+	}
 
 	/* After the file is open, so the sink never sees a closed recorder.
 	 *

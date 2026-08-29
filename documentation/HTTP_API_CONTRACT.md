@@ -236,7 +236,10 @@ Absent `routes` means an older build: treat every route as possibly present
 and fall back to calling it.
 
 `supported` is backend-specific. Current Star6E and Maruko builds both expose
-scene detection, intra refresh, and digital zoom fields.
+scene detection and digital zoom fields, and drive intra refresh from the
+`video0.resilience` preset — but `video0.intraRefreshQp` is advertised on
+CV610 only, because the SigmaStar encoder stores it and ignores it. See the
+per-backend table above.
 
 A field MAY carry an optional `ui` object (data-driven field schema): when
 present the dashboard renders a control for it generically — no `dashboard.html`
