@@ -32,8 +32,9 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
 > release tarball and repository are all named `waybeam`. The repository
 > was renamed from `waybeam_venc`; GitHub redirects the old URL, so
 > existing clones, forks and remotes keep working without a change.
-> The old name still appears in historical documents and in a few
-> internal test paths.
+> The old name still appears in historical documents, in a few internal
+> test paths, and in the dashboard's page title and exported config
+> filename.
 
 ## Features
 
