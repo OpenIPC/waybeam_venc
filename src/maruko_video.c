@@ -168,6 +168,14 @@ int maruko_video_reject_incomplete_access_unit(const i6c_venc_strm *stream,
 				"WARN: Maruko packetInfo table is incomplete "
 				"or invalid; dropping whole access unit\n");
 		}
+		/* Transport-independent, as on Star6E: this runs ahead of the
+		 * frame_ring/RTP branch.  Skip only the droppable SVC-T top
+		 * layer, which breaks no reference chain. */
+		if (output->request_idr &&
+		    !(output->svct_active &&
+		      stream->h265Info.refType ==
+			      MARUKO_REFTYPE_ENHANCE_P_NOTFORREF))
+			output->request_idr(output->idr_ctx);
 	}
 	return 1;
 }

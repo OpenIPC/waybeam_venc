@@ -61,6 +61,11 @@ static void mk_mirror_record_close(MarukoBackendContext *ctx, unsigned grace_ms)
 static void mk_mirror_record_locks_init(MarukoBackendContext *ctx);
 static void maruko_recorder_start_idr(MarukoBackendContext *ctx);
 
+/* Rate-limited forced IDR — defined next to the scene detector that was its
+ * first caller, and also wired as MarukoOutput::request_idr in
+ * bind_maruko_pipeline(). */
+static void maruko_scene_request_idr(void *ctx_ptr);
+
 /* Grace for a mid-run record/stop.  Waiting out a stalled disk on the encode
  * loop would put the stall straight back on the live video path, which is the
  * whole thing this writer removes; losing the tail of a recording is the
@@ -2861,6 +2866,12 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			return -1;
 	}
 
+	/* After the init above, whose reset would clear it.  Same
+	 * rate-limited primitive the scene detector uses, so both producers
+	 * of forced IDRs coalesce through one 100 ms window. */
+	ctx->output.request_idr = maruko_scene_request_idr;
+	ctx->output.idr_ctx = ctx;
+
 	return 0;
 }
 
@@ -4099,20 +4110,36 @@ static int mk_mirror_record_open(MarukoBackendContext *ctx, const char *dir)
 		ctx->cfg.record.format, dir, ctx->cfg.record.mode,
 		ctx->audio.rec_ring ? " + audio" : "");
 
+	/* Zeroed BEFORE the dual bail-out below and before the writer starts:
+	 * they describe THIS recording, and mk_mirror_record_close() has
+	 * already harvested the previous writer's totals into them. */
+	pthread_mutex_lock(&ctx->rec_writer_lock);
+	ctx->rec_dropped_frames = 0;
+	ctx->rec_flatten_failures = 0;
+	ctx->rec_writer_peak_depth = 0;
+	pthread_mutex_unlock(&ctx->rec_writer_lock);
+
+	/* Dual: chn 1 feeds the file through its own drain thread, so the
+	 * mirror producer gate (!ctx->dual, see maruko_pipeline_process_stream)
+	 * never feeds this writer — starting one leaves an idle thread for the
+	 * whole session.  The start IDR is skipped for the same reason:
+	 * maruko_recorder_start_idr() names ctx->venc_channel, i.e. chn 0, the
+	 * LIVE stream, so firing it here would inject a keyframe into the live
+	 * path and re-arm the limiter so chn 1's own request is swallowed,
+	 * while doing nothing for the recording.  That is the trap named in
+	 * include/star6e_ts_recorder.h — a shared hook cannot name the right
+	 * channel.  Same guard as star6e_runtime.c's mirror_record_open();
+	 * chn 1 requests its own on its start path. */
+	if (ctx->dual)
+		return 1;
+
 	/* After the file is open, so the sink never sees a closed recorder.
-	 *
-	 * The counters are zeroed in the same critical section: they describe
-	 * THIS recording, and a writer that lives exactly as long as the
-	 * recording has nothing to carry over — which is the point.
 	 *
 	 * A writer that fails to start leaves the recording OPEN: the producer
 	 * gate falls back to writing synchronously when rec_writer is NULL, so
 	 * the recording still lands — on the encode loop, which is what the
 	 * warning is about. */
 	pthread_mutex_lock(&ctx->rec_writer_lock);
-	ctx->rec_dropped_frames = 0;
-	ctx->rec_flatten_failures = 0;
-	ctx->rec_writer_peak_depth = 0;
 	if (venc_rec_writer_start(&ctx->rec_writer, mk_mirror_record_sink,
 			ctx) != 0)
 		fprintf(stderr, "WARNING: [maruko] recorder writer thread did "

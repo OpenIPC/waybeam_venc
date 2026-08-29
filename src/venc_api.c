@@ -2617,9 +2617,19 @@ static int process_restart_set_query(const SetQueryParam *param,
 	 * be applied via lighter machinery (Phase 1+). */
 	if (strcmp(g_cfg->video0.resilience, new_cfg.video0.resilience) != 0) {
 		const VencConfigVideo old_v = g_cfg->video0;
+		/* The preset owns intra_refresh_mode/lines, but NOT
+		 * intra_refresh_qp: that one is an explicit operator override
+		 * where 0 already means "use the preset's default", and on
+		 * CV610 it is the only working I-frame lever.  Letting the
+		 * preset zero it here would discard a value staged in THIS
+		 * request, or one the craft already carried, with a 200 and no
+		 * log — and new_cfg is what gets persisted. */
+		const uint8_t staged_ir_qp = new_cfg.video0.intra_refresh_qp;
 
 		(void)venc_config_apply_resilience_preset(
 			new_cfg.video0.resilience, &new_cfg.video0);
+		if (staged_ir_qp)
+			new_cfg.video0.intra_refresh_qp = staged_ir_qp;
 
 		/* Classify the delta:
 		 *

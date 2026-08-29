@@ -177,7 +177,7 @@ Response `200`:
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
       "video0.slice_count": { "mutability": "restart_required", "supported": true },
       "video0.resilience": { "mutability": "restart_required", "supported": true },
-      "video0.intra_refresh_qp": { "mutability": "restart_required", "supported": true },
+      "video0.intra_refresh_qp": { "mutability": "restart_required", "supported": false },
       "video0.zoom_x": { "mutability": "live", "supported": true },
       "video0.zoom_y": { "mutability": "live", "supported": true },
       "video0.framing": { "mutability": "restart_required", "supported": true },
@@ -472,7 +472,11 @@ Semantics:
 - Range: `-12..12`
 - Mutability: `live`
 - Alias: `video0.qpDelta`
-- Semantics: adjusts I-frame QP relative to P-frame; negative values lower I-frame QP (higher quality keyframes), positive values raise it.
+- Semantics: adjusts I-frame QP relative to P-frame. Note the sign: negative
+  values **raise** the I-frame's QP relative to P, making I-frames **smaller**;
+  positive values lower it, making them larger. Delivered rate does not move —
+  it is a redistribution knob, not a rate knob. See the measured sweep under
+  "Rate-control QP knobs" in `README.md`.
 
 ### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_kalman_q`, `video0.stab_kalman_r`, `video0.stab_recenter_speed`
 

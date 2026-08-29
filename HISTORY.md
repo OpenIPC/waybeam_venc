@@ -1,5 +1,75 @@
 # History
 
+## [0.73.1] - 2026-08-29
+
+Fixes found while reviewing the 0.68.0-0.73.0 range for upstream submission.
+Five behaviour bugs, all regressions or asymmetries introduced in that range,
+plus the documentation that contradicted the code. `contract_version` stays
+**0.22.0** — no field, endpoint or response shape changes.
+
+- **Restored recovery for a malformed access unit on every transport.** The
+  ring-v2 work removed the recovery IDR as self-actuation on the egress, which
+  is right for a ring-full drop — that is congestion, and the rate controller
+  owns it. But the same helper was called from
+  `star6e_output_reject_incomplete_access_unit()`, which runs *before* the
+  transport branch in `star6e_output_send_frame()`. So `udp://` and `unix://`
+  crafts, which have no ring and were never congested, lost recovery too: an
+  invalid SDK packet table dropped the whole picture and left the decoder
+  broken until the next GOP. With `resilience=off` that is seconds. A
+  malformed AU is an encoder fault, not egress pressure — the ring header
+  draws the same line, keeping `other_drops` apart from `full_drops` because
+  it "is not congestion at all and slowing down fixes nothing". Recovery is
+  back on both SigmaStar backends, paced by the shared 100 ms per-channel IDR
+  limiter, and still skipped for the droppable SVC-T top layer. Ring-full
+  recovery stays removed.
+
+- **Maruko `record.mode=dual` no longer keyframes the live stream.**
+  `mk_mirror_record_open()` was missing the `ctx->dual` bail-out its Star6E
+  counterpart has. In dual mode it started a mirror writer that the producer
+  gate (`!ctx->dual`) never feeds — an idle thread for the session — and
+  called `maruko_recorder_start_idr()`, which names `ctx->venc_channel`, i.e.
+  **chn 0, the live stream**, while the file is fed by chn 1. Every dual-mode
+  bring-up injected a keyframe into the live path and re-armed the limiter so
+  chn 1's own request was swallowed. The per-recording counters are now also
+  zeroed before the bail-out, so a failed start no longer reports the previous
+  recording's `droppedFrames`.
+
+- **A `resilience` change no longer discards `video0.intraRefreshQp`.**
+  `venc_config_apply_resilience_preset()` zeroes `intra_refresh_qp`, and the
+  live-set path applied the preset to the staged config *after* the request's
+  own fields had been staged — then persisted it. So
+  `?video0.resilience=balanced&video0.intraRefreshQp=44` returned 200 and
+  applied the preset default, and a craft already carrying an override lost it
+  permanently on any resilience change. On CV610 this is the only working
+  I-frame lever. An explicit non-zero override now survives the preset; `0`
+  still means "use the preset's default".
+
+- **Bounded the CV610 recorder flush at teardown.** `cv610_teardown()` used
+  the unbounded writer stop, which drains the whole queue against the disk
+  before joining. CV610's medium can stall or disappear under load, and this
+  backend has no watchdog, so a stalled queue meant teardown never reached the
+  VENC/VPSS stop below it — leaking the kernel-state channels and binds that
+  make the next start fail, and wedging the SoC when the init script rmmods
+  MPP underneath. Now uses the same 250 ms bounded stop as every other path.
+
+- **Star6E rejects `min_qp > max_qp` instead of writing it.** The API
+  validator only compares the two when *both* are non-zero, so a
+  half-specified pair (`minQp=50`, `maxQp` unset) resolved against the
+  captured driver default and reached `MI_VENC_SetRcParam` as min > max. The
+  SDK accepts that and then behaves erratically. Maruko and CV610 already
+  refused it; Star6E now does too.
+
+- **Documentation corrected against the code.** The field table claimed
+  `min_qp`/`max_qp` were "Star6E + CV610 only" nine lines above a support
+  matrix that correctly said all three (Maruko gained them in 0.73.0). The
+  `/api/v1/version` example still showed 0.72.0/0.21.0. The `qpDelta` sign in
+  `HTTP_API_CONTRACT.md` was stated backwards — it said negative values lower
+  the I-frame QP, when they raise it and shrink the I-frame, which is the
+  whole basis for the `-12` default. The capabilities example advertised
+  `qp_delta` and `intra_refresh_qp` as both supported, which no backend can
+  report. A stale paragraph still described the CV610 `qpDelta` boot rejection
+  that 0.73.0 removed, and the sample config still showed the old `-4`.
+
 ## [0.73.0] - 2026-08-29
 
 `video0.qpDelta` now reaches the encoder on Star6E when QP bounds are also

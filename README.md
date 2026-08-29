@@ -258,7 +258,7 @@ omitted fields keep their compiled-in defaults.
   "video0":   {
     "rcMode": "cbr", "fps": 30,
     "bitrate": 8192, "gopSize": 1.0,
-    "qpDelta": -4,
+    "qpDelta": -12,
     "sceneThreshold": 0, "sceneHoldoff": 2,
     "sliceCount": 1,
     "resilience": "off",
@@ -385,7 +385,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.72.0","backend":"star6e","contract_version":"0.21.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.73.1","backend":"star6e","contract_version":"0.22.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -648,8 +648,8 @@ cleanly; the key is silently ignored.
 | `video0.bitrate` | uint | live | Target bitrate in kbps |
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | I-frame QP relative to P (-12..12). **More negative = smaller I-frames**, at constant bitrate. Inert on CV610 — see below |
-| `video0.min_qp` | uint | live | QP floor, i.e. a **bit ceiling** (0 = driver default). Star6E + CV610 only. Collapses the stream once it binds — see below |
-| `video0.max_qp` | uint | live | QP ceiling, i.e. a **bit floor** (0 = driver default). Star6E + CV610 only. Overshoots the target once it binds — see below |
+| `video0.min_qp` | uint | live | QP floor, i.e. a **bit ceiling** (0 = driver default). All three backends. Collapses the stream once it binds — see below |
+| `video0.max_qp` | uint | live | QP ceiling, i.e. a **bit floor** (0 = driver default). All three backends. Overshoots the target once it binds — see below |
 | `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `stab-fill`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
 | `video0.zoom_x` | double | live | Pan crop center X (`0.0` left to `1.0` right) — applies to `zoom-*` modes only |
 | `video0.zoom_y` | double | live | Pan crop center Y (`0.0` top to `1.0` bottom) — applies to `zoom-*` modes only |
@@ -857,13 +857,12 @@ The super-frame strategy (`ss_mpi_venc_set_super_frame_strategy`,
 which buys IDR size with latency. That is the wrong trade for a per-frame-FEC
 link, so it is recorded here and deliberately not used.
 
-Note also that CV610's `ip_qp_delta` field range is **`[-10, 30]`**, not
-venc's `-12..12`, and `cv610_validation.c` enforces it as a hard config
-error. A `qpDelta: -12` that is perfectly legal on Star6E and Maruko
-therefore stops a CV610 craft from booting at all:
-
-    [venc_config] ERROR: invalid value in /etc/waybeam.json:
-    CV610 video0.qp_delta must be between -10 and 30
+Note that CV610's underlying `ip_qp_delta` field range is **`[-10, 30]`**,
+not venc's `-12..12`. That mismatch used to be a hard config error, so a
+`qpDelta: -12` that is perfectly legal on Star6E and Maruko stopped a CV610
+craft from booting at all. Since `qpDelta` is no longer offered on CV610 and
+is never written to the encoder there, `cv610_validation.c` no longer
+range-checks it and a shared craft config carrying `-12` boots normally.
 
 #### Framing: Stabilization & Digital Zoom
 

@@ -1709,7 +1709,13 @@ static void cv610_teardown(void *opaque)
 	g_cv610_runner = NULL;
 	/* Before cv610_audio_stop(): the tee points into ctx->audio_ring, and
 	 * the recorder is the only reader of it. */
-	cv610_record_stop(ctx, 0);   /* full flush: shutting down anyway */
+	/* BOUNDED, even at teardown.  An unbounded stop drains the whole queue
+	 * against the disk before the join, and CV610's medium can stall or
+	 * vanish under load — a hang here never reaches the VENC/VPSS teardown
+	 * below, which is exactly the leak the comment beneath describes, and
+	 * this backend has no watchdog to cut it short.  Losing the tail of a
+	 * recording on shutdown is the correct trade. */
+	cv610_record_stop(ctx, 1);
 	cv610_audio_stop(ctx->audio);
 	ctx->audio = NULL;
 	/* AFTER cv610_audio_stop(), which is what joins the capture thread.

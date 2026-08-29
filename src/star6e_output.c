@@ -173,6 +173,15 @@ int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
 				"WARN: Star6E packetInfo table is incomplete "
 				"or invalid; dropping whole access unit\n");
 		}
+		/* Transport-independent: this runs before the frame_ring/RTP
+		 * branch in star6e_output_send_frame(), because a malformed AU
+		 * is an encoder fault, not ring pressure.  Skip only the
+		 * droppable SVC-T top layer, which breaks no chain. */
+		if (output->request_idr &&
+		    !(output->svct_active &&
+		      stream->h265Info.refType ==
+			      STAR6E_REFTYPE_ENHANCE_P_NOTFORREF))
+			output->request_idr(output->idr_ctx);
 	}
 	return 1;
 }
