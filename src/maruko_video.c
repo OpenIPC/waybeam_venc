@@ -1,12 +1,14 @@
 #include "maruko_video.h"
 
+#include "venc_rec_writer.h"
+
 #include "h26x_util.h"
 #include "hevc_rtp.h"
-#include "timing.h"
 #include "rtp_packetizer.h"
 #include "rtp_session.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 
@@ -16,6 +18,107 @@ typedef struct {
 	MarukoOutput *output;
 	venc_ring_t *ring;
 } MarukoRtpWriteContext;
+
+/* Two passes — size, then copy — rather than a growing buffer: the sizes are
+ * already known and an IRAP can be megabytes, so a realloc loop would copy it
+ * repeatedly on the encode loop.  Mirrors star6e_output_stream_flatten(). */
+static size_t maruko_stream_payload_bytes(const i6c_venc_strm *stream,
+	int *out_is_idr)
+{
+	size_t total = 0;
+	unsigned int i;
+
+	if (out_is_idr)
+		*out_is_idr = 0;
+	for (i = 0; i < stream->count; ++i) {
+		const i6c_venc_pack *pack = &stream->packet[i];
+		unsigned int k;
+
+		if (!pack->data)
+			continue;
+		if (pack->packNum == 0) {
+			if (pack->length > pack->offset)
+				total += pack->length - pack->offset;
+			continue;
+		}
+		for (k = 0; k < (unsigned int)pack->packNum; ++k) {
+			unsigned int off = pack->packetInfo[k].offset;
+			unsigned int len = pack->packetInfo[k].length;
+			unsigned int nalu;
+
+			if (len == 0 || off >= pack->length ||
+			    len > (pack->length - off))
+				continue;
+			nalu = (unsigned int)pack->packetInfo[k].packType.h265Nalu;
+			if ((nalu == 19 || nalu == 20) && out_is_idr)
+				*out_is_idr = 1;
+			total += len;
+		}
+	}
+	return total;
+}
+
+uint8_t *maruko_video_stream_flatten(const i6c_venc_strm *stream,
+	size_t *out_len, int *out_is_idr)
+{
+	uint8_t *buf;
+	size_t total;
+	size_t off_out = 0;
+	unsigned int i;
+	int is_idr = 0;
+
+	if (out_len)
+		*out_len = 0;
+	if (out_is_idr)
+		*out_is_idr = 0;
+	if (!maruko_video_stream_packet_info_complete(stream))
+		return NULL;
+
+	total = maruko_stream_payload_bytes(stream, &is_idr);
+	/* An access unit larger than the whole queue can never be recorded:
+	 * push() would reject it at the cap and free it again.  Refusing here
+	 * skips a multi-megabyte malloc+memcpy that exists only to be thrown
+	 * away — and on a 89 MB SoC that allocation is not free. */
+	if (total == 0 || total > VENC_REC_WRITER_MAX_BYTES)
+		return NULL;
+	buf = malloc(total);
+	if (!buf)
+		return NULL;
+
+	for (i = 0; i < stream->count; ++i) {
+		const i6c_venc_pack *pack = &stream->packet[i];
+		unsigned int k;
+
+		if (!pack->data)
+			continue;
+		if (pack->packNum == 0) {
+			if (pack->length > pack->offset) {
+				size_t len = pack->length - pack->offset;
+
+				memcpy(buf + off_out, pack->data + pack->offset,
+					len);
+				off_out += len;
+			}
+			continue;
+		}
+		for (k = 0; k < (unsigned int)pack->packNum; ++k) {
+			unsigned int off = pack->packetInfo[k].offset;
+			unsigned int len = pack->packetInfo[k].length;
+
+			if (len == 0 || off >= pack->length ||
+			    len > (pack->length - off))
+				continue;
+			memcpy(buf + off_out, pack->data + off, len);
+			off_out += len;
+		}
+	}
+
+	if (out_len)
+		*out_len = off_out;
+	if (out_is_idr)
+		*out_is_idr = is_idr;
+	return buf;
+}
 
 int maruko_video_stream_packet_info_complete(const i6c_venc_strm *stream)
 {
@@ -50,35 +153,30 @@ int maruko_video_stream_packet_info_complete(const i6c_venc_strm *stream)
 	return 1;
 }
 
-static void maruko_recover_dropped_access_unit(const i6c_venc_strm *stream,
-	MarukoOutput *output)
-{
-	uint8_t flags = 0;
-
-	if (!stream || !output)
-		return;
-	if (output->svct_active &&
-	    stream->h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF)
-		flags |= VENC_FRAME_FLAG_ENHANCE;
-	if (venc_frame_drop_breaks_chain(flags) && output->request_idr &&
-	    venc_frame_drop_idr_due(&output->drop_idr_last_us,
-		wb_monotonic_us()) &&
-	    output->request_idr(output->idr_ctx) == 0)
-		output->drop_idr_last_us = 0;
-}
-
 int maruko_video_reject_incomplete_access_unit(const i6c_venc_strm *stream,
 	MarukoOutput *output)
 {
 	if (maruko_video_stream_packet_info_complete(stream))
 		return 0;
-	if (output && !output->trunc_warned) {
-		output->trunc_warned = 1;
-		fprintf(stderr,
-			"WARN: Maruko packetInfo table is incomplete or invalid; "
-			"dropping whole access unit\n");
+	if (output) {
+		__atomic_add_fetch(&output->bad_au_drops, 1, __ATOMIC_RELAXED);
+		/* No-op off frame-shm — see the Star6E equivalent. */
+		venc_frame_ring_note_other_drop(output->frame_ring);
+		if (!output->trunc_warned) {
+			output->trunc_warned = 1;
+			fprintf(stderr,
+				"WARN: Maruko packetInfo table is incomplete "
+				"or invalid; dropping whole access unit\n");
+		}
+		/* Transport-independent, as on Star6E: this runs ahead of the
+		 * frame_ring/RTP branch.  Skip only the droppable SVC-T top
+		 * layer, which breaks no reference chain. */
+		if (output->request_idr &&
+		    !(output->svct_active &&
+		      stream->h265Info.refType ==
+			      MARUKO_REFTYPE_ENHANCE_P_NOTFORREF))
+			output->request_idr(output->idr_ctx);
 	}
-	maruko_recover_dropped_access_unit(stream, output);
 	return 1;
 }
 
@@ -334,6 +432,32 @@ void maruko_video_init_rtp_state(MarukoRtpState *rtp,
 	rtp_session_init(rtp, rtp_session_payload_type(codec), sensor_fps);
 }
 
+/* Abort a partially written ring slot because the access unit does not fit.
+ *
+ * The drop is counted -- stats.oversize_drops, and separately mirrored into
+ * the ring header's other_drops by venc_frame_ring_note_other_drop() -- but
+ * until now nothing was logged, so the frame
+ * simply vanished: 0.73.0 removed the frame-size caps that were supposed to
+ * prevent it, and ring v2 removed the recovery IDR that used to heal the
+ * chain afterwards.
+ *
+ * Deliberately does NOT request an IDR.  An access unit that overflows the
+ * slot does so because the craft's bitrate genuinely exceeds it, which
+ * repeats every GOP -- asking each time would be exactly the automatic
+ * keyframing ring v2 removed. */
+static void maruko_video_abort_oversize(MarukoOutput *output)
+{
+	venc_frame_ring_abort_write(output->frame_ring);
+	if (output->oversize_warned)
+		return;
+	output->oversize_warned = 1;
+	fprintf(stderr,
+		"WARN: Maruko access unit exceeds the frame-shm slot "
+		"(%u bytes of payload); dropping the whole frame\n",
+		(unsigned)(output->frame_ring->slot_data_size -
+			VENC_FRAME_META_SIZE));
+}
+
 static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 	MarukoOutput *output)
 {
@@ -384,18 +508,8 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 	    stream->h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF)
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
-	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0) {
-		if (venc_frame_drop_breaks_chain(meta.flags) &&
-		    output->request_idr &&
-		    venc_frame_drop_idr_due(&output->drop_idr_last_us,
-					    wb_monotonic_us()) &&
-		    output->request_idr(output->idr_ctx) == 0) {
-			/* Swallowed by the shared 100 ms limiter — roll the
-			 * holdoff back so the next drop retries. */
-			output->drop_idr_last_us = 0;
-		}
+	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0)
 		return 0;
-	}
 
 	for (i = 0; i < stream->count; ++i) {
 		const i6c_venc_pack *pack = &stream->packet[i];
@@ -417,9 +531,7 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 
 				if (venc_frame_ring_append(frame_ring,
 				    pack->data + offset, length) != 0) {
-					venc_frame_ring_abort_write(frame_ring);
-					maruko_recover_dropped_access_unit(stream,
-						output);
+					maruko_video_abort_oversize(output);
 					return 0;
 				}
 				total_bytes += length;
@@ -432,8 +544,7 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 
 			if (venc_frame_ring_append(frame_ring,
 			    pack->data + pack->offset, length) != 0) {
-				venc_frame_ring_abort_write(frame_ring);
-				maruko_recover_dropped_access_unit(stream, output);
+				maruko_video_abort_oversize(output);
 				return 0;
 			}
 			total_bytes += length;

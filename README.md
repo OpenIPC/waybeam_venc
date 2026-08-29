@@ -245,7 +245,7 @@ omitted fields keep their compiled-in defaults.
 
 ```json
 {
-  "system":   { "webPort": 80, "overclockLevel": 0, "verbose": false },
+  "system":   { "webPort": 80, "overclockLevel": 1, "verbose": false },
   "sensor":   { "index": -1, "mode": -1 },
   "isp":      {
     "sensorBin": "",
@@ -256,9 +256,9 @@ omitted fields keep their compiled-in defaults.
   },
   "image":    { "mirror": false, "flip": false, "rotate": 0 },
   "video0":   {
-    "rcMode": "cbr", "fps": 30,
+    "rcMode": "cbr", "fps": 60,
     "bitrate": 8192, "gopSize": 1.0,
-    "qpDelta": -4,
+    "qpDelta": -12,
     "sceneThreshold": 0, "sceneHoldoff": 2,
     "sliceCount": 1,
     "resilience": "off",
@@ -272,11 +272,11 @@ omitted fields keep their compiled-in defaults.
   },
   "fpv":      {
     "roiEnabled": true, "roiQp": 0, "roiSteps": 2,
-    "roiCenter": 0.25, "noiseLevel": 0
+    "roiCenter": 0.4, "noiseLevel": 0
   },
   "audio":    {
-    "enabled": false, "sampleRate": 16000, "channels": 1,
-    "codec": "g711a", "volume": 80, "mute": false
+    "enabled": false, "sampleRate": 48000, "channels": 1,
+    "codec": "opus", "volume": 80, "mute": false
   },
   "imu":      {
     "enabled": false, "i2cDevice": "/dev/i2c-1", "i2cAddr": "0x68",
@@ -385,7 +385,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.67.0","backend":"star6e","contract_version":"0.18.5","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.73.3","backend":"star6e","contract_version":"0.22.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -560,8 +560,9 @@ curl http://<device-ip>:<port>/api/v1/audio/status
 #### GET /api/v1/transport/status
 
 Live observability for the active video transport (UDP / Unix / SHM):
-fill percentage, backpressure flag, lifetime drop counters. Used by the
-WebUI status bar and external link controllers.
+fill percentage, backpressure flag, lifetime drop counters, and on
+`frame-shm://` the ring low-water gauge. Consumed by external link
+controllers; the WebUI does not call it.
 
 ```sh
 curl http://<device-ip>:<port>/api/v1/transport/status
@@ -646,7 +647,9 @@ cleanly; the key is silently ignored.
 | `video0.size` | string | restart | Encode resolution: `"auto"` (default, uses sensor native), `"1920x1080"`, `"720p"`, `"1080p"` |
 | `video0.bitrate` | uint | live | Target bitrate in kbps |
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
-| `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |
+| `video0.qp_delta` | int | live | I-frame QP relative to P (-12..12). **More negative = smaller I-frames**, at constant bitrate. Inert on CV610 — see below |
+| `video0.min_qp` | uint | live | QP floor, i.e. a **bit ceiling** (0 = driver default). All three backends. Collapses the stream once it binds — see below |
+| `video0.max_qp` | uint | live | QP ceiling, i.e. a **bit floor** (0 = driver default). All three backends. Overshoots the target once it binds — see below |
 | `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `stab-fill`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
 | `video0.zoom_x` | double | live | Pan crop center X (`0.0` left to `1.0` right) — applies to `zoom-*` modes only |
 | `video0.zoom_y` | double | live | Pan crop center Y (`0.0` top to `1.0` bottom) — applies to `zoom-*` modes only |
@@ -655,6 +658,218 @@ cleanly; the key is silently ignored.
 | `video0.stab_kalman_r` | double | restart | Smoothness (Kalman measurement noise), shared by `stab`/`stab-fill` (`0.1..50.0`; higher = smoother but laggier; preset default 2.0) |
 | `video0.stab_recenter_speed` | uint | restart | `pauseStab` glide-home rate in frames (`0..3600`, `0` = default ramp). Inert during normal stabilization — the Kalman recentres |
 | `video0.pause_stab` | bool | live | Live pause for `stab`/`stab-fill` — glides the stabilized window / floating image back to centre (software ramp, no rebind). Runtime-only (not persisted); boots `false`. No effect under `off`/`zoom-*` |
+
+#### Rate-control QP knobs: `qp_delta`, `min_qp`, `max_qp`
+
+These three steer the CBR rate controller. `qp_delta` is safe and is the
+supported way to bound IDR cost; `min_qp` and `max_qp` each break the rate
+contract outright once they bind. The measured behaviour is recorded here
+because the failure modes are large, silent, and easy to reach by accident.
+
+Figures are device measurements, sizes in bytes, rate measured over the wire.
+Star6E rows: SSC338Q, 1280x720@60, H.265 CBR 19092 kbps, GDR `racing`, five
+forced IDRs per point (GDR emits none on its own). Maruko rows: Infinity6C
+bench, 1280x720@30, CBR 1500 kbps, `resilience: off`, ten periodic IDRs per
+point (none forced). Both benches viewed a near-static scene — see the caveat
+on binding points below.
+
+**`qp_delta` — moves bits between I and P, at constant rate.**
+
+| `qp_delta` | Star6E IRAP | Star6E P | Star6E rate | Maruko IRAP | Maruko P |
+|---|---|---|---|---|---|
+| `+12` | — | — | — | 76607 | 3398 |
+| `+6` | 197974 | 42988 | 19.53 Mbps | — | — |
+| `0` | 65022 | 43382 | 19.50 Mbps | 32096 | 4676 |
+| `-4` | 29429 | 44128 | 19.54 Mbps | 16575 | 5790 |
+| `-8` | 7668 | 43514 | 19.54 Mbps | — | — |
+| `-12` | 3622 | 43823 | 19.51 Mbps | 7739 | 7344 |
+
+Monotonic over a 55x span on Star6E and 9.9x on Maruko, while **delivered
+rate does not move** (19.50-19.54 Mbps across the whole Star6E sweep). It is
+a redistribution knob, not a rate knob: bits taken off the I-frame reappear
+in the P-frames, which is visible on Maruko where IDRs are a large share of
+the budget (P median rises 3398 -> 7344 as I falls 76607 -> 7739).
+
+That property is what makes it the right lever for bounding IDR cost on a
+per-frame-FEC link, and it is why it replaced the frame-size caps, which on
+Star6E were accepted and logged but never imposed a ceiling.
+
+Note the sign: `s32IPQPDelta` is not the I QP offset in the direction most
+people assume. Negative values raise the I-frame's QP relative to P, making
+I-frames **smaller**.
+
+**`min_qp` — a QP floor, therefore a bit ceiling.**
+
+| `min_qp` | 0 (driver default 12) | 20 | 24 | 26 | 28 | 30 | 40 |
+|---|---|---|---|---|---|---|---|
+| rate | 19.58 Mbps | 19.10 | **0.63** | 0.31 | 0.19 | 0.13 | 0.08 |
+
+Below the scene's natural QP it does nothing. At or above it, the encoder can
+no longer spend the budget and **CBR is abandoned**: the stream becomes
+effectively fixed-QP and the rate falls to whatever the scene costs at that
+QP — a 30x drop between 20 and 24 on this bench.
+
+**`max_qp` — a QP ceiling, therefore a bit floor.** Measured against a
+*1000 kbps* target, the regime where it binds:
+
+| `max_qp` | 0 (driver default 48) | 24 | 18 |
+|---|---|---|---|
+| delivered | 1.02 Mbps (on target) | **9.45 Mbps** | **75.03 Mbps** |
+
+Symmetric to `min_qp` and considerably more dangerous: if the encoder needs a
+QP above the ceiling to hit target, it is forced to spend the bits anyway.
+75x over a 1 Mbps target will take a radio link down.
+
+Its legitimate use is the opposite case — a noisy, high-gain scene where the
+encoder saturates its *own* default ceiling and overshoots. That is why CV610
+carries it (measured 3-7x target on the .181 bench with the lights off).
+
+**Binding points are scene- and bitrate-dependent.** The ~21-23 crossover
+above is this bench's static scene at 19 Mbps, not a constant. A moving scene
+needs a higher QP for the same rate, which moves the `min_qp` cliff up and the
+`max_qp` overshoot down. Never port a bound between crafts, scenes or
+bitrates without re-measuring.
+
+**Interaction.** `min_qp`/`max_qp` bound the P/global QP; `qp_delta` sets the
+I-frame offset from it. Star6E writes only the P bounds (`u32MinQp`/
+`u32MaxQp`) and leaves the I-frame bounds at the driver defaults, so the two
+are orthogonal in the healthy regime: across the whole `min_qp` and `max_qp`
+sweeps above, IRAP size stayed at 3.0-4.3 KB, i.e. `qp_delta` kept working
+even where the bounds had destroyed the rate contract. Set `qp_delta` for
+IDR cost; leave both bounds at 0 unless you have measured a specific
+overshoot.
+
+**Backend support** (as reported by `/api/v1/capabilities`):
+
+| Field | Star6E | Maruko | CV610 |
+|---|---|---|---|
+| `video0.qp_delta` | yes | yes | **not offered** |
+| `video0.min_qp` / `max_qp` | yes | yes | yes |
+| `video0.intra_refresh_qp` | **inert, not offered** | **inert, not offered** | yes |
+| `outgoing.sidecar_port` | yes | yes | not implemented |
+
+`video0.intra_refresh_qp` is advertised on CV610 only. It reaches
+`MI_VENC_SetIntraRefresh` on Star6E and Maruko as well, and both log it as
+applied (`intraRefresh: ... qp=10`), but the SigmaStar encoder ignores it —
+swept across a 38-QP span with `qpDelta: 0` so it could not be masked:
+
+| `intraRefreshQp` | 10 | 36 (preset) | 48 |
+|---|---|---|---|
+| Star6E IRAP p50 | 80099 | 79791 | 79566 |
+| Star6E rate (Mbps) | 19.42 | 19.43 | 19.42 |
+| Maruko IRAP p50 | 16466 | 16485 | — |
+
+A consequence worth knowing: `mode_default_qp()`'s per-mode stripe QP —
+36 / 32 / 28, chosen so `robust` gets the cleanest recovery anchor — is
+therefore **inert on the SigmaStar backends** and only takes effect on CV610.
+
+`video0.qp_delta` is **not offered on CV610**: it is absent from the backend's
+supported-field list, and `cv610_validation.c` deliberately does not
+range-check it, so a shared craft config carrying the portable `-12` still
+boots there. The knob cannot be honoured — across `-12`, `-4`, `0`, `+12`,
+applied both live and at channel create, and in both a saturated and an
+unsaturated CBR regime, IDR size held at 16.1-20.3 KB (<=1.2% spread) where
+Star6E spans 9x over the same range. IDR access units were confirmed
+well-formed (`19, 32, 33, 34, 39` — IDR_W_RADL + VPS/SPS/PPS/SEI). CV610's
+I-frame lever is `video0.intra_refresh_qp`, below.
+
+The cause is not venc's write. Reading the channel back through the SDK shows
+`ip_qp_delta=-4` correctly in force. On CV610 **every rate-control input to
+I-frame size is stored and then ignored**, measured one at a time against the
+live channel:
+
+| Knob | Set to | IRAP median |
+|---|---|---|
+| (baseline) | — | 16042 |
+| `gop_attr.normal_p.ip_qp_delta` | -12 / 0 / +12 | 16245 / 16209 / 16161 |
+| `h265_cbr_param.max_i_proportion` | 5 / 10 / 20 / 40 | 16229 / 16205 / 16395 / 16250 |
+| `h265_cbr_param.min_i_qp` | 30 / 40 | 16079 / 16177 |
+| `h265_cbr_param.max_i_qp` | 20 / 15 | 16098 / 16010 |
+
+The last row is the decisive one: a *hard I-QP ceiling of 15* must bind, and
+the read-back confirms the driver took it (`i_qp=10..15`), yet the IDR did not
+move. `min_qp`/`max_qp` are not inert on CV610 — `max_qp=30` drove a 2.1x
+overshoot (16.4 -> 34.8 Mbps) — so the RC honours the P-side bounds and
+ignores the I-side ones.
+
+**The working lever is the intra-refresh I-frame QP**,
+`ot_venc_intra_refresh.request_i_qp` — a rate-control input, not a re-encode,
+so it costs no extra encode pass. It is exposed as **`video0.intraRefreshQp`**
+(restart-only), the per-field override `intra_refresh_compute()` already
+consumed as `override_qp` on all three backends; `0` keeps the resilience
+preset's default (fast 36 / balanced 32 / robust 28). Valid range is `0..51`,
+enforced by both the config loader and `/api/v1/set`.
+
+A non-zero value is an explicit operator override and **survives a
+`video0.resilience` change**: applying a preset would otherwise reset it to the
+preset default, silently discarding the setting with a `200` and no log entry.
+To go back to the preset's own anchor, set `video0.intraRefreshQp=0`
+explicitly.
+
+**It is one register, and the resilience preset owns it too.** On a GDR craft
+this same value sets the recovery-anchor quality in every P-frame *and* the
+size of a forced IDR — they cannot be separated, so raising it to shrink IDRs
+also coarsens the anchor that GDR recovery depends on. That is why it is
+exposed under its own name rather than driven from `qp_delta`: an earlier
+attempt to map `qp_delta` onto it silently retuned every craft's anchor,
+including `fpv`/`robust` where the anchor matters most. Note also that the
+preset defaults are absolute constants on purpose — a recovery anchor should
+be reliably clean regardless of what the scene is doing, so it deliberately
+does not track the P QP.
+
+There is no matching `intraRefreshLines` override: `lines` is derived from the
+mode's target self-heal window (fast 150 ms / balanced 500 ms / robust
+1000 ms) and also drives the auto-GOP, so exposing it would let a config
+contradict the `resilience` name it declares. Timing belongs to the preset;
+anchor cost is the tunable axis.
+
+Measured on .181, 10 forced IDRs per point, re-programmed live, delivered rate
+constant at 1.49-1.51 Mbps throughout (CBR 1500 kbps):
+
+| `request_i_qp` | 34 | 35 | 36 | 37 | 38 | 40 | 44 | 48 | 51 |
+|---|---|---|---|---|---|---|---|---|---|
+| IRAP median | 22337 | 17871 | 14957 | 13605 | 12435 | 9974 | 7405 | 5669 | 4497 |
+
+Smooth, monotonic and reversible — 36 measured three times across the sweep
+gave 14957 / 14941 / 14888, and a re-program to the *same* value matched an
+untouched do-nothing control (14941), so the call has no effect of its own.
+Like `qp_delta` on the SigmaStar parts this is a redistribution knob: the rate
+does not move, and the P-frame tail grows as the IDR shrinks.
+
+**It has a lower cliff that tracks the bitrate.** Ask for an I-frame QP the
+rate cannot fund and the IDR collapses to a floor instead of growing:
+
+| target | usable floor | at the floor | one step below |
+|---|---|---|---|
+| 1500 kbps | 34 | 22337 | 33 -> 6704, <=28 -> ~4770 |
+| 8000 kbps | 26 | 105018 | 22 -> 6568 |
+
+At 8 Mbps the usable span is 26..51, giving a 10x range (105018 -> 10598 at
+40) — comparable to `qp_delta`'s 9.9x on Maruko. This is the same shape as the
+`min_qp` cliff above: the bound is only real while the encoder can afford it,
+so it must be measured per craft, scene and bitrate rather than ported.
+
+Two constraints on using it. It exists only while intra refresh is enabled,
+i.e. `resilience` != `off` — which is the FPV case, but means it is not a
+general knob. And `ss_mpi_venc_set_debreath_effect`, the other candidate, is
+**mutually exclusive with intra refresh**: it returns `OT_ERR_NOT_PERM` on a
+running channel, succeeds if called between `create_chn` and `start_chn`, and
+then makes `ss_mpi_venc_set_intra_refresh` fail with the same error so venc
+does not start. On a GDR craft you can have intra refresh or debreath, not
+both.
+
+The super-frame strategy (`ss_mpi_venc_set_super_frame_strategy`,
+`i_frame_bits_threshold`) also bounds the IDR — 16395 -> 5040 / 4414 / 4293 at
+12 / 8 / 4 KiB — but it works by re-encoding a frame that came out too large,
+which buys IDR size with latency. That is the wrong trade for a per-frame-FEC
+link, so it is recorded here and deliberately not used.
+
+Note that CV610's underlying `ip_qp_delta` field range is **`[-10, 30]`**,
+not venc's `-12..12`. That mismatch used to be a hard config error, so a
+`qpDelta: -12` that is perfectly legal on Star6E and Maruko stopped a CV610
+craft from booting at all. Since `qpDelta` is no longer offered on CV610 and
+is never written to the encoder there, `cv610_validation.c` no longer
+range-checks it and a shared craft config carrying `-12` boots normally.
 
 #### Framing: Stabilization & Digital Zoom
 
@@ -1092,10 +1307,11 @@ uses a dedicated local UDP audio destination.
 preserved) into a POSIX shared-memory ring, bypassing RTP packetization
 entirely — no RTP state, no `sendmmsg`, no sidecar. It exists so a
 same-host consumer (waybeam-link) can apply per-frame FEC at frame
-boundaries instead of re-fragmenting pre-built RTP packets. The ring is a
-16-slot × 512 KB SPSC region (~8 MB); each slot carries an 8-byte
-`VencFrameMeta` header (`pts`, `codec`, `flags` — `flags` bit 0 marks an
-IDR) followed by the raw frame. On a full ring (consumer stalled or gone)
+boundaries instead of re-fragmenting pre-built RTP packets. The ring is an
+8-slot SPSC region — 384 KB per slot on Star6E and Maruko, 512 KB on CV610;
+each slot carries an 8-byte `VencFrameMeta` header (`pts`, `codec`, `flags`
+— `flags` bit 0 marks an IDR, bit 3 is reserved for the receiver-set
+SALVAGED flag) followed by the raw frame. On a full ring (consumer stalled or gone)
 the encoder drops the frame and keeps running — it never blocks. Like
 `shm://` it is video-only (a nonzero `audioPort` uses a dedicated local
 UDP audio destination) and cannot be switched to/from live (restart

@@ -20,10 +20,13 @@
 #include "rtp_packetizer.h"
 #if !HAVE_BACKEND_CV610
 #include "sensor_select.h"
-#include "star6e_recorder.h"
-#else
-#define RECORDER_DEFAULT_DIR "/mnt/mmcblk0p1"
 #endif
+/* The recorder state machine, its RECORDER_DEFAULT_DIR and the TS mux are
+ * SoC-independent; only the SDK-typed adapters inside are compiled out per
+ * backend.  CV610 used to carry its own copy of the default-dir constant
+ * because it did not link the recorder — two definitions that had to agree
+ * by hand. */
+#include "star6e_recorder.h"
 #include "venc_httpd.h"
 #include "venc_jpeg.h"
 #include "venc_webui.h"
@@ -171,16 +174,6 @@ void venc_api_set_config_path(const char *path)
 	/* Path change invalidates the last-saved cache so the first save to
 	 * the new path is unconditional. */
 	g_last_saved_valid = 0;
-	pthread_mutex_unlock(&g_cfg_mutex);
-}
-
-int venc_api_cfg_trylock(void)
-{
-	return pthread_mutex_trylock(&g_cfg_mutex) == 0 ? 1 : 0;
-}
-
-void venc_api_cfg_unlock(void)
-{
 	pthread_mutex_unlock(&g_cfg_mutex);
 }
 
@@ -451,20 +444,8 @@ static const FieldUi ui_pause_stab = {
 	"framing=off or zoom."
 };
 
-/* UI descriptor for outgoing.shm_throttle — the frame-shm ring-fill bitrate
- * clamp.  Data-driven so the toggle appears without a SECTIONS edit; it is
- * inert on every transport except frame-shm://. */
-static const FieldUi ui_shm_throttle = {
-	"Outgoing", "SHM ring throttle", "toggle", 0, 0, 0, NULL,
-	"frame-shm:// only: clamp the encoder bitrate when the ring backs up, so "
-	"a slow consumer never forces a whole-frame drop (which breaks the H.265 "
-	"reference chain). Never changes video0.bitrate — an external rate "
-	"controller keeps ownership of that. Default: on."
-};
-
-/* UI descriptors for the per-frame size caps (0.45.0).  Rendered as a
- * "Frame size caps" group purely from capabilities — the caps were API-only
- * until now (no static SECTIONS rows). */
+/* UI descriptors for the RC QP bounds.  Rendered purely from capabilities —
+ * these were API-only (no static SECTIONS rows). */
 static const FieldUi ui_min_qp = {
 	"Video", "Min QP", "number", 0, 51, 1, NULL,
 	"RC QP floor. 0 = leave the SDK default. Raising the floor caps quality and saves bitrate; LOWERING it lets CBR actually spend its budget on a simple scene instead of undershooting the target. Applied live."
@@ -473,6 +454,18 @@ static const FieldUi ui_max_qp = {
 	"Video", "Max QP", "number", 0, 51, 1, NULL,
 	"RC QP ceiling. 0 = leave the SDK default. Raising the ceiling lets the encoder compress a scene change hard enough to stay inside the frame budget instead of emitting a burst frame. Applied live."
 };
+static const FieldUi ui_intra_refresh_qp = {
+	"Video", "Intra-refresh QP", "number", 0, 51, 1, NULL,
+	"QP of the GDR intra-refresh stripe — the quality of the recovery "
+	"anchor, and the bitrate it costs. 0 = the resilience preset's default "
+	"(fast 36 / balanced 32 / robust 28; robust runs lowest because lossy "
+	"links want the cleanest anchor). Lower = cleaner anchor, more bits. "
+	"On CV610 this is also the ONLY control that moves I-frame size, so it "
+	"trades forced-IDR size against anchor quality — they are one register. "
+	"Setting it below the scene's natural P QP collapses the I-frame instead "
+	"of growing it. Restart-only; needs resilience != off."
+};
+
 static const FieldUi ui_slice_count = {
 	"Video", "Slices per frame", "number", 1, VENC_SLICE_COUNT_MAX, 1, NULL,
 	"Independent H.265 slices per picture. 1 = off. Multi-slice "
@@ -481,20 +474,6 @@ static const FieldUi ui_slice_count = {
 	"as 1/N. The request is quantized to encoder row geometry; startup logs "
 	"the requested/applied mapping and validation tools report the VCL census. On Star6E, "
 	"1080p delivers only 1,2,3,4,5,6,9,17 and saturates at 17. Restart-only."
-};
-static const FieldUi ui_max_i_bytes = {
-	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
-	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
-	"When either cap is > 0 the RC priority switches to framebits-first so "
-	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
-	"An IDR is requested after each apply. Applied live."
-};
-static const FieldUi ui_max_p_bytes = {
-	"Video", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
-	"Hard per-frame cap on the encoded P-frame size in bytes. 0 = unlimited. "
-	"When either cap is > 0 the RC priority switches to framebits-first so "
-	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
-	"An IDR is requested after each apply. Applied live."
 };
 
 /* UI descriptors for the snapshot subsystem.  The whole section was API-only
@@ -574,8 +553,6 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, bitrate,         FT_UINT,   MUT_LIVE),
 	FIELD(video0, gop_size,        FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
-	FIELD_UI(video0, max_i_bytes,  FT_UINT,   MUT_LIVE, &ui_max_i_bytes),
-	FIELD_UI(video0, max_p_bytes,  FT_UINT,   MUT_LIVE, &ui_max_p_bytes),
 	FIELD_UI(video0, min_qp,       FT_UINT,   MUT_LIVE, &ui_min_qp),
 	FIELD_UI(video0, max_qp,       FT_UINT,   MUT_LIVE, &ui_max_qp),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
@@ -586,7 +563,6 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, allow_unix_encoder_stall, FT_BOOL, MUT_RESTART),
 	FIELD(outgoing, audio_port,        FT_INT,    MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
-	FIELD_UI(outgoing, shm_throttle,   FT_BOOL,   MUT_LIVE, &ui_shm_throttle),
 
 	/* mDNS device beacon — read at boot / re-read on SIGHUP-respawn, so
 	 * all restart-required (no live re-announce path). */
@@ -642,6 +618,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD_UI(video0, slice_count,  FT_UINT,   MUT_RESTART, &ui_slice_count),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
+	FIELD_UI(video0, intra_refresh_qp, FT_UINT8, MUT_RESTART, &ui_intra_refresh_qp),
 	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
 	 * magnitude is part of the framing preset (derived zoom_pct), not a
 	 * settable field. */
@@ -741,10 +718,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.rcMode", "video0.rc_mode" },
 	{ "video0.gopSize", "video0.gop_size" },
 	{ "video0.qpDelta", "video0.qp_delta" },
-	{ "video0.maxIBytes", "video0.max_i_bytes" },
 	{ "video0.minQp", "video0.min_qp" },
 	{ "video0.maxQp", "video0.max_qp" },
-	{ "video0.maxPBytes", "video0.max_p_bytes" },
 	{ "outgoing.maxPayloadSize", "outgoing.max_payload_size" },
 	{ "outgoing.audioPort", "outgoing.audio_port" },
 	{ "fpv.roiEnabled", "fpv.roi_enabled" },
@@ -770,6 +745,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
 	{ "video0.sliceCount", "video0.slice_count" },
+	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
 	{ "video0.stabCropPct", "video0.stab_crop_pct" },
@@ -779,7 +755,6 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.stabAccuracy", "video0.stab_accuracy" },
 	{ "video0.pauseStab", "video0.pause_stab" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
-	{ "outgoing.shmThrottle", "outgoing.shm_throttle" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.allowUnixEncoderStall", "outgoing.allow_unix_encoder_stall" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -884,8 +859,16 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"sensor.index", "sensor.mode",
 			"isp.keep_aspect",
 			"video0.fps", "video0.size",
-			"video0.bitrate", "video0.gop_size", "video0.qp_delta",
+			"video0.bitrate", "video0.gop_size",
 			"video0.slice_count", "video0.resilience",
+			/* video0.qp_delta is deliberately ABSENT.  CV610's CBR rate
+			 * controller stores gop_attr.normal_p.ip_qp_delta and ignores
+			 * it (measured; README), and the register that does move
+			 * I-frame size is intra refresh's request_i_qp, which is the
+			 * GDR recovery anchor owned by the resilience preset.  Driving
+			 * qpDelta into it would silently retune the anchor, so the
+			 * anchor is exposed under its own name instead. */
+			"video0.intra_refresh_qp",
 			/* Read by cv610_apply_qp_bounds(), live and at startup.
 			 * CBR cannot hold its target in a noise-dominated scene
 			 * without room to raise QP. */
@@ -895,6 +878,20 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"outgoing.connected_udp",
 			"outgoing.allow_unix_encoder_stall",
 			"audio.enabled", "audio.mute",
+			/* Snapshot: the JPEG channel is a second bind target on
+			 * the main stream's VPSS output, so it inherits that
+			 * geometry.  snapshot.width/height are deliberately NOT
+			 * listed — nothing reads them here, and advertising a
+			 * field the encoder ignores is what this list exists to
+			 * prevent. */
+			"snapshot.enabled", "snapshot.quality",
+			"snapshot.channel",
+			/* Recording, mirror mode only.  record.bitrate/fps/
+			 * gop_size/server describe a second VENC channel that
+			 * dual and dual-stream would need; those modes are not
+			 * implemented on this backend. */
+			"record.enabled", "record.dir", "record.format",
+			"record.mode", "record.max_seconds", "record.max_mb",
 			"debug.show_osd",
 			"discovery.enabled", "discovery.service_type",
 			"discovery.name", "discovery.bare_alias",
@@ -908,13 +905,27 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 		return 0;
 	}
 
+	/* video0.intra_refresh_qp reaches MI_VENC_SetIntraRefresh on Star6E and
+	 * Maruko and is logged as applied ("intraRefresh: ... qp=10"), but the
+	 * SigmaStar encoder ignores it: sweeping it 10 / 36 / 48 on .232 moved
+	 * IRAP 80099 / 79791 / 79566 and the delivered rate not at all, and
+	 * 0 vs 10 on .233 moved IRAP 16485 / 16466.  A 38-QP span with no effect
+	 * is not a control, so only CV610 -- where it IS the I-frame lever --
+	 * advertises it.  (Which also means mode_default_qp()'s per-mode stripe
+	 * QP is inert on the SigmaStar parts.) */
+	if (backend_name && strcmp(backend_name, "cv610") != 0 &&
+	    strcmp(canonical_key, "video0.intra_refresh_qp") == 0)
+		return 0;
+
 	/* These controls have no Maruko implementation.  Keep them in the shared
 	 * schema so clients can render one dashboard, but advertise them honestly
-	 * and reject writes before they reach a missing callback or route. */
+	 * and reject writes before they reach a missing callback or route.
+	 *
+	 * video0.min_qp/max_qp left this list when maruko_apply_qp_bounds()
+	 * landed; Maruko is the same MI VENC RC as Star6E, so the bounds are
+	 * the same u32MinQp/u32MaxQp write. */
 	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
-	    (strncmp(canonical_key, "qr.", 3) == 0 ||
-	     strcmp(canonical_key, "video0.min_qp") == 0 ||
-	     strcmp(canonical_key, "video0.max_qp") == 0))
+	    strncmp(canonical_key, "qr.", 3) == 0)
 		return 0;
 
 	/* isp.awb_fps paces the Star6E userspace AWB loop (src/star6e_awb.c),
@@ -1275,6 +1286,14 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		    cfg->video0.min_qp > cfg->video0.max_qp)
 			return "video0.min_qp must not exceed max_qp";
 	}
+	/* Same range as min_qp/max_qp beside it.  Without this the FT_UINT8
+	 * parser accepts 0..255, persists it, and echoes it back from GET,
+	 * while the config loader clamps to 51 on the next start -- so the API
+	 * reports a value the encoder will never use. */
+	if (strcmp(key, "video0.intra_refresh_qp") == 0) {
+		if (cfg->video0.intra_refresh_qp > 51)
+			return "video0.intra_refresh_qp must be 0..51";
+	}
 	if (strcmp(key, "snapshot.quality") == 0) {
 		/* JPEG q-factor range.  Backend clamps internally too, but
 		 * the validator gives a clean error response instead of a
@@ -1334,6 +1353,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.qp_delta",
 		"video0.min_qp",
 		"video0.max_qp",
+		"video0.intra_refresh_qp",
 		"video0.size",
 		"video0.scene_holdoff",
 		"video0.slice_count",
@@ -1512,10 +1532,8 @@ typedef enum {
 	LIVE_GROUP_ISP_BIN,
 	LIVE_GROUP_SNAPSHOT_QUALITY,
 	LIVE_GROUP_PAUSE_STAB,
-	LIVE_GROUP_MAX_FRAME_SIZE,
 	LIVE_GROUP_QP_BOUNDS,
 	LIVE_GROUP_DETECT,
-	LIVE_GROUP_SHM_THROTTLE,
 	LIVE_GROUP_QR_WINDOW,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
@@ -1694,9 +1712,6 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_SNAPSHOT_QUALITY;
 	if (strcmp(canonical_key, "video0.pause_stab") == 0)
 		return LIVE_GROUP_PAUSE_STAB;
-	if (strcmp(canonical_key, "video0.max_i_bytes") == 0 ||
-	    strcmp(canonical_key, "video0.max_p_bytes") == 0)
-		return LIVE_GROUP_MAX_FRAME_SIZE;
 	if (strcmp(canonical_key, "video0.min_qp") == 0 ||
 	    strcmp(canonical_key, "video0.max_qp") == 0)
 		return LIVE_GROUP_QP_BOUNDS;
@@ -1706,8 +1721,6 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	    strcmp(canonical_key, "detect.conf_thresh") == 0 ||
 	    strcmp(canonical_key, "detect.nms_iou") == 0)
 		return LIVE_GROUP_DETECT;
-	if (strcmp(canonical_key, "outgoing.shm_throttle") == 0)
-		return LIVE_GROUP_SHM_THROTTLE;
 	if (strcmp(canonical_key, "qr.window_ms") == 0)
 		return LIVE_GROUP_QR_WINDOW;
 
@@ -1751,14 +1764,10 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "snapshot.quality";
 	case LIVE_GROUP_PAUSE_STAB:
 		return "video0.pauseStab";
-	case LIVE_GROUP_MAX_FRAME_SIZE:
-		return "video0.maxIBytes/maxPBytes";
 	case LIVE_GROUP_QP_BOUNDS:
 		return "video0.minQp/maxQp";
 	case LIVE_GROUP_DETECT:
 		return "detect.enabled/model_path/model_id/conf_thresh/nms_iou";
-	case LIVE_GROUP_SHM_THROTTLE:
-		return "outgoing.shmThrottle";
 	case LIVE_GROUP_QR_WINDOW:
 		return "qr.windowMs";
 	default:
@@ -1935,18 +1944,10 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality != NULL;
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab != NULL;
-	case LIVE_GROUP_MAX_FRAME_SIZE:
-		return g_cb->apply_max_frame_size != NULL;
 	case LIVE_GROUP_QP_BOUNDS:
 		return g_cb->apply_qp_bounds != NULL;
 	case LIVE_GROUP_DETECT:
 		return g_cb->apply_detect_reload != NULL;
-	case LIVE_GROUP_SHM_THROTTLE:
-		/* No callback: the clamp loop reads outgoing.shm_throttle from
-		 * the committed config on the pipeline thread every frame, so
-		 * commit_config_locked() *is* the apply.  Supported on every
-		 * backend, and inert on transports other than frame-shm://. */
-		return 1;
 	case LIVE_GROUP_QR_WINDOW:
 		/* No callback: a new scan snapshots qr.window_ms when it opens. */
 		return 1;
@@ -2036,10 +2037,6 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 	case LIVE_GROUP_PAUSE_STAB:
 		dst->video0.pause_stab = src->video0.pause_stab;
 		break;
-	case LIVE_GROUP_MAX_FRAME_SIZE:
-		dst->video0.max_i_bytes = src->video0.max_i_bytes;
-		dst->video0.max_p_bytes = src->video0.max_p_bytes;
-		break;
 	case LIVE_GROUP_QP_BOUNDS:
 		dst->video0.min_qp = src->video0.min_qp;
 		dst->video0.max_qp = src->video0.max_qp;
@@ -2057,9 +2054,6 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		dst->detect.model_id    = src->detect.model_id;
 		dst->detect.conf_thresh = src->detect.conf_thresh;
 		dst->detect.nms_iou     = src->detect.nms_iou;
-		break;
-	case LIVE_GROUP_SHM_THROTTLE:
-		dst->outgoing.shm_throttle = src->outgoing.shm_throttle;
 		break;
 	case LIVE_GROUP_QR_WINDOW:
 		dst->qr.window_ms = src->qr.window_ms;
@@ -2196,9 +2190,6 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality(cfg->snapshot.quality);
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab(cfg->video0.pause_stab);
-	case LIVE_GROUP_MAX_FRAME_SIZE:
-		return g_cb->apply_max_frame_size(cfg->video0.max_i_bytes,
-			cfg->video0.max_p_bytes);
 	case LIVE_GROUP_QP_BOUNDS:
 		/* Backends without RC QP bounds leave the hook NULL. */
 		if (!g_cb->apply_qp_bounds)
@@ -2210,10 +2201,6 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		 * so the backend reads the new model_path/model_id/conf/iou from the
 		 * live config when it performs the swap on the pipeline thread. */
 		return g_cb->apply_detect_reload();
-	case LIVE_GROUP_SHM_THROTTLE:
-		/* Committed above; the pipeline thread picks the new value up on
-		 * its next frame and releases or re-engages the clamp itself. */
-		return 0;
 	case LIVE_GROUP_QR_WINDOW:
 		/* Committed above; the next scan snapshots the new duration. */
 		return 0;
@@ -2639,9 +2626,19 @@ static int process_restart_set_query(const SetQueryParam *param,
 	 * be applied via lighter machinery (Phase 1+). */
 	if (strcmp(g_cfg->video0.resilience, new_cfg.video0.resilience) != 0) {
 		const VencConfigVideo old_v = g_cfg->video0;
+		/* The preset owns intra_refresh_mode/lines, but NOT
+		 * intra_refresh_qp: that one is an explicit operator override
+		 * where 0 already means "use the preset's default", and on
+		 * CV610 it is the only working I-frame lever.  Letting the
+		 * preset zero it here would discard a value staged in THIS
+		 * request, or one the craft already carried, with a 200 and no
+		 * log — and new_cfg is what gets persisted. */
+		const uint8_t staged_ir_qp = new_cfg.video0.intra_refresh_qp;
 
 		(void)venc_config_apply_resilience_preset(
 			new_cfg.video0.resilience, &new_cfg.video0);
+		if (staged_ir_qp)
+			new_cfg.video0.intra_refresh_qp = staged_ir_qp;
 
 		/* Classify the delta:
 		 *
@@ -2931,10 +2928,10 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.18.6\","
+		"\"contract_version\":\"%s\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
-		"}}", VENC_VERSION, g_backend);
+		"}}", VENC_VERSION, VENC_CONTRACT_VERSION, g_backend);
 	return httpd_send_json(fd, 200, buf);
 }
 
@@ -3555,6 +3552,8 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 		"\"bytes\":%llu,"
 		"\"elapsed_ms\":%llu,"
 		"\"segments\":%u,"
+		"\"droppedFrames\":%u,"
+		"\"writerPeakDepth\":%u,"
 		"\"stop_reason\":\"%s\""
 		"}}",
 		st.active ? "true" : "false",
@@ -3564,6 +3563,8 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 		(unsigned long long)st.bytes_written,
 		(unsigned long long)st.elapsed_ms,
 		st.segments,
+		st.dropped_frames,
+		st.writer_peak_depth,
 		st.stop_reason);
 	return httpd_send_json(fd, 200, buf);
 }
@@ -4174,9 +4175,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	g_api_routes_registered = 1;
 	pthread_mutex_unlock(&g_cfg_mutex);
 
-#if !HAVE_BACKEND_CV610
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
-#endif
 #if HAVE_BACKEND_STAR6E
 	r |= venc_httpd_route("GET", "/api/v1/qr/tap.pgm", handle_qr_tap_pgm,
 		backend_ctx);

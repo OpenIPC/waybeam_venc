@@ -18,13 +18,13 @@ static int backend_run_pipeline(const BackendOps *backend, void *ctx)
 	return ret;
 }
 
-int backend_execute(const BackendOps *backend)
+int backend_execute(const BackendOps *backend, const VencConfig *cfg)
 {
 	void *ctx;
-	VencConfig *cfg;
+	VencConfig *ctx_cfg;
 	int ret;
 
-	if (!backend || !backend->config_path || !backend->config ||
+	if (!backend || !cfg || !backend->config ||
 	    !backend->prepare || !backend->init || !backend->run ||
 	    !backend->teardown ||
 	    backend->context_size == 0) {
@@ -38,17 +38,15 @@ int backend_execute(const BackendOps *backend)
 		return 1;
 	}
 
-	cfg = backend->config(ctx);
-	if (!cfg) {
+	ctx_cfg = backend->config(ctx);
+	if (!ctx_cfg) {
 		free(ctx);
 		return -1;
 	}
 
-	venc_config_defaults(cfg);
-	if (venc_config_load(backend->config_path, cfg) != 0) {
-		free(ctx);
-		return 1;
-	}
+	/* VencConfig is a flat POD with no owning pointers, so the backend gets
+	 * its own mutable copy of main()'s parse by plain assignment. */
+	*ctx_cfg = *cfg;
 
 	ret = backend->prepare(ctx);
 	if (ret == 0) {

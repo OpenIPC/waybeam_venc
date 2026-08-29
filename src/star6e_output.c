@@ -1,5 +1,7 @@
 #include "star6e_output.h"
 
+#include "venc_rec_writer.h"
+
 #include "output_socket.h"
 #include "timing.h"
 #include "venc_config.h"
@@ -8,6 +10,7 @@
 #include <errno.h>
 #include <sched.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -15,6 +18,112 @@
 
 #define STAR6E_RTP_HEADER_SIZE 12
 /* STAR6E_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in star6e.h. */
+
+/* Walk the pack list once per pass: size, then copy.  Two passes rather than
+ * a realloc loop because the sizes are already known and an IRAP can be
+ * megabytes — a growing buffer would copy it repeatedly on the encode loop. */
+static size_t stream_payload_bytes(const MI_VENC_Stream_t *stream,
+	int *out_is_idr)
+{
+	size_t total = 0;
+	unsigned int i;
+
+	if (out_is_idr)
+		*out_is_idr = 0;
+	for (i = 0; i < stream->count; ++i) {
+		const MI_VENC_Pack_t *pack = &stream->packet[i];
+		unsigned int k;
+
+		if (!pack->data)
+			continue;
+		if (pack->packNum == 0) {
+			if (pack->length > pack->offset)
+				total += pack->length - pack->offset;
+			continue;
+		}
+		for (k = 0; k < (unsigned int)pack->packNum; ++k) {
+			MI_U32 off = pack->packetInfo[k].offset;
+			MI_U32 len = pack->packetInfo[k].length;
+			unsigned int nalu;
+
+			if (len == 0 || off >= pack->length ||
+			    len > (pack->length - off))
+				continue;
+			/* IDR_W_RADL (19) and IDR_N_LP (20), matching the
+			 * synchronous writer's test exactly. */
+			nalu = (unsigned int)pack->packetInfo[k].packType.h265Nalu;
+			if ((nalu == 19 || nalu == 20) && out_is_idr)
+				*out_is_idr = 1;
+			total += len;
+		}
+	}
+	return total;
+}
+
+uint8_t *star6e_output_stream_flatten(const MI_VENC_Stream_t *stream,
+	size_t *out_len, int *out_is_idr)
+{
+	uint8_t *buf;
+	size_t total;
+	size_t off_out = 0;
+	unsigned int i;
+	int is_idr = 0;
+
+	if (out_len)
+		*out_len = 0;
+	if (out_is_idr)
+		*out_is_idr = 0;
+	/* Same refusal as the synchronous writers: an incomplete packetInfo
+	 * table means the pack boundaries are unknown, and half an access unit
+	 * is worse than none. */
+	if (!star6e_output_stream_packet_info_complete(stream))
+		return NULL;
+
+	total = stream_payload_bytes(stream, &is_idr);
+	/* An access unit larger than the whole queue can never be recorded:
+	 * push() would reject it at the cap and free it again.  Refusing here
+	 * skips a multi-megabyte malloc+memcpy that exists only to be thrown
+	 * away — and on a 64 MB SoC that allocation is not free. */
+	if (total == 0 || total > VENC_REC_WRITER_MAX_BYTES)
+		return NULL;
+	buf = malloc(total);
+	if (!buf)
+		return NULL;
+
+	for (i = 0; i < stream->count; ++i) {
+		const MI_VENC_Pack_t *pack = &stream->packet[i];
+		unsigned int k;
+
+		if (!pack->data)
+			continue;
+		if (pack->packNum == 0) {
+			if (pack->length > pack->offset) {
+				size_t len = pack->length - pack->offset;
+
+				memcpy(buf + off_out, pack->data + pack->offset,
+					len);
+				off_out += len;
+			}
+			continue;
+		}
+		for (k = 0; k < (unsigned int)pack->packNum; ++k) {
+			MI_U32 off = pack->packetInfo[k].offset;
+			MI_U32 len = pack->packetInfo[k].length;
+
+			if (len == 0 || off >= pack->length ||
+			    len > (pack->length - off))
+				continue;
+			memcpy(buf + off_out, pack->data + off, len);
+			off_out += len;
+		}
+	}
+
+	if (out_len)
+		*out_len = off_out;
+	if (out_is_idr)
+		*out_is_idr = is_idr;
+	return buf;
+}
 
 int star6e_output_stream_packet_info_complete(
 	const MI_VENC_Stream_t *stream)
@@ -48,36 +157,59 @@ int star6e_output_stream_packet_info_complete(
 	return 1;
 }
 
-static void star6e_output_recover_dropped_access_unit(Star6eOutput *output,
-	const MI_VENC_Stream_t *stream)
-{
-	uint8_t flags = 0;
-
-	if (!output || !stream)
-		return;
-	if (output->svct_active &&
-	    stream->h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF)
-		flags |= VENC_FRAME_FLAG_ENHANCE;
-	if (venc_frame_drop_breaks_chain(flags) && output->request_idr &&
-	    venc_frame_drop_idr_due(&output->drop_idr_last_us,
-		wb_monotonic_us()) &&
-	    output->request_idr(output->idr_ctx) == 0)
-		output->drop_idr_last_us = 0;
-}
-
 int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream)
 {
 	if (star6e_output_stream_packet_info_complete(stream))
 		return 0;
-	if (output && !output->trunc_warned) {
-		output->trunc_warned = 1;
-		fprintf(stderr,
-			"WARN: Star6E packetInfo table is incomplete or invalid; "
-			"dropping whole access unit\n");
+	if (output) {
+		__atomic_add_fetch(&output->bad_au_drops, 1, __ATOMIC_RELAXED);
+		/* No-op off frame-shm; the per-output counter above is the
+		 * transport-independent record. */
+		venc_frame_ring_note_other_drop(output->frame_ring);
+		if (!output->trunc_warned) {
+			output->trunc_warned = 1;
+			fprintf(stderr,
+				"WARN: Star6E packetInfo table is incomplete "
+				"or invalid; dropping whole access unit\n");
+		}
+		/* Transport-independent: this runs before the frame_ring/RTP
+		 * branch in star6e_output_send_frame(), because a malformed AU
+		 * is an encoder fault, not ring pressure.  Skip only the
+		 * droppable SVC-T top layer, which breaks no chain. */
+		if (output->request_idr &&
+		    !(output->svct_active &&
+		      stream->h265Info.refType ==
+			      STAR6E_REFTYPE_ENHANCE_P_NOTFORREF))
+			output->request_idr(output->idr_ctx);
 	}
-	star6e_output_recover_dropped_access_unit(output, stream);
 	return 1;
+}
+
+/* Abort a partially written ring slot because the access unit does not fit.
+ *
+ * The drop is counted -- stats.oversize_drops, and separately mirrored into
+ * the ring header's other_drops by venc_frame_ring_note_other_drop() -- but
+ * until now nothing was logged, so the frame
+ * simply vanished: 0.73.0 removed the frame-size caps that were supposed to
+ * prevent it, and ring v2 removed the recovery IDR that used to heal the
+ * chain afterwards.
+ *
+ * Deliberately does NOT request an IDR.  An access unit that overflows the
+ * slot does so because the craft's bitrate genuinely exceeds it, which
+ * repeats every GOP -- asking each time would be exactly the automatic
+ * keyframing ring v2 removed. */
+static void star6e_output_abort_oversize(Star6eOutput *output)
+{
+	venc_frame_ring_abort_write(output->frame_ring);
+	if (output->oversize_warned)
+		return;
+	output->oversize_warned = 1;
+	fprintf(stderr,
+		"WARN: Star6E access unit exceeds the frame-shm slot "
+		"(%u bytes of payload); dropping the whole frame\n",
+		(unsigned)(output->frame_ring->slot_data_size -
+			VENC_FRAME_META_SIZE));
 }
 
 static uint16_t star6e_read_be16(const uint8_t *data)
@@ -955,19 +1087,8 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 	    stream->h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF)
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
-	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0) {
-		if (venc_frame_drop_breaks_chain(meta.flags) &&
-		    output->request_idr &&
-		    venc_frame_drop_idr_due(&output->drop_idr_last_us,
-					    wb_monotonic_us()) &&
-		    output->request_idr(output->idr_ctx) == 0) {
-			/* Swallowed by the shared 100 ms limiter — roll the
-			 * holdoff back so the next drop retries, instead of
-			 * pacing a request that never happened. */
-			output->drop_idr_last_us = 0;
-		}
+	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0)
 		return 0;
-	}
 
 	for (i = 0; i < stream->count; ++i) {
 		const MI_VENC_Pack_t *pack = &stream->packet[i];
@@ -989,10 +1110,7 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 
 				if (venc_frame_ring_append(output->frame_ring,
 				    pack->data + offset, length) != 0) {
-					venc_frame_ring_abort_write(
-						output->frame_ring);
-					star6e_output_recover_dropped_access_unit(
-						output, stream);
+					star6e_output_abort_oversize(output);
 					return 0;
 				}
 				total_bytes += length;
@@ -1005,9 +1123,7 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 
 			if (venc_frame_ring_append(output->frame_ring,
 			    pack->data + pack->offset, length) != 0) {
-				venc_frame_ring_abort_write(output->frame_ring);
-				star6e_output_recover_dropped_access_unit(output,
-					stream);
+				star6e_output_abort_oversize(output);
 				return 0;
 			}
 			total_bytes += length;

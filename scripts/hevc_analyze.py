@@ -4,6 +4,8 @@
 Two subcommands:
 
   walk  <file>         Histogram NAL types and temporal_id distribution.
+  au    <file>         Per-access-unit byte aggregate: delivered rate, AU
+                       size distribution, per-bucket rows, over-cap census.
   drop  <file> <rate>  Stream NALs to stdout, dropping <rate> fraction of
                        non-IDR / non-parameter-set NALs.  Deterministic via
                        --seed (default 1).
@@ -465,6 +467,124 @@ def cmd_refs(path: str, frames: int) -> int:
     return 0
 
 
+def iter_access_units(data: bytes):
+    """Yield (bytes, is_irap, n_vcl) per access unit, in decode order.
+
+    An AU boundary is the first VCL NAL whose first_slice_segment_in_pic_flag
+    is 1 — the only rule that survives multi-slice output (video0.sliceCount
+    reaches 17 on Star6E 1080p), where naive one-NAL-per-frame counting
+    divides every frame by its slice count.  That flag is the first bit of
+    slice_segment_header(), immediately after the 2-byte NAL header; no
+    emulation-prevention byte can precede it.
+
+    Leading non-VCL NALs (VPS/SPS/PPS/AUD/prefix SEI) are charged to the AU
+    they introduce, so the byte totals are what the encoder actually emitted
+    for that picture.  A trailing partial AU (the recorder cut mid-picture)
+    is yielded like any other; callers measuring a rate should drop the last
+    one.
+    """
+    au_bytes = 0
+    au_irap = False
+    au_vcl = 0
+    started = False
+    for sc_begin, end, nal in iter_nals(data):
+        nal_type, _, _ = parse_header(nal)
+        size = end - sc_begin
+        is_vcl = 0 <= nal_type <= 31
+        if is_vcl and len(nal) >= 3 and (nal[2] >> 7) & 1:
+            if started:
+                yield au_bytes, au_irap, au_vcl
+            au_bytes, au_irap, au_vcl = 0, False, 0
+            started = True
+        au_bytes += size
+        if is_vcl:
+            au_vcl += 1
+            if 16 <= nal_type <= 23:
+                au_irap = True
+    if started:
+        yield au_bytes, au_irap, au_vcl
+
+
+def _pct(sorted_vals, q: float) -> int:
+    """Nearest-rank percentile; sorted_vals must be non-empty."""
+    idx = int(q * (len(sorted_vals) - 1) + 0.5)
+    return sorted_vals[idx]
+
+
+def cmd_au(path: str, fps: float, bucket_s: float, cap: int,
+           as_csv: bool) -> int:
+    """Per-AU byte aggregate — the frame-size-cap measurement.
+
+    Annex-B ES carries no timestamps, so time is AU index / fps.  That is
+    exact for a fixed-cadence encoder and drifts by exactly the frames it
+    dropped otherwise, which is why --fps must be the CONFIGURED cadence and
+    the AU count is reported next to the expected one.
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    aus = list(iter_access_units(data))
+    if not aus:
+        print(f"{path}: no access units found")
+        return 1
+    # A recording cut mid-picture leaves a short final AU that would read as
+    # an outlier low and drag the rate down.  Drop it only when it IS short —
+    # fewer VCL NALs than the modal slice count — so a clean file keeps every
+    # AU and the count stays checkable against the VCL census from `walk`.
+    if len(aus) > 1:
+        modal_vcl = Counter(vcl for _, _, vcl in aus).most_common(1)[0][0]
+        if aus[-1][2] < modal_vcl:
+            print(f"note: dropped a truncated final AU "
+                  f"({aus[-1][2]} of {modal_vcl} slices)")
+            aus = aus[:-1]
+
+    if as_csv:
+        print("idx,t_s,bytes,type,vcl_nals")
+        for i, (n, irap, vcl) in enumerate(aus):
+            print(f"{i},{i / fps:.4f},{n},{'IRAP' if irap else 'P'},{vcl}")
+        return 0
+
+    total = sum(n for n, _, _ in aus)
+    dur = len(aus) / fps
+    irap_n = sum(1 for _, irap, _ in aus if irap)
+    p_sizes = sorted(n for n, irap, _ in aus if not irap)
+
+    print(f"file: {path}  {len(aus)} AUs  {total} B  "
+          f"{dur:.2f} s @ {fps:g} fps  ({irap_n} IRAP)")
+    print(f"delivered: {total * 8 / dur / 1000:.0f} kbps")
+    if p_sizes:
+        print(f"non-IRAP AU bytes: mean {total // len(aus)}  "
+              f"p50 {_pct(p_sizes, 0.50)}  p95 {_pct(p_sizes, 0.95)}  "
+              f"p99 {_pct(p_sizes, 0.99)}  max {p_sizes[-1]}")
+
+    if cap > 0 and p_sizes:
+        over = [n for n in p_sizes if n > cap]
+        print(f"\ncap {cap} B  ->  predicted {cap * 8 * fps / 1000:.0f} kbps, "
+              f"delivered {total * 8 / dur / 1000:.0f} kbps "
+              f"({total * 8 / dur / 1000 / (cap * 8 * fps / 1000) * 100:.0f}% "
+              f"of predicted)")
+        print(f"over cap: {len(over)}/{len(p_sizes)} non-IRAP AUs "
+              f"({100.0 * len(over) / len(p_sizes):.2f}%)  "
+              f"max overshoot {(p_sizes[-1] - cap) if over else 0} B")
+
+    if bucket_s > 0:
+        per = max(1, int(round(bucket_s * fps)))
+        print(f"\n{'t0_s':>7} {'t1_s':>7} {'AUs':>5} {'kbps':>7} "
+              f"{'mean_B':>8} {'max_B':>8} {'IRAP':>5}")
+        for b0 in range(0, len(aus), per):
+            chunk = aus[b0:b0 + per]
+            if len(chunk) < per // 2:
+                break  # ragged tail bucket: too short to read as a rate
+            b_total = sum(n for n, _, _ in chunk)
+            b_dur = len(chunk) / fps
+            b_p = [n for n, irap, _ in chunk if not irap]
+            print(f"{b0 / fps:>7.1f} {(b0 + len(chunk)) / fps:>7.1f} "
+                  f"{len(chunk):>5} {b_total * 8 / b_dur / 1000:>7.0f} "
+                  f"{b_total // len(chunk):>8} "
+                  f"{max(b_p) if b_p else 0:>8} "
+                  f"{sum(1 for _, irap, _ in chunk if irap):>5}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -495,6 +615,20 @@ def main() -> int:
     pr.add_argument("file")
     pr.add_argument("--frames", type=int, default=60)
 
+    pa = sub.add_parser("au",
+        help="per-access-unit byte aggregate (frame-size-cap measurement)")
+    pa.add_argument("file")
+    pa.add_argument("--fps", type=float, default=60.0,
+        help="CONFIGURED encoder cadence; Annex-B has no timestamps "
+             "(default 60)")
+    pa.add_argument("--bucket", type=float, default=0.0,
+        help="emit per-bucket rows of this many seconds (0 = summary only)")
+    pa.add_argument("--cap", type=int, default=0,
+        help="maxPBytes under test: report delivered vs predicted rate and "
+             "the over-cap census")
+    pa.add_argument("--csv", action="store_true",
+        help="per-AU rows to stdout instead of the summary")
+
     pda = sub.add_parser("drop_at",
         help="drop ONE specific NAL by 1-based index (reproducible)")
     pda.add_argument("file")
@@ -512,6 +646,8 @@ def main() -> int:
         return cmd_frames(args.file, args.limit)
     if args.cmd == "refs":
         return cmd_refs(args.file, args.frames)
+    if args.cmd == "au":
+        return cmd_au(args.file, args.fps, args.bucket, args.cap, args.csv)
     if args.cmd == "drop_at":
         return cmd_drop_at(args.file, args.idx, args.start_from_vps)
     return 1

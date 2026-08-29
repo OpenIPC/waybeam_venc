@@ -66,11 +66,14 @@ typedef struct {
 	VencOutputUriType transport;
 	venc_ring_t *ring;
 	venc_frame_ring_t *frame_ring;
-	/* Last clamp factor published by the frame-shm ring-fill throttle
-	 * (include/venc_shm_throttle.h), 1000 = unclamped.  Cached here so
-	 * the sidecar emit path can report it without reaching into the
-	 * backend control layer. */
-	uint16_t throttle_permille;
+	/* Window state for the reading above.  PER OUTPUT, not a file-static
+	 * singleton: a second frame-shm output (dual-stream ch1) is a second
+	 * ring with its own occupancy, and a shared tracker cannot represent
+	 * it -- the ring would publish VHLT with a low-water that nothing ever
+	 * writes, which reads as the healthiest value in the range rather than
+	 * as an absent gauge. */
+	VencRingLowWater low_water;
+	int low_water_ready;
 	int requested_connected_udp; /* user preference, persisted for apply_server */
 	int connected_udp;           /* actual kernel state — set by configure() */
 	int allow_unix_encoder_stall; /* unix:// blocking compatibility mode */
@@ -97,21 +100,27 @@ typedef struct {
 	int svct_active;
 	uint8_t gdr_cycle_len;
 	uint8_t gdr_counter;
-	/* Mirror of Star6eOutput's ring-full recovery hook — see the rationale
-	 * there.  A full ring discards an already-encoded frame, so the
-	 * reference chain breaks until the next IDR; the producer is the only
-	 * party that knows instantly, so it re-establishes locally rather than
-	 * waiting for a ground RecoveryRequest over RF.  Paced by
-	 * venc_frame_drop_idr_due() (1 s holdoff, state below) so a
-	 * consumer-less ring does not become an IDR storm.  Returns 1 when
-	 * issued, 0 when the shared 100 ms limiter swallowed it — the caller
-	 * rolls the holdoff back so the next drop retries. */
-	int (*request_idr)(void *ctx);
-	void *idr_ctx;
-	uint64_t drop_idr_last_us;
+	/* Access units discarded before they could be shipped because the
+	 * SDK's packet table was incomplete or invalid.  Transport-independent
+	 * (it happens on RTP too), which is why it lives here rather than in
+	 * the ring's stats; on frame-shm it is ALSO mirrored into the ring
+	 * header's other_drops so the consumer can see the frame vanish.
+	 * Written on the pipeline thread, read on the httpd thread: relaxed
+	 * atomics, like socket_drops/socket_writes beside it in the same
+	 * response. */
+	uint64_t bad_au_drops;
 	/* One WARN per init when packet metadata is incomplete or invalid (frame
 	 * aborted, never shipped truncated). */
 	uint8_t trunc_warned;
+	/* One WARN per init when an access unit does not fit a ring slot.
+	 * Separate one-shot from trunc_warned — different faults. */
+	uint8_t oversize_warned;
+	/* Recovery for a MALFORMED access unit — byte-symmetric with
+	 * Star6eOutput::request_idr, see the rationale there.  An encoder
+	 * fault, not egress pressure, so it fires on every transport
+	 * including udp:// and unix://.  NULL disables recovery. */
+	void (*request_idr)(void *ctx);
+	void *idr_ctx;
 } MarukoOutput;
 
 /** Initialize UDP or Unix socket output from a parsed URI. */
@@ -132,11 +141,11 @@ int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name);
  *  no other live consumer on the producer hot path. */
 void maruko_output_observe_pressure(MarukoOutput *output);
 
-/* Snapshot the frame-shm ring occupancy for the bitrate clamp
- * (include/venc_shm_throttle.h).  Returns -1 when the active transport is
- * not frame-shm://.  Deliberately NOT maruko_output_observe_pressure() -- that
- * one is gated on a live sidecar subscription, and the clamp is a safety
- * mechanism that must run whether or not anyone is watching. */
+/* Snapshot the frame-shm ring occupancy for the low-water measurement.
+ * Returns -1 when the active transport is not frame-shm://.  Deliberately NOT
+ * maruko_output_observe_pressure() -- that one is gated on a live sidecar
+ * subscription, and the measurement must run whether or not anyone is
+ * watching, because waybeam-link reads the result from the ring header. */
 int maruko_output_frame_ring_fill(
 	const MarukoOutput *output, venc_frame_ring_fill_t *out);
 

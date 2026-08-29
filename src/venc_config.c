@@ -112,7 +112,13 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.height = 0;
 	cfg->video0.bitrate = 8192;
 	cfg->video0.gop_size = 1.0;
-	cfg->video0.qp_delta = -4;
+	/* -12, matching config/waybeam.default{,.maruko}.json since 0.73.0.
+	 * Seeded here as well as shipped in the JSON because this is what a
+	 * config that OMITS qpDelta gets, and what GET /api/v1/defaults hands
+	 * back -- leaving it at -4 meant a craft could be silently reverted to
+	 * an IDR cost 9x higher than the shipped default.  Inert on CV610,
+	 * which does not read the field. */
+	cfg->video0.qp_delta = -12;
 
 	/* outgoing */
 	cfg->outgoing.enabled = false;
@@ -121,7 +127,6 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->outgoing.max_payload_size = 1400;
 	cfg->outgoing.connected_udp = true;
 	cfg->outgoing.allow_unix_encoder_stall = false;
-	cfg->outgoing.shm_throttle = true;
 
 	/* fpv */
 	cfg->fpv.roi_enabled = true;
@@ -628,8 +633,6 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->qp_delta = json_get_int(obj, "qpDelta", v->qp_delta);
 	if (v->qp_delta < -12) v->qp_delta = -12;
 	if (v->qp_delta > 12) v->qp_delta = 12;
-	v->max_i_bytes = (uint32_t)json_get_int(obj, "maxIBytes", (int)v->max_i_bytes);
-	v->max_p_bytes = (uint32_t)json_get_int(obj, "maxPBytes", (int)v->max_p_bytes);
 	v->min_qp = (uint32_t)json_get_int(obj, "minQp", (int)v->min_qp);
 	v->max_qp = (uint32_t)json_get_int(obj, "maxQp", (int)v->max_qp);
 	v->scene_threshold = (uint16_t)json_get_int(obj, "sceneThreshold",
@@ -661,6 +664,25 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 			safe_strcpy(v->resilience, sizeof(v->resilience), "off");
 			(void)venc_config_apply_resilience_preset("off", v);
 		}
+	}
+	/* Per-field override on top of the preset, applied AFTER it because the
+	 * preset zeroes this field; non-zero wins (see include/intra_refresh.h).
+	 * This is the intra-refresh stripe QP — the quality of the GDR recovery
+	 * anchor, and on CV610 the only control that moves I-frame size at all.
+	 *
+	 * Deliberately NOT paired with an intraRefreshLines override: `lines` is
+	 * derived from the mode's target self-heal window (fast 150 ms /
+	 * balanced 500 ms / robust 1000 ms) and also drives the auto-GOP, so a
+	 * config could silently contradict the resilience name it declares.
+	 * Timing belongs to the preset; anchor cost is the tunable axis. */
+	{
+		int irqp = json_get_int(obj, "intraRefreshQp",
+			(int)v->intra_refresh_qp);
+		if (irqp < 0)
+			irqp = 0;
+		if (irqp > 51)
+			irqp = 51;
+		v->intra_refresh_qp = (uint8_t)irqp;
 	}
 
 	/* zoom_pct is derived from the framing preset (below) — no longer
@@ -753,7 +775,6 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 	s->audio_port = json_get_int(obj, "audioPort", s->audio_port);
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
 		(int)s->sidecar_port);
-	s->shm_throttle = json_get_bool(obj, "shmThrottle", s->shm_throttle);
 }
 
 static void load_discovery(const cJSON *root, VencConfigDiscovery *s)
@@ -1384,14 +1405,13 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "bitrate",        cfg->video0.bitrate,         0);
 	pp_field_double(p, 2, "gopSize",        cfg->video0.gop_size,        0);
 	pp_field_int(p,    2, "qpDelta",        cfg->video0.qp_delta,        0);
-	pp_field_uint(p,   2, "maxIBytes",      cfg->video0.max_i_bytes,     0);
-	pp_field_uint(p,   2, "maxPBytes",      cfg->video0.max_p_bytes,     0);
 	pp_field_uint(p,   2, "minQp",          cfg->video0.min_qp,          0);
 	pp_field_uint(p,   2, "maxQp",          cfg->video0.max_qp,          0);
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
 	pp_field_uint(p,   2, "sliceCount",     cfg->video0.slice_count,     0);
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
+	pp_field_uint(p,   2, "intraRefreshQp", cfg->video0.intra_refresh_qp, 0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
 	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              0);
 	pp_field_string(p, 2, "framing",           cfg->video0.framing,             0);
@@ -1413,8 +1433,7 @@ static void render_outgoing(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_bool(p,   2, "allowUnixEncoderStall",
 		cfg->outgoing.allow_unix_encoder_stall, 0);
 	pp_field_int(p,    2, "audioPort",       cfg->outgoing.audio_port,        0);
-	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,    0);
-	pp_field_bool(p,   2, "shmThrottle",     cfg->outgoing.shm_throttle,      1);
+	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,    1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1642,14 +1661,14 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "bitrate", cfg->video0.bitrate);
 		cJSON_AddNumberToObject(vid, "gopSize", cfg->video0.gop_size);
 		cJSON_AddNumberToObject(vid, "qpDelta", cfg->video0.qp_delta);
-		cJSON_AddNumberToObject(vid, "maxIBytes", cfg->video0.max_i_bytes);
-		cJSON_AddNumberToObject(vid, "maxPBytes", cfg->video0.max_p_bytes);
 		cJSON_AddNumberToObject(vid, "minQp", cfg->video0.min_qp);
 		cJSON_AddNumberToObject(vid, "maxQp", cfg->video0.max_qp);
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
 		cJSON_AddNumberToObject(vid, "sliceCount", cfg->video0.slice_count);
 		cJSON_AddStringToObject(vid, "resilience", cfg->video0.resilience);
+		cJSON_AddNumberToObject(vid, "intraRefreshQp",
+			cfg->video0.intra_refresh_qp);
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);
 		cJSON_AddStringToObject(vid, "framing", cfg->video0.framing);
@@ -1676,7 +1695,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 			cfg->outgoing.allow_unix_encoder_stall);
 		cJSON_AddNumberToObject(out, "audioPort", cfg->outgoing.audio_port);
 		cJSON_AddNumberToObject(out, "sidecarPort", cfg->outgoing.sidecar_port);
-		cJSON_AddBoolToObject(out, "shmThrottle", cfg->outgoing.shm_throttle);
 	}
 
 	/* discovery */

@@ -7,6 +7,7 @@
 
 #include "backend.h"
 #include "mdns_beacon.h"
+#include "venc_api.h"
 #include "venc_config.h"
 #include "venc_respawn.h"
 
@@ -90,6 +91,7 @@ static int is_another_waybeam_running(void)
 int main(int argc, char* argv[])
 {
 	const BackendOps *backend;
+	VencConfig cfg;
 
   (void)argc;
   (void)argv;
@@ -116,14 +118,31 @@ int main(int argc, char* argv[])
 
 	printf("> SoC backend build: %s\n", backend->name);
 
+	/* The config file is a program-level input, so it is read exactly once
+	 * here and the parsed value is handed to everything that needs it.  A
+	 * module that opens it for itself is a second source of truth: the mDNS
+	 * beacon used to load it separately, and a config write landing between
+	 * that read and the backend's own left the device advertising a web_port
+	 * the HTTP server never bound.  Loading before the beacon also fixes the
+	 * ordering — a malformed config now exits without ever having announced,
+	 * rather than announcing defaults and immediately sending a goodbye.
+	 *
+	 * venc_config_load() reports its own failures, and treats a missing file
+	 * as "use defaults" (0); only an unreadable or malformed one returns
+	 * non-zero. */
+	venc_config_defaults(&cfg);
+	if (venc_config_load(VENC_CONFIG_DEFAULT_PATH, &cfg) != 0)
+		return 1;
+	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
+
 	/* mDNS device beacon — announce-only, self-contained thread.  Makes
 	 * the encoder discoverable as _waybeam-venc._tcp independent of the
 	 * optional waybeam-hub.  Inert if discovery is disabled in the config
 	 * or no usable interface exists; never blocks the encode path. */
 	MdnsBeacon beacon;
-	mdns_beacon_start_from_config(&beacon, VENC_CONFIG_DEFAULT_PATH);
+	mdns_beacon_start_from_cfg(&beacon, &cfg);
 
-	int rc = backend_execute(backend);
+	int rc = backend_execute(backend, &cfg);
 
 	/* Multicast a goodbye and tear down before any SIGHUP-respawn exec so
 	 * peers see the device leave; the successor re-announces on boot. */

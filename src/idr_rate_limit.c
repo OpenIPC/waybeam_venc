@@ -31,7 +31,15 @@ int idr_rate_limit_allow(int venc_chn)
 	 * winning store synchronizes with the next caller's load. */
 	last = __atomic_load_n(&s->last_us, __ATOMIC_ACQUIRE);
 	for (;;) {
-		if (last != 0 && (now - last) < IDR_RATE_LIMIT_MIN_SPACING_US) {
+		/* `now <= last` first: another thread may have stamped an anchor
+		 * AHEAD of our clock read (force() does exactly that, from the
+		 * httpd thread, and a lost CAS refreshes `last` to it).  Without
+		 * this the unsigned `now - last` wraps to ~2^64, sails past the
+		 * spacing check, and the CAS then rewinds the anchor by the
+		 * difference — disarming the gate for as long as the preemption
+		 * lasted. */
+		if (last != 0 && (now <= last ||
+		    (now - last) < IDR_RATE_LIMIT_MIN_SPACING_US)) {
 			__atomic_add_fetch(&s->dropped, 1, __ATOMIC_RELAXED);
 			return 0;
 		}
@@ -45,6 +53,36 @@ int idr_rate_limit_allow(int venc_chn)
 
 	__atomic_add_fetch(&s->honored, 1, __ATOMIC_RELAXED);
 	return 1;
+}
+
+void idr_rate_limit_force(int venc_chn)
+{
+	struct chn_state *s;
+	uint64_t now;
+	uint64_t last;
+
+	if (venc_chn < 0 || venc_chn >= IDR_RATE_LIMIT_MAX_CHANNELS)
+		return;
+
+	s = &g_state[venc_chn];
+	now = wb_monotonic_us();
+
+	/* CAS-MAX, not a plain store.  A bare store reintroduces exactly the
+	 * load-then-store race allow()'s CAS loop exists to prevent, in the
+	 * other direction: this caller can read the clock, be preempted while
+	 * a concurrent allow() CASes a LATER timestamp, then resume and write
+	 * its own earlier one — rewinding the anchor and letting the next
+	 * allow() honor an IDR inside the spacing window.  Only ever move the
+	 * anchor forward. */
+	last = __atomic_load_n(&s->last_us, __ATOMIC_ACQUIRE);
+	while (last < now) {
+		if (__atomic_compare_exchange_n(&s->last_us, &last, now,
+		    /* weak */ 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+			break;
+		/* Lost the race — `last` now holds the winner's value; if it
+		 * is already at or past `now`, keep the later anchor. */
+	}
+	__atomic_add_fetch(&s->honored, 1, __ATOMIC_RELAXED);
 }
 
 uint32_t idr_rate_limit_honored(int venc_chn)

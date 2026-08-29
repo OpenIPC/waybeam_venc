@@ -32,7 +32,6 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 	MarukoRunnerContext *ctx = g_maruko_runner_ctx;
 	Star6eTsRecorderState *ts;
 	Star6eRecorderState *rec;
-	Star6eRecorderStopReason sr = RECORDER_STOP_MANUAL;
 
 	memset(out, 0, sizeof(*out));
 	if (!ctx)
@@ -40,37 +39,80 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 	ts = &ctx->backend.ts_recorder;
 	rec = &ctx->backend.recorder;
 
-	if (star6e_ts_recorder_is_active(ts)) {
-		out->active = 1;
-		snprintf(out->format, sizeof(out->format), "ts");
-		star6e_ts_recorder_status(ts,
-			&out->bytes_written, &out->frames_written,
-			&out->segments, NULL, NULL);
-		snprintf(out->path, sizeof(out->path), "%s", ts->path);
-		out->elapsed_ms = star6e_recorder_elapsed_ms(&ts->start_time);
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
-	} else if (star6e_recorder_is_active(rec)) {
-		const char *path = "";
-		out->active = 1;
-		snprintf(out->format, sizeof(out->format), "hevc");
-		star6e_recorder_status(rec, &out->bytes_written,
-			&out->frames_written, &path, NULL);
-		out->segments = 1;  /* HEVC recorder has no rotation */
-		snprintf(out->path, sizeof(out->path), "%s", path);
-		out->elapsed_ms = star6e_recorder_elapsed_ms(&rec->start_time);
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
-	} else {
-		const char *reason = "manual";
-		/* Whichever stopped most recently — both reasons are
-		 * disjoint because only one recorder is ever active. */
-		sr = ts->last_stop_reason != RECORDER_STOP_MANUAL
-			? ts->last_stop_reason : rec->last_stop_reason;
-		if (sr == RECORDER_STOP_DISK_FULL)
-			reason = "disk_full";
-		else if (sr == RECORDER_STOP_WRITE_ERROR)
-			reason = "write_error";
-		snprintf(out->stop_reason, sizeof(out->stop_reason), "%s",
-			reason);
+	{
+		uint64_t dropped;
+		uint32_t peak;
+
+		/* Under the lock: the writer is freed from the encode loop at
+		 * teardown and this runs on the httpd thread.  The stored
+		 * values are the fallback so a finished recording still
+		 * reports what it shed. */
+		pthread_mutex_lock(&ctx->backend.rec_writer_lock);
+		/* Inside the lock, not just the store: a 64-bit load on ARM32 is
+		 * two instructions and can straddle the encode loop's update. */
+		dropped = ctx->backend.rec_dropped_frames;
+		peak = ctx->backend.rec_writer_peak_depth;
+		if (ctx->backend.rec_writer)
+			venc_rec_writer_stats(ctx->backend.rec_writer, NULL,
+				&dropped, NULL, &peak);
+		dropped += ctx->backend.rec_flatten_failures;
+		pthread_mutex_unlock(&ctx->backend.rec_writer_lock);
+		out->dropped_frames = (uint32_t)dropped;
+		out->writer_peak_depth = peak;
+	}
+
+	/* is_RECORDING, not is_active: a rotation holds fd == -1 on the writer
+	 * thread, and reporting that as "not recording" makes a healthy
+	 * recording blink off once per segment. */
+	{
+		/* ONE coherent instant per recorder.  The fields below are
+		 * mutated by the writer thread during writes and segment
+		 * rotation: bytes_written is 64-bit on ARM32 and path is
+		 * rewritten wholesale on a rotation, so reading them in place
+		 * could tear outright, and reading active, counters and path at
+		 * three different instants could disagree with each other. */
+		Star6eRecorderSnapshot ts_snap, rec_snap;
+
+		star6e_ts_recorder_snapshot(ts, &ts_snap);
+		star6e_recorder_snapshot(rec, &rec_snap);
+
+		if (ts_snap.active) {
+			out->active = 1;
+			snprintf(out->format, sizeof(out->format), "ts");
+			out->bytes_written = ts_snap.bytes_written;
+			out->frames_written = ts_snap.frames_written;
+			out->segments = ts_snap.segments;
+			out->elapsed_ms = ts_snap.elapsed_ms;
+			snprintf(out->path, sizeof(out->path), "%s",
+				ts_snap.path);
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"none");
+		} else if (rec_snap.active) {
+			out->active = 1;
+			snprintf(out->format, sizeof(out->format), "hevc");
+			out->bytes_written = rec_snap.bytes_written;
+			out->frames_written = rec_snap.frames_written;
+			out->segments = 1;  /* HEVC recorder has no rotation */
+			out->elapsed_ms = rec_snap.elapsed_ms;
+			snprintf(out->path, sizeof(out->path), "%s",
+				rec_snap.path);
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"none");
+		} else {
+			/* Either recorder may hold the reason; a manual stop on
+			 * one does not mask a disk-full on the other. */
+			const char *reason = "manual";
+			Star6eRecorderStopReason sr = ts_snap.last_stop_reason;
+
+			if (sr == RECORDER_STOP_MANUAL)
+				sr = rec_snap.last_stop_reason;
+			if (sr == RECORDER_STOP_DISK_FULL)
+				reason = "disk_full";
+			else if (sr == RECORDER_STOP_WRITE_ERROR)
+				reason = "write_error";
+			snprintf(out->stop_reason, sizeof(out->stop_reason),
+				"%s", reason);
+		}
 	}
 }
 
@@ -131,8 +173,12 @@ static int maruko_runner_init(void *opaque)
 	maruko_bind_controls(ctx);
 	maruko_reset_scene(backend);
 	venc_api_register(&ctx->vcfg, "maruko", maruko_controls_callbacks(), NULL);
-	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
 	g_maruko_runner_ctx = ctx;
+	/* Explicit, not positional: the callback below takes rec_writer_lock on
+	 * the httpd thread, which is already accepting.  Maruko happened to get
+	 * this right via configure_graph(); saying so here means a later
+	 * reorder cannot silently undo it. */
+	mk_mirror_record_locks_init_public(&ctx->backend);
 	venc_api_set_record_status_fn(maruko_record_status_callback);
 	venc_api_set_record_http_control_supported(true);
 	if (ctx->vcfg.video0.qp_delta != 0 &&
@@ -140,12 +186,22 @@ static int maruko_runner_init(void *opaque)
 		maruko_controls_callbacks()->apply_qp_delta(
 			ctx->vcfg.video0.qp_delta);
 	}
-	if ((ctx->vcfg.video0.max_i_bytes > 0 ||
-	     ctx->vcfg.video0.max_p_bytes > 0) &&
-	    maruko_controls_callbacks()->apply_max_frame_size) {
-		maruko_controls_callbacks()->apply_max_frame_size(
-			ctx->vcfg.video0.max_i_bytes,
-			ctx->vcfg.video0.max_p_bytes);
+	/* video0.minQp/maxQp are MUT_LIVE but must also take effect on a cold
+	 * boot: the config is read before the channel exists, so the live path
+	 * never runs for a value already in the file. */
+	if (ctx->vcfg.video0.min_qp > 0 || ctx->vcfg.video0.max_qp > 0) {
+		const VencApplyCallbacks *cb = maruko_controls_callbacks();
+		/* Not (void): apply_qp_bounds() refuses on a VBR/AVBR rcMode,
+		 * and a rejected cold-boot apply would otherwise leave the
+		 * operator booting with no QP bound and no indication.  Same
+		 * reporting as the CV610 cold-boot apply. */
+		if (cb->apply_qp_bounds &&
+		    cb->apply_qp_bounds(ctx->vcfg.video0.min_qp,
+			    ctx->vcfg.video0.max_qp) != 0)
+			fprintf(stderr, "WARN: qpBounds from config not applied "
+				"(min=%u max=%u)\n",
+				(unsigned)ctx->vcfg.video0.min_qp,
+				(unsigned)ctx->vcfg.video0.max_qp);
 	}
 
 	return 0;
@@ -231,7 +287,6 @@ static int maruko_map_pipeline_result(int result)
 
 static const BackendOps g_backend_ops = {
 	.name = "maruko",
-	.config_path = VENC_CONFIG_DEFAULT_PATH,
 	.context_size = sizeof(MarukoRunnerContext),
 	.config = maruko_config,
 	.prepare = maruko_prepare,

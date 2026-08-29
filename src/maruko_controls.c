@@ -15,7 +15,6 @@
 #include "venc_config.h"
 #include "venc_api.h"
 #include "venc_jpeg.h"
-#include "venc_shm_throttle.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -157,6 +156,11 @@ typedef struct {
 	MI_SYS_ChnPort_t venc_port;
 	volatile sig_atomic_t *output_enabled_ptr;
 	volatile uint32_t *stored_fps_ptr;
+	/* Destination the output socket is ACTUALLY pointed at -- see the note
+	 * in maruko_apply_server().  Never derive this from vcfg.  Held here
+	 * rather than as a file-scope global, matching
+	 * Star6eControlContext::applied_server. */
+	char applied_server[VENC_CONFIG_STRING_MAX];
 } MarukoControlContext;
 
 enum {
@@ -202,27 +206,114 @@ static int maruko_apply_rc_qp_delta(const i6c_venc_chn *attr, MI_VENC_RcParam_t 
 	}
 }
 
+/* Only CBR carries QP bounds we can steer; other modes leave them alone. */
+static int maruko_rc_qp_bound_ptrs(const i6c_venc_chn *attr,
+	MI_VENC_RcParam_t *param, uint32_t **pmin, uint32_t **pmax)
+{
+	if (!attr || !param)
+		return -1;
+	switch (attr->rate.mode) {
+	case MARUKO_VENC_RC_H265_CBR:
+		*pmin = &param->stParamH265Cbr.u32MinQp;
+		*pmax = &param->stParamH265Cbr.u32MaxQp;
+		return 0;
+	case MARUKO_VENC_RC_H264_CBR:
+		*pmin = &param->stParamH264Cbr.u32MinQp;
+		*pmax = &param->stParamH264Cbr.u32MaxQp;
+		return 0;
+	default:
+		return -1;
+	}
+}
+
+/* Everything we have asked the rate controller for.  Maruko is the same MI
+ * VENC RC as Star6E and therefore has the same hazard: MI_VENC_GetRcParam
+ * does not reflect a just-written value until the driver commits the block
+ * (~5 s after StartRecvPic on SSC338Q), so a second read-modify-write inside
+ * that window reads a stale 0 and writes it back.  Adding qp bounds gives
+ * Maruko a second RC writer for the first time, so it gets Star6E's fix at
+ * the same moment rather than inheriting the bug -- see g_rc_intent in
+ * src/star6e_controls.c and issue #255. */
+static struct {
+	int      qp_delta;
+	uint32_t min_qp;   /* 0 = driver default */
+	uint32_t max_qp;   /* 0 = driver default */
+} g_maruko_rc_intent;
+
+/* Driver-default QP bounds, captured on the first Get before any write so a
+ * later 0 can restore them.  The rate mode is fixed for the process lifetime
+ * (Maruko always respawns on reinit), so one capture is enough. */
+static struct {
+	int      captured;
+	uint32_t min_qp;
+	uint32_t max_qp;
+} g_maruko_qp_defaults;
+
+/* Write the whole intent, never a patched Get result. */
+static int maruko_rc_commit_intent(int require_bounds)
+{
+	i6c_venc_chn attr = {0};
+	MI_VENC_RcParam_t param = {0};
+	uint32_t *pmin, *pmax;
+
+	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev, g_ctx.venc_chn, &attr) != 0)
+		return -1;
+	if (maruko_mi_venc_get_rc_param(g_ctx.venc_dev, g_ctx.venc_chn, &param) != 0)
+		return -1;
+	if (maruko_apply_rc_qp_delta(&attr, &param, g_maruko_rc_intent.qp_delta) != 0)
+		return -1;
+	if (maruko_rc_qp_bound_ptrs(&attr, &param, &pmin, &pmax) == 0) {
+		if (!g_maruko_qp_defaults.captured) {
+			g_maruko_qp_defaults.min_qp = *pmin;
+			g_maruko_qp_defaults.max_qp = *pmax;
+			g_maruko_qp_defaults.captured = 1;
+		}
+		*pmin = g_maruko_rc_intent.min_qp ? g_maruko_rc_intent.min_qp
+						  : g_maruko_qp_defaults.min_qp;
+		*pmax = g_maruko_rc_intent.max_qp ? g_maruko_rc_intent.max_qp
+						  : g_maruko_qp_defaults.max_qp;
+		/* The API validator only compares min against max when BOTH are
+		 * non-zero, so a half-specified pair can still resolve to min > max
+		 * against the driver default.  CV610's sibling refuses this and says
+		 * why: "the SDK takes that without complaint and then behaves
+		 * erratically".  Maruko could not reach it before qp bounds were
+		 * wired up here, so guard it at the same time. */
+		if (*pmin > *pmax) {
+			fprintf(stderr, "ERROR: qpBounds min>max after resolving "
+				"defaults (%u/%u)\n", (unsigned)*pmin, (unsigned)*pmax);
+			return -1;
+		}
+	} else if (require_bounds) {
+		/* This rate mode carries no QP bounds.  Return BEFORE the write:
+		 * master's apply_qp_bounds() bailed out of its switch without ever
+		 * calling SetRcParam, and a rejected request must not touch the
+		 * encoder.  Reachable — video0.rcMode selects VBR/AVBR, and the
+		 * API's rollback re-invokes the failing group, so writing here
+		 * would poke the hardware twice per refusal. */
+		return -1;
+	}
+	return maruko_mi_venc_set_rc_param(g_ctx.venc_dev, g_ctx.venc_chn,
+		&param) == 0 ? 0 : -1;
+}
+
 /* ── Basic controls (existing) ───────────────────────────────────────── */
 
-/* Published clamp factor from the frame-shm ring-fill throttle
- * (include/venc_shm_throttle.h).  Byte-symmetric with the Star6E side —
- * same ring geometry, same control law, same authority rules. */
-static uint16_t g_output_throttle_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
-
-/* want_idr=0 is the throttle path — see the matching note in
- * src/star6e_controls.c apply_bitrate_ex(): IDR-ing every 200 ms while the
- * ring backs up would feed the queue we are draining. */
-static int maruko_apply_bitrate_ex(uint32_t kbps, int want_idr)
+/* No IDR request on bitrate writes — see the matching note in
+ * src/star6e_controls.c apply_bitrate() for the measurement.
+ *
+ * Compile-tested only here.  Operator ruling 2026-08-26: assume i6c
+ * set_chn_attr keyframes implicitly the way Star6E's MI_VENC_SetChnAttr was
+ * measured to, and keep the two backends symmetric rather than diverging on
+ * an untested difference.  Stated as an assumption because it is one — if a
+ * Maruko ever reaches a bench, the check is ten spaced video0.bitrate writes
+ * against a count of IRAP access units (not /api/v1/idr/stats, which only
+ * sees requests and is blind to an SDK-implicit keyframe). */
+static int maruko_apply_bitrate(uint32_t kbps)
 {
 	i6c_venc_chn attr = {0};
 	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
 	    g_ctx.venc_chn, &attr) != 0)
 		return -1;
-	/* Clamp first, absolute rails last — same pinned order as Star6E
-	 * (Maruko has no >120 fps CBR compensation step in between). */
-	kbps = venc_shm_throttle_scale(
-		__atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED),
-		kbps);
 	if (kbps > VENC_BITRATE_MAX_KBPS)
 		kbps = VENC_BITRATE_MAX_KBPS;
 	if (kbps < VENC_BITRATE_MIN_KBPS)
@@ -247,39 +338,7 @@ static int maruko_apply_bitrate_ex(uint32_t kbps, int want_idr)
 	if (maruko_mi_venc_set_chn_attr(g_ctx.venc_dev,
 	    g_ctx.venc_chn, &attr) != 0)
 		return -1;
-	/* Force an IDR after a bitrate change so the decoder resyncs against
-	 * the new rate-control state.  Rate-limit gated to coalesce storms;
-	 * see the matching note in src/star6e_controls.c apply_bitrate(). */
-	if (want_idr && idr_rate_limit_allow(g_ctx.venc_chn))
-		maruko_mi_venc_request_idr(g_ctx.venc_dev,
-			g_ctx.venc_chn, 1);
 	return 0;
-}
-
-static int maruko_apply_bitrate(uint32_t kbps)
-{
-	return maruko_apply_bitrate_ex(kbps, 1);
-}
-
-int maruko_controls_set_output_throttle(uint16_t permille)
-{
-	uint32_t cfg_kbps;
-	int rc;
-
-	__atomic_store_n(&g_output_throttle_permille, permille,
-		__ATOMIC_RELAXED);
-
-	if (!venc_api_cfg_trylock())
-		return -1;  /* config transaction in flight; retry next window */
-	cfg_kbps = g_ctx.vcfg ? g_ctx.vcfg->video0.bitrate : 0;
-	rc = cfg_kbps > 0 ? maruko_apply_bitrate_ex(cfg_kbps, 0) : 0;
-	venc_api_cfg_unlock();
-	return rc;
-}
-
-uint16_t maruko_controls_output_throttle(void)
-{
-	return __atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED);
 }
 
 static int maruko_apply_gop(uint32_t gop_size)
@@ -303,95 +362,57 @@ static int maruko_apply_gop(uint32_t gop_size)
 
 static int maruko_apply_qp_delta(int delta)
 {
-	i6c_venc_chn attr = {0};
-	MI_VENC_RcParam_t param = {0};
+	int prev = g_maruko_rc_intent.qp_delta;
 
-	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &attr) != 0)
+	g_maruko_rc_intent.qp_delta = delta;
+	if (maruko_rc_commit_intent(0) != 0) {
+		g_maruko_rc_intent.qp_delta = prev;
 		return -1;
-	if (maruko_mi_venc_get_rc_param(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &param) != 0)
-		return -1;
-	if (maruko_apply_rc_qp_delta(&attr, &param, delta) != 0)
-		return -1;
-	if (maruko_mi_venc_set_rc_param(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &param) != 0)
-		return -1;
+	}
 
-	if (idr_rate_limit_allow(g_ctx.venc_chn))
-		maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
+	/* No IDR: a QP-delta change is rate-control state, absorbed mid-GOP.
+	 * Star6E parity — see apply_qp_delta() in src/star6e_controls.c. */
 	printf("> qpDelta changed to %d\n", delta);
 	return 0;
 }
 
-static int maruko_request_idr(void);
-static uint32_t maruko_query_live_fps(void);
-
-static int maruko_apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
+/* CBR holds its target by raising QP; these bound how far it may go in each
+ * direction.  Both break the rate contract once they bind -- a floor above
+ * the scene's natural QP collapses the rate, a ceiling below it overshoots --
+ * so they default to 0 (driver default) and the README records the measured
+ * behaviour.  Star6E parity: apply_qp_bounds() in src/star6e_controls.c. */
+static int maruko_apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
 {
-	i6c_venc_chn attr = {0};
-	MI_VENC_RcParam_t param = {0};
-	int pri;
+	uint32_t prev_min = g_maruko_rc_intent.min_qp;
+	uint32_t prev_max = g_maruko_rc_intent.max_qp;
+	if (min_qp == 0 && max_qp == 0 && !g_maruko_qp_defaults.captured)
+		return 0;   /* never written — driver defaults already in force */
 
-	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &attr) != 0)
-		return -1;
-	if (maruko_mi_venc_get_rc_param(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &param) != 0)
-		return -1;
-
-	switch (attr.rate.mode) {
-	case MARUKO_VENC_RC_H265_CBR:
-		param.stParamH265Cbr.u32MaxISize = max_i_bytes;
-		param.stParamH265Cbr.u32MaxPSize = max_p_bytes;
-		break;
-	case MARUKO_VENC_RC_H264_CBR:
-		param.stParamH264Cbr.u32MaxISize = max_i_bytes;
-		param.stParamH264Cbr.u32MaxPSize = max_p_bytes;
-		break;
-	case MARUKO_VENC_RC_H265_VBR:
-		param.stParamH265Vbr.u32MaxISize = max_i_bytes;
-		param.stParamH265Vbr.u32MaxPSize = max_p_bytes;
-		break;
-	case MARUKO_VENC_RC_H264_VBR:
-		param.stParamH264VBR.u32MaxISize = max_i_bytes;
-		param.stParamH264VBR.u32MaxPSize = max_p_bytes;
-		break;
-	case MARUKO_VENC_RC_H265_AVBR:
-		param.stParamH265Avbr.u32MaxISize = max_i_bytes;
-		param.stParamH265Avbr.u32MaxPSize = max_p_bytes;
-		break;
-	case MARUKO_VENC_RC_H264_AVBR:
-		param.stParamH264Avbr.u32MaxISize = max_i_bytes;
-		param.stParamH264Avbr.u32MaxPSize = max_p_bytes;
-		break;
-	default:
+	/* 0 restores the captured driver default so bounds can be cleared
+	 * live, not just overridden. */
+	g_maruko_rc_intent.min_qp = min_qp;
+	g_maruko_rc_intent.max_qp = max_qp;
+	if (maruko_rc_commit_intent(1) != 0) {
+		g_maruko_rc_intent.min_qp = prev_min;
+		g_maruko_rc_intent.max_qp = prev_max;
 		return -1;
 	}
-
-	if (maruko_mi_venc_set_rc_param(g_ctx.venc_dev,
-	    g_ctx.venc_chn, &param) != 0)
-		return -1;
-
-	pri = (max_i_bytes > 0 || max_p_bytes > 0)
-		? E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
-		: E_MI_VENC_RC_PRIORITY_BITRATE_FIRST;
-	maruko_mi_venc_set_rc_priority(g_ctx.venc_dev, g_ctx.venc_chn, pri);
-
-	if (idr_rate_limit_allow(g_ctx.venc_chn))
-		maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
-	printf("> maxFrameSize changed: I=%u P=%u bytes, priority=%s\n",
-		max_i_bytes, max_p_bytes,
-		pri == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
-			? "framebits" : "bitrate");
+	printf("> qpBounds changed: min=%u max=%u (0 = driver default %u/%u)\n",
+		min_qp, max_qp, g_maruko_qp_defaults.min_qp,
+		g_maruko_qp_defaults.max_qp);
 	return 0;
 }
+
+static int maruko_request_idr(void);
+static int maruko_request_idr_bootstrap(void);
+static uint32_t maruko_query_live_fps(void);
 
 static int maruko_apply_fps(uint32_t fps)
 {
 	i6c_venc_chn attr = {0};
 	MI_S32 bind_ret;
 	uint32_t sensor_fps;
+	int rebound = 0;
 
 	if (fps == 0 || fps > PIPELINE_LIVE_FPS_MAX)
 		return -1;
@@ -436,6 +457,12 @@ static int maruko_apply_fps(uint32_t fps)
 		}
 	}
 
+	/* The encoder channel HAS been rebound at this point.  Everything
+	 * below is best-effort bookkeeping of the RC fpsNum, and it is
+	 * skipped outright when the attr read fails or the rate mode is not
+	 * one we enumerate -- so a caller must NOT infer "did it change?"
+	 * by diffing fpsNum.  Report it in the return value instead. */
+	rebound = 1;
 	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
 	    g_ctx.venc_chn, &attr) == 0) {
 		switch (attr.rate.mode) {
@@ -458,9 +485,13 @@ static int maruko_apply_fps(uint32_t fps)
 			g_ctx.venc_chn, &attr);
 	}
 
-	maruko_request_idr();
+	/* No IDR here — see apply_fps() in src/star6e_controls.c.  Only the
+	 * live video0.fps write needs one; it is issued in
+	 * maruko_apply_fps_live(). */
 	printf("> FPS changed to %u (bind %u:%u)\n", fps, sensor_fps, fps);
-	return 0;
+	/* 1 = the encoder was rebound, 0 = nothing to do, -1 = failed.
+	 * Callers that only care about failure keep testing < 0. */
+	return rebound;
 }
 
 static int maruko_apply_verbose(bool on)
@@ -471,8 +502,47 @@ static int maruko_apply_verbose(bool on)
 	return 0;
 }
 
+/* Live video0.fps write: the rebind re-creates the encoder channel, so a
+ * receiver needs a random-access point.  Star6E parity — see
+ * apply_fps_live() in src/star6e_controls.c. */
+static int maruko_apply_fps_live(uint32_t fps)
+{
+	/* Only a real rebind is a bootstrap event, and maruko_apply_fps()
+	 * reports that directly rather than leaving us to diff the RC fpsNum:
+	 * it rebinds BEFORE writing fpsNum, and skips that write when the attr
+	 * read fails or the rate mode is not one we enumerate -- so a diff
+	 * reads "unchanged" over a channel that WAS rebound, leaving the
+	 * receiver with no random-access point.  Star6E compares delivered_fps,
+	 * which its apply_fps() sets on exactly that path. */
+	int ret = maruko_apply_fps(fps);
+
+	if (ret < 0)
+		return -1;
+	if (ret == 1)
+		(void)maruko_request_idr_bootstrap();
+	return 0;
+}
+
 static int maruko_request_idr(void)
 {
+	/* Through the shared per-channel gate, as Star6E's request_idr() and
+	 * CV610's cv610_request_idr() already are.  Without it this endpoint
+	 * was neither coalesced against an IDR storm nor visible in
+	 * /api/v1/idr/stats, so the contract's claim that IDR sources are
+	 * paced and counted equivalently on both SigmaStar backends was not
+	 * true for Maruko.  A coalesced request is not an error: the caller
+	 * asked for a resync point and one is already in flight. */
+	if (!idr_rate_limit_allow(g_ctx.venc_chn))
+		return 0;
+	return maruko_mi_venc_request_idr(g_ctx.venc_dev,
+		g_ctx.venc_chn, 1) == 0 ? 0 : -1;
+}
+
+/* Bootstrap form — Star6E parity, see request_idr_bootstrap() in
+ * src/star6e_controls.c for why these three sites must not be coalesced. */
+static int maruko_request_idr_bootstrap(void)
+{
+	idr_rate_limit_force(g_ctx.venc_chn);
 	return maruko_mi_venc_request_idr(g_ctx.venc_dev,
 		g_ctx.venc_chn, 1) == 0 ? 0 : -1;
 }
@@ -1169,6 +1239,13 @@ static int maruko_apply_output_enabled(bool on)
 		return -1;
 
 	if (on) {
+		/* Star6E parity — see apply_output_enabled() there for why an
+		 * unchanged re-POST must not reach the un-coalescible IDR, and
+		 * why this guard covers only the enable arm: the disable arm
+		 * also idles the encoder, and skipping that leaves it at full
+		 * rate with the output off. */
+		if (*g_ctx.output_enabled_ptr)
+			return 0;
 		if (!g_ctx.vcfg || !g_ctx.vcfg->outgoing.server[0]) {
 			fprintf(stderr, "> Cannot enable output: no server configured\n");
 			return -1;
@@ -1178,7 +1255,10 @@ static int maruko_apply_output_enabled(bool on)
 			*g_ctx.stored_fps_ptr :
 			(g_ctx.vcfg ? g_ctx.vcfg->video0.fps : 30);
 		maruko_apply_fps(restored_fps);
-		maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
+		/* Exactly one IDR for the enable: counted, but NOT coalesced —
+		 * the consumer has seen no parameter set.  apply_fps() no
+		 * longer issues its own, so this is not a back-to-back pair. */
+		(void)maruko_request_idr_bootstrap();
 		printf("> Output enabled, FPS restored to %u\n", restored_fps);
 	} else {
 		*g_ctx.output_enabled_ptr = 0;
@@ -1196,15 +1276,25 @@ static int maruko_apply_output_enabled(bool on)
 /* ── Live server change (Step 3C) ────────────────────────────────────── */
 
 static MarukoOutput *g_maruko_output_ptr;
-
 static int maruko_apply_server(const char *uri)
 {
 	if (!g_maruko_output_ptr)
 		return -1;
+	/* Star6E parity — an unchanged destination is not a bootstrap event.
+	 * Compare what we actually applied, never vcfg: the config is
+	 * committed before this callback runs, so a vcfg comparison matches
+	 * even on a real change and would skip the repoint. */
+	if (uri && g_ctx.applied_server[0] &&
+	    strcmp(g_ctx.applied_server, uri) == 0)
+		return 0;
 	if (maruko_output_apply_server(g_maruko_output_ptr, uri) != 0)
 		return -1;
+	snprintf(g_ctx.applied_server,
+		sizeof(g_ctx.applied_server), "%s", uri);
 
-	maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);
+	/* A new destination is a receiver that has never seen a parameter set,
+	 * so this is counted but never coalesced. */
+	(void)maruko_request_idr_bootstrap();
 	printf("> Destination changed to %s\n", uri);
 	return 0;
 }
@@ -1253,9 +1343,6 @@ static char *maruko_query_transport_status(void)
 	const char *transport;
 	int pos;
 	uint32_t pressure_drops;
-	/* Clamp state — see the star6e_controls equivalent. */
-	uint16_t permille = maruko_controls_output_throttle();
-	uint32_t cfg_kbps = g_ctx.vcfg ? g_ctx.vcfg->video0.bitrate : 0;
 
 	if (!backend)
 		return NULL;
@@ -1285,7 +1372,8 @@ static char *maruko_query_transport_status(void)
 			"\"packetsSent\":%llu,"
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
-			"\"usedSlots\":%u}}",
+			"\"usedSlots\":%u,"
+			"\"badAuDrops\":%llu}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1294,7 +1382,9 @@ static char *maruko_query_transport_status(void)
 			(unsigned long long)fill.writes,
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
-			(unsigned)fill.used_slots);
+			(unsigned)fill.used_slots,
+			(unsigned long long)__atomic_load_n(
+				&backend->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else if (backend->output.frame_ring) {
 		venc_frame_ring_fill_t fill;
 		int in_pressure;
@@ -1314,8 +1404,9 @@ static char *maruko_query_transport_status(void)
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
 			"\"usedSlots\":%u,"
-			"\"throttlePermille\":%u,"
-			"\"effectiveBitrateKbps\":%u}}",
+			"\"ringLowWaterSlots\":%u,"
+			"\"otherDrops\":%llu,"
+			"\"badAuDrops\":%llu}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1325,8 +1416,10 @@ static char *maruko_query_transport_status(void)
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
 			(unsigned)fill.used_slots,
-			(unsigned)permille,
-			(unsigned)venc_shm_throttle_scale(permille, cfg_kbps));
+			(unsigned)venc_ring_low_water_slots(&backend->output.low_water),
+			(unsigned long long)fill.other_drops,
+			(unsigned long long)__atomic_load_n(
+				&backend->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else if ((backend->output.transport == VENC_OUTPUT_URI_UNIX ||
 	            backend->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           backend->output.socket_handle >= 0) {
@@ -1344,7 +1437,8 @@ static char *maruko_query_transport_status(void)
 			"\"inPressure\":%s,"
 			"\"pressureDrops\":%u,"
 			"\"transportDrops\":%u,"
-			"\"packetsSent\":%u}}",
+			"\"packetsSent\":%u,"
+			"\"badAuDrops\":%llu}}",
 			transport,
 			(unsigned)fill_pct,
 			in_pressure ? "true" : "false",
@@ -1352,7 +1446,9 @@ static char *maruko_query_transport_status(void)
 			(unsigned)__atomic_load_n(&backend->output.socket_drops,
 				__ATOMIC_RELAXED),
 			(unsigned)__atomic_load_n(&backend->output.socket_writes,
-				__ATOMIC_RELAXED));
+				__ATOMIC_RELAXED),
+			(unsigned long long)__atomic_load_n(
+				&backend->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
@@ -1475,9 +1571,10 @@ void maruko_controls_service_detect_reload(void)
 
 static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_bitrate = maruko_apply_bitrate,
-	.apply_fps = maruko_apply_fps,
+	.apply_fps = maruko_apply_fps_live,
 	.apply_gop = maruko_apply_gop,
 	.apply_qp_delta = maruko_apply_qp_delta,
+	.apply_qp_bounds = maruko_apply_qp_bounds,
 	.apply_roi_qp = maruko_apply_roi_qp,
 	.apply_verbose = maruko_apply_verbose,
 	.apply_output_enabled = maruko_apply_output_enabled,
@@ -1496,7 +1593,6 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.query_iq_info = maruko_iq_query,
 	.apply_iq_param = maruko_iq_set,
 	.apply_max_payload_size = maruko_apply_max_payload_size,
-	.apply_max_frame_size = maruko_apply_max_frame_size,
 	.query_transport_status = maruko_query_transport_status,
 	.query_audio_status = maruko_query_audio_status,
 	.apply_zoom = maruko_apply_zoom,
@@ -1531,6 +1627,16 @@ void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
 	g_ctx.output_enabled_ptr = &backend->output_enabled;
 	g_ctx.stored_fps_ptr = &backend->stored_fps;
 	g_maruko_output_ptr = &backend->output;
+	/* Seed from the create path so the first live set naming the
+	 * already-active destination is correctly seen as unchanged -- but
+	 * ONLY if the output actually came up; see the Star6E twin for why
+	 * seeding over a failed bring-up would remove the retry route. */
+	if (g_ctx.vcfg &&
+	    (backend->output.ring || backend->output.frame_ring ||
+	     backend->output.socket_handle >= 0))
+		snprintf(g_ctx.applied_server,
+			sizeof(g_ctx.applied_server), "%s",
+			g_ctx.vcfg->outgoing.server);
 }
 
 const VencApplyCallbacks *maruko_controls_callbacks(void)

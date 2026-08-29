@@ -109,11 +109,14 @@ typedef struct {
 	uint32_t socket_drops;
 	uint32_t socket_writes;
 	Star6eOutputBatch batch;
-	/* Last clamp factor published by the frame-shm ring-fill throttle
-	 * (include/venc_shm_throttle.h), 1000 = unclamped.  Cached here so
-	 * the sidecar emit path can report it without reaching into the
-	 * backend control layer. */
-	uint16_t throttle_permille;
+	/* Window state for the reading above.  PER OUTPUT, not a file-static
+	 * singleton: a second frame-shm output (dual-stream ch1) is a second
+	 * ring with its own occupancy, and a shared tracker cannot represent
+	 * it -- the ring would publish VHLT with a low-water that nothing ever
+	 * writes, which reads as the healthiest value in the range rather than
+	 * as an absent gauge. */
+	VencRingLowWater low_water;
+	int low_water_ready;
 	/* Transport-pressure observation cache (telemetry only — never gates
 	 * frame transmission).  Populated by star6e_output_observe_pressure
 	 * once per frame on the producer thread and read by the sidecar emit
@@ -144,37 +147,43 @@ typedef struct {
 	int svct_active;
 	uint8_t gdr_cycle_len;
 	uint8_t gdr_counter;
-	/* Recovery hook for a frame-shm:// ring-full drop.
-	 *
-	 * A full ring discards a frame that is ALREADY ENCODED, so the
-	 * decoder's reference chain breaks and it renders garbage until the
-	 * next IDR — with a long GOP, that is seconds.  The producer is the
-	 * one party that knows instantly it just broke the chain, so it
-	 * re-establishes it locally instead of waiting for the ground to
-	 * notice and ask: waybeam-link only requests an IDR on a
-	 * RecoveryRequest arriving over RF, which is a full round trip and is
-	 * off by default (venc.recovery_enabled).
-	 *
-	 * Wired to star6e_ring_request_idr(), so it inherits the shared
-	 * per-channel IDR rate limiter (100 ms) — but 10 IDRs/s into an
-	 * already-congested ring is still a storm (measured: a consumer-less
-	 * ring degraded the stream to an IDR every ~7 frames with GDR
-	 * suppressed), so this path adds its own holdoff on top:
-	 * venc_frame_drop_idr_due(), one request per second, state in
-	 * drop_idr_last_us.  Returns 1 when the IDR was actually issued, 0
-	 * when the shared limiter swallowed it — the caller then rolls the
-	 * holdoff anchor back so the next drop retries instead of leaving
-	 * the chain unhealed for up to a second. */
-	int (*request_idr)(void *ctx);
-	void *idr_ctx;
-	uint64_t drop_idr_last_us;
+	/* Access units discarded before they could be shipped because the
+	 * SDK's packet table was incomplete or invalid.  Transport-independent
+	 * (it happens on RTP too), which is why it lives here rather than in
+	 * the ring's stats; on frame-shm it is ALSO mirrored into the ring
+	 * header's other_drops so the consumer can see the frame vanish.
+	 * Written on the pipeline thread, read on the httpd thread: relaxed
+	 * atomics, like socket_drops/socket_writes beside it in the same
+	 * response. */
+	uint64_t bad_au_drops;
 	/* One WARN per pipeline start (reset by star6e_output_reset's memset)
 	 * when packet metadata is incomplete or invalid — the frame is aborted,
 	 * never shipped truncated. */
 	uint8_t trunc_warned;
-	/* Ring-full drops split by whether they actually broke the chain.
+	/* One WARN per pipeline start when an access unit does not fit a ring
+	 * slot.  Separate one-shot from trunc_warned: the two are different
+	 * faults and either must not mask the other. */
+	uint8_t oversize_warned;
+	/* Recovery for a MALFORMED access unit: the SDK handed us a packet
+	 * table we cannot ship, the whole picture is dropped, and the
+	 * decoder's reference chain stays broken until the next IDR — with a
+	 * long GOP, seconds.
+	 *
+	 * This is an encoder-side event, NOT egress pressure, so it is not the
+	 * self-actuation ring v2 removed.  The ring header draws the same line
+	 * itself: other_drops is kept apart from full_drops because it "is not
+	 * congestion at all and slowing down fixes nothing".  It therefore
+	 * fires on EVERY transport, including udp:// and unix://, which have
+	 * no ring and were never congested.
+	 *
 	 * A non-referenced (SVC-T) frame is droppable by construction, so
-	 * those cost exactly one frame and must NOT trigger an IDR. */
+	 * losing one costs exactly one frame and must NOT trigger an IDR.
+	 *
+	 * Paced by the shared 100 ms per-channel IDR limiter inside the
+	 * callback, so this coalesces against the scene detector's requests.
+	 * NULL disables recovery. */
+	void (*request_idr)(void *ctx);
+	void *idr_ctx;
 } Star6eOutput;
 
 typedef struct {
@@ -232,11 +241,11 @@ int star6e_output_is_frame_shm(const Star6eOutput *output);
  *  on the producer hot path. */
 void star6e_output_observe_pressure(Star6eOutput *output);
 
-/* Snapshot the frame-shm ring occupancy for the bitrate clamp
- * (include/venc_shm_throttle.h).  Returns -1 when the active transport is
- * not frame-shm://.  Deliberately NOT star6e_output_observe_pressure() -- that
- * one is gated on a live sidecar subscription, and the clamp is a safety
- * mechanism that must run whether or not anyone is watching. */
+/* Snapshot the frame-shm ring occupancy for the low-water measurement.
+ * Returns -1 when the active transport is not frame-shm://.  Deliberately NOT
+ * star6e_output_observe_pressure() -- that one is gated on a live sidecar
+ * subscription, and the measurement must run whether or not anyone is
+ * watching, because waybeam-link reads the result from the ring header. */
 int star6e_output_frame_ring_fill(
 	const Star6eOutput *output, venc_frame_ring_fill_t *out);
 
@@ -245,8 +254,34 @@ int star6e_output_frame_ring_fill(
 int star6e_output_stream_packet_info_complete(
 	const MI_VENC_Stream_t *stream);
 
+/** Flatten a VENC stream's NAL payload into ONE malloc'd Annex-B access unit.
+ *
+ *  For the asynchronous recorder: the SDK's stream memory is only valid until
+ *  ReleaseStream, so anything that writes it on another thread must own a copy
+ *  first.  Returns the buffer (the caller, or the writer queue it is handed
+ *  to, owns and frees it) or NULL if there is nothing valid to record.
+ *
+ *  *out_len gets the byte count and *out_is_idr whether any VCL NAL was an
+ *  IRAP, which segment rotation needs.  The IRAP test reads H.265 NAL types
+ *  (19/20) and is H.265-ONLY: on an H.264 stream those numbers mean something
+ *  else, so *out_is_idr would be meaningless.  Every SigmaStar craft encodes
+ *  H.265; a future H.264 path must extend this before recording works.  A stream whose
+ *  packetInfo table is incomplete is refused, exactly as the synchronous
+ *  writers refuse it — a partial table means the pack boundaries are unknown
+ *  and half an access unit is worse than none.
+ *
+ *  Sized from the stream itself rather than a fixed buffer, so it does not
+ *  inherit the 512 KB cliff of the automatic in
+ *  star6e_ts_recorder_write_stream().  It is not unbounded, though: an access
+ *  unit larger than VENC_REC_WRITER_MAX_BYTES is refused here rather than
+ *  copied, because the writer queue would reject it at its cap anyway.  The
+ *  caller counts that refusal — see rec_flatten_failures. */
+uint8_t *star6e_output_stream_flatten(const MI_VENC_Stream_t *stream,
+	size_t *out_len, int *out_is_idr);
+
 /** Reject an incomplete AU before output/recording. Returns 1 when rejected,
- * emits a one-time warning, and requests paced recovery for reference frames. */
+ * emits a one-time warning, counts the drop, and — on every transport —
+ * requests paced recovery when the dropped picture was a reference frame. */
 int star6e_output_reject_incomplete_access_unit(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream);
 

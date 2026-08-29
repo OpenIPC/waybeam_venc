@@ -1,5 +1,12 @@
 #include "star6e_recorder.h"
-#ifndef PLATFORM_MARUKO
+/* The SigmaStar-typed adapters below need star6e_output.c, which only the
+ * Star6E target and the host test build link.  Maruko has its own adapter
+ * in maruko_recorder.c / maruko_ts_recorder.c; CV610 needs none, because it
+ * hands the recorder one contiguous access unit and calls the SoC-
+ * independent entry points directly.  Stated as "not those two" rather than
+ * "PLATFORM_STAR6E" because the host test build defines no platform macro
+ * at all and must keep compiling these. */
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 #include "star6e_output.h"
 #endif
 
@@ -20,6 +27,8 @@ void star6e_recorder_init(Star6eRecorderState *state)
 	state->fd = -1;
 	state->sync_interval_frames = RECORDER_SYNC_DEFAULT_FRAMES;
 	state->last_stop_reason = RECORDER_STOP_MANUAL;
+	if (pthread_mutex_init(&state->status_lock, NULL) == 0)
+		state->status_lock_ready = 1;
 }
 
 uint64_t star6e_recorder_free_space(const char *path)
@@ -59,7 +68,7 @@ static int build_recording_path(char *path, size_t path_size, const char *dir)
 	return 0;
 }
 
-#ifndef PLATFORM_MARUKO
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 static ssize_t writev_all(int fd, const struct iovec *iov, int iov_count)
 {
 	struct iovec pending[16];
@@ -114,13 +123,22 @@ static const char *stop_reason_str(Star6eRecorderStopReason reason)
 static void stop_with_reason(Star6eRecorderState *state,
 	Star6eRecorderStopReason reason)
 {
-	if (!state || state->fd < 0)
+	if (!state)
+		return;
+	/* Cleared before the fd test: a stop that lands on an already-closed
+	 * recorder must still end the recording. */
+	star6e_recorder_status_lock(state);
+	__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
+	star6e_recorder_status_unlock(state);
+	if (state->fd < 0)
 		return;
 
 	fdatasync(state->fd);
 	close(state->fd);
 	state->fd = -1;
+	star6e_recorder_status_lock(state);
 	state->last_stop_reason = reason;
+	star6e_recorder_status_unlock(state);
 
 	fprintf(stderr, "[recorder] stopped (%s): %s (%u frames, %llu bytes)\n",
 		stop_reason_str(reason), state->path, state->frames_written,
@@ -144,28 +162,40 @@ int star6e_recorder_start(Star6eRecorderState *state, const char *dir)
 			"(%llu bytes free, need %llu)\n",
 			dir, (unsigned long long)free_bytes,
 			(unsigned long long)RECORDER_MIN_FREE_BYTES);
+		star6e_recorder_status_lock(state);
 		state->last_stop_reason = RECORDER_STOP_DISK_FULL;
+		star6e_recorder_status_unlock(state);
 		return -1;
 	}
 
 	snprintf(state->dir, sizeof(state->dir), "%s", dir);
+	star6e_recorder_status_lock(state);
 	build_recording_path(state->path, sizeof(state->path), dir);
+	star6e_recorder_status_unlock(state);
 
 	state->fd = open(state->path,
 		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (state->fd < 0) {
 		fprintf(stderr, "[recorder] open %s failed: %s\n",
 			state->path, strerror(errno));
+		star6e_recorder_status_lock(state);
 		state->path[0] = '\0';
+		star6e_recorder_status_unlock(state);
 		return -1;
 	}
 
+	star6e_recorder_status_lock(state);
 	state->bytes_written = 0;
 	state->frames_written = 0;
 	state->frames_since_sync = 0;
 	state->space_check_countdown = RECORDER_SPACE_CHECK_INTERVAL;
 	state->last_stop_reason = RECORDER_STOP_MANUAL;
 	clock_gettime(CLOCK_MONOTONIC, &state->start_time);
+	/* Published last, once the file is genuinely open -- and inside the
+	 * same section as the counters, so a poll cannot catch "not recording,
+	 * stopped manually" naming a file that is about to start. */
+	__atomic_store_n(&state->recording, 1, __ATOMIC_RELEASE);
+	star6e_recorder_status_unlock(state);
 
 	fprintf(stderr, "[recorder] started: %s\n", state->path);
 	return 0;
@@ -194,7 +224,91 @@ static int check_disk_space(Star6eRecorderState *state)
 	return 0;
 }
 
-#ifndef PLATFORM_MARUKO
+static ssize_t write_all(int fd, const uint8_t *data, size_t len)
+{
+	size_t total = 0;
+
+	while (total < len) {
+		ssize_t ret = write(fd, data + total, len - total);
+
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (ret == 0) {
+			errno = EIO;
+			return -1;
+		}
+		total += (size_t)ret;
+	}
+
+	return (ssize_t)total;
+}
+
+int star6e_recorder_write_au(Star6eRecorderState *state,
+	const uint8_t *au, size_t len)
+{
+	ssize_t written;
+	off_t frame_start;
+
+	if (!state || state->fd < 0 || !au || len == 0)
+		return 0;
+
+	/* Same order as star6e_recorder_write_frame() below: space check
+	 * first (it can stop the recorder), then the frame boundary, then the
+	 * write, then the counters and the sync cadence. */
+	if (check_disk_space(state) != 0)
+		return 0;
+	frame_start = lseek(state->fd, 0, SEEK_CUR);
+
+	written = write_all(state->fd, au, len);
+	if (written < 0) {
+		int saved_errno = errno;
+
+		/* A failure may follow a short successful write. Roll the
+		 * regular file back to its frame boundary so it never retains
+		 * half an AU. */
+		if (frame_start >= 0)
+			(void)ftruncate(state->fd, frame_start);
+		errno = saved_errno;
+		if (errno == ENOSPC) {
+			fprintf(stderr, "[recorder] disk full (ENOSPC)\n");
+			stop_with_reason(state, RECORDER_STOP_DISK_FULL);
+		} else {
+			fprintf(stderr, "[recorder] write error: %s\n",
+				strerror(errno));
+			stop_with_reason(state, RECORDER_STOP_WRITE_ERROR);
+		}
+		return -1;
+	}
+
+	star6e_recorder_status_lock(state);
+	state->bytes_written += (uint64_t)written;
+	state->frames_written++;
+	star6e_recorder_status_unlock(state);
+	state->frames_since_sync++;
+
+	if (state->sync_interval_frames > 0 &&
+	    state->frames_since_sync >= state->sync_interval_frames) {
+		/* Non-blocking writeback hint: bounds the dirty page count
+		 * without stalling the encoder thread. Durability checkpoint
+		 * is the fdatasync at recorder stop. */
+		sync_file_range(state->fd, 0, 0, SYNC_FILE_RANGE_WRITE);
+		state->frames_since_sync = 0;
+	}
+
+	return (int)written;
+}
+
+/* The failure tail above is spelled out rather than shared with
+ * write_frame(): folding them would edit a device-verified Star6E code path
+ * for no behavioural gain, and would cost the byte-for-byte no-change control
+ * on the star6e and maruko binaries that this change relies on. Collapsing
+ * the two — together with the larger maruko_recorder.c duplication — is a
+ * separate change with its own verification. */
+
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 int star6e_recorder_write_frame(Star6eRecorderState *state,
 	const MI_VENC_Stream_t *stream)
 {
@@ -279,8 +393,10 @@ int star6e_recorder_write_frame(Star6eRecorderState *state,
 		total += (size_t)written;
 	}
 
+	star6e_recorder_status_lock(state);
 	state->bytes_written += total;
 	state->frames_written++;
+	star6e_recorder_status_unlock(state);
 	state->frames_since_sync++;
 
 	if (state->sync_interval_frames > 0 &&
@@ -324,6 +440,31 @@ void star6e_recorder_stop(Star6eRecorderState *state)
 int star6e_recorder_is_active(const Star6eRecorderState *state)
 {
 	return state && state->fd >= 0;
+}
+
+int star6e_recorder_is_recording(const Star6eRecorderState *state)
+{
+	return state && __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
+}
+
+void star6e_recorder_snapshot(Star6eRecorderState *state,
+	Star6eRecorderSnapshot *out)
+{
+	if (!out)
+		return;
+	memset(out, 0, sizeof(*out));
+	if (!state || !state->status_lock_ready)
+		return;
+
+	pthread_mutex_lock(&state->status_lock);
+	out->active = __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
+	out->bytes_written = state->bytes_written;
+	out->frames_written = state->frames_written;
+	out->elapsed_ms = out->active
+		? star6e_recorder_elapsed_ms(&state->start_time) : 0;
+	out->last_stop_reason = state->last_stop_reason;
+	snprintf(out->path, sizeof(out->path), "%s", state->path);
+	pthread_mutex_unlock(&state->status_lock);
 }
 
 void star6e_recorder_status(const Star6eRecorderState *state,

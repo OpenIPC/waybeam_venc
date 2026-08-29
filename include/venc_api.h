@@ -1,6 +1,13 @@
 #ifndef VENC_API_H
 #define VENC_API_H
 
+
+/* The HTTP API contract version this build serves.  Must equal the version in
+ * documentation/HTTP_API_CONTRACT.md — tests/test_venc_api.c reads that file
+ * and fails if they drift.  0.73.0 shipped with the document on 0.22.0 and the
+ * code still answering 0.21.0, so every craft advertised a contract it was not
+ * serving. */
+#define VENC_CONTRACT_VERSION "0.22.0"
 #include "venc_config.h"
 
 #ifdef __cplusplus
@@ -50,15 +57,11 @@ typedef struct {
 	 * not need to reject size-based requests. Returns 0 on success,
 	 * -1 if the backend has no live state to mutate. */
 	int (*apply_max_payload_size)(uint16_t size);
-	/* Live-update per-frame size caps (MaxISize/MaxPSize) in the RC param
-	 * struct and set RC priority to FRAMEBITS_FIRST when either is >0.
-	 * Both values in bytes; 0 = unlimited (restores BITRATE_FIRST). */
-	int (*apply_max_frame_size)(uint32_t max_i_bytes, uint32_t max_p_bytes);
 	/* Live-update the RC QP bounds (MinQp/MaxQp) in the RC param struct.
 	 * 0 leaves that bound at whatever the driver reported, so a config
-	 * that sets neither behaves exactly as before. Unlike the frame-size
-	 * caps these are the knobs the SDK rate controller actually honours:
-	 * the floor governs whether CBR can spend its budget on a simple
+	 * that sets neither behaves exactly as before. These are knobs the SDK
+	 * rate controller actually honours: the floor governs whether CBR can
+	 * spend its budget on a simple
 	 * scene, the ceiling governs how hard it may compress a scene change.
 	 * NULL on backends that do not implement it. */
 	int (*apply_qp_bounds)(uint32_t min_qp, uint32_t max_qp);
@@ -133,19 +136,6 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 /* Register the config path so restart-required sets can persist to disk
  * before triggering reinit.  Pass NULL to disable save-on-restart. */
 void venc_api_set_config_path(const char *path);
-
-/* Try to take the config mutex that serialises the apply_* callbacks.
- * Returns 1 on success (caller must venc_api_cfg_unlock), 0 if a config
- * transaction is already in flight.
- *
- * For pipeline-thread control writes that must not collide with an HTTP
- * apply doing its own SDK read-modify-write.  TRY, never block: a
- * restart-class set holds this mutex across a full pipeline reinit, and
- * stalling the encode loop behind that is far worse than skipping one
- * advisory update.  Callers must therefore treat a 0 as normal and retry
- * on their next cycle. */
-int venc_api_cfg_trylock(void);
-void venc_api_cfg_unlock(void);
 
 /* Return 1 if a config field is supported on the named backend.
  * field_key may be canonical (video0.scene_threshold) or an accepted
@@ -226,6 +216,13 @@ typedef struct {
 	uint64_t elapsed_ms;
 	uint32_t frames_written;
 	uint32_t segments;
+	/* Access units the async writer refused because its queue was full —
+	 * i.e. the disk could not keep up and the RECORDING was sacrificed to
+	 * keep the live video path unstalled.  Reported because a silent drop
+	 * makes a damaged recording look like a clean one.  0 on backends that
+	 * still write synchronously. */
+	uint32_t dropped_frames;
+	uint32_t writer_peak_depth;
 	char path[256];
 	char stop_reason[32];
 	char format[16];

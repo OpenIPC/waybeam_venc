@@ -33,15 +33,14 @@
     "size": "auto",
     "bitrate": 8192,
     "gopSize": 1.0,
-    "qpDelta": -4,
-    "maxIBytes": 0,
-    "maxPBytes": 0,
+    "qpDelta": -12,
     "minQp": 0,
     "maxQp": 0,
     "sceneThreshold": 0,
     "sceneHoldoff": 2,
     "sliceCount": 1,
     "resilience": "off",
+    "intraRefreshQp": 0,
     "zoomX": 0.5,
     "zoomY": 0.5,
     "framing": "off",
@@ -58,8 +57,7 @@
     "connectedUdp": true,
     "allowUnixEncoderStall": false,
     "audioPort": 5601,
-    "sidecarPort": 5602,
-    "shmThrottle": true
+    "sidecarPort": 5602
   },
   "discovery": {
     "enabled": true,

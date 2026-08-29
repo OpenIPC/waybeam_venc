@@ -2,6 +2,58 @@
 
 Per-incident notes on hangs, D-state, and recovery actions on the bench.
 
+## 2026-08-29 — Maruko `record.mode=dual` drain thread overflowed its stack
+
+**Bench:** SSC378QE (Maruko) lab unit, musl
+(`/lib/ld-musl-armhf.so.1`, `arm-openipc-linux-musleabihf`).
+
+**Build:** 0.73.1 review of the 0.67.3 -> 0.73.0 range. Found by inspection,
+then reproduced deliberately; this was never observed as a field incident,
+because `record.mode=dual` is not the shipped configuration on this craft.
+
+**Symptom:** the chn 1 recording drain thread terminates the process on its
+first recorded frame. Any `record.mode=dual` recording on a musl target dies
+immediately; `record.mode=mirror` is unaffected because it feeds the async
+writer thread, which already carried an explicit stack size.
+
+**Trigger:** `maruko_pipeline_start_dual()` created the drain thread with a
+NULL `pthread_attr_t`, taking musl's 128 KB default. The thread's path holds
+`nal_buf[512 * 1024]` (`maruko_ts_recorder.c`) live across a call to
+`star6e_ts_recorder_write_video()`, which holds `ts_buf[3000 * 188]` =
+564 000 B — about 1.06 MB of automatics against a 128 KB stack.
+
+**Reproduction (standalone probe on the bench, no venc involved):**
+
+| Arm | Thread stack | Result |
+|---|---|---|
+| default attr | 131 072 B | SIGSEGV, exit 139 |
+| explicit 2 MB | 2 097 152 B | completed, exit 0 |
+
+Frame addresses in the passing arm — `nal_buf @0xb6eb4d4c`,
+`ts_buf @0xb6e2b214`, a `0x89B38` (564 024 B) delta — confirm both buffers are
+really on the stack.
+
+**False negative worth recording:** the first version of that probe reported
+`survived` in BOTH arms. It `memset()` the buffers to a constant and read them
+back, so at `-O1` GCC constant-folded the reads and deleted the arrays; nothing
+was ever placed on the stack. A probe built to demonstrate a failure that does
+not fail is broken until proven otherwise. The working version uses a
+`__attribute__((noinline))` toucher taking a `volatile unsigned char *` with a
+seed derived from `argc`, and prints each frame's address.
+
+**Root cause/fix:** both dual-recording drain threads now request
+`STAR6E_TS_RECORDER_STREAM_STACK_BYTES` (2 MB, lazily committed). It is larger
+than `VENC_REC_WRITER_STACK_BYTES` because the async writer thread only ever
+reaches `write_video`, while this path reaches both buffers. The size is
+**raised, never lowered**: Star6E is glibc and already had 8 MB by default —
+which is why this went unnoticed there, and why no host test can catch it — and
+that thread also runs SDK entry points whose stack use is opaque. CV610 has no
+dual mode; its writer thread was already sized.
+
+**State/recovery:** no device state to recover — the probe was a standalone
+binary in `/overlay`, removed after the run, and the venc service was not
+modified during the test.
+
 ## 2026-08-13 — CV610 module unload raced API-respawn successor
 
 **Bench:** `root@192.168.2.181` — Hi3516CV610 + IMX662, 1080p100.

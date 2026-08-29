@@ -15,16 +15,21 @@ large control surface.
 - Linear 1920x1080 modes at 30/60 fps RAW12 and 90/100 fps RAW10 are accepted
   (see "Sensor modes" below — the table in `src/cv610_modes.c` is the only
   place they are written down).
-- H.265 CBR, GOP, and I/P QP delta come from the existing `VencConfig` fields.
+- H.265 CBR and GOP come from the existing `VencConfig` fields. `video0.qpDelta`
+  is **not** among them: CV610's rate control stores every I-frame input and
+  then ignores it, so the field is not advertised for this backend and
+  `normal_p.ip_qp_delta` is left at 0. The I-frame lever here is
+  `video0.intraRefreshQp`.
 - Shared resilience presets drive row GDR and reference cadence with strict
   vendor readback; frame-SHM carries GDR/ENHANCE metadata and copied droppable
   NALs are marked TRAIL_N.
 - `video0.sliceCount` enables whole-access-unit H.265 slicing. CV610 uses
   32-pixel LCU-row units and keeps early per-slice output disabled.
 - UDP and abstract UNIX outputs use the shared HEVC RTP packetizer.
-- `frame-shm://` publishes the existing VFRM v1 whole-frame contract.
+- `frame-shm://` publishes the VFRM v2 whole-frame contract (ring header
+  version 2 since 0.69.0; consumers must be rebuilt to match).
 - The shared HTTP/WebUI API advertises a CV610-specific capability mask and
-  applies bitrate, GOP, I/P QP delta, RTP payload size, and IDR requests live.
+  applies bitrate, GOP, RTP payload size, and IDR requests live.
 - Debug OSD reuses the shared palette, font, primitive rasterizer, panel, and
   CPU sampler through a CV610 CLUT4 hardware-region adapter.
 - Optional audio preserves the standalone streamer's verified inner-ACODEC ->
@@ -34,7 +39,29 @@ large control surface.
 - The source-built `libsns_imx662.so` is included under
   `sensors/cv610/imx662/` and staged separately from the proprietary runtime
   libraries.
+- `GET /api/v1/snapshot.jpg` serves a JPEG from a dedicated VENC channel bound
+  as a **second destination** on the same VPSS output the H.265 channel
+  consumes (`OT_MAX_BIND_DST_NUM` is 4). The channel is created once and left
+  stopped; each capture pulses `start_chn(recv_pic_num=1)` -> `get_stream` ->
+  `stop_chn`, so it costs nothing while idle and never reconfigures the source.
+  Geometry is inherited from the main stream, so `snapshot.width`/`height` are
+  advertised unsupported; `snapshot.quality` maps to
+  `ss_mpi_venc_set_jpeg_param(qfactor)`.
+- Recording in `record.mode=mirror`, both `format=ts` (with Opus audio muxed)
+  and `format=hevc`, with rotation on `record.max_seconds`/`max_mb` and
+  `/api/v1/record/{start,stop,status}`. No SDK-typed adapter was needed: the
+  drain loop already copies each access unit into one contiguous Annex-B
+  buffer, which is exactly what the shared recorder cores consume. Record
+  start forces an un-coalescible IDR — the shipped config is
+  `resilience=racing`, which emits no periodic IDR, so a coalesced request
+  would leave a file with no IRAP access unit anywhere in it.
 - SIGINT/SIGTERM unwind VENC, ISP, sensor callbacks, VI, SYS, and VB in order.
+
+The shipped `record.dir` default is `/mnt/mmcblk0p1`, shared with the SigmaStar
+backends. The CV610 reference board has no such device — the SIP-K662C6S bench
+mounts USB storage at `/mnt/sda1` — so `record.dir` has to be set for the
+target before recording will start. It is left at the shared default rather
+than hardcoding one board's mount point into a generic config.
 
 The graph uses VI-online mode, matching the standalone streamer's production
 path. The module loader must provide a clean SYS/VB lifecycle; the backend
@@ -197,9 +224,14 @@ and continues on the boot-time clock.
    completed.
 2. Add live output redirection and encoder output-FPS control.
 3. Add frame-SHM pressure metrics/throttling and sidecar parity.
-4. Port recording selectively, and only then consider dual VENC or
-   stabilization. Add live audio gain/mute only after the analog control path
-   can be operator-verified.
+4. Dual VENC (`record.mode=dual` / `dual-stream`) — a second encoder channel
+   at its own bitrate/fps/GOP, needing a second VPSS channel, a drain thread
+   and its own teardown ordering. Mirror-mode recording landed first, as this
+   list prescribed; the remaining modes are refused with a warning rather than
+   silently recording ch0. Stabilization likewise remains deferred. Add live
+   audio gain/mute only after the analog control path can be operator-verified.
+5. Independent snapshot geometry (`snapshot.width`/`height`), which needs a
+   dedicated VPSS scaler channel running continuously.
 
 Unsupported SigmaStar-only fields remain in the common configuration schema
 but are marked unsupported in `/api/v1/capabilities` and rejected before

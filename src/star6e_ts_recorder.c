@@ -1,5 +1,12 @@
 #include "star6e_ts_recorder.h"
-#ifndef PLATFORM_MARUKO
+/* The SigmaStar-typed adapters below need star6e_output.c, which only the
+ * Star6E target and the host test build link.  Maruko has its own adapter
+ * in maruko_recorder.c / maruko_ts_recorder.c; CV610 needs none, because it
+ * hands the recorder one contiguous access unit and calls the SoC-
+ * independent entry points directly.  Stated as "not those two" rather than
+ * "PLATFORM_STAR6E" because the host test build defines no platform macro
+ * at all and must keep compiling these. */
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 #include "star6e_output.h"
 #endif
 
@@ -66,6 +73,19 @@ static int build_ts_path(char *path, size_t path_size, const char *dir,
 	return 0;
 }
 
+/* Guard the status-visible fields.  Never wrap I/O in these. */
+static void ts_status_lock(Star6eTsRecorderState *state)
+{
+	if (state->status_lock_ready)
+		pthread_mutex_lock(&state->status_lock);
+}
+
+static void ts_status_unlock(Star6eTsRecorderState *state)
+{
+	if (state->status_lock_ready)
+		pthread_mutex_unlock(&state->status_lock);
+}
+
 static const char *stop_reason_str(Star6eRecorderStopReason reason)
 {
 	if (reason == RECORDER_STOP_DISK_FULL)
@@ -78,13 +98,28 @@ static const char *stop_reason_str(Star6eRecorderStopReason reason)
 static void stop_with_reason(Star6eTsRecorderState *state,
 	Star6eRecorderStopReason reason)
 {
-	if (!state || state->fd < 0)
+	if (!state)
+		return;
+	/* Cleared before the fd test, not after it: a stop that lands while fd
+	 * is already -1 (mid-rotation, or after a failed reopen) must still end
+	 * the recording, or a producer would go on handing frames to a dead
+	 * recorder.  Today the state lock makes that unreachable; the invariant
+	 * should not depend on the caller's locking. */
+	ts_status_lock(state);
+	__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
+	ts_status_unlock(state);
+	/* Drop any rotation ask still in flight; the recording it was for is
+	 * ending, and a re-queued one would otherwise fire into the next. */
+	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
+	if (state->fd < 0)
 		return;
 
 	fdatasync(state->fd);
 	close(state->fd);
 	state->fd = -1;
+	ts_status_lock(state);
 	state->last_stop_reason = reason;
+	ts_status_unlock(state);
 
 	fprintf(stderr, "[ts_recorder] stopped (%s): %s (%u frames, %llu bytes, %u segments)\n",
 		stop_reason_str(reason), state->path, state->frames_written,
@@ -104,22 +139,29 @@ void star6e_ts_recorder_init(Star6eTsRecorderState *state,
 	state->max_seconds = TS_RECORDER_DEFAULT_MAX_SECONDS;
 	state->max_bytes = TS_RECORDER_DEFAULT_MAX_BYTES;
 	ts_mux_init(&state->mux, audio_rate, audio_channels, audio_codec);
+	if (pthread_mutex_init(&state->status_lock, NULL) == 0)
+		state->status_lock_ready = 1;
 }
 
 static int open_new_segment(Star6eTsRecorderState *state)
 {
 	uint8_t pat_pmt_buf[2 * TS_PACKET_SIZE];
+	char newpath[RECORDER_PATH_MAX];
 	size_t pat_pmt_len;
+	uint64_t pat_bytes = 0;
 	ssize_t ret;
 
-	build_ts_path(state->path, sizeof(state->path), state->dir,
-		&state->mux);
+	/* Built into a LOCAL and published at the end together with segments
+	 * and bytes.  Writing it into state->path up front would let a status
+	 * poll pair the new path with the old segment count, and the open()
+	 * below must not run under the lock anyway. */
+	build_ts_path(newpath, sizeof(newpath), state->dir, &state->mux);
 
-	state->fd = open(state->path,
+	state->fd = open(newpath,
 		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (state->fd < 0) {
 		fprintf(stderr, "[ts_recorder] open %s failed: %s\n",
-			state->path, strerror(errno));
+			newpath, strerror(errno));
 		return -1;
 	}
 
@@ -137,12 +179,19 @@ static int open_new_segment(Star6eTsRecorderState *state)
 			state->fd = -1;
 			return -1;
 		}
-		state->bytes_written += (uint64_t)ret;
-		state->segment_bytes = (uint64_t)ret;
+		pat_bytes = (uint64_t)ret;
+		state->segment_bytes = pat_bytes;
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &state->segment_start_time);
+
+	/* ONE publish: path, segment count and byte total change together, so
+	 * a poll mid-rotation cannot report the new file with the old count. */
+	ts_status_lock(state);
+	snprintf(state->path, sizeof(state->path), "%s", newpath);
+	state->bytes_written += pat_bytes;
 	state->segments++;
+	ts_status_unlock(state);
 
 	fprintf(stderr, "[ts_recorder] segment %u: %s\n",
 		state->segments, state->path);
@@ -163,12 +212,15 @@ int star6e_ts_recorder_start(Star6eTsRecorderState *state, const char *dir,
 	free_bytes = star6e_recorder_free_space(dir);
 	if (free_bytes > 0 && free_bytes < RECORDER_MIN_FREE_BYTES) {
 		fprintf(stderr, "[ts_recorder] insufficient space on %s\n", dir);
+		ts_status_lock(state);
 		state->last_stop_reason = RECORDER_STOP_DISK_FULL;
+		ts_status_unlock(state);
 		return -1;
 	}
 
 	snprintf(state->dir, sizeof(state->dir), "%s", dir);
 	state->audio_ring = audio_ring;
+	ts_status_lock(state);
 	state->bytes_written = 0;
 	state->frames_written = 0;
 	state->segments = 0;
@@ -176,10 +228,26 @@ int star6e_ts_recorder_start(Star6eTsRecorderState *state, const char *dir,
 	state->space_check_countdown = RECORDER_SPACE_CHECK_INTERVAL;
 	state->last_stop_reason = RECORDER_STOP_MANUAL;
 	state->segment_bytes = 0;
+	/* Part of the per-recording reset like everything above it: a stop and
+	 * restart inside the same second must not inherit the old recording's
+	 * pacing anchor and suppress the new one's first rotation request. */
+	state->idr_request_last_sec = 0;
+	state->idr_requests_unanswered = 0;
+	state->rotation_due_since = 0;
+	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
 	clock_gettime(CLOCK_MONOTONIC, &state->start_time);
+	ts_status_unlock(state);
 
 	if (open_new_segment(state) != 0)
 		return -1;
+
+	/* Published only once the first segment is actually open, so a failed
+	 * start never leaves a producer thinking a recording is running -- and
+	 * under the lock, so a poll cannot pair active == 0 with the new path
+	 * and counters. */
+	ts_status_lock(state);
+	__atomic_store_n(&state->recording, 1, __ATOMIC_RELEASE);
+	ts_status_unlock(state);
 
 	fprintf(stderr, "[ts_recorder] started: %s\n", state->path);
 	return 0;
@@ -210,9 +278,6 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	unsigned long elapsed;
 	int should_rotate = 0;
 
-	if (!is_idr)
-		return 0;
-
 	/* Check time-based rotation */
 	if (state->max_seconds > 0) {
 		clock_gettime(CLOCK_MONOTONIC, &now);
@@ -228,6 +293,63 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	if (!should_rotate)
 		return 0;
 
+	/* A segment has to OPEN on an IRAP or it decodes from nothing, so the
+	 * cut can only happen on one.  The original code enforced that by
+	 * returning early on !is_idr — correct, but it silently assumed the
+	 * stream produces IDRs on its own.  A GDR craft (resilience=racing)
+	 * never does: device-measured on CV610, max_seconds=15 yielded ONE
+	 * segment after 50 s under racing and THREE under resilience=off.
+	 * max_seconds/max_mb were simply inert, and the file grew unbounded.
+	 *
+	 * So ask for one instead of waiting for one that is never coming, and
+	 * rotate on the IDR that answers.  Rate-limited to one request per
+	 * second: the threshold stays crossed until the cut actually happens,
+	 * and this must not become a per-frame IDR request — that would be the
+	 * automatic keyframing 0.69.0 removed, reintroduced through the back
+	 * door.  This is operator-configured rotation, not a congestion
+	 * response, and it is the only thing that asks. */
+	if (!is_idr) {
+		/* Bounded: an unanswered ask degrades back to waiting for a
+		 * natural keyframe rather than becoming a permanent 1 Hz
+		 * keyframe tax on the live link. */
+		if (state->idr_requests_unanswered >= TS_RECORDER_MAX_IDR_REQUESTS)
+			return 0;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		/* Give a keyframing stream a chance to rotate on its own before
+		 * asking for anything.  Costs at most one second of overshoot
+		 * on a GDR craft; saves a keyframe per rotation on every stream
+		 * that never needed the request. */
+		if (state->rotation_due_since == 0) {
+			state->rotation_due_since = now.tv_sec;
+			return 0;
+		}
+		if (now.tv_sec - state->rotation_due_since < 1)
+			return 0;
+		/* An elapsed-interval test, not "a different second": X.999 and
+		 * X+1.001 are different seconds 2 ms apart, and on a backend
+		 * whose request path is un-coalesced that is two back-to-back
+		 * keyframes.  `unanswered == 0` doubles as the never-asked
+		 * sentinel, so tv_sec == 0 in the first second after boot is
+		 * not mistaken for one. */
+		if (state->idr_requests_unanswered == 0 ||
+		    now.tv_sec - state->idr_request_last_sec >= 1) {
+			state->idr_request_last_sec = now.tv_sec;
+			state->idr_requests_unanswered++;
+			__atomic_store_n(&state->idr_request_pending, 1,
+				__ATOMIC_RELAXED);
+		}
+		return 0;
+	}
+
+	/* An IRAP arrived, so any outstanding ask was answered.  Clear the
+	 * pending flag too: since a coalesced ask is now re-queued rather than
+	 * dropped, one can still be in flight here, and issuing it after the
+	 * rotation would keyframe the live channel for nothing. */
+	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
+	state->idr_request_last_sec = 0;
+	state->idr_requests_unanswered = 0;
+	state->rotation_due_since = 0;
+
 	/* Close current segment, open new one */
 	fdatasync(state->fd);
 	close(state->fd);
@@ -235,12 +357,17 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	state->segment_bytes = 0;
 
 	if (open_new_segment(state) != 0) {
+		/* A rotation that cannot reopen is a stop, not a gap: clear the
+		 * recording flag so producers stop handing over frames. */
+		ts_status_lock(state);
+		__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
 		state->last_stop_reason = RECORDER_STOP_WRITE_ERROR;
+		ts_status_unlock(state);
 		return -1;
 	}
 
-	/* No IDR request needed: check_rotation only fires when is_idr==1,
-	 * so the current frame (about to be written) IS already an IDR. */
+	/* The frame about to be written IS the IDR — either a natural one or
+	 * the answer to the request above — so the new segment opens on it. */
 	return 0;
 }
 
@@ -308,11 +435,23 @@ int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 			}
 			return -1;
 		}
-		state->bytes_written += (uint64_t)written;
 		state->segment_bytes += (uint64_t)written;
+	} else {
+		written = 0;
 	}
 
+	/* ONE section for both counters: a poll landing between two separate
+	 * ones would report frame N's bytes with frame N-1's count.
+	 *
+	 * frames_written is incremented unconditionally, as it always was --
+	 * a frame that muxed to zero TS bytes still passed through the
+	 * recorder, and quietly making the count conditional here would be a
+	 * semantic change smuggled in by a locking refactor. */
+	ts_status_lock(state);
+	state->bytes_written += (uint64_t)written;
 	state->frames_written++;
+	ts_status_unlock(state);
+
 	state->frames_since_sync++;
 
 	if (state->sync_interval_frames > 0 &&
@@ -337,7 +476,12 @@ int star6e_ts_recorder_is_active(const Star6eTsRecorderState *state)
 	return state && state->fd >= 0;
 }
 
-#ifndef PLATFORM_MARUKO
+int star6e_ts_recorder_is_recording(const Star6eTsRecorderState *state)
+{
+	return state && __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
+}
+
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 	const MI_VENC_Stream_t *stream)
 {
@@ -421,6 +565,27 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 		nal_buf, nal_len, pts, is_idr);
 }
 #endif
+
+void star6e_ts_recorder_snapshot(Star6eTsRecorderState *state,
+	Star6eRecorderSnapshot *out)
+{
+	if (!out)
+		return;
+	memset(out, 0, sizeof(*out));
+	if (!state || !state->status_lock_ready)
+		return;
+
+	pthread_mutex_lock(&state->status_lock);
+	out->active = __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
+	out->bytes_written = state->bytes_written;
+	out->frames_written = state->frames_written;
+	out->segments = state->segments;
+	out->elapsed_ms = out->active
+		? star6e_recorder_elapsed_ms(&state->start_time) : 0;
+	out->last_stop_reason = state->last_stop_reason;
+	snprintf(out->path, sizeof(out->path), "%s", state->path);
+	pthread_mutex_unlock(&state->status_lock);
+}
 
 void star6e_ts_recorder_status(const Star6eTsRecorderState *state,
 	uint64_t *bytes_written, uint32_t *frames_written,

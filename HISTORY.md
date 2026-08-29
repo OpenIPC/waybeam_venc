@@ -1,5 +1,1250 @@
 # History
 
+## [0.73.3] - 2026-08-29
+
+Recorder status is now a coherent snapshot instead of an unsynchronised read.
+`contract_version` stays **0.22.0** — the response shape is unchanged.
+
+- **`/api/v1/record/status` raced the writer thread on all three backends.**
+  The callbacks read `recording`, the counters, `segments`, `path`,
+  `start_time` and `last_stop_reason` in place while the writer mutated them
+  during writes and segment rotation. Star6E documented this as safe because
+  the fields were "single words written by one thread" — which did not hold on
+  two counts: `bytes_written` is **64-bit on ARM32**, so an unsynchronised load
+  can tear outright, and `path` is not a word at all, being rewritten wholesale
+  on every rotation. The separate reads could also disagree with each other:
+  `active` from one instant, counters from another, `path` from a third.
+
+  Both recorders gain a `status_lock` guarding exactly the status-visible
+  fields, plus `star6e_ts_recorder_snapshot()` / `star6e_recorder_snapshot()`
+  returning one coherent `Star6eRecorderSnapshot`. All three backends now build
+  their response from that.
+
+  The lock is held **only across field updates — never across `write()`,
+  `open()`, `fdatasync()` or `close()`**. A status poll must not be able to
+  block on the disk; that is the coupling 0.73.2 removed from the encode loop
+  and it must not reappear on the httpd thread. In `open_new_segment()` the
+  path is built under the lock and the `open()` deliberately follows outside
+  it.
+
+  A `status_lock_ready` flag covers the window where a backend publishes its
+  status callback before the recorders are initialised: the snapshot reports
+  inactive rather than locking an uninitialised mutex.
+
+- **Two fatal defects in 0.73.2's own hand-off, found by the final review.**
+  Both were invisible to CI because no test exercises the deferred-reap window.
+
+  *The encode loop wrote into the recorders during the hand-off.* The producer
+  gate is `rec_writer != NULL`, and the async close nulls that immediately —
+  but the recorders stay OPEN until the reaper joins. Star6E's and Maruko's
+  no-writer fallback therefore wrote synchronously into the same descriptor the
+  abandoned writer was still inside: the stalled write straight back onto the
+  encode loop, unbounded, plus interleaved TS packets and a race on the mux
+  continuity counters. The fallback is now also gated on `rec_reap_pending`.
+  CV610 was never affected — it has no synchronous fallback.
+
+  *A second close during a hand-off reaped inline.* `stop_bounded_async(NULL,
+  …)` runs `on_exit` immediately, which is right in isolation but wrong while a
+  reaper is outstanding: it closed both descriptors under the live sink and
+  cleared `rec_reap_pending`, so the start guard that exists to prevent exactly
+  that then passed and the new recording reused a descriptor the abandoned
+  writer was about to append to. Every close now returns early while a reap is
+  pending; teardown instead waits it out (bounded), so a reaper cannot run
+  against a context `backend.c` has already freed.
+
+- **0.73.3's lock reached only two of the three writers.** `maruko_recorder.c`
+  mutates the same `Star6eRecorderState` fields from the dual-mode chn 1
+  thread, and could not take the guard because it was `static` in
+  `star6e_recorder.c`. It is now `static inline` in the header and Maruko's
+  five sites take it — a mutex only helps if every writer takes it.
+
+- **Coherence tightened.** `recording` is published inside the same section as
+  the counters, `write_video()` updates bytes and frames in one section rather
+  than two, and `open_new_segment()` builds the path into a local and publishes
+  path, segment count and byte total together — so a poll mid-rotation cannot
+  report the new file with the old count. The unconditional frame count is
+  preserved: making it conditional would have been a semantic change smuggled
+  in by a locking refactor.
+
+- **Stale comments** that this series' own earlier commits invalidated: three
+  backends still described the mid-run stop as ending in a blocking join,
+  `venc_rec_writer.h` still said "both stops" join unconditionally, and CV610
+  documented a parameter under its old name. Maruko now zeroes the
+  per-recording counters before the open attempt, as Star6E and CV610 already
+  did. The `/api/v1/version` example in `HTTP_API_CONTRACT.md` had gone stale by
+  three releases; the version pin now covers both docs, not just README.
+
+- **Test:** a writer thread driving `write_video()` with rotation every 64 KB
+  while the main thread polls the snapshot, asserting counters never go
+  backwards and that `active` never coincides with an empty path. Verified to
+  be a real test rather than a decorative one: removing the writer-side
+  locking makes TSAN report the race at
+  `star6e_ts_recorder_write_video` and `star6e_ts_recorder_snapshot`.
+
+Completes the Qodo review of the upstream sync PR.
+
+## [0.73.2] - 2026-08-29
+
+A mid-run record/stop can no longer stall live video. `contract_version` stays
+**0.22.0** — no endpoint, payload or status change.
+
+- **`venc_rec_writer_stop_bounded()` was not actually time-bounded.** It
+  abandons the queued backlog, which bounds the *queue*, and then joins
+  unconditionally — so the access unit already inside the sink's `write()` held
+  the caller for as long as the kernel did. On a medium that has stopped
+  completing, that is unbounded.
+
+  That mattered more than the teardown case 0.73.1 documented: every backend
+  calls a mid-run stop **from its encode loop** — CV610 for the HTTP stop
+  (`cv610_runtime.c`) and for the recorder's own disk-full/write-error stop,
+  Star6E and Maruko likewise. So stopping a recording on a stalled card stalled
+  the live stream, which is precisely the coupling the async writer exists to
+  remove, reintroduced on the one path that only runs when storage is already
+  misbehaving.
+
+  New `venc_rec_writer_stop_bounded_async()` never joins past its deadline: one
+  grace to let the queued tail reach the disk, one to let the in-flight write
+  finish, and if the sink is still inside that write it hands the writer to a
+  detached reaper and returns. The reaper joins, frees, and only then runs the
+  caller's reap callback — which is where each backend now closes its
+  recorders, so on **both** paths the close still happens strictly after the
+  sink can never run again. `*dropped` is still filled synchronously, because
+  the abandon happens on the caller's thread.
+
+  Bounded by roughly 2 × grace (500 ms on CV610) instead of by the disk. The
+  healthy path is unchanged: the sink finishes inside the grace, the join is
+  immediate, and the reap runs inline before the call returns — byte-identical
+  ordering to the synchronous stop.
+
+- **Teardown deliberately still joins.** There is no later for a reaper to run
+  in, and the VENC/VPSS teardown below must not race a writer that still holds
+  a descriptor. It stays bounded (the backlog is abandoned first).
+
+- **A recording cannot start over recorders a reaper still owns.** When the
+  hand-off happens the previous recording's descriptors are still live, so
+  `record/start` is refused with a warning until the reap completes, rather
+  than racing the close. On a healthy card this is never observable — the stop
+  reaps inline.
+
+Found by the Qodo review on the upstream PR, which identified the encode-loop
+exposure the 0.73.1 note had understated.
+
+## [0.73.1] - 2026-08-29
+
+Fixes found while reviewing the 0.68.0-0.73.0 range for upstream submission:
+sixteen behaviour bugs, all regressions or asymmetries introduced in that
+range, plus the documentation that contradicted the code.  (Three review passes
+folded into this one unreleased version.) `contract_version` stays
+**0.22.0** — no field, endpoint or response shape changes.
+
+- **Restored recovery for a malformed access unit on every transport.** The
+  ring-v2 work removed the recovery IDR as self-actuation on the egress, which
+  is right for a ring-full drop — that is congestion, and the rate controller
+  owns it. But the same helper was called from
+  `star6e_output_reject_incomplete_access_unit()`, which runs *before* the
+  transport branch in `star6e_output_send_frame()`. So `udp://` and `unix://`
+  crafts, which have no ring and were never congested, lost recovery too: an
+  invalid SDK packet table dropped the whole picture and left the decoder
+  broken until the next GOP. With `resilience=off` that is seconds. A
+  malformed AU is an encoder fault, not egress pressure — the ring header
+  draws the same line, keeping `other_drops` apart from `full_drops` because
+  it "is not congestion at all and slowing down fixes nothing". Recovery is
+  back on both SigmaStar backends, paced by the shared 100 ms per-channel IDR
+  limiter, and still skipped for the droppable SVC-T top layer. Ring-full
+  recovery stays removed.
+
+- **Maruko `record.mode=dual` no longer keyframes the live stream.**
+  `mk_mirror_record_open()` was missing the `ctx->dual` bail-out its Star6E
+  counterpart has. In dual mode it started a mirror writer that the producer
+  gate (`!ctx->dual`) never feeds — an idle thread for the session — and
+  called `maruko_recorder_start_idr()`, which names `ctx->venc_channel`, i.e.
+  **chn 0, the live stream**, while the file is fed by chn 1. Every dual-mode
+  bring-up injected a keyframe into the live path and re-armed the limiter so
+  chn 1's own request was swallowed. The per-recording counters are now also
+  zeroed before the bail-out, so a failed start no longer reports the previous
+  recording's `droppedFrames`.
+
+- **A `resilience` change no longer discards `video0.intraRefreshQp`.**
+  `venc_config_apply_resilience_preset()` zeroes `intra_refresh_qp`, and the
+  live-set path applied the preset to the staged config *after* the request's
+  own fields had been staged — then persisted it. So
+  `?video0.resilience=balanced&video0.intraRefreshQp=44` returned 200 and
+  applied the preset default, and a craft already carrying an override lost it
+  permanently on any resilience change. On CV610 this is the only working
+  I-frame lever. An explicit non-zero override now survives the preset; `0`
+  still means "use the preset's default".
+
+- **Bounded the CV610 recorder flush at teardown.** `cv610_teardown()` used
+  the unbounded writer stop, which drains the whole queue against the disk
+  before joining. CV610's medium can stall or disappear under load, and this
+  backend has no watchdog, so a stalled queue meant teardown never reached the
+  VENC/VPSS stop below it — leaking the kernel-state channels and binds that
+  make the next start fail, and wedging the SoC when the init script rmmods
+  MPP underneath. Now uses the same 250 ms bounded stop as every other path.
+  Note this narrows the window rather than closing it: `stop_bounded()` still
+  ends in an unconditional join, so the access unit already in the sink's hands
+  can still block on a medium that never completes. Bounding the whole backlog
+  is the part that was in venc's gift.
+
+- **Star6E rejects `min_qp > max_qp` instead of writing it.** The API
+  validator only compares the two when *both* are non-zero, so a
+  half-specified pair (`minQp=50`, `maxQp` unset) resolved against the
+  captured driver default and reached `MI_VENC_SetRcParam` as min > max. The
+  SDK accepts that and then behaves erratically. Maruko and CV610 already
+  refused it; Star6E now does too.
+
+- **Maruko `record.mode=dual` no longer smashes its thread stack.** The chn 1
+  drain thread was created with a NULL attr, and its path holds
+  `nal_buf[512 KB]` and then `ts_buf[551 KB]` — ~1.06 MB live. Maruko is a
+  musl target (`arm-openipc-linux-musleabihf`, confirmed on the bench:
+  `/lib/ld-musl-armhf.so.1`), and musl gives a new pthread 128 KB, so this
+  overflowed on the first recorded frame. Both dual threads now set an
+  explicit 2 MB stack — larger than `VENC_REC_WRITER_STACK_BYTES`, because the
+  writer thread only ever reaches `write_video` while this path reaches both
+  buffers. Star6E is glibc and its 8 MB default already covered it, which is
+  why this went unnoticed; the constant is set there too so the requirement
+  travels with the code path rather than with the libc. The comment in
+  `venc_rec_writer.h` claiming musl for "every SigmaStar target" is corrected.
+
+- **A coalesced rotation request is no longer lost.**
+  `star6e_ts_recorder_take_idr_request()` clears the pending flag before the
+  caller knows whether the shared 100 ms IDR limiter will honour it, and
+  `check_rotation()` has already counted that ask against
+  `TS_RECORDER_MAX_IDR_REQUESTS`. Eight limiter collisions therefore exhausted
+  the budget and rotation degraded to waiting for a natural keyframe — which a
+  GDR craft (`resilience=racing`, the shipped FPV config) never produces,
+  silently disabling `max_seconds` and `max_mb` for the rest of the recording.
+  All five call sites across the three backends now re-queue.
+  `runtime_rotate_idr_on()` and the new `cv610_rotate_idr()` return 1/0/-1 so
+  "coalesced" is distinguishable from "issued"; `cv610_request_idr()` keeps its
+  API-callback contract unchanged.
+
+- **`video0.qpDelta`'s default is no longer split between the code and the
+  shipped JSON.** `venc_config_defaults()` still seeded `-4` while
+  `waybeam.default.json` and `.maruko.json` shipped `-12` since 0.73.0. A
+  config that omits `qpDelta` therefore got `-4`, and `GET /api/v1/defaults`
+  actively reverted a craft to it — an IDR cost roughly 9x the shipped
+  default. The seed is now `-12`. CV610's shipped config no longer carries the
+  key at all, since that backend does not read it.
+
+- **An oversize access unit is no longer a silent frame loss.** The ring
+  counts `oversize_drops` (mirrored into the header's `other_drops`) but
+  nothing was logged, while 0.73.0 removed the frame-size caps meant to
+  prevent it and ring v2 removed the recovery IDR that healed the chain. Both
+  SigmaStar backends now emit one WARN per pipeline start naming the slot
+  size. Deliberately no IDR request: an AU that overflows the slot does so
+  because the bitrate genuinely exceeds it, which repeats every GOP.
+
+- **`video0.intraRefreshQp` is range-checked at the API.** `FT_UINT8` accepted
+  0..255, persisted it and echoed it back, while the config loader clamped to
+  51 on the next start — so the API reported a value the encoder would never
+  use. Now rejected like `min_qp`/`max_qp`, with a regression test.
+
+- **A refused cold-boot QP-bounds apply is visible on Maruko.**
+  `apply_qp_bounds()` refuses on a VBR/AVBR `rcMode`, and the Maruko cold-boot
+  call discarded the result, so the operator booted with no QP bound and no
+  indication. Now warns, matching CV610.
+
+- **CV610 sets `rec_locks_ready` after the recorders it guards.** A calloc'd
+  `ts_recorder` has `fd == 0`, which `cv610_record_stop()` reads as an open
+  file, so the flag being set one statement early left a window where a stop
+  would `fdatasync(0)`/`close(0)` — closing STDIN. Unreachable today, but the
+  flag means "the things I guard are initialised" and must not lie.
+
+- **Star6E gained the two guards its siblings already had.** A refused
+  cold-boot QP-bounds apply is now reported instead of discarded (it refuses on
+  a VBR/AVBR `rcMode`, so the craft flew with no bound and nothing in the log),
+  and `rec_locks_ready` is published after both recorders are initialised
+  rather than ~45 lines earlier — `venc_api_register()` and the record HTTP
+  control were being published inside that window, where a calloc'd recorder's
+  `fd == 0` reads as an open file and `GET /api/v1/record/status` would report
+  `active:1` on a recording that does not exist.
+
+- **Maruko `record.mode=dual` starts its file on a keyframe.** The dual
+  bail-out skipped the start IDR on the grounds that chn 1 asks for its own —
+  true on Star6E, where the drain thread does it, but Maruko has no such path
+  and its HTTP record controls are gated `!ctx->dual`, so nothing asked at all.
+  On a GDR craft that meant a recording with no IRAP anywhere in it. The
+  request is now issued on chn 1, the channel that actually feeds the file.
+
+- **A re-queued rotation request cannot outlive what it was for.** Now that a
+  coalesced ask is re-queued rather than dropped, one can still be in flight
+  when the IRAP arrives or the recording stops, so both sites clear the pending
+  flag — otherwise it would keyframe the live channel for a rotation that
+  already happened, or fire into the next recording.
+
+- **The dual-thread stack is raised, never lowered.** The explicit 2 MB is now
+  applied only when the platform default is smaller, so musl's 128 KB comes up
+  while Star6E keeps glibc's 8 MB — that thread also runs SDK entry points
+  whose stack use is opaque, and there was nothing to gain by reducing a
+  platform that was already safe.
+
+- **Documentation corrected against the code.** The field table claimed
+  `min_qp`/`max_qp` were "Star6E + CV610 only" nine lines above a support
+  matrix that correctly said all three (Maruko gained them in 0.73.0). The
+  `/api/v1/version` example still showed 0.72.0/0.21.0. The `qpDelta` sign in
+  `HTTP_API_CONTRACT.md` was stated backwards — it said negative values lower
+  the I-frame QP, when they raise it and shrink the I-frame, which is the
+  whole basis for the `-12` default. The capabilities example advertised
+  `qp_delta` and `intra_refresh_qp` as both supported, which no backend can
+  report. A stale paragraph still described the CV610 `qpDelta` boot rejection
+  that 0.73.0 removed, and the sample config still showed the old `-4`.
+
+## [0.73.0] - 2026-08-29
+
+`video0.qpDelta` now reaches the encoder on Star6E when QP bounds are also
+configured, Maruko gains `minQp`/`maxQp`, and CV610 gains `intraRefreshQp`
+while losing `qpDelta`. `contract_version` 0.21.0 -> **0.22.0** (additive
+field; two per-backend `supported` flags change).
+
+- **Fixed `video0.qpDelta` being silently reverted at startup (#255).**
+  `MI_VENC_GetRcParam` does not reflect a just-written value until the driver
+  commits the block — measured on SSC338Q as between t+0s and t+5s after
+  `StartRecvPic` — so a second read-modify-write inside that window read a
+  stale 0 and wrote it back. `apply_qp_bounds()` is exactly that shape and
+  runs immediately after `apply_qp_delta()`, so **every Star6E craft with
+  `minQp` or `maxQp` set flew with an effective IPQPDelta of 0**: IRAP
+  66497-81400 B against 3159-3743 B once fixed, on one binary with only
+  `minQp` differing. Both calls returned success and both logged it.
+
+  Every RC write now stages the whole intent instead of patching a `Get`
+  result, so ordering and timing cannot matter. The deleted
+  `apply_max_frame_size()` had the same shape and is how the bug first
+  surfaced — it bit through two different callers.
+
+- **Added `video0.minQp` / `video0.maxQp` on Maruko.** Same MI VENC rate
+  controller as Star6E, so the same `u32MinQp`/`u32MaxQp` write. Applied from
+  config at startup as well as live. Device-measured on Infinity6C: `minQp 40`
+  took the stream from 1.54 Mbps to 0.09, `maxQp 20` drove it to 45.31 Mbps,
+  and both cleared cleanly.
+
+  **Upgrade note**: these fields were always parsed, validated and persisted —
+  only HTTP writes and the `supported` flag were gated. A Maruko craft already
+  carrying `minQp` in a shared config has been booting with it inert and will
+  now apply it. Check craft configs before rolling out.
+
+- **Added `video0.intraRefreshQp`** (restart-only), the intra-refresh stripe
+  QP. It was already a config member consumed by `intra_refresh_compute()` as
+  `override_qp`, but was never parsed from JSON, so every craft ran
+  `mode_default_qp()`. `0` keeps the resilience preset's default.
+
+  Advertised on **CV610 only**, where it is the sole control that moves
+  I-frame size: 0 (preset 36) -> 15442 B, 44 -> 7773 B, 51 -> 4716 B at CBR
+  1500 kbps, rate flat. It reaches `MI_VENC_SetIntraRefresh` on the SigmaStar
+  parts too and is logged as applied, but the encoder ignores it — a 38-QP
+  sweep moved IRAP 0.7% and the delivered rate not at all. A consequence worth
+  knowing: `mode_default_qp()`'s per-mode stripe QP (36/32/28) is therefore
+  inert on Star6E and Maruko.
+
+  On CV610 this one register sets both the forced-IDR size and the GDR
+  recovery-anchor quality; they cannot be separated.
+
+- **Removed `video0.qpDelta` from CV610.** The CBR rate controller stores
+  `gop_attr.normal_p.ip_qp_delta` and ignores it — flat to <=1.2% across
+  -12..+12, live and at channel create, saturated and unsaturated. It is no
+  longer advertised, no longer range-checked (an inert field must not decide
+  whether a craft boots), and no longer written at channel create, where its
+  narrower [-10, 30] range made a shared config carrying the portable
+  `qpDelta: -12` fail `ss_mpi_venc_create_chn` outright.
+
+- **Default `qpDelta` is now -12 on Star6E and Maruko.** The shipped defaults
+  are `gopSize 1.0` with `resilience: off`, i.e. a real IDR every second; at
+  -4 that IDR is many times a P-frame. At -12 it is no larger than one
+  (Star6E 29429 -> 3622 B, Maruko 16575 -> 7739 B) at unchanged delivered
+  rate. CV610's default is left alone — `qpDelta` is inert there.
+
+
+## [0.72.0] - 2026-08-29
+
+The per-frame size caps are removed. `contract_version` 0.20.1 -> **0.21.0**.
+**Breaking**: two config fields deleted, and a `GET /api/v1/set` or
+`/api/v1/live/set` naming either now fails the whole request.
+
+- **Removed `video0.maxIBytes` and `video0.maxPBytes`** from the config, the
+  capabilities payload, and the Star6E and Maruko backends, along with
+  `apply_max_frame_size()` and the now-unused `MI_VENC_SetRcPriority` binding
+  on both. CV610 never implemented them.
+
+  They never imposed the ceiling they named. Device-measured on a SSC338Q
+  (IMX335 1280x720@60, H.265 CBR, GDR via `racing`), 2026-08-28, with the
+  encoder's own bitstream as the tap and every step confirmed applied by
+  `apply_max_frame_size()`'s own `priority=framebits` log line:
+
+  | commanded `maxPBytes` | predicted | delivered |
+  |---:|---:|---:|
+  | 33144 B | 15909 kbps | 19333 kbps |
+  | 25000 B | 12000 kbps | 19319 kbps |
+  | 16000 B | 7680 kbps | 19285 kbps |
+  | 10000 B | 4800 kbps | 19319 kbps |
+  | 6000 B | 2880 kbps | 19327 kbps |
+
+  Flat across a 5.5x range; at 6000 B every one of 863 access units exceeded
+  the cap, mean 40247 bytes. `maxIBytes` stepped 91788 -> 26000 -> 8000 -> 2000
+  left IDR size at 66-81 KB across **16 sampled IDRs** — a 46x cap range. That
+  arm is the weaker of the two: the stream is GDR, so its IDRs are on-demand
+  artefacts of the measurement tap rather than a natural population. Three
+  controls make the result attributable: CBR tracked its 19092 kbps target to
+  within 1.3% (delivered 19285-19333, slightly over — the rate controller was
+  working), raising `video0.minQp` to 30 on the
+  same scene gave ~490 bytes/frame (the encoder can produce frames that small),
+  and every step was re-read from `/api/v1/get`. Startup application was not
+  the gap either. The **I-cap arm** was corroborated on a second Star6E rig in
+  OpenIPC/waybeam_venc#111 (2026-08-22, 10 Mbps: IDRs an identical 42-44 KB at
+  caps 2000 / 26000 / 8) — a closed, unmerged PR that probed the I-cap only, so
+  it does not corroborate the `maxPBytes` sweep above.
+
+  **Scope.** One SSC338Q, one SDK build, 720p60 H.265 CBR, GDR. Maruko was not
+  measured in this sweep; removal there is taken on parity with Star6E and is
+  the operator's call, not a Maruko measurement.
+
+  **The claim is bounded, and 0.45.0 is why.** That release recorded
+  `maxPBytes=2000` moving a Star6E from 5619 to 1868 kbps — real influence, 3x
+  below this sweep's floor of 6000 B, and this sweep did not re-test at 2000 B.
+  It reconciles rather than contradicts: 1868 kbps at the bench's 60 fps
+  (`.201`, IMX335 — the rate is recorded, the cadence is not, and the
+  conclusion is cadence-sensitive: at 120 fps the same numbers would bind) is
+  ~3892 B/frame against a 2000 B cap, ~1.95x over. That is a whole-stream mean
+  against a P-only cap, so it mixes in uncapped I frames and the true P mean is
+  lower — the error runs toward binding — and a mean cannot show that no frame
+  was under the cap. The 2000 B point has never had a per-AU census on either
+  backend.
+
+  The one Maruko datum comes not from #111's body but from the comment in which
+  its author **withdrew** that PR's "inert" wording: `maxIBytes=2000` moving a
+  Maruko IDR *median* 12195 -> 5866 B, ~3x over. A median is the stronger form
+  — at least half the IDRs exceeded the cap. The caps
+  *influence* below ~6000 B and *bind* nowhere they have been measured. It is
+  the not-binding that disqualifies them as a ceiling, not an absence of
+  effect.
+
+  **Upgrade note.** A config file still carrying the keys loads fine — unknown
+  keys are ignored and they disappear on the next config write. A `GET
+  /api/v1/set` **or** `GET /api/v1/live/set` **naming** them does not: the
+  multi-field preflight rejects the whole request with `404 unknown config
+  field` on the first unrecognised key, so a stored "apply my profile" batch
+  that still carries them applies none of its other fields.
+  `/api/v1/live/set` is the path a volatile-first controller hits first, and it
+  fails the same way. Strip them from saved batches, and from any controller
+  that pushes them, before upgrading.
+
+  **Deployment order is craft-side, not ground-side.** The controller that
+  pushed these caps (waybeam-link) runs on the *same box* as venc and talks to
+  `127.0.0.1:80`; ground nodes never pushed them. So on each craft, update the
+  controller BEFORE this venc. Get it backwards and the stale controller's cap
+  transaction 404s at the head of its queue forever — write-on-change never
+  advances past a request that never succeeds — which starves its bitrate, fps
+  and IDR pushes too, not just the caps. That exact starvation was already
+  observed on CV610, which answers 501 to these fields.
+
+  **What to use instead — and what has no replacement.** For I-frame size,
+  `video0.qpDelta` is the strongest lever left: a 68x range on the same rig
+  (-12 -> ~3.8 KB IDRs, 0 -> ~67-82 KB, +12 -> ~261 KB), and it does not
+  keyframe. (#111 read the opposite — "qpDelta barely moves IDR size, 43 KB at
+  0 and at -6" — measured before #255 was understood, and consistent with a
+  startup apply that never reached the encoder.) **It has an open defect of its
+  own**: issue #255 — applied from venc's startup path it logs success without
+  reaching the encoder, so a craft boots with IDRs up to ~20x larger than its
+  config asks for (at `qpDelta=-12`; ~4x at -6) and only a live write corrects
+  it. Fix #255 before depending on this to bound the IDR.
+
+  For **P-frame** size there is no direct replacement. `video0.minQp` is the
+  surviving rate lever — the control above measured it taking the same scene to
+  ~490 bytes/frame — but it is Star6E-only (venc rejects it on Maruko), so this
+  removal leaves Maruko with no per-frame size control at all.
+
+## [0.71.0] - 2026-08-28
+
+Star6E and Maruko mirror-mode recording moves off the encode loop, matching
+what 0.70.0 did for CV610. `contract_version` 0.20.0 -> **0.20.1**:
+`droppedFrames` and `writerPeakDepth` already existed, but this release widens
+what `droppedFrames` counts and makes both per-recording rather than
+per-process — see the contract change log.
+
+Review found two defects in the first cut of this work, both of which shipped
+past a green suite. Both were then fixed a second time, by deleting the
+mechanism they lived in — that story is below, because the reason they got
+through is more useful than the fixes are.
+
+- **Same defect, same fix.** Both backends called the recorder from their
+  encode loop between the transport send and ReleaseStream, with a blocking
+  `write(2)`: `star6e_runtime.c` and `maruko_pipeline.c` both wrote, then
+  released. When storage blocks, the release is late, the encoder's output
+  queue backs up, and the LIVE stream stalls with it. Star6E's **dual** mode
+  already drained ch1 on its own thread and was never affected; mirror mode
+  was the gap.
+
+  Stated plainly: the *symptom* was measured on CV610, not on these two.
+  Star6E's bench SD is native MMC at 16 MB/s and absorbs everything short of
+  abuse; Maruko has no storage that can block at all. The fix lands on the
+  structural argument — identical call-site shape — plus CV610's measurement,
+  with a device no-regression pass on both.
+
+- **Moving the recorder to its own thread broke two things, and the second
+  attempt at fixing them deleted the mechanism instead.**
+
+  *The drain was not a barrier.* A `venc_rec_writer_drain()` existed so a
+  caller could close the segment file the instant it returned. It waited for
+  the queue to empty — but the writer pops under the lock and runs the sink
+  outside it, so "queue empty" was true for the whole duration of a `write(2)`.
+  The drain returned with the sink still writing and the caller closed the file
+  under it: the tail of one recording landed in the next file, over its PAT/PMT
+  and opening IRAP. The frequency was inverted against the design goal — rare
+  on a healthy card, and on a stalling card, the only case this thread exists
+  for, every time.
+
+  *Rotation silently dropped frames.* Segment rotation moved onto the writer
+  thread with it, and rotation holds `fd == -1` across `fdatasync`/`close`/
+  `open`. The producer gated on `fd >= 0`, so every frame in that window fell
+  to the synchronous fallback, hit its own `fd < 0` guard, and was discarded
+  and counted nowhere — right after the new segment's opening IRAP.
+
+  Both were first patched in place: an `in_flight` flag to make the drain a
+  real barrier, a `rec_state_lock` for the case the bounded drain could not
+  cover, a `venc_rec_writer_reset_counters()` so a new recording did not
+  inherit the last one's drops, and an `is_recording()` predicate for the
+  producer gate. Three adversarial reviews then returned about a dozen
+  findings, and nearly every one had the same shape: a fix applied to one of
+  the several places a mechanism reached. That is the argument against the
+  mechanisms, not for more fixes.
+
+  **So the writer's lifetime is now tied to the recording it serves** — one
+  writer per recording on all three backends, as CV610 already did. It is
+  created after the recorder file is open and stopped before it closes, and
+  both stops end in an unconditional `pthread_join`. That join is the barrier;
+  nothing else is needed. `venc_rec_writer_drain()`, `in_flight`,
+  `venc_rec_writer_reset_counters()` and `rec_state_lock` are all deleted, the
+  counters are per-recording because the writer is, and the producer gate
+  becomes `rec_writer != NULL` — a handle that exists for exactly as long as
+  the recording, so a rotation is invisible to it and cannot cost a frame.
+
+  Two things the redesign surfaced that the patched version had wrong:
+
+  - **`venc_rec_writer_stop_bounded()` was not actually bounded.** Setting
+    `stopping` does not stop the writer thread short — it drains its queue to
+    the end and only then honours the flag — so the join could block for a
+    whole 4 MB backlog on the stalled card the writer exists for. It now
+    abandons the queue before the join, which is what makes its documented
+    bound (grace + one write) true. Maruko's teardown depends on that: its
+    watchdog reboots the craft.
+  - **A recorder that stops itself needs someone to notice.** Disk-full and
+    write errors end a recording from the writer thread. The old gate handled
+    that implicitly, because it read recorder state; a gate that reads only
+    the writer handle does not, and would go on copying, allocating and
+    queueing a frame per encode into a dead writer indefinitely. So all three
+    backends now check `star6e_record_wants_frame()` once per frame and tear
+    the writer down when it goes false. CV610 has had this leak since 0.70.0,
+    where the gate was already the handle alone.
+
+    What was **not** wrong, and was checked rather than assumed: reporting.
+    Every backend's status callback already read `is_recording()`, so a
+    self-stop was always reported honestly. Device control on `.2.232` — a
+    56 MB tmpfs filled until the recorder stopped itself — has both the
+    pre-redesign and the per-recording binary reporting `active: false`,
+    `stopReason: disk_full` within one poll. The difference is the writer:
+    it lingers on the old build and is joined and freed on the new one
+    (thread count 9 -> 8).
+
+  Rotation loss was never observed on the Star6E bench, and the reason is
+  worth recording: the same `fdatasync`/`close`/`open` that opens the window
+  also stalls the encoder, so no frames arrive to be dropped. Five runs there
+  — fixed and unfixed — all show the recorder writing exactly what the encoder
+  produced. On hardware where rotation is slow but does not stall the encoder,
+  the window is live. The case for the fix is the source-level defect plus a
+  mutation test, not a device measurement.
+
+- **`star6e_output_stream_flatten()` and `maruko_video_stream_flatten()`.**
+  The writer needs its own copy, because SDK stream memory dies at
+  ReleaseStream. These also remove an existing cliff: both
+  `*_ts_recorder_write_stream()` flattened into a **512 KB automatic and
+  dropped the whole access unit** when it did not fit. At 19 Mbps an IRAP can
+  exceed that, and a silently dropped keyframe is the worst frame to lose.
+  Not an extra copy for the TS path, which was already flattening onto the
+  stack.
+
+- A writer whose thread fails to start falls back to the synchronous path
+  rather than silently recording nothing. Star6E and Maruko keep the recording
+  open in that case and write on the encode loop; CV610 has no such fallback
+  and closes the recording instead of reporting a phantom one.
+
+Device, after the per-recording rework (2026-08-28):
+
+- **star6e `.2.232`**, IMX415 1280x720@60, `resilience=racing` (GDR),
+  recording TS+Opus to the SD card. Manual record 69 s: 4149 frames /
+  59.93 fps against a nominal 60, `droppedFrames` 0. Rotation at
+  `max_seconds=20`: 4 segments in 66 s, 3971 frames / 59.95 fps,
+  `droppedFrames` 0 across all three rotations, and every segment opens on
+  an `I` frame — the forced IDR lands on a GDR craft at record start and at
+  each rotation. Boot auto-start: same, 2 segments, both opening on an `I`.
+  Full decode of a segment: 251 frames, no video errors.
+- **The writer's lifetime is directly observable.** Thread count 8 -> 9 on
+  record start and 9 -> 8 on stop, on every one of five recordings, and
+  9 -> 8 on a self-stop as well.
+- **`writerPeakDepth` measures the rotation window.** It reads 1 while
+  writing steadily and jumps to 12 and then 20 at rotations — the queue
+  absorbing the `fdatasync`/`close`/`open` stall that used to sit on the
+  encode loop, with no frame lost to it.
+- **maruko `.2.233`**, 30 fps, recording to tmpfs (this craft has no block
+  device). 3 segments at `max_seconds=10`, 816 frames / 30.0 fps exactly,
+  `droppedFrames` 0, every segment opening on an `I`, a full segment
+  decoding to exactly 300 frames. Threads 6 -> 7 -> 6.
+- **cv610 `.2.181`**, 100 fps, GDR. On tmpfs: 3 segments at `max_seconds=10`,
+  3231 frames / 100.0 fps exactly, 0 dropped, every segment opening on an `I`,
+  a full segment decoding to 1100 frames. On the **real FAT32 USB volume**:
+  5 segments, 4518 frames / 100.03 fps, 0 dropped across 4 rotations, all five
+  segments opening on an `I`, a segment decoding to 1101 frames — and
+  `writerPeakDepth` 1 -> 5 -> 6 -> 7, the real rotation cost being absorbed by
+  the queue exactly as on the star6e card. Threads 6 -> 7 -> 6 on both.
+- **The CV610 self-stop leak is demonstrated, not asserted.** Same box, same
+  test (a 52 MB tmpfs filled to the free-space floor), shipped 0.70.0 versus
+  this build: both report `stopReason: disk_full`, but 0.70.0 leaves the
+  writer thread alive — 6 threads before, **7** still 24 s after the recorder
+  stopped itself — while this build tears it down inside one poll (7 -> 6).
+  That thread goes on receiving a copied, allocated access unit per encoded
+  frame, forever, because its gate is the handle alone.
+
+Both benches were restored to their master binaries and original config
+afterwards; no RF was raised for any of it (waybeam-link stayed down).
+
+Three adversarial reviews then ran against the finished change — concurrency
+and lifetime, behaviour preservation, and test coverage. They cleared the
+design on the questions it rests on (no sink/close race on any path, no lock
+inversion, no use-after-free, format dispatch and status fields unchanged,
+rotation transparency holding) and found four things worth fixing:
+
+- **The self-stop teardown was inside the GetStream/ReleaseStream window** on
+  all three backends. It ends in a join over the access unit still in the
+  sink's hands, which on the failing card that triggered the stop is a
+  blocking write — so it held the encoder's output slot and stalled the live
+  stream, the exact coupling this writer removes, reintroduced on the one path
+  that only runs when storage is already misbehaving. Moved after the release,
+  beside the rotation IDR request that is there for the same reason. Two of
+  the three reviewers found this independently.
+- **Boot auto-start forced an IDR on the wrong channel in `record.mode=dual`.**
+  The shared open helper names chn 0, but in dual mode the file is fed by
+  chn 1 — so it injected a keyframe into the live stream, re-armed the rate
+  limiter so chn 1's own request was swallowed, and did nothing for the
+  recording. That is verbatim the trap documented in
+  `include/star6e_ts_recorder.h`. Dual mode now returns from the open helper
+  before the writer start and the IDR, which also makes the invariant the
+  producer gate rests on ("the handle is non-NULL exactly while a mirror
+  recording runs") true rather than nearly true.
+- **star6e's teardown flush was unbounded**, and the comment called it free.
+  It is not: the teardown watchdog SIGKILLs after 3 s and then writes
+  `sysrq-b`, so waiting out a stalled card there trades a lost recording tail
+  for an emergency reboot. Bounded at 500 ms, the same reasoning maruko
+  already used for its reboot watchdog.
+- **CV610 kept two defects of its own**, both predating this change and both
+  now fixed: its status callback read the 64-bit counters outside the lock
+  that the store side takes, and it had no readiness flag, so an init failure
+  before the recorders were set up reached `star6e_ts_recorder_stop()` on a
+  zeroed state whose `fd` of 0 passes the `fd < 0` test — `fdatasync`ing and
+  closing **stdin**.
+
+The test review proved three coverage holes with surviving mutants rather than
+asserting them, and all three are now closed: `stop_bounded(NULL, …)` had no
+test despite running on every record start; nothing asserted the *positive*
+half of the bounded contract, so the production 250 ms grace could have been
+cut to an eighth with the suite green; and the unbounded stop's barrier was
+caught only as a heap-corruption abort. It also showed the rotation sampler
+failing on **correct** code in 6 of 8 runs at 4x CPU oversubscription — the
+sampler thread was never scheduled before the writes finished — which is a
+gate testing the machine rather than the code. It now waits for the sampler to
+reach a CPU first, and is 6/6 green under the same load.
+
+Re-verified on hardware AFTER those fixes, since three of the four touch the
+SigmaStar backends:
+
+- **star6e `.2.232`**, real SD card, 60 fps, GDR. Rotation at
+  `max_seconds=10`: 5 segments, 2658 frames / 59.93 fps, `droppedFrames` 0
+  across 4 rotations, every segment opening on an `I`, and `writerPeakDepth`
+  1 -> 20 — the same rotation signature as before the fixes. Self-stop on a
+  56 MB tmpfs, with the teardown now in its new position after the release:
+  threads 8 -> 9 -> 8 and `stopReason: disk_full` within one poll. Boot
+  auto-start: 3 segments, 0 dropped. Teardown **while recording**, three
+  cycles: 1.4-1.9 s against a watchdog that SIGKILLs at 3 s, with no
+  watchdog, sysrq or kill event in the log.
+- **maruko `.2.233`**, 30 fps. Rotation: 4 segments, 965 frames / 29.98 fps,
+  0 dropped, every segment opening on an `I`, a full segment decoding to
+  exactly 300 frames. Boot auto-start: 2 segments, 0 dropped. Teardown while
+  recording: 1756 ms twice, with uptime continuing to climb — the
+  `reboot(RB_AUTOBOOT)` watchdog never fired.
+- Threads 8 -> 9 -> 8 (star6e) and 6 -> 7 -> 6 (maruko) on every recording.
+
+**Maruko's self-stop cannot be exercised on that hardware, and this is
+permanent.** Its SD slot detects no card (the `ms_sdmmc` controller probes and
+`mmc0` exists, but `/sys/bus/mmc/devices/` stays empty), and the kernel has no
+SCSI bus and no `usb-storage`/`sd_mod`, so a USB drive cannot substitute
+either. With no block device, `star6e_recorder_free_space()` returns 0 on its
+ramfs and the disk-full guard is skipped entirely. What covers maruko instead:
+the detection predicate and the recorder's disk-full stop are shared code
+exercised by the host suite, and the three-line reaction is identical in shape
+to star6e's and CV610's, both of which are device-verified — CV610 as a direct
+A/B against the shipped build.
+
+## [0.70.0] - 2026-08-27
+
+Snapshot and recording reach the CV610 backend, and the config file is read
+exactly once at startup. Contract `0.19.0` -> `0.20.0` — **additive**: no
+field was removed, renamed, or given a new meaning, and a client written
+against `0.19.0` sees strictly more capability and no changed response shape.
+
+- **`GET /api/v1/snapshot.jpg` on CV610.** It was the one route a backend
+  omitted entirely. The JPEG channel binds as a **second destination** on the
+  same VPSS output the H.265 channel already consumes — the SDK allows four
+  bind targets per source — so it needs no VPSS channel of its own: no extra
+  scaling, no extra VB pool, and nothing running while nobody is asking. The
+  bind is permanent and only the channel's receive state pulses
+  (`start_chn(recv_pic_num=1)` -> `get_stream` -> `stop_chn`), which
+  deliberately avoids reconfiguring the source per request.
+
+  Because it shares the main stream's VPSS channel it inherits that geometry.
+  `snapshot.width` / `snapshot.height` are advertised **unsupported** on CV610
+  rather than accepted and ignored.
+
+- **Recording on CV610 in `record.mode=mirror`**, `format=ts` (Opus muxed) and
+  `format=hevc`, with rotation and `/api/v1/record/{start,stop,status}`.
+
+  No SDK-typed adapter was needed. The CV610 drain loop already copies each
+  access unit into one contiguous Annex-B buffer before any consumer sees it,
+  and `star6e_ts_recorder_write_video()` has always taken a flat buffer. Only
+  the `.hevc` path was missing a SoC-independent entry point, so
+  `star6e_recorder_write_au()` was added beside the existing iovec writer,
+  carrying the same side-effect order: disk-space check, frame boundary,
+  write, truncate-back-to-boundary on failure, then counters and the
+  `sync_file_range` cadence.
+
+  `record.bitrate` / `fps` / `gop_size` / `server` stay **unsupported**: they
+  describe the second VENC channel that `dual` and `dual-stream` need, which
+  this backend does not create. Those modes are refused with a warning rather
+  than silently recording ch0 at the wrong bitrate.
+
+- **Record start forces an un-coalescible IDR on CV610.** The shipped
+  configuration is `resilience=racing` — a GDR craft emits no periodic IDR at
+  all — so a request the rate limiter coalesced away would leave a recording
+  with no IRAP access unit anywhere in it: a file that seeks to nothing and
+  plays from nothing, while the caller was told the start succeeded. Same
+  reasoning and same path as Star6E.
+
+- **The shared recorder is no longer gated behind a SigmaStar-only guard.**
+  `star6e_recorder.c`, `star6e_ts_recorder.c` and `ts_mux.c` were always
+  SoC-independent apart from their SDK-typed adapters; the guard around those
+  adapters read `#ifndef PLATFORM_MARUKO`, which silently included them in any
+  build that was not Maruko. It now names what it actually requires —
+  `star6e_output.c` being linked — so CV610 can use the cores.
+
+  Verified as a no-op for the existing backends: with the version strings held
+  constant, `star6e_ts_recorder.o` and `ts_mux.o` are **byte-identical** on
+  both star6e and maruko, and `star6e_recorder.o` differs only by the added
+  `star6e_recorder_write_au` — no pre-existing symbol changed or disappeared.
+
+- **`RECORDER_DEFAULT_DIR` had two definitions.** `venc_api.c` carried its own
+  copy for CV610 because that backend did not link the recorder header. Now it
+  includes the header like everything else.
+
+- **Recording no longer stalls the live video path.** Every backend called the
+  recorder from its encode drain loop, between the transport send and the
+  SDK's ReleaseStream, with a blocking `write(2)`. When storage blocked,
+  ReleaseStream was late, the encoder's output queue backed up, and the LIVE
+  transport stalled with it.
+
+  Device-measured on CV610 with the same card, same mount and the same
+  stimulus (three concurrent direct-IO writers on a `-o sync` mount):
+
+  | | stream min | stall seconds | recorder |
+  |---|---|---|---|
+  | synchronous | 608 pkt/s (42% of baseline) | **15 / 18** | 33-44 fps |
+  | async writer | **1462 pkt/s (100%)** | **0 / 18** | 43-66 fps |
+
+  The queue absorbed the stall (depth 1 -> 358, hitting its 4 MB cap), then
+  shed recording frames — 526 of them, every one counted and reported through
+  the new `droppedFrames`. A slow disk now costs recording frames and never
+  the live link, which is the 0.69.0 principle applied one layer up.
+
+  Star6E's dual mode already drained its second channel on its own thread and
+  was never affected; this gives mirror mode the same property. **The star6e
+  and maruko mirror paths still write synchronously** — the coupling is
+  identical there by construction (`star6e_runtime.c`,
+  `maruko_pipeline.c`) and wiring them needs their own device runs.
+
+- **Rotation asks the right channel, from the right place, at the right rate.**
+  An adversarial review of the first cut found the rotation hook was wrong
+  three ways, all on the two backends that had not been on hardware: it fired
+  *inside* the SDK's GetStream/ReleaseStream window, which no other IDR call
+  site on any backend does; a single shared `int (*)(void)` could not name the
+  channel, so under `record.mode=dual` it keyframed the LIVE stream while the
+  ch1 recording rotated on nothing (a defect `star6e_runtime.c` already
+  carried a fix for at record-start); and on Star6E it resolved to the
+  *forced* path, which re-arms the rate limiter and would swallow a scene or
+  operator keyframe arriving in the next 100 ms.
+
+  The callback is gone. `check_rotation()` now raises a flag and the backend
+  services it after its own ReleaseStream, coalesced, on the channel that
+  actually feeds that recorder. Requests are bounded
+  (`TS_RECORDER_MAX_IDR_REQUESTS`) so an unanswered ask degrades to the old
+  wait-for-a-keyframe behaviour instead of becoming a permanent 1 Hz keyframe
+  tax, paced by elapsed interval rather than "a different second", and reset
+  per recording.
+
+  They are also **grace-delayed by one second**, which is a measured
+  correction rather than a precaution: on Maruko at `resilience=off` with a
+  1 s GOP, `max_seconds=15` over 50 s took the honored-IDR count from **1 to
+  4** — three needless keyframes for three rotations that happened naturally
+  anyway. With the grace, Maruko is back to **4 segments, 1501 frames, delta
+  1**, identical to 0.69.0.
+
+- **`record.max_seconds` / `max_mb` were inert on a GDR craft.** Rotation can
+  only cut on an IRAP or the new segment decodes from nothing, and the check
+  simply returned early when the frame was not one — correct, but it assumed
+  the stream produces IDRs by itself. Under `resilience=racing` it never does,
+  so a configured cap did nothing and the file grew unbounded. The recorder
+  now asks for an IDR when rotation is due, rate-limited to one request per
+  second so a crossed threshold cannot become per-frame keyframing.
+
+  Measured on CV610 under `racing`, `max_seconds=15` over 50 s: **1 segment
+  before, 4 after**, with `/api/v1/idr/stats` showing exactly 4 honored
+  requests and 0 dropped, and each rotated segment opening on `key_frame=1,
+  pict_type=I`. `Star6eTsRecorderState.request_idr` is the callback the
+  original author declared for exactly this and never wired; it was removed as
+  dead code in 0.69.0 and is restored here with the wiring that makes it live.
+
+- Note for operators: the shipped `record.dir` default is `/mnt/mmcblk0p1`,
+  which does not exist on the CV610 reference board (the bench mounts USB
+  storage at `/mnt/sda1`). It is left at the shared default rather than
+  hardcoding one board's mount point; set it for the target before recording.
+
+### The config file is read exactly once
+
+venc parsed `/etc/waybeam.json` twice at startup — once in `main()` for the
+mDNS beacon, once in `backend_execute()` for the backend. The two reads were
+not atomic and not equally trusted: a config write landing between them handed
+the beacon and the encoder different snapshots of `system.web_port`, and the
+beacon's load discarded its return value, so a malformed config announced a
+service on defaults and *then* exited.
+
+The config file is a program-level input, not a module-level one, so it is now
+parsed once at the program boundary and the value handed down; modules take a
+`const VencConfig *`, never a path. Loading before the beacon also means a
+malformed config exits without ever having announced.
+`BackendOps.config_path` is gone, and `VENC_CONFIG_DEFAULT_PATH` went from
+seven mentions across five files to one call site.
+
+## [0.69.0] - 2026-08-26
+
+venc stops actuating on its own egress. Contract `0.18.6` -> `0.19.0`
+(the intermediate `0.18.7` never shipped — see the folded section below).
+**Breaking**: one config key removed, two `transport/status` fields removed,
+and the frame-SHM ring header goes to **version 2**. A v2 producer will not
+serve a v1 consumer -- waybeam-link, waybeam-hub and radeon-vrx must be
+rebuilt alongside.
+
+The principle: **venc is a sensor and an actuator-on-request, never a
+controller.** It measures egress pressure and publishes it; it changes
+encoder behaviour only when something asks.
+
+- **Removed the frame-shm ring-fill bitrate clamp** and its config key
+  `outgoing.shmThrottle`. On a `frame-shm://` craft the rate controller
+  (waybeam-link) runs on the same SoC, already reads the egress ring, and
+  already owns `video0.bitrate` -- so the clamp was a second controller on
+  the same input signal, and its only actuator keyframes
+  (`MI_VENC_SetChnAttr` emits an IDR on every real rate change).
+
+  Measured by @vertexodessa on a Star6E, 720p120, ~11 Mbps, 2026-08-24:
+
+  | | clamp on | clamp off |
+  |---|---|---|
+  | IDR rate at receiver | 6.5 /sec | 0.2 /sec |
+  | glass-to-glass | ~100-143 ms | **~15-37 ms** |
+  | ring read latency | 40-120 ms | **1-9 ms** |
+
+  A config *file* still carrying the key loads fine — unknown keys are
+  ignored and the key disappears on the next config write. A `POST
+  /api/v1/set` naming it does **not**: the multi-field preflight rejects the
+  whole batch with `404 unknown config field` on the first unrecognised key,
+  so a stored "apply my profile" batch that still carries `shmThrottle`
+  applies none of its other fields. Strip it from saved batches before
+  upgrading.
+
+- **Removed the ring-full recovery IDR entirely**, for GOP as well as GDR.
+  It fired precisely when the ring was full, so the largest frame in the
+  stream could not be delivered anyway -- measured on a SSC338Q with the
+  consumer stopped, 13 IDRs in 12 s, none of which reached anyone. Recovery
+  is now the operator-selected GOP cadence, or an explicit request:
+  `/request/idr`, or waybeam-link's §3.9 `RECOVERY_REQUEST`.
+
+  Known gap, stated rather than hidden: waybeam-link's §3.9 currently arms
+  only on stream latch, not on mid-stream damage, and `venc.recovery_enabled`
+  defaults false. Until that is wired to the receiver's existing damage
+  signal, a mid-flight ring-full drop on a **plain-GOP** stream has no
+  automatic heal until the next GOP boundary. GDR (`resilience=racing`), the
+  flight configuration, heals within one refresh cycle as before.
+
+- **Ring header v2 -- offset 88 changed meaning.** `throttle_permille`
+  (`1000` = unclamped) becomes `low_water_slots`: the lowest ring occupancy,
+  **in slots**, reached in the producer's last 200 ms window. `sizeof` stays
+  192 and nothing before offset 88 moves, but **the polarity inverts** (a
+  LOW number is now the healthy end), so this is a deliberate hard version
+  break: consumers validate `version` and refuse to attach rather than
+  silently misread a healthy ring as a catastrophic clamp.
+
+  Low-water rather than peak, and that is the measured choice: on a Star6E
+  at 100 fps into an 8-slot ring with a healthy consumer, the ring routinely
+  spikes 2-3 slots inside a window and drains again, so a peak reading calls
+  that congestion 15-25% of the time with nothing wrong. Low-water asks
+  whether the ring failed to drain at *any* point, which is what separates a
+  transient burst from standing backlog. The consumer cannot derive it
+  itself -- it can sample occupancy any time, but the low-water mark
+  *between* its own reads is producer-side knowledge.
+
+  **The healthy reading is 1, not 0, and it is reported in slots for exactly
+  that reason.** The sample is taken immediately after the frame is written,
+  so a consumer that is keeping up still leaves one frame queued -- which is
+  why the clamp this replaced recovered at `<= 1` slot and engaged at `>= 2`.
+  Whether a permille encoding round-trips that 1 depends on the geometry: at
+  the 8 slots every venc backend currently creates it does (125 permille
+  exactly), but at 16 it does not -- 62.5 truncates to 62, which converts back
+  to 0, a healthy ring indistinguishable from a drained one. The header does
+  not fix `slot_count`, so an encoding whose fidelity varies with it is the
+  wrong choice regardless of what today's producers pick. Raw slots have no
+  such dependence, and a consumer wanting a fraction already has `slot_count`
+  at header offset 8.
+
+- **Producer drops that are not congestion are now visible to the consumer.**
+  Only `full_drops` ever reached the ring header. A frame the producer could
+  not build at all -- an oversize access unit, or one whose SDK packet table
+  was incomplete -- simply vanished: the malformed-AU path counted nothing
+  anywhere (one stderr WARN, latched, then silence), and the producer-side
+  oversize counters lived in process-local ring stats no consumer could
+  reach. With venc no longer self-healing, nobody downstream could tell a
+  frame had gone missing.
+
+  Header offset 96 now carries `other_drops`, kept strictly apart from
+  `full_drops`: congestion the consumer is causing calls for slowing down,
+  a frame the producer could not build does not. Malformed access units also
+  get a transport-independent per-output counter (they happen on RTP too),
+  and both surface as `otherDrops`/`badAuDrops` on `transport/status`.
+
+- **Bootstrap IDRs are counted but never coalesced.** The 100 ms spacing gate
+  exists to absorb storms from producers asking for a *fresher* picture (the
+  scene detector, `/api/v1/idr`), where losing one costs nothing because
+  another is already in flight. A bootstrap IDR is a different event: output
+  enable, a destination change, a live fps rebind and recorder start each hand
+  the stream to a receiver — or a file — that has seen no parameter set, so a
+  coalesced request leaves it with nothing to start from while the caller is
+  told the apply succeeded. On a GDR craft, which emits no periodic IDRs at
+  all, "nothing to start from" is permanent: a recording with no IRAP anywhere
+  in it seeks to nothing and plays from nothing.
+
+  `idr_rate_limit_force()` honors those unconditionally, still books them in
+  `/api/v1/idr/stats`, and re-arms the spacing window so an ordinary request
+  right behind a bootstrap still coalesces — a bootstrap must not open a hole
+  for a storm. Applied at all four sites on both SigmaStar backends. Only a
+  *real* fps rebind qualifies: `apply_fps()` returns 0 for its unchanged-fps
+  early return too, and firing on that turned a ground re-posting an unchanged
+  profile into ungated keyframes at the caller's write rate.
+
+  A failed bootstrap IDR is **not** fatal to the apply. The work it accompanies
+  has already succeeded — in `apply_server` the socket is repointed before the
+  request — so failing the apply would send venc into a rollback that re-enters
+  the same failing call and can commit the new `outgoing.server` while the
+  socket sits on the old one. It is logged instead, and both backends now
+  genuinely behave the same way.
+
+- **Every frame-shm producer measures its own ring.** The low-water tracker
+  moved from a per-backend file static onto the output, because
+  `venc_frame_ring_create()` publishes the `VHLT` health marker unconditionally:
+  a ring nobody measured still advertised a live gauge sitting at its
+  create-time `0` — the *healthiest* value in the range — so "not measured" was
+  indistinguishable from "the consumer is keeping up perfectly". That affected
+  CV610 (which measured nothing at all) and Star6E dual-stream ch1, whose
+  second ring a shared tracker could not represent. `badAuDrops` is likewise
+  reported on every transport now, not only `frame-shm`, since a malformed
+  packet table happens on RTP too and there is no ring header to see it through
+  there.
+
+- **`GET /api/v1/transport/status`**: `throttlePermille` and
+  `effectiveBitrateKbps` removed, `ringLowWaterSlots` added on the
+  `frame-shm` branch. Read `video0.bitrate` from `/api/v1/config`; nothing
+  scales it any more.
+
+- Sidecar `TRANSPORT_INFO`: `throttle_permille` returns to `_pad[2]`.
+  Trailer stays 16 bytes; later trailers keep their offsets.
+
+- Debug OSD: the `thr<n>%` bitrate annotation becomes `ring<n>`, showing
+  ring low-water in slots when it stayed above the healthy 1-slot band, so a
+  stuttering picture separates "the consumer is behind" from "the encoder is
+  behind".
+
+### Folded in: the work first staged as `0.68.1`
+
+This began as a separate release, "venc stops injecting IDRs of its own
+accord" (contract `0.18.6` -> `0.18.7`). It never shipped under that number —
+`0.68.1` and `0.68.2` below were released while it was in review — so it is
+recorded here as part of `0.69.0`, the release that actually carries it.
+
+Several items below were superseded again by `0.69.0` above: the ring-full
+recovery IDR they kept for plain GOP is now removed outright, and the
+throttle-clamp deadband they tuned is gone with the clamp. Kept for the
+reasoning and the device measurements, which still stand.
+
+- **`video0.bitrate`, `video0.qpDelta` and `video0.maxIBytes`/`maxPBytes` no
+  longer request an IDR after applying** (Star6E and Maruko). These are all
+  decoder-neutral rate-control state, absorbed mid-GOP by the rate
+  controller; the frame-shm throttle clamp relied on exactly that for as long
+  as it existed (`0.69.0` above removed the clamp, so that corroboration is
+  historical — the SDK behaviour it rested on is unchanged). A controller that wants a resync point calls `/request/idr`
+  explicitly. CV610 never IDR'd on these paths.
+
+  Device-measured on a SSC338Q (IMX335 1920x1080@60, H.265 CBR, GDR via the
+  `racing` preset) using the venc recorder as a bitstream tap, ten live
+  writes spaced 300 ms, counting IRAP access units:
+
+  | field | before | after |
+  |---|---:|---:|
+  | `video0.qpDelta` | 11 | 1 |
+  | `video0.maxIBytes` | 11 | 1 |
+  | `video0.bitrate` | 11 | **11** |
+
+  The residual 1 is the recorder's own start IDR — a do-nothing control arm
+  on each binary recorded exactly that one and nothing else, and with the
+  `racing` preset the stream is GDR, so there are no periodic IDRs to
+  confound the count.
+
+- **The bitrate row above is a no-op on the wire, deliberately kept.**
+  `MI_VENC_SetChnAttr` emits an IDR by itself on Star6E, and
+  `MI_VENC_RcParam_t` carries no bitrate field on either SigmaStar backend,
+  so there is no rate-only actuator to switch to and the keyframe survives.
+  Two real defects are still fixed by removing the request: it consumed a
+  slot in the shared 100 ms IDR gate, so a genuine recovery request (a
+  ring-full drop, or `/request/idr` from waybeam-link) landing within
+  100 ms of a bitrate write was silently swallowed; and it inflated
+  `/api/v1/idr/stats` with one honored IDR per bitrate write that the write
+  did not cause, which is what made the counters read as though bitrate
+  writes were the IDR source. Calling `SetChnAttr` less often is left as a
+  follow-up.
+
+- **Maruko's `/request/idr` now goes through the shared per-channel gate.**
+  `maruko_request_idr()` called the vendor request directly, making it the
+  only IDR source on any backend that was neither rate-limited nor counted:
+  an HTTP caller could issue unbounded back-to-back IDRs and
+  `/api/v1/idr/stats` reported none of them. Compile-tested only; Maruko
+  hardware was unreachable.
+
+- **Contract corrections, no code change.** The `/api/v1/dual/set` `bitrate`
+  row claimed venc issues an IDR; `dual_apply_bitrate()` only updates the
+  channel attribute and never has. The `/api/v1/idr/stats` example reported
+  `min_spacing_us: 250000` against a compile-time
+  `IDR_RATE_LIMIT_MIN_SPACING_US` of `100000`.
+
+- **The frame-shm ring-full recovery IDR is now reserved for GOP streams.**
+  A drop told venc its ring overflowed, not that any decoder lost sync. On a
+  GDR stream that distinction is decisive: a rolling intra refresh repairs a
+  chain break within one cycle for free, so the recovery IDR bought only the
+  gap until the sweep reached the damage -- and paid for it with the largest
+  frame the encoder makes, pushed into a ring that was by definition full.
+  On a plain GOP stream there is no other heal and the IDR is genuinely a
+  lifesaver, so that case keeps it, paced by the existing 1 s holdoff.
+
+  (Superseded within this same release train: `0.69.0` below removed the
+  ring-full recovery IDR outright, for plain GOP as well as GDR, so the helper
+  named next never appeared in a shipped binary. The reasoning is kept because
+  it is the argument `0.69.0` then extended.)
+
+  `venc_frame_drop_needs_idr()` folds this with the existing SVC-T enhance
+  exemption so all three backends share one definition. No configuration:
+  venc already knows which kind of stream it is producing.
+
+  Device-measured on a SSC338Q with the ring consumer stopped for 12 s (ring
+  pinned at 100%, 8/8 slots, ~900 drops):
+
+  | stream | IRAP access units |
+  |---|---:|
+  | GDR (`resilience=racing`), before | 13 |
+  | GDR, after | **1** |
+  | GOP (`resilience=off`), after | **kept** |
+
+  The single remaining IRAP is the recorder's own start IDR; a do-nothing
+  control arm recorded exactly that one.
+
+- **The ring-fill clamp deadbands its own writes.** *(Superseded by `0.69.0`
+  above, which removed the clamp entirely; the deadband no longer exists.)*
+  It re-programmed the
+  encoder on every permille change, as often as every 200 ms — and each
+  programmed rate change costs an IDR, so a clamp chasing an oscillating
+  fill signal keyframed the link it was trying to unclog. Movement below
+  100 permille (10%) no longer re-programs. Reach is preserved in both
+  directions: both rails are exempt, and the comparison is against the last
+  *applied* value so suppressed movement accumulates. Device-confirmed —
+  with the consumer stopped the clamp still walked to its floor (permille
+  50, 1909 kbps).
+
+- **The fps-rebind IDR has one owner instead of three.** Output enable
+  emitted two back-to-back requests (its own plus `apply_fps`'s, coalesced
+  only by luck of the 100 ms gate — and coalescing the *recovery* IDR
+  behind an unrelated one is exactly what that gate should not do); output
+  disable emitted one *after* the output was already off; the startup idle
+  transition emitted one with no consumer at all. Only the live
+  `video0.fps` write needs one, because the rebind re-creates the encoder
+  channel, so that is where it now lives. Enable emits exactly one,
+  disable none.
+
+- **Every Maruko IDR source is now counted; the coalescible ones are paced.**
+  `maruko_request_idr()` called the vendor request directly, and the
+  output-enable and server-change paths bypassed the gate too, so Maruko's
+  `/request/idr` was the only IDR source on any backend that was neither
+  rate-limited nor visible in `/api/v1/idr/stats`.
+## [0.68.2] - 2026-08-26
+
+CV610 / IMX662 colour. Both changes device-verified on `.181`.
+
+- **`/api/v1/awb` now works on the CV610 backend.** `cv610_awb_query()` in
+  `src/cv610_iq.c` reads `ss_mpi_isp_query_wb_info()` and
+  `ss_mpi_isp_query_exposure_info()` and reports the gains AWB actually
+  converged on, the CCM saturation the AGC bucket selected, the detected
+  colour temperature, the interpolated CCM, scene status, Bv, and the
+  exposure that selected all of it. `query_awb_info` already existed for
+  star6e and maruko; cv610 returned 501.
+
+  The pre-existing `wb` group in `/api/v1/iq` could not answer this. It reads
+  back `ot_isp_wb_attr`, whose `manual_attr` holds the last value *written* --
+  on a backend that never leaves auto WB it reads 256/256/256/256 forever.
+  Diagnosing a colour cast without this was guesswork.
+
+- **The ISP black level is no longer rescaled by the sensor's bit depth.**
+  `cmos_get_isp_black_level()` sent `IMX662_BLACK_LEVEL_12BIT >> 2` for the
+  RAW10 modes. `ot_isp_cmos_black_level` is `Format:14.0` -- a fixed 14-bit ISP
+  domain, not the sensor's output depth -- so the correct value is `50 << 2 =
+  200` in *every* mode. Every vendor plugin on this silicon uses one constant
+  across all of its modes (sc450ai/sc431hai/sc500ai/sc4336p `0x410`,
+  os04d10/gc4023 `0x400`), sc450ai included, which runs both a 12-bit linear
+  and a 10-bit WDR mode off `BLACK_LEVEL_DEFAULT`.
+
+  The shift left ~150 codes of pedestal unsubtracted on the 90 and 100 fps
+  modes -- which is what the craft flies. AWB then measures `(B+p)/(G+p)`,
+  biased toward 1, so it reads blue as relatively stronger than it is and
+  under-applies blue gain; the residue itself is multiplied by 2.9x on B
+  against 1.1x on R, so it lifts blue hardest where signal is smallest.
+
+  Verified at matched analog gain 12.02x, before/after: `b_gain` 732 -> 791
+  (+8.1%), `b/r` 2.511 -> 2.810 (+11.9%), CCT 2976 -> 2898 K. The direction
+  and asymmetry were written down before the deploy. Operator verdict on the
+  image: "a bit more natural".
+
+**Not included, deliberately:** the residual white point is still roughly 5%
+too blue at ~2900 K indoor. A candidate correction to
+`IMX662_AWB_STATIC_WB_B` recovers about half of it, but its magnitude could
+not be resolved above the bench's own repeatability (a repeat arm on one
+unchanged build spread 6.2% once the room light drifted), and everything was
+measured at a single colour temperature. Tracked with the patch attached.
+
+## [0.68.1] - 2026-08-23
+
+Header only. Bit 3 of the frame-SHM metadata flags is reserved for the
+receiver-set SALVAGED flag. No encoder path changes and nothing venc emits
+is different.
+
+- **`VENC_FRAME_FLAG_SALVAGED` (0x08) is reserved in
+  `include/venc_frame_ring.h`.** waybeam-link sets the bit on a frame it
+  rebuilt from an unrecoverable FEC block — synthesized skip slices over the
+  lost region, or a whole-picture freeze (its `PROTOCOL.md` §6.3b) — and
+  waybeam-hub reads it to keep a repaired picture out of the recording as a
+  seek point and out of the parameter-set cache. venc never sets it, but this
+  header is the canonical definition of the format
+  (`protocols/frame-shm.md`), and a future encoder-side flag claiming 0x08
+  would have been read downstream as damage on every frame carrying it. Both
+  consumers already carry the bit (waybeam-link `cde72f7`, waybeam-hub
+  `a214f7a`); this is the third and last definition of the flag set.
+  radeon-vrx's `frame_shm_format.h` defines only `IDR` and tests that bit
+  alone, so it needs nothing and is unaffected.
+- **`venc_frame_drop_breaks_chain()` is deliberately unchanged.** A salvaged
+  frame is still a reference frame, so the ring-full drop policy keeps
+  keying off `ENHANCE` alone. `tests/test_venc_frame_ring.c` asserts that,
+  and that the four defined flag bits stay disjoint — the guard that fails
+  if a later flag claims bit 3.
+
+## [0.68.0] - 2026-08-23
+
+CV610 only. No wire format or config schema change, but see the frame-SHM
+metadata note below: a field that was already on the wire now carries a
+different (correct) value.
+
+- **CV610 now refreshes by COLUMN, so the GDR recovery frame keeps its slices.**
+  Under `OT_VENC_INTRA_REFRESH_ROW` the intra band is a contiguous CTB range, so
+  on the recovery frame the encoder carved it off as its own I slice and then
+  ignored the configured row split: measured on .181 at 1080p100 with
+  `sliceCount: 17`, that frame shipped **2 slices at addresses `[0,45]`** — on
+  the largest frame in the stream and the one carrying VPS/SPS/PPS and the
+  `recovery_point` SEI. waybeam-link's spatial repair drops any frame whose
+  slice addresses fall outside the geometry it has learned, so the recovery
+  frame was precisely the frame it could never salvage. A column band is not
+  contiguous in raster order, so it cannot become a slice and the row split
+  survives.
+
+  Measured ROW -> COLUMN: refresh-AU slices 2 -> 17; refresh-AU first slice
+  I -> P; refresh-AU size 1.32x -> 1.07x of the stream mean; stream mean AU
+  11235 -> 11416 B against a 9264 kbps target. GDR markers unchanged
+  (`recovery_point` every 200 frames, no IRAP). Not configurable: there is no
+  reason to select ROW.
+
+- **The intra-refresh sweep now derives from the picture WIDTH on CV610.**
+  `intra_refresh_compute()` divides whatever extent it is given into 32-px
+  units; it was being handed the height, so a column sweep covered 34 units on a
+  60-unit-wide picture and ran 1.7x slower than the mode's target
+  (19 frames measured, against the 15 that "fast" asks for at 100 fps). With the
+  width it derives `refresh_num` 4 and a 15-frame cycle, measured converging in
+  14 frames. The slice split still uses the height, because slices are always
+  rows. The shared `intra_refresh_compute()` parameter is renamed `height` ->
+  `extent` and documented, since silently passing the wrong dimension is what
+  caused this.
+
+  Consequence: on CV610, `total_rows` and `lines` in `/api/v1/intra/status` now
+  count 32-px **columns** (60 at 1080p, not 34). The JSON key is shared across
+  backends and was left alone rather than renamed for one of them.
+
+- **frame-SHM `gdr_len` was wrong on CV610 and is now correct.** Byte 7 of the
+  frame metadata (`protocols/frame-shm.md`) advertises the GDR cycle length in
+  frames. It is computed as `ceil(total_rows / refresh_num)`, so with the
+  height-derived extent it published **12** while the encoder's true sweep was
+  20; it now publishes 15, matching the device log. No consumer reads the field
+  today (waybeam-link parses it into `FrameShmMeta::gdr_len` and never uses it),
+  so nothing changes behaviourally — but a future consumer would have been
+  reading a wrong number.
+
+  Star6E and Maruko are unaffected: `MI_VENC_SetIntraRefresh` has no direction
+  field, they still pass the height, and their derivation is unchanged. Measured
+  on .232, Star6E sweeps top-to-bottom and converges in ~9 frames at 60 fps.
+
+## [0.67.4] - 2026-08-23
+
+CV610 only. No wire format, config schema, frame-SHM layout or HTTP contract
+changes.
+
+- **A live `video0.gop_size` change silently dropped the CV610 stream out of
+  GDR.** Writing `attr.rc_attr.h265_cbr.gop` resets the channel's intra-refresh
+  state, so one slider drag converted a GDR stream (`recovery_point` SEI, no
+  IRAP) into an IDR stream for the rest of the venc lifetime — and writing the
+  old value back did not undo it, only a restart did. `/api/v1/intra/status`
+  kept reporting intra refresh active throughout, because it serves a snapshot
+  published once at startup. Measured on .181 by RTP capture at each step.
+  `cv610_apply_gop()` now refuses the write while intra refresh is active and
+  leaves the encoder untouched.
+
+  Re-asserting intra refresh after the write was tried first and rejected: it
+  restores GDR, but the recovery period stays where it was (identical at gop
+  0.5/1.0/2.0/4.0) while the CBR window still moves, swinging the achieved rate
+  2.7–11.2 Mbps against a fixed 9.26 Mbps target.
+
+  Scoped to intra-refresh-active: with `resilience: "off"` the write proceeds
+  unchanged, and that is the only configuration where `video0.gop_size` is the
+  operator's value at all — a named preset already owns it. A live **bitrate**
+  write goes through the same `set_chn_attr` path with the gop member unchanged
+  and is unaffected. Star6E and Maruko keep live GOP control.
+
+  **Known limitation:** `/api/v1/capabilities` still reports
+  `video0.gop_size` as `mutability: live, supported: true` on CV610. The
+  backend gate is key-based and cannot express "live only while `resilience`
+  is off". The write now fails loudly instead of silently destroying GDR, but
+  the capability surface does not yet tell the operator why.
+
 ## [0.67.3] - 2026-08-23
 
 Follow-up to 0.67.2 from the upstream review. No wire format, config schema,

@@ -18,8 +18,25 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.6`
+- `contract_version`: `0.22.0`
 - `status`: `active`
+
+## Per-Backend Field Support
+
+`supported` in `/api/v1/capabilities` is per backend and is not cosmetic — a
+`false` field is rejected by `GET /api/v1/set` and `/api/v1/live/set` with
+`501 not_implemented` rather than accepted and ignored.
+
+| Field | Star6E | Maruko | CV610 |
+|---|---|---|---|
+| `video0.qpDelta` | true | true | **false** |
+| `video0.minQp` / `maxQp` | true | true | true |
+| `video0.intraRefreshQp` | **false** | **false** | true |
+
+`video0.qpDelta` is `false` on CV610 and `video0.intraRefreshQp` is `false` on
+the SigmaStar backends because in each case the encoder accepts the value and
+does not act on it. Clients should read `supported` rather than assume a field
+present in the schema is live on the craft in front of them.
 
 ## Governance Rules
 - Non-breaking changes: add optional fields, add new endpoints, extend enum values.
@@ -79,8 +96,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.67.0",
-    "contract_version": "0.18.6",
+    "app_version": "0.73.3",
+    "contract_version": "0.22.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -105,7 +122,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1 },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "sliceCount": 1, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
+      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "sliceCount": 1, "resilience": "off", "intraRefreshQp": 0, "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "allowUnixEncoderStall": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -160,6 +177,7 @@ Response `200`:
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
       "video0.slice_count": { "mutability": "restart_required", "supported": true },
       "video0.resilience": { "mutability": "restart_required", "supported": true },
+      "video0.intra_refresh_qp": { "mutability": "restart_required", "supported": false },
       "video0.zoom_x": { "mutability": "live", "supported": true },
       "video0.zoom_y": { "mutability": "live", "supported": true },
       "video0.framing": { "mutability": "restart_required", "supported": true },
@@ -218,7 +236,10 @@ Absent `routes` means an older build: treat every route as possibly present
 and fall back to calling it.
 
 `supported` is backend-specific. Current Star6E and Maruko builds both expose
-scene detection, intra refresh, and digital zoom fields.
+scene detection and digital zoom fields, and drive intra refresh from the
+`video0.resilience` preset — but `video0.intraRefreshQp` is advertised on
+CV610 only, because the SigmaStar encoder stores it and ignores it. See the
+per-backend table above.
 
 A field MAY carry an optional `ui` object (data-driven field schema): when
 present the dashboard renders a control for it generically — no `dashboard.html`
@@ -430,7 +451,7 @@ would wear flash and boot into the last adaptive transient.
 curl "http://<device-ip>/api/v1/live/set?video0.bitrate=4096"
 
 # Multi-set works identically (all fields must be live)
-curl "http://<device-ip>/api/v1/live/set?video0.maxIBytes=60000&video0.maxPBytes=12000"
+curl "http://<device-ip>/api/v1/live/set?video0.minQp=28&video0.maxQp=44"
 ```
 
 Semantics:
@@ -454,7 +475,11 @@ Semantics:
 - Range: `-12..12`
 - Mutability: `live`
 - Alias: `video0.qpDelta`
-- Semantics: adjusts I-frame QP relative to P-frame; negative values lower I-frame QP (higher quality keyframes), positive values raise it.
+- Semantics: adjusts I-frame QP relative to P-frame. Note the sign: negative
+  values **raise** the I-frame's QP relative to P, making I-frames **smaller**;
+  positive values lower it, making them larger. Delivered rate does not move —
+  it is a redistribution knob, not a rate knob. See the measured sweep under
+  "Rate-control QP knobs" in `README.md`.
 
 ### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_kalman_q`, `video0.stab_kalman_r`, `video0.stab_recenter_speed`
 
@@ -579,7 +604,7 @@ curl "http://<device-ip>/api/v1/set?outgoing.server=udp://<receiver-ip>:5600"
 - `shm://` and `frame-shm://` are video-only. They cannot share audio; use a nonzero `audioPort` for separate UDP audio.
 - On Star6E, `audioPort=0` piggybacks on the active video destination for both `udp://` and `unix://`.
 - On Star6E, a nonzero `audioPort` keeps audio on a dedicated UDP port. With `unix://`, `shm://`, or `frame-shm://` video output, that dedicated audio port is sent to `127.0.0.1:<audioPort>`.
-- `frame-shm://` publishes whole Annex-B frames into a 16-slot × 512 KB SPSC ring; each slot is prefixed with an 8-byte `VencFrameMeta` (`pts`, `codec`, `flags`; `flags` bit 0 = IDR). On a full ring the encoder drops the frame and keeps running (never blocks). `outgoing.maxPayloadSize` does not apply (no packetization). `GET /api/v1/transport/status` reports `"transport":"frame-shm"` with `framesSent`/`fillPct`/`transportDrops`/`oversizeDrops`.
+- `frame-shm://` publishes whole Annex-B frames into an 8-slot SPSC ring (384 KB per slot on Star6E and Maruko, 512 KB on CV610 — 16 × 512 KB is the ring *format*'s default, not what any venc backend creates); each slot is prefixed with an 8-byte `VencFrameMeta` (`pts`, `codec`, `flags`; `flags` bit 0 = IDR). On a full ring the encoder drops the frame and keeps running (never blocks). `outgoing.maxPayloadSize` does not apply (no packetization). `GET /api/v1/transport/status` reports `"transport":"frame-shm"` with `framesSent`/`fillPct`/`transportDrops`/`oversizeDrops`.
 
 ### Stream Mode and Send Feedback
 
@@ -895,9 +920,14 @@ scales with pixels per module, so size the channel up for longer-distance
 markers.  Pairing, commands, boot scheduling, and action dispatch are
 deliberately outside the waybeam binary and this endpoint.
 
-This route is registered by the Star6E and Maruko backends. The initial CV610
-backend does not advertise snapshot capability and does not register the
-route, so requests receive the normal HTTP `404` route response.
+Registered on **all three** backends since `0.20.0`. On CV610 the JPEG channel
+is a second bind target on the same VPSS output the H.265 channel consumes
+(the SDK allows up to four destinations per source), pulse-encoded with
+`start_chn(recv_pic_num = 1)` -> `get_stream` -> `stop_chn`. Because it shares
+the main stream's VPSS channel it inherits that geometry: `snapshot.width` and
+`snapshot.height` report `supported:false` on CV610 rather than being accepted
+and ignored. `snapshot.enabled`, `snapshot.quality` and `snapshot.channel` are
+honoured; quality maps to `ss_mpi_venc_set_jpeg_param(qfactor)`.
 
 > **Retired:** `GET /api/v1/snapshot.pgm` (grayscale P5 PGM, added 0.59.0)
 > was removed in 0.60.0 and now answers `404`.  It captured through a
@@ -1118,18 +1148,17 @@ Recording format is determined by `record.format` config: `"ts"` (default, MPEG-
 with audio) or `"hevc"` (raw HEVC NAL stream). File rotation is controlled by
 `record.maxSeconds` and `record.maxMB` config fields.
 
-Backend gating: only the Star6E backend currently runs the runtime poll that
-honors HTTP-driven start/stop.  On Maruko, recording is config-driven only
-(set `record.enabled=true` + `record.mode="mirror"|"dual"` in `/etc/venc.json`)
-and `/api/v1/record/start` returns:
+Backend gating: **all three backends** run the runtime poll that honours
+HTTP-driven start/stop — Star6E and Maruko in their encode loops, CV610 in its
+drain loop.  A backend that does not register the poll answers
+`/api/v1/record/start` with
 
 ```json
 {"ok":false,"error":{"code":"not_implemented","message":"HTTP record control not available on this backend"}}
 ```
 
-with HTTP `501`.  This avoids the prior behaviour where the request returned
-`{"ok":true}` but no recording started.  Tracked as Phase 6.5 in
-`MARUKO_PARITY_PLAN.md`.
+and HTTP `501`, rather than the older behaviour of returning `{"ok":true}`
+while no recording started.  No shipped backend takes that path today.
 
 ### `GET /api/v1/record/stop`
 
@@ -1350,7 +1379,7 @@ Live-change secondary VENC channel parameters. Supported parameters:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `bitrate` | uint | Bitrate in kbps (applied immediately via MI_VENC, IDR issued) |
+| `bitrate` | uint | Bitrate in kbps, applied immediately via `MI_VENC_SetChnAttr`. No IDR is *requested*; `dual_apply_bitrate()` only updates the channel attribute. Note that on Star6E `MI_VENC_SetChnAttr` emits an IDR of its own (measured 2026-08-23), so a rate change still produces a keyframe — it is simply not one venc asked for and it is not counted in `/api/v1/idr/stats`. For an explicit ch1 resync point use `/api/v1/dual/idr`. |
 | `gop` | double | GOP interval in seconds (converted to frames using ch1 fps) |
 
 ```bash
@@ -1410,7 +1439,7 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "min_spacing_us": 250000,
+    "min_spacing_us": 100000,
     "channels": [
       {"idx": 0, "honored": 47, "dropped": 3},
       {"idx": 1, "honored": 12, "dropped": 0}
@@ -1453,7 +1482,7 @@ Response `200` (SHM ring transport, common for `outgoing.server=shm://...`):
 }
 ```
 
-Response `200` (frame-shm ring, with the ring-fill bitrate clamp engaged):
+Response `200` (frame-shm ring):
 ```json
 {
   "ok": true,
@@ -1468,8 +1497,9 @@ Response `200` (frame-shm ring, with the ring-fill bitrate clamp engaged):
     "oversizeDrops": 0,
     "slotCount": 8,
     "usedSlots": 2,
-    "throttlePermille": 640,
-    "effectiveBitrateKbps": 6400
+    "ringLowWaterSlots": 1,
+    "otherDrops": 0,
+    "badAuDrops": 0
   }
 }
 ```
@@ -1485,7 +1515,8 @@ Response `200` (UDP/Unix kernel-buffer fill_pct):
     "inPressure": false,
     "pressureDrops": 0,
     "transportDrops": 0,
-    "packetsSent": 184523
+    "packetsSent": 184523,
+    "badAuDrops": 0
   }
 }
 ```
@@ -1504,11 +1535,13 @@ Field reference:
 | `inPressure` | Point-in-time HTTP snapshot: true when the current `fillPct >= 75`, false otherwise. The RTP sidecar field uses 75/50 hysteresis |
 | `transportDrops` | Lifetime drops: ring-full for SHM; unsent datagrams after `EAGAIN`/`ENOBUFS` or frame-budget exhaustion for UDP/Unix |
 | `pressureDrops` | Frames dropped by the in-process backpressure path while a sidecar probe was subscribed |
-| `packetsSent` | Lifetime sends accepted: ring writes for SHM, datagrams for UDP/Unix |
+| `packetsSent` | Lifetime sends accepted: ring writes on `shm://`, datagrams on `udp://`/`unix://`.  Absent on `frame-shm://`, which reports whole frames as `framesSent` instead |
+| `framesSent` | (`frame-shm` only) Lifetime whole frames written into the ring.  The `frame-shm` counterpart of `packetsSent`: this transport carries one access unit per slot, not packets |
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
-| `throttlePermille` | (frame-shm only) Ring-fill bitrate clamp, `1000` = unclamped, `250` = floor.  A **clamp, not a veto** — `video0.bitrate` in `/api/v1/config` is never modified, so an external rate controller's writes all still succeed |
-| `effectiveBitrateKbps` | (frame-shm only) `video0.bitrate` scaled by `throttlePermille`; what the encoder is actually programmed to |
+| `otherDrops` | (frame-shm only, all three backends) Frames the producer discarded for a reason **other than a full ring** — an access unit it could not build at all (oversize, or a malformed SDK packet table).  Kept apart from `transportDrops` on purpose: that one is congestion the consumer is causing and a rate controller should slow down for it, this one is not congestion and slowing down fixes nothing.  Mirrored into the ring header at offset 96 so the consumer sees it too |
+| `badAuDrops` | Access units discarded because the SDK's packet table was incomplete or invalid.  Transport-independent — this happens on RTP as well — and a subset of `otherDrops` on `frame-shm`.  **Star6E and Maruko only:** the CV610 stream path has no packet-table validation, so the field is absent there rather than reported as a permanent zero |
+| `ringLowWaterSlots` | (frame-shm only, all three backends) Lowest ring occupancy reached in the last 200 ms window, **in slots**.  `<= 1` is the healthy band and `>= 2` sustained is standing backlog — venc samples just after writing, so a consumer that is keeping up still leaves exactly one frame queued.  Raw slots rather than a fraction of `slotCount`, because whether a fraction round-trips that 1 depends on the geometry — at the 8 slots venc creates it does (125 permille exactly), at 16 it does not (62.5 truncates to 62, back to 0: a healthy ring indistinguishable from a drained one) — and the header does not fix `slotCount`.  A **measurement, not an actuator** — venc publishes it and changes nothing in response |
 
 On `unix://`, `fillPct` is measured against the *peer's* datagram queue,
 which is the limit that actually blocks a sender — not the local
@@ -1526,10 +1559,41 @@ may show a full queue while the consumer is paused. The usual cause of
 unexpected pressure is a shallow `net.unix.max_dgram_qlen` — see the
 `unix://` notes in the README.
 
-A `throttlePermille` below `1000` means the consumer is not draining the ring
-fast enough for the configured bitrate.  Pinned at `250` the clamp has spent
-all its authority and drops may resume — that case is also logged once on
-entry and once on exit.  Disable with `outgoing.shmThrottle=false` (live).
+A `ringLowWaterSlots` of `2` or more means the ring never got back down to
+its one-frame idle occupancy inside the window; at `slotCount` it never
+dropped below full and frames are being discarded after encode.  venc does
+not act on this — it is published for the rate controller, which on a
+`frame-shm://` deployment is co-located on the same SoC and reads the same
+value from the ring header.
+
+**The healthy reading is 1, not 0.**  The measurement is taken immediately
+after the frame is written, so even a consumer draining perfectly leaves the
+frame just written in the ring.  `0` means the consumer emptied the ring
+between the write and the sample; `1` is the ordinary steady state.  Treat
+`<= 1` as clean.
+
+**Low-water, not peak, and the distinction is what makes it usable.**
+Measured on a Star6E at 100 fps into an 8-slot ring with a perfectly healthy
+consumer, the ring routinely spikes to 2-3 slots inside a 200 ms window and
+drains again — the consumer reads one frame per event-loop iteration, so short
+bursts are normal.  A peak-based reading calls those bursts congestion 15-25%
+of the time with nothing wrong.  Low-water asks whether the ring failed to
+drain at *any* point in the window, which is the question that discriminates
+a transient burst from standing backlog.
+
+**Why venc no longer clamps its own rate (0.19.0).** Through 0.18.7 venc ran a
+ring-fill bitrate clamp here.  It was a *second* rate controller: on a
+`frame-shm://` craft waybeam-link already owns `video0.bitrate` and already
+reads the egress ring, so two loops with different time constants acted on one
+actuator — and every actuation costs an IDR, because `MI_VENC_SetChnAttr`
+keyframes whenever the programmed rate changes. That was **measured on
+Star6E** (2026-08-23); Maruko is assumed to behave the same way and is
+labelled as an assumption in the code, not a measurement.  Measured
+2026-08-24 on a Star6E at 720p120: with the clamp engaged the receiver saw
+6.5 IDR/s and 100-143 ms glass-to-glass; with it off, 0.2 IDR/s and 15-37 ms.
+Ring-full drops remain the backpressure signal, readable from the ring header
+(`full_drops`, `low_water_slots`), and a GDR stream heals a chain break
+within one refresh cycle.
 
 Error `501` — backend has no transport observability hook.
 
@@ -1794,12 +1858,12 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.18.6`:
+in Notes. As of `contract_version: 0.22.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
-| `/api/v1/record/{start,stop}` | yes | **501** | Maruko has no runtime poll loop yet (Phase 6.5).  Config-driven recording (`record.enabled=true` + `record.mode="mirror"\|"dual"`) works. |
-| `/api/v1/record/status` | live counters | live counters | Both backends register a status callback against the live `Star6eTsRecorderState`; Maruko reflects daemon-config-driven recording (mirror/dual). |
+| `/api/v1/record/{start,stop}` | yes | yes | Maruko has polled the start/stop flags since it registered `venc_api_set_record_http_control_supported(true)`; the older **501** row was stale. Config-driven recording (`record.enabled=true` + `record.mode="mirror"\|"dual"`) works on both. **CV610 from 0.20.0**, `record.mode=mirror` only: the drain loop polls the same flags. `dual`/`dual-stream` need a second VENC channel and are refused with a warning rather than silently recording ch0. |
+| `/api/v1/record/status` | live counters | live counters | Both backends register a status callback against the live `Star6eTsRecorderState`; Maruko reflects daemon-config-driven recording (mirror/dual). **CV610 from 0.20.0** registers the same callback. |
 | `/api/v1/qr/*` | yes | **404** | Star6E-only VPE port1 luma tap. QR capability fields remain in the shared schema but report `supported:false` on Maruko. |
 | `/api/v1/recordings*` | yes | yes | File listing/download/delete works against `record.dir` regardless of which backend wrote the file. |
 | `/api/v1/audio/status` | yes | yes | Both backends register `query_audio_status`. |
@@ -1808,17 +1872,190 @@ in Notes. As of `contract_version: 0.18.6`:
 | `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Star6E/Maruko share one IQ table schema. **CV610 also serves these from 0.18.4, in a DIFFERENT shape** — see "CV610 IQ response shape" below. `/api/v1/iq/import` stays Star6E/Maruko-only and 501s on CV610 (advertised as `routes.iq_import:false`). |
 | `/api/v1/awb` | live | live | Both backends register `query_awb_info`. CV610: **501**. |
 | `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
-| `/api/v1/transport/status` | yes | yes | SHM-ring fields are shown when `outgoing.server=shm://`; otherwise the UDP/Unix subset. |
+| `/api/v1/transport/status` | yes | yes | Three distinct field sets by transport: `frame-shm://` (ring fields plus `ringLowWaterSlots`/`otherDrops`), `shm://` (packet-ring fields), and UDP/Unix (socket subset). `badAuDrops` appears on every transport. **CV610** serves the same endpoint but emits no `badAuDrops` (no packet-table validation in its stream path); its `frame-shm` branch does carry `ringLowWaterSlots` and `otherDrops`. |
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
 | `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **live** | Both backends hot-swap the NPU detector on the pipeline thread without respawning video. Star6E uses VPE port 1; Maruko uses SCL port 3 and its drain-while-disable teardown. A model whose reported input geometry disagrees with the configured tap is refused and leaves detection off. |
 | `detect.net_width` / `net_height` | restart | restart | Tap geometry is fixed when the VPE/SCL detector port is created. |
-| `video0.min_qp` / `max_qp` | live | **501** | RC QP bounds. Star6E live; Maruko reports unsupported. **CV610 live from 0.18.4** (`cv610_apply_qp_bounds`, applied live and at startup); it sets the P bounds and the I-frame ceiling, leaving the I-frame floor to `video0.qp_delta`. |
+| `video0.min_qp` / `max_qp` | live | live | RC QP bounds, live and from config at startup on all three. **Maruko gained them in 0.73.0**; before that it reported unsupported. **CV610 from 0.18.4** — it sets the P bounds and the I-frame ceiling, but the I-frame floor is not steerable there (`video0.qp_delta` is not offered on CV610; see Per-Backend Field Support). |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.21.0` (**breaking**, `video0.maxIBytes`/`video0.maxPBytes` removed): the
+    per-frame size caps are gone from the config, the capabilities payload and
+    both SigmaStar backends. They never imposed the ceiling they named.
+    Device-measured on a SSC338Q (1280x720@60, H.265 CBR, GDR): across
+    `maxPBytes` 33144 -> 25000 -> 16000 -> 10000 -> 6000 the delivered rate
+    moved under 0.3%, and at the 6000 B step an AU census found all 863 access
+    units over the cap (mean 40247 B). `maxIBytes` 91788 -> 26000 -> 8000 ->
+    2000 left IDR size at 66-81 KB across 16 sampled IDRs — the weaker of the
+    two arms, since a GDR stream's IDRs are requested on demand rather than
+    being a natural population; corroborated by #111's 42-44 KB at caps
+    2000 / 26000 / 8. Scope: one SSC338Q, one SDK build, 720p60 H.265 CBR, GDR
+    — Maruko was not measured, and removal there is taken on parity.
+    **Bounded claim.** `0.45.0` recorded `maxPBytes=2000` moving a Star6E from
+    5619 to 1868 kbps — real influence, 3x below this sweep's floor. But 1868
+    kbps at 60 fps is ~3892 B/frame against a 2000 B cap, ~1.95x over, and the
+    Maruko datum in #111 (`maxIBytes=2000` -> IDR median 12195 -> 5866) is ~3x
+    over. The caps influence below ~6000 B; they do not bind anywhere they have
+    been measured, which is what disqualifies them as a ceiling.
+    A config file still carrying the keys loads fine (unknown keys are ignored)
+    and they disappear on the next config write, but a `GET /api/v1/set` **or**
+    `GET /api/v1/live/set` **naming** them now fails the whole request with
+    `404 unknown config field` — and `/api/v1/live/set` is the path a
+    volatile-first controller hits first. Strip them from saved batches and
+    from any controller that pushes them.
+    For I-frame size use `video0.qpDelta` — a 68x range on the same rig, and
+    it does not keyframe. **Fix #255 before depending on it:** applied from
+    venc's own startup path it logs success without reaching the encoder, so
+    only a live write takes effect today. That is the same
+    logs-success-without-taking-effect shape as the caps removed here.
+    For **P-frame** size there is no direct replacement; `video0.minQp` is the
+    surviving rate lever and is Star6E-only, so this removal leaves Maruko
+    without a per-frame size control.
+- `0.20.1` (`/api/v1/record/status` — `droppedFrames` widened and scoped):
+  - **`droppedFrames` now counts every recording frame that did not reach the
+    file, not only the ones the queue refused.** An access unit the SDK-typed
+    flatten rejects — an incomplete `packetInfo` table, or one over the queue's
+    byte cap — never reaches the queue at all, and counting only the queue's
+    refusals let those pass silently. The field's promise is that a damaged
+    recording cannot look like a clean one, so it has to include them.
+    Widening, not narrowing: no frame that used to be counted stops being.
+  - **`droppedFrames` and `writerPeakDepth` are per-RECORDING, not
+    per-process.** All three backends now create the recorder writer when a
+    recording opens and destroy it when the recording closes, so the counters
+    are scoped by construction rather than reset by an operation. Previously
+    the SigmaStar writer outlived any one recording and both accumulated for
+    the life of the daemon: a clean recording reported the previous one's
+    drops, and one shed frame poisoned every recording that followed.
+  - Note the denominators still differ slightly by backend: CV610 hands the
+    transport's already-flattened buffer to the recorder and so has no flatten
+    step of its own to fail.
+- `0.20.0` (additive — snapshot and recording reach CV610):
+  - **`/api/v1/record/status` gains `droppedFrames` and `writerPeakDepth`.**
+    Recording writes now run on their own thread behind a bounded 4 MB queue,
+    so a stalling disk sheds recording frames instead of stalling the live
+    video path. `droppedFrames` counts what the queue refused — a silent drop
+    would make a damaged recording look like a clean one. (Widened in `0.20.1`
+    to every frame that did not reach the file.) `writerPeakDepth` is
+    the high-water queue depth, which reads 0-1 when storage keeps up.
+    Both are 0 on backends that still write synchronously.
+  - **`record.max_seconds` / `max_mb` now work on a GDR craft.** Segment
+    rotation can only cut on an IRAP; under `resilience=racing` the stream
+    emits none, so rotation was silently inert and the file grew unbounded.
+    The recorder now requests one when rotation is due, rate-limited to one
+    request per second. Device-measured on CV610: `max_seconds=15` over 50 s
+    gave **1** segment before and **4** after, with `/api/v1/idr/stats`
+    showing exactly 4 honored requests (one start + three rotations).
+  - **`GET /api/v1/snapshot.jpg` is now registered on CV610.** It was the one
+    route a backend omitted entirely; all three now serve it. The CV610 JPEG
+    channel binds as a second destination on the main stream's VPSS output, so
+    it inherits that geometry — `snapshot.width` / `snapshot.height` report
+    `supported:false` there.
+  - **`record.*` reaches CV610 in `mirror` mode.** `record.enabled`, `dir`,
+    `format` (`ts` | `hevc`), `mode`, `max_seconds` and `max_mb` are now
+    advertised supported, and `/api/v1/record/{start,stop,status}` act on a
+    real recorder. `record.bitrate` / `fps` / `gop_size` / `server` stay
+    `supported:false`: they describe the second VENC channel that `dual` and
+    `dual-stream` would need, which this backend does not create.
+  - Record start on CV610 forces an **un-coalescible** IDR. The shipped
+    configuration is `resilience=racing` (GDR, no periodic IDR), so a
+    rate-limited request would produce a file with no IRAP access unit
+    anywhere in it.
+  - No field was removed, renamed or given a new meaning. A client written
+    against `0.19.0` sees strictly more capability and no changed response
+    shape.
+- `0.19.0` (**breaking** — venc stops actuating on its own egress, and the
+  frame-SHM ring header goes to v2):
+  - **Removed `outgoing.shm_throttle`** (alias `outgoing.shmThrottle`) and the
+    ring-fill bitrate clamp behind it.  venc no longer writes the encoder rate
+    in response to ring pressure at all.  On a `frame-shm://` craft the rate
+    controller (waybeam-link) is co-located, already reads the egress ring, and
+    already owns `video0.bitrate` — the clamp was a second controller on the
+    same signal, and its only actuator keyframes.  Measured 2026-08-24 on a
+    Star6E at 720p120: clamp on, 6.5 IDR/s and 100-143 ms glass-to-glass; clamp
+    off, 0.2 IDR/s and 15-37 ms.
+    **Config files tolerate the key; the API does not.**  A
+    `waybeam.json` still carrying `outgoing.shmThrottle` loads fine — the
+    parser ignores unknown keys, and the key disappears on the next config
+    write.  A `POST /api/v1/set` naming it is a different matter: the
+    multi-field preflight rejects the **whole batch** `404 unknown config
+    field` on the first unrecognised key, so a stored ground-side "apply my
+    profile" batch that still carries it now applies *none* of its other
+    fields.  Strip it from any saved batch before upgrading.
+  - **Removed the ring-full recovery IDR entirely.**  Through 0.18.7 a
+    `frame-shm://` ring-full drop asked the encoder for an IDR on a plain-GOP
+    stream.  That request fired precisely when the ring was full, so the
+    largest frame in the stream could not be delivered anyway — measured on a
+    SSC338Q with the consumer stopped, 13 IDRs in 12 s, none of which reached
+    anyone.  Recovery is now the operator-selected GOP cadence, or an explicit
+    request: `/request/idr`, or waybeam-link's §3.9 `RECOVERY_REQUEST`.  Every
+    remaining venc-issued IDR is either explicitly asked for (the endpoints,
+    the opt-in scene detector) or structural bootstrap (recorder start, live
+    fps rebind, output enable, new destination) — a receiver that has never
+    seen a parameter set has nothing to start from.
+  - **`GET /api/v1/transport/status`**: `throttlePermille` and
+    `effectiveBitrateKbps` are **removed**; `ringLowWaterSlots` is added on the
+    `frame-shm` branch.  Note the polarity is inverted — a LOW number is
+    healthy here (`<= 1`), where `1000` was healthy for the clamp.  Read
+    `video0.bitrate` from `/api/v1/config`; there is no longer a scaled
+    "effective" rate, because nothing scales it.
+  - **Bootstrap IDRs bypass the 100 ms spacing gate.** Output enable, a
+    destination change, a live fps rebind and recorder start hand the stream (or
+    a new file) to a receiver that has seen no parameter set, so they are
+    honored unconditionally rather than coalesced — still counted in
+    `/api/v1/idr/stats`, and they re-arm the window so an ordinary request
+    behind one still coalesces. Every *other* source, including
+    `/api/v1/idr` and the scene detector, is paced exactly as before. A failed
+    bootstrap IDR is logged, not fatal: the apply it accompanies has already
+    succeeded.
+  - **New `other_drops` at ring header offset 96** (u64, producer cumulative):
+    frames the producer discarded for a reason other than a full ring.  Only
+    `full_drops` was ever published, so a consumer was structurally blind to an
+    oversize or malformed access unit — the frame simply vanished.  Deliberately
+    separate from `full_drops` because the two demand opposite responses from a
+    rate controller.  `transport/status` gains `otherDrops` and `badAuDrops`.
+  - **Frame-SHM ring header is now version `2`.**  Offset 88 changed meaning:
+    it carried `throttle_permille` (`1000` = unclamped) and now carries
+    `low_water_slots` (ring occupancy in slots, `<= 1` healthy).  `sizeof` stays 192 and
+    nothing before offset 88 moves, but the polarity inverts, so this is a
+    hard version break by design — every consumer validates `version` and
+    refuses to attach on a mismatch rather than silently misreading the field.
+    **A v2 producer will not serve a v1 consumer:** waybeam-link, waybeam-hub
+    and radeon-vrx must be rebuilt alongside.
+  - Sidecar `TRANSPORT_INFO` trailer: `throttle_permille` returns to `_pad[2]`.
+    Trailer stays 16 bytes and later trailers keep their offsets.
+
+- **`0.18.7` was never a servable contract version.**  It was staged during
+  review and folded into `0.19.0` above; no device ever reports
+  `contract_version: 0.18.7`, so do not match against it.  Most of what it
+  described — a ring-full recovery IDR kept for plain GOP, and a deadband on
+  the ring-fill clamp — was superseded outright: `0.19.0` removed both the
+  recovery IDR and the clamp.  Three things it introduced do survive, and are
+  in force as of `0.19.0`:
+  - **Rate-control writes no longer request an IDR.** `video0.bitrate`,
+    `video0.qpDelta` and `video0.maxIBytes`/`maxPBytes` no longer request one
+    after applying, on Star6E and Maruko.  A controller wanting a resync point
+    calls `/request/idr` (ch0) or `/api/v1/dual/idr` (ch1) explicitly.  CV610
+    never IDR'd on these paths.  Device-measured on a SSC338Q, 2026-08-23, ten
+    live writes spaced 300 ms, counted as IRAP access units in the encoder's
+    own bitstream: `qpDelta` and `maxIBytes` fell from 11 to 1, `bitrate`
+    stayed at 11.  The bitrate path is unchanged **on the wire** because
+    `MI_VENC_SetChnAttr` emits an IDR by itself and `MI_VENC_RcParam_t`
+    carries no bitrate field, leaving no rate-only actuator to switch to; what
+    the removal fixes there is the shared 100 ms IDR gate, which a bitrate
+    write used to consume — a genuine recovery request arriving inside that
+    window was swallowed — and `/api/v1/idr/stats`, which counted an IDR per
+    bitrate write that the write did not cause.
+  - Maruko's `/request/idr`, output-enable and server-change IDRs now go
+    through the shared per-channel gate, so every Maruko IDR source is paced
+    and counted in `/api/v1/idr/stats`.  Previously none of these were.
+  - Two corrections with no code change: the `/api/v1/dual/set` `bitrate` row
+    no longer claims venc requests an IDR (it never did), and the
+    `/api/v1/idr/stats` example reports `min_spacing_us: 100000`, matching
+    `IDR_RATE_LIMIT_MIN_SPACING_US`.
 - `0.18.6` (documentation + correctness; no shipped response changes):
   `GET /api/v1/intra/status` and `GET /api/v1/resilience/status` are now
   documented — both have been served for several releases and the CV610
@@ -2018,7 +2255,9 @@ in Notes. As of `contract_version: 0.18.6`:
     Both must be `0` (default) or a multiple of 32 (`>=64`).
   - `detect.confThresh` / `nmsIou` accept `[0, 1)` (0 = plugin default);
     `netWidth` / `netHeight` accept `0` or a `>=64` multiple of 32.
-- `0.57.0` (additive — new config field + new response fields):
+- `0.57.0` (additive — new config field + new response fields).  **All of it
+  removed again in `0.19.0`; kept here so a reader of an older device can
+  still decode what it sees.**
   - Added `outgoing.shm_throttle` (boolean, default `true`, `MUT_LIVE`,
     alias `outgoing.shmThrottle`).  Enables the `frame-shm://` ring-fill
     bitrate clamp; inert on every other transport.  Both backends.

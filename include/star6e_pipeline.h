@@ -9,6 +9,7 @@
 #include "star6e_output.h"
 #include "star6e_recorder.h"
 #include "star6e_ts_recorder.h"
+#include "venc_rec_writer.h"
 #include "star6e_video.h"
 #include "venc_config.h"
 
@@ -66,6 +67,36 @@ typedef struct {
 	Star6eRecorderState recorder;
 	Star6eTsRecorderState ts_recorder;
 	AudioRing audio_ring;
+	/* Mirror-mode recording runs its disk writes here, not on the encode
+	 * loop.  A blocking write(2) between the transport send and
+	 * MI_VENC_ReleaseStream() delays the release, backs up the encoder's
+	 * output queue and stalls the LIVE stream — measured on CV610 at 22%
+	 * of normal throughput (see include/venc_rec_writer.h).  Dual mode is
+	 * unaffected: it already drains ch1 on its own thread.
+	 *
+	 * PER-RECORDING: created after the recorder file is open and joined
+	 * before it closes.  That join is the barrier — nothing else has to
+	 * serialise the sink against a close, and the pointer being non-NULL
+	 * IS "a recording is running", so the producer gate needs no
+	 * recorder-state predicate.  NULL whenever nothing is recording. */
+	VencRecWriter *rec_writer;
+	pthread_mutex_t rec_writer_lock;   /* guards rec_writer + the counters */
+	/* rec_writer_lock is initialised in one runtime callback and destroyed
+	 * in another, so teardown after a failed bring-up needs to know
+	 * whether it ever ran. */
+	int rec_locks_ready;
+	uint64_t rec_dropped_frames;
+	/* Access units the SDK-typed flatten refused (an incomplete packetInfo
+	 * table, or one over the queue's byte cap).  Reported as part of
+	 * droppedFrames rather than as a field of its own: to an operator both
+	 * are the same fact — a frame that is not in the file — and a silent
+	 * one would make a damaged recording look clean. */
+	uint64_t rec_flatten_failures;
+	uint32_t rec_writer_peak_depth;
+	/* Non-zero while a detached reaper still owns the recorders: it has not
+	 * joined a writer whose sink outlived the stop deadline, so their
+	 * descriptors are still live and a new recording must not reuse them. */
+	int rec_reap_pending;
 	ImuState *imu;              /* NULL if IMU disabled */
 	MI_VENC_Pack_t *stream_packs;     /* pre-allocated for main loop */
 	uint32_t stream_packs_cap;

@@ -29,6 +29,8 @@
 #include <netinet/in.h>
 #include <pthread.h>
 
+#include "venc_config.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -98,11 +100,15 @@ bool mdns_beacon_alias_loses(uint32_t our_addr_net, uint32_t their_addr_net);
 int mdns_beacon_start(MdnsBeacon *b, const MdnsBeaconParams *p);
 
 /**
- * Convenience wrapper: read the `discovery` settings and ports from a venc
- * config file, resolve the remaining params (version, hostname), and start.
- * Inert on any error.
+ * Convenience wrapper: take the `discovery` settings and ports from an
+ * already-parsed venc config, resolve the remaining params (version,
+ * hostname), and start.  Inert on any error, and a no-op when cfg is NULL.
+ *
+ * Deliberately takes the parsed config rather than a path: the config file is
+ * read exactly once, in main(), so the port this beacon advertises is the same
+ * one the HTTP server binds.
  */
-void mdns_beacon_start_from_config(MdnsBeacon *b, const char *config_path);
+void mdns_beacon_start_from_cfg(MdnsBeacon *b, const VencConfig *cfg);
 
 /** Stop the thread, multicast a goodbye, and close the socket.  Safe to call
  *  on an inert beacon or one that never started. */

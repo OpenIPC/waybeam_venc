@@ -30,6 +30,13 @@ char *cv610_iq_query(void);
  *  Returns 0 on success, -1 on unknown name, bad value, or an MPI error. */
 int cv610_iq_set(const char *param, const char *value);
 
+/** Query the AWB loop's applied result plus the exposure that selected it.
+ *  Returns malloc'd JSON, caller frees.  NULL when the ISP is not running.
+ *  This is ot_isp_wb_info, not the ot_isp_wb_attr that cv610_iq_query()'s
+ *  "wb" group reads back -- the attr's manual gains are the last value
+ *  written, so they say nothing about where auto WB converged. */
+char *cv610_awb_query(void);
+
 #ifdef __cplusplus
 }
 #endif

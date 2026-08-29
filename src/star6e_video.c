@@ -146,10 +146,6 @@ size_t star6e_video_send_frame(Star6eVideoState *state,
 				tinfo.fill_pct = output->last_fill_pct;
 				tinfo.in_pressure = output->in_pressure ? 1 : 0;
 				tinfo.pressure_drops = output->pressure_drops;
-				/* frame-shm only; 0 elsewhere, which the wire
-				 * doc defines as "not reported". */
-				tinfo.throttle_permille =
-					output->throttle_permille;
 				/* For socket transports these carry the
 				 * congestion drops / successful sends counted
 				 * in the batch flush; for the SHM rings they

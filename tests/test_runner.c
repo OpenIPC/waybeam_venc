@@ -29,11 +29,11 @@ extern int test_star6e_output(void);
 extern int test_star6e_audio(void);
 extern int test_star6e_video(void);
 extern int test_star6e_recorder(void);
+extern int test_venc_rec_writer(void);
 extern int test_ts_mux(void);
 extern int test_audio_ring(void);
 extern int test_star6e_ts_recorder(void);
 extern int test_idr_rate_limit(void);
-extern int test_venc_shm_throttle(void);
 extern int test_backend(void);
 extern int test_debug_osd(void);
 extern int test_intra_refresh(void);
@@ -123,6 +123,8 @@ int main(void)
 
 	printf("\n--- test_star6e_recorder ---\n");
 	failures += test_star6e_recorder();
+	printf("\n--- test_venc_rec_writer ---\n");
+	failures += test_venc_rec_writer();
 
 	printf("\n--- test_ts_mux ---\n");
 	failures += test_ts_mux();
@@ -135,9 +137,6 @@ int main(void)
 
 	printf("\n--- test_idr_rate_limit ---\n");
 	failures += test_idr_rate_limit();
-
-	printf("\n--- test_venc_shm_throttle ---\n");
-	failures += test_venc_shm_throttle();
 
 	printf("\n--- test_backend ---\n");
 	failures += test_backend();

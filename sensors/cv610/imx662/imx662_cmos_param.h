@@ -21,20 +21,37 @@
 #define IMX662_ID   662
 #endif
 
-/* ---- Black level (FRAMOS blsData = 200/4095 on all 4 channels, 12-bit) ----
- * Scale to your ISP path's bit depth if not 12-bit (200 @12b ≈ 50 @10b ≈ 12 @8b).
+/* ---- Black level -----------------------------------------------------------
+ * ot_isp_cmos_black_level is Format:14.0 (ot_common_isp.h) -- a FIXED 14-bit
+ * ISP domain, NOT the sensor's output bit depth.  imx662_sensor_ctl.c writes
+ * BLKLEVEL = 50, a 12-bit pedestal, so the ISP value is 50 << 2 = 200 and it
+ * is the same number in every mode: every vendor plugin on this silicon uses
+ * one constant across all of its modes (sc450ai/sc431hai/sc500ai/sc4336p
+ * 0x410, os04d10/gc4023 0x400), sc450ai included, which runs both a 12-bit
+ * linear and a 10-bit WDR mode off BLACK_LEVEL_DEFAULT.
+ *
+ * Do not rescale this by the mode's bit depth.  It used to be shifted down
+ * for the RAW10 modes, which left ~150 codes of pedestal unsubtracted on the
+ * 90 and 100 fps modes; the WB gains then multiply that common-mode residue
+ * by 1.13x on R and 2.9x on B, lifting blue hardest.
  */
-#define IMX662_BLACK_LEVEL_12BIT   200
+#define IMX662_BLACK_LEVEL   200
 
 /* ---- AWB static reference and Planckian curve -----------------------------
- * Mode 0/1 values recovered verbatim from the factory xipc. The scene routine
- * leaves ref_color_temp unchanged; 4950 K follows the CV6xx sensor-driver
- * convention until the factory sensor callback itself is recovered.
+ * Recovered verbatim from the factory xipc. The scene routine leaves
+ * ref_color_temp unchanged; 4950 K follows the CV6xx sensor-driver convention
+ * until the factory sensor callback itself is recovered.
  */
 #define IMX662_AWB_STATIC_TEMP     4950
 #define IMX662_AWB_STATIC_WB_R     418
 #define IMX662_AWB_STATIC_WB_GR    256           /* 1.000 * 256 */
 #define IMX662_AWB_STATIC_WB_GB    256           /* 1.000 * 256 */
+/* Measured ~10% too blue at ~2900 K indoor on .181 (2026-08-26).  Lowering
+ * this to 492 recovers about half of that and is the right domain for the
+ * correction, but the transfer saturates, the magnitude was never resolved
+ * above the bench's own repeatability, and it was only ever measured at one
+ * colour temperature -- so the factory value stands.  The remainder is a
+ * wb_para curve-shape problem.  Patch and data are on the tracking issue. */
 #define IMX662_AWB_STATIC_WB_B     545
 #define IMX662_AWB_P1              (-86)
 #define IMX662_AWB_P2              342

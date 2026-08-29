@@ -1,4 +1,5 @@
 #include "star6e_output.h"
+#include "venc_rec_writer.h"
 #include "timing.h"
 
 #include "output_socket.h"
@@ -1601,17 +1602,7 @@ static int test_star6e_output_always_sends_under_pressure(void)
 	return failures;
 }
 
-/* ── frame-ring recovery-IDR paths ─────────────────────────────────────── */
-
-static int g_test_ring_idr_calls;
-static int g_test_ring_idr_honored;
-
-static int test_ring_request_idr_stub(void *ctx)
-{
-	(void)ctx;
-	g_test_ring_idr_calls++;
-	return g_test_ring_idr_honored;
-}
+/* ── frame-ring full-drop paths ────────────────────────────────────────── */
 
 static void test_ring_fill_p_frame(MI_VENC_Pack_t *pack,
 	MI_VENC_Stream_t *stream, uint8_t *data, size_t len)
@@ -1628,10 +1619,29 @@ static void test_ring_fill_p_frame(MI_VENC_Pack_t *pack,
 	stream->packet = pack;
 }
 
-/* Ring-full drop: the 1 s holdoff paces HONORED requests, and a request the
- * shared 100 ms limiter swallowed rolls the anchor back so the next drop
- * retries instead of leaving the chain unhealed. */
-static int test_star6e_output_frame_ring_idr_holdoff(void)
+/* A ring-full drop must discard the frame, count it, and actuate NOTHING.
+ * venc measures egress pressure and publishes it; the co-located rate
+ * controller (waybeam-link) reads the ring and owns every response.
+ *
+ * Two separate reasons, and it is worth keeping them apart because only the
+ * first is about the ring being full:
+ *
+ *   1. Categorically, venc no longer requests an IDR on its own -- for any
+ *      reason, on any transport.  Recovery belongs to the operator-selected
+ *      GOP cadence or to an explicit request (/request/idr, or waybeam-link's
+ *      §3.9 RECOVERY_REQUEST from the receiver, which is the only party that
+ *      can see whether the decoder is actually broken).
+ *   2. In THIS path specifically the request was also futile: it fired when
+ *      the ring was full, so the largest frame in the stream could not be
+ *      delivered anyway -- measured on a SSC338Q with the consumer stopped,
+ *      13 IDRs in 12 s, none of which reached anyone.
+ *
+ * Reason 2 does NOT extend to the sibling drop paths (a malformed packetInfo
+ * table, or an oversize frame aborting mid-append).  Those fire with a ring
+ * that has room, and on every transport including plain RTP, so an IDR there
+ * would have been delivered.  They are removed under reason 1 alone, and the
+ * damage they leave is bounded by GDR rather than by any venc action. */
+static int test_star6e_output_frame_ring_full_drop_is_inert(void)
 {
 	Star6eOutputSetup setup;
 	Star6eOutput output;
@@ -1641,50 +1651,38 @@ static int test_star6e_output_frame_ring_idr_holdoff(void)
 	int failures = 0;
 	int i;
 
-	CHECK("ring idr prepare", star6e_output_prepare(&setup,
-		"frame-shm://test_idr_holdoff", "compact", 0) == 0);
-	CHECK("ring idr init", star6e_output_init(&output, &setup) == 0);
-	output.request_idr = test_ring_request_idr_stub;
-	output.idr_ctx = NULL;
+	CHECK("ring drop prepare", star6e_output_prepare(&setup,
+		"frame-shm://test_full_drop", "compact", 0) == 0);
+	CHECK("ring drop init", star6e_output_init(&output, &setup) == 0);
 	test_ring_fill_p_frame(&pack, &stream, data, sizeof(data));
 
 	for (i = 0; i < 8; ++i) {  /* fill all 8 slots */
-		CHECK("ring idr fill slot",
+		CHECK("ring drop fill slot",
 			star6e_output_send_frame(&output, &stream, 0,
 				NULL, NULL) > 0);
 	}
-	g_test_ring_idr_calls = 0;
-	g_test_ring_idr_honored = 1;
-	CHECK("ring idr 9th drops",
+	CHECK("ring drop 9th drops",
 		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
-	CHECK("ring idr fired once", g_test_ring_idr_calls == 1);
-	CHECK("ring idr next drop paced",
-		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
-	CHECK("ring idr holdoff quiet", g_test_ring_idr_calls == 1);
+	CHECK("ring drop counted",
+		output.frame_ring->stats.full_drops == 1);
 
-	/* Swallowed request: anchor must roll back so the next drop retries. */
-	output.drop_idr_last_us = 0;
-	g_test_ring_idr_honored = 0;
-	CHECK("ring idr swallowed drop",
-		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
-	CHECK("ring idr swallowed called", g_test_ring_idr_calls == 2);
-	CHECK("ring idr retry drop",
-		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
-	CHECK("ring idr retried immediately", g_test_ring_idr_calls == 3);
-	g_test_ring_idr_honored = 1;
-	CHECK("ring idr honored drop",
-		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
-	CHECK("ring idr honored called", g_test_ring_idr_calls == 4);
-	CHECK("ring idr paced again",
-		star6e_output_send_frame(&output, &stream, 0, NULL, NULL) == 0);
-	CHECK("ring idr paced count", g_test_ring_idr_calls == 4);
+	/* A standing full ring keeps dropping and keeps counting -- no
+	 * pacing state, because nothing is being paced. */
+	for (i = 0; i < 5; ++i)
+		CHECK("ring drop still drops",
+			star6e_output_send_frame(&output, &stream, 0,
+				NULL, NULL) == 0);
+	CHECK("ring drop all counted",
+		output.frame_ring->stats.full_drops == 6);
+	CHECK("ring drop nothing extra written",
+		output.frame_ring->stats.writes == 8);
 
 	star6e_output_teardown(&output);
 	return failures;
 }
 
 /* A pack reporting more NALs than packetInfo holds must abort the frame —
- * never ship it truncated — request recovery, and leave the ring usable. */
+ * never ship it truncated — and leave the ring usable. */
 static int test_star6e_output_frame_ring_truncation_abort(void)
 {
 	Star6eOutputSetup setup;
@@ -1699,10 +1697,6 @@ static int test_star6e_output_frame_ring_truncation_abort(void)
 	CHECK("ring trunc prepare", star6e_output_prepare(&setup,
 		"frame-shm://test_trunc_abort", "compact", 0) == 0);
 	CHECK("ring trunc init", star6e_output_init(&output, &setup) == 0);
-	output.request_idr = test_ring_request_idr_stub;
-	output.idr_ctx = NULL;
-	g_test_ring_idr_calls = 0;
-	g_test_ring_idr_honored = 1;
 
 	memset(&pack, 0, sizeof(pack));
 	pack.data = data;
@@ -1719,10 +1713,17 @@ static int test_star6e_output_frame_ring_truncation_abort(void)
 
 	sent = star6e_output_send_frame(&output, &stream, 0, NULL, NULL);
 	CHECK("ring trunc aborted", sent == 0);
-	CHECK("ring trunc recovery requested", g_test_ring_idr_calls == 1);
 	CHECK("ring trunc warned once", output.trunc_warned == 1);
 	CHECK("ring trunc nothing committed",
 		output.frame_ring->stats.writes == 0);
+	/* The frame is gone; the consumer must be able to SEE that it is gone.
+	 * Before other_drops existed this discard left no trace anywhere in
+	 * the shared header. */
+	CHECK("ring trunc counted locally", output.bad_au_drops == 1);
+	CHECK("ring trunc published to consumer",
+		output.frame_ring->hdr->other_drops == 1);
+	CHECK("ring trunc not conflated with congestion",
+		output.frame_ring->hdr->full_drops == 0);
 
 	/* The abort must leave the ring writable. */
 	test_ring_fill_p_frame(&pack, &stream, data, 8);
@@ -1780,6 +1781,232 @@ static int test_star6e_output_packet_info_validation(void)
 	return failures;
 }
 
+/* ── star6e_output_stream_flatten: the async recorder's copy ──────────── */
+
+static int test_star6e_flatten_concatenates_nals_in_order(void)
+{
+	MI_VENC_Pack_t packs[2];
+	MI_VENC_Stream_t stream;
+	uint8_t d0[16], d1[8];
+	uint8_t *out;
+	size_t len = 0;
+	int is_idr = -1;
+	int failures = 0;
+	int i;
+
+	for (i = 0; i < 16; i++) d0[i] = (uint8_t)(0x10 + i);
+	for (i = 0; i < 8; i++)  d1[i] = (uint8_t)(0xA0 + i);
+
+	memset(packs, 0, sizeof(packs));
+	memset(&stream, 0, sizeof(stream));
+	/* pack 0: two descriptors, deliberately not covering the whole pack */
+	packs[0].data = d0;
+	packs[0].length = 16;
+	packs[0].packNum = 2;
+	packs[0].packetInfo[0].offset = 0;  packs[0].packetInfo[0].length = 4;
+	packs[0].packetInfo[1].offset = 8;  packs[0].packetInfo[1].length = 4;
+	/* pack 1: the packNum == 0 fallback, honouring offset */
+	packs[1].data = d1;
+	packs[1].length = 8;
+	packs[1].offset = 2;
+	packs[1].packNum = 0;
+	stream.packet = packs;
+	stream.count = 2;
+
+	out = star6e_output_stream_flatten(&stream, &len, &is_idr);
+	CHECK("flatten returned a buffer", out != NULL);
+	CHECK("flatten length is the sum of the spans", len == 4 + 4 + 6);
+	if (out && len == 14) {
+		CHECK("flatten span 1 verbatim", memcmp(out, d0, 4) == 0);
+		CHECK("flatten span 2 verbatim", memcmp(out + 4, d0 + 8, 4) == 0);
+		CHECK("flatten fallback honours offset",
+			memcmp(out + 8, d1 + 2, 6) == 0);
+	} else {
+		CHECK("flatten payload check reachable", 0);
+	}
+	CHECK("flatten no IRAP here", is_idr == 0);
+	free(out);
+	return failures;
+}
+
+static int test_star6e_flatten_detects_idr(void)
+{
+	MI_VENC_Pack_t pack;
+	MI_VENC_Stream_t stream;
+	uint8_t data[16] = { 0 };
+	uint8_t *out;
+	size_t len = 0;
+	int is_idr = 0;
+	int failures = 0;
+
+	memset(&pack, 0, sizeof(pack));
+	memset(&stream, 0, sizeof(stream));
+	pack.data = data; pack.length = 16; pack.packNum = 1;
+	pack.packetInfo[0].offset = 0; pack.packetInfo[0].length = 16;
+	stream.packet = &pack; stream.count = 1;
+
+	/* 19 = IDR_W_RADL */
+	pack.packetInfo[0].packType.h265Nalu = 19;
+	out = star6e_output_stream_flatten(&stream, &len, &is_idr);
+	CHECK("flatten idr_w_radl detected", out && is_idr == 1);
+	free(out);
+
+	/* 20 = IDR_N_LP */
+	is_idr = 0;
+	pack.packetInfo[0].packType.h265Nalu = 20;
+	out = star6e_output_stream_flatten(&stream, &len, &is_idr);
+	CHECK("flatten idr_n_lp detected", out && is_idr == 1);
+	free(out);
+
+	/* 1 = TRAIL_R, not an IRAP */
+	is_idr = 1;
+	pack.packetInfo[0].packType.h265Nalu = 1;
+	out = star6e_output_stream_flatten(&stream, &len, &is_idr);
+	CHECK("flatten trail is not an IRAP", out && is_idr == 0);
+	free(out);
+	return failures;
+}
+
+/* The synchronous writer holds a 512 KB automatic and DROPS anything larger.
+ * Sizing from the stream removes that cliff — at 19 Mbps an IRAP can exceed
+ * it, and a silently dropped keyframe is the worst frame to lose. */
+static int test_star6e_flatten_handles_a_frame_over_512k(void)
+{
+	MI_VENC_Pack_t pack;
+	MI_VENC_Stream_t stream;
+	size_t big = 700u * 1024u;
+	uint8_t *data = malloc(big);
+	uint8_t *out;
+	size_t len = 0;
+	int failures = 0;
+
+	CHECK("flatten big alloc", data != NULL);
+	if (!data)
+		return failures;
+	memset(data, 0x5A, big);
+
+	memset(&pack, 0, sizeof(pack));
+	memset(&stream, 0, sizeof(stream));
+	pack.data = data; pack.length = (MI_U32)big; pack.packNum = 0;
+	stream.packet = &pack; stream.count = 1;
+
+	out = star6e_output_stream_flatten(&stream, &len, NULL);
+	CHECK("flatten accepts a 700 KB access unit", out != NULL);
+	CHECK("flatten big length exact", len == big);
+	if (out)
+		CHECK("flatten big payload intact", memcmp(out, data, big) == 0);
+	free(out);
+	free(data);
+	return failures;
+}
+
+static int test_star6e_flatten_refuses_what_the_writers_refuse(void)
+{
+	MI_VENC_Pack_t pack;
+	MI_VENC_Stream_t stream;
+	uint8_t data[16] = { 0 };
+	size_t len = 99;
+	int is_idr = 9;
+	int failures = 0;
+
+	memset(&pack, 0, sizeof(pack));
+	memset(&stream, 0, sizeof(stream));
+	CHECK("flatten NULL stream", star6e_output_stream_flatten(NULL, &len,
+		&is_idr) == NULL);
+	CHECK("flatten NULL clears outputs", len == 0 && is_idr == 0);
+
+	stream.count = 1; stream.packet = &pack;
+	CHECK("flatten null pack data refused",
+		star6e_output_stream_flatten(&stream, &len, &is_idr) == NULL);
+
+	/* packNum beyond the descriptor table — the incomplete-table case */
+	pack.data = data; pack.length = 16;
+	pack.packNum = (MI_U32)(sizeof(pack.packetInfo) /
+		sizeof(pack.packetInfo[0])) + 1;
+	CHECK("flatten incomplete packetInfo refused",
+		star6e_output_stream_flatten(&stream, &len, &is_idr) == NULL);
+
+	/* Valid table but every descriptor empty -> nothing to record */
+	pack.packNum = 1;
+	pack.packetInfo[0].offset = 0;
+	pack.packetInfo[0].length = 0;
+	CHECK("flatten zero-length descriptor refused",
+		star6e_output_stream_flatten(&stream, &len, &is_idr) == NULL);
+
+	/* The discriminating case: a FIRST pack that is perfectly valid and
+	 * would flatten to real bytes, followed by one with an over-long
+	 * packNum.  Without the whole-stream validation this returns a buffer
+	 * holding pack 0 only — a silently truncated access unit that looks
+	 * successful.  With it, the stream is refused outright, which is what
+	 * the synchronous writers do. */
+	{
+		MI_VENC_Pack_t two[2];
+		MI_VENC_Stream_t st2;
+		uint8_t good[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+
+		memset(two, 0, sizeof(two));
+		memset(&st2, 0, sizeof(st2));
+		two[0].data = good; two[0].length = 8; two[0].packNum = 1;
+		two[0].packetInfo[0].offset = 0;
+		two[0].packetInfo[0].length = 8;
+		two[1].data = good; two[1].length = 8;
+		two[1].packNum = (MI_U32)(sizeof(two[1].packetInfo) /
+			sizeof(two[1].packetInfo[0])) + 1;
+		st2.packet = two; st2.count = 2;
+		CHECK("flatten refuses a partly-valid stream outright",
+			star6e_output_stream_flatten(&st2, &len, &is_idr) == NULL);
+	}
+	return failures;
+}
+
+/* An access unit larger than the writer queue's byte cap is refused here
+ * rather than copied, because push() would reject it at the cap anyway.  The
+ * refusal has to be counted by the caller, which is why it is safe — but an
+ * absent guard is invisible without this: it just means a doomed
+ * multi-megabyte malloc+memcpy per oversized frame on a 64 MB SoC. */
+static int test_flatten_refuses_an_access_unit_over_the_queue_cap(void)
+{
+	MI_VENC_Stream_t stream;
+	MI_VENC_Pack_t pack;
+	size_t oversized = VENC_REC_WRITER_MAX_BYTES + 1;
+	uint8_t *big = malloc(oversized);
+	size_t len = 0;
+	int is_idr = -1;
+	int failures = 0;
+
+	CHECK("cap test allocated its stimulus", big != NULL);
+	if (!big)
+		return failures;
+	memset(big, 0x5A, oversized);
+
+	memset(&pack, 0, sizeof(pack));
+	memset(&stream, 0, sizeof(stream));
+	pack.data = big;
+	pack.length = (MI_U32)oversized;
+	pack.packNum = 0;
+	stream.packet = &pack;
+	stream.count = 1;
+
+	CHECK("flatten refuses an AU over the queue cap",
+		star6e_output_stream_flatten(&stream, &len, &is_idr) == NULL);
+	CHECK("refused AU reports no length", len == 0);
+
+	/* Control: one byte under the cap is accepted, so the refusal is the
+	 * cap and not simply "large streams fail". */
+	pack.length = (MI_U32)(VENC_REC_WRITER_MAX_BYTES - 1);
+	{
+		uint8_t *out = star6e_output_stream_flatten(&stream, &len,
+			&is_idr);
+
+		CHECK("flatten accepts an AU just under the cap", out != NULL);
+		CHECK("accepted AU reports its length",
+			len == VENC_REC_WRITER_MAX_BYTES - 1);
+		free(out);
+	}
+	free(big);
+	return failures;
+}
+
 int test_star6e_output(void)
 {
 	int failures = 0;
@@ -1816,8 +2043,13 @@ int test_star6e_output(void)
 	failures += test_star6e_output_unix_flush_is_bounded();
 	failures += test_star6e_output_unix_stall_mode_resumes_without_drops();
 	failures += test_star6e_output_always_sends_under_pressure();
-	failures += test_star6e_output_frame_ring_idr_holdoff();
+	failures += test_star6e_output_frame_ring_full_drop_is_inert();
 	failures += test_star6e_output_frame_ring_truncation_abort();
 	failures += test_star6e_output_packet_info_validation();
+	failures += test_star6e_flatten_concatenates_nals_in_order();
+	failures += test_flatten_refuses_an_access_unit_over_the_queue_cap();
+	failures += test_star6e_flatten_detects_idr();
+	failures += test_star6e_flatten_handles_a_frame_over_512k();
+	failures += test_star6e_flatten_refuses_what_the_writers_refuse();
 	return failures;
 }

@@ -58,6 +58,10 @@ typedef struct {
 	int last_awb_mode;
 	uint32_t last_awb_ct;
 	char last_server[128];
+	/* Set by a test that needs to inspect the committed config from
+	 * inside an apply callback (see the commit-ordering test). */
+	const VencConfig *live_cfg;
+	int server_committed_at_callback;
 	uint16_t last_max_payload;
 	double last_zoom_pct;
 	double last_zoom_x;
@@ -313,6 +317,9 @@ static int test_apply_server(const char *uri)
 	g_api_cb_state.apply_server_calls++;
 	snprintf(g_api_cb_state.last_server, sizeof(g_api_cb_state.last_server),
 		"%s", uri ? uri : "");
+	if (g_api_cb_state.live_cfg && uri &&
+	    strcmp(g_api_cb_state.live_cfg->outgoing.server, uri) == 0)
+		g_api_cb_state.server_committed_at_callback = 1;
 	return g_api_cb_state.fail_server ? -1 : 0;
 }
 
@@ -470,12 +477,15 @@ static int test_field_support_by_backend(void)
 	CHECK("min qp supported star6e",
 		venc_api_field_supported_for_backend("star6e",
 			"video0.minQp") == 1);
-	CHECK("min qp unsupported maruko",
+	/* Maruko gained QP bounds with maruko_apply_qp_bounds(): same MI VENC
+	 * RC as Star6E, so the same u32MinQp/u32MaxQp write.  Device-verified
+	 * on .233 -- minQp 40 took the stream from 1.54 Mbps to 0.09. */
+	CHECK("min qp supported maruko",
 		venc_api_field_supported_for_backend("maruko",
-			"video0.minQp") == 0);
-	CHECK("max qp unsupported maruko",
+			"video0.minQp") == 1);
+	CHECK("max qp supported maruko",
 		venc_api_field_supported_for_backend("maruko",
-			"video0.max_qp") == 0);
+			"video0.max_qp") == 1);
 	CHECK("slice count supported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"video0.sliceCount") == 1);
@@ -518,9 +528,41 @@ static int test_field_support_by_backend(void)
 	CHECK("rc mode unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"video0.rc_mode") == 0);
-	CHECK("recording unsupported cv610",
+	/* Recording and snapshot arrived on CV610 in mirror mode: the main
+	 * channel's access unit is teed to file, and the JPEG channel is a
+	 * second bind target on the main stream's VPSS output. */
+	CHECK("recording supported cv610",
 		venc_api_field_supported_for_backend("cv610",
-			"record.enabled") == 0);
+			"record.enabled") == 1);
+	CHECK("record dir supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"record.dir") == 1);
+	CHECK("record format supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"record.format") == 1);
+	/* dual / dual-stream need a second VENC channel, which this backend
+	 * does not create — so the fields that only describe that channel stay
+	 * unsupported rather than being accepted and ignored. */
+	CHECK("record bitrate unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"record.bitrate") == 0);
+	CHECK("record server unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"record.server") == 0);
+	CHECK("snapshot enabled supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"snapshot.enabled") == 1);
+	CHECK("snapshot quality supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"snapshot.quality") == 1);
+	/* The JPEG channel shares the main stream's VPSS output, so it cannot
+	 * honour an independent snapshot geometry. */
+	CHECK("snapshot width unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"snapshot.width") == 0);
+	CHECK("snapshot height unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"snapshot.height") == 0);
 
 	return failures;
 }
@@ -934,7 +976,7 @@ static int test_multi_set_rejects_duplicate_fields(void)
 			&status, response, sizeof(response)) == 0);
 	CHECK("multi dup status", status == 400);
 	CHECK("multi dup error", strstr(response, "duplicate field") != NULL);
-	CHECK("multi dup qp unchanged", cfg.video0.qp_delta == -4);
+	CHECK("multi dup qp unchanged", cfg.video0.qp_delta == -12);
 	CHECK("multi dup no apply", g_api_cb_state.apply_qp_delta_calls == 0);
 
 	return failures;
@@ -1156,6 +1198,128 @@ static int test_restart_set_rejects_legacy_codec_field(void)
 	CHECK("legacy codec error",
 		strstr(response, "unknown config field") != NULL);
 
+	/* The contract version the code serves must equal the one the contract
+	 * document declares.  Reads the file rather than a second literal, so a
+	 * doc-only bump (which is what shipped in 0.73.0) fails here. */
+	{
+		FILE *cf = fopen("documentation/HTTP_API_CONTRACT.md", "r");
+		char line[256];
+		int found = 0;
+
+		CHECK("contract_doc_readable", cf != NULL);
+		while (cf && fgets(line, sizeof(line), cf)) {
+			if (strncmp(line, "- `contract_version`: `", 23) != 0)
+				continue;
+			found = 1;
+			CHECK("contract_version_code_matches_doc",
+				strncmp(line + 23, VENC_CONTRACT_VERSION,
+					strlen(VENC_CONTRACT_VERSION)) == 0 &&
+				line[23 + strlen(VENC_CONTRACT_VERSION)] == '`');
+			break;
+		}
+		if (cf)
+			fclose(cf);
+		CHECK("contract_version_line_present", found);
+	}
+	{
+		/* README carries a worked /api/v1/version example, and it went
+		 * stale twice in one release cycle -- the pin above covers only
+		 * HTTP_API_CONTRACT.md, which is exactly why nobody noticed.
+		 * Pin both strings in it against the compiled values. */
+		/* Both docs carry a worked /api/v1/version example.  The pin
+		 * originally covered README alone, and the contract doc's copy
+		 * promptly went stale by three releases -- which is the whole
+		 * argument for pinning rather than eye-checking. */
+		static const char *const version_docs[] = {
+			"README.md",
+			"documentation/HTTP_API_CONTRACT.md",
+		};
+		size_t di;
+		FILE *rf;
+		char line[512];
+		int found = 0;
+		char want_app[96], want_contract[96];
+		char ver[64] = {0};
+		FILE *vf = fopen("VERSION", "r");
+
+		/* Read VERSION rather than VENC_VERSION: the host test build
+		 * does not define it, and the file is the source of truth the
+		 * README example is supposed to track anyway. */
+		CHECK("version_file_readable", vf != NULL);
+		if (vf) {
+			if (fgets(ver, sizeof(ver), vf))
+				ver[strcspn(ver, "\r\n")] = '\0';
+			fclose(vf);
+		}
+		snprintf(want_app, sizeof(want_app), "\"app_version\":\"%s\"",
+			ver);
+		snprintf(want_contract, sizeof(want_contract),
+			"\"contract_version\":\"%s\"", VENC_CONTRACT_VERSION);
+
+		/* Quoted values only, so the match survives either formatting:
+		 * README's compact JSON and the contract doc's pretty-printed
+		 * copy put different whitespace after the colon. */
+		snprintf(want_app, sizeof(want_app), "\"%s\"", ver);
+		snprintf(want_contract, sizeof(want_contract), "\"%s\"",
+			VENC_CONTRACT_VERSION);
+
+		for (di = 0; di < sizeof(version_docs) / sizeof(version_docs[0]);
+		     di++) {
+			int seen_app = 0, seen_contract = 0;
+
+			rf = fopen(version_docs[di], "r");
+			CHECK("version_doc_readable", rf != NULL);
+			while (rf && fgets(line, sizeof(line), rf)) {
+				if (!seen_app && strstr(line, "\"app_version\"")) {
+					seen_app = 1;
+					CHECK("doc_app_version_matches_VERSION",
+						strstr(line, want_app) != NULL);
+				}
+				if (!seen_contract &&
+				    strstr(line, "\"contract_version\"")) {
+					seen_contract = 1;
+					CHECK("doc_contract_version_matches_code",
+						strstr(line, want_contract) != NULL);
+				}
+				if (seen_app && seen_contract)
+					break;
+			}
+			if (rf)
+				fclose(rf);
+			found = seen_app && seen_contract;
+			CHECK("version_example_present_in_doc", found);
+		}
+	}
+
+	/* 0.21.0 removed video0.maxIBytes/maxPBytes.  The contract promises a
+	 * controller still pushing them gets 404 "unknown config field" — on
+	 * BOTH set paths, and that a multi-field request naming one is rejected
+	 * WHOLE rather than partially applied.  That promise is what forces the
+	 * craft-side deploy order (controller before venc), so it is worth a
+	 * test rather than an assertion in prose. */
+	CHECK("removed cap rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"video0.maxIBytes=60000", &status, response,
+			sizeof(response)) == 0);
+	CHECK("removed cap status", status == 404);
+	CHECK("removed cap error",
+		strstr(response, "unknown config field") != NULL);
+
+	CHECK("removed cap alias rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"video0.maxPBytes=12000", &status, response,
+			sizeof(response)) == 0);
+	CHECK("removed cap alias status", status == 404);
+
+	/* Whole-request rejection: the surviving field must NOT be applied. */
+	cfg.video0.bitrate = 8192;
+	CHECK("removed cap batch rc",
+		apply_set_query_http(&cfg, "star6e", NULL,
+			"video0.bitrate=4096&video0.maxPBytes=12000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("removed cap batch status", status == 404);
+	CHECK("removed cap batch applied nothing", cfg.video0.bitrate == 8192);
+
 	return failures;
 }
 
@@ -1186,6 +1350,49 @@ static int test_single_set_url_decodes_outgoing_server(void)
 		strcmp(g_api_cb_state.last_server,
 			"udp://192.168.1.5:5601") == 0);
 
+	return failures;
+}
+
+static int test_live_apply_sees_already_committed_config(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	/* apply_live_group_for_cfg() calls commit_config_locked() BEFORE it
+	 * dispatches to the apply callbacks.  A backend guard that asks "did
+	 * this value change?" by comparing the incoming argument against the
+	 * committed config therefore compares the new value against itself and
+	 * matches on EVERY call -- including a real change.
+	 *
+	 * That is not hypothetical: it shipped, and on Star6E it made
+	 * outgoing.server live changes a silent no-op -- the socket stayed on
+	 * the startup destination while /api/v1/config reported the new one.
+	 * A backend guard must compare against its own applied runtime state.
+	 *
+	 * Pin the ordering so the trap is visible to the next person who
+	 * writes such a guard. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_server = test_apply_server;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server), "%s",
+		"udp://127.0.0.1:5600");
+	g_api_cb_state.live_cfg = &cfg;
+
+	CHECK("commit-order rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"outgoing.server=udp%3A%2F%2F127.0.0.1%3A5610",
+			&status, response, sizeof(response)) == 0);
+	CHECK("commit-order status", status == 200);
+	CHECK("commit-order callback invoked",
+		g_api_cb_state.apply_server_calls == 1);
+	CHECK("commit-order callback saw the NEW value already committed",
+		g_api_cb_state.server_committed_at_callback == 1);
+
+	g_api_cb_state.live_cfg = NULL;
 	return failures;
 }
 
@@ -1632,6 +1839,89 @@ static int test_live_set_isp_bin_no_callback_returns_501(void)
 /* /api/v1/capabilities emits the data-driven `ui` block for fields that carry
  * UI metadata (video0.pause_stab), so the dashboard can render a control with
  * no static SECTIONS entry.  Core fields stay ui-less. */
+/* A resilience preset OWNS intra_refresh_mode/lines, but must NOT own
+ * intra_refresh_qp: that one is an explicit operator override where 0 already
+ * means "use the preset's default".
+ *
+ * venc_config_apply_resilience_preset() zeroes the field, and the restart-set
+ * path applies the preset to the staged config AFTER the request's own fields
+ * are staged -- then persists it.  So a resilience change silently discarded
+ * the override, returning 200 with no log.  On CV610 that field is the only
+ * working I-frame lever, which is why it is tested on that backend (it is
+ * also the only one that advertises it).
+ *
+ * Asserts the surviving VALUE, not that the code took some path, so it fails
+ * if the preserve is removed.  The third case is the do-nothing control: the
+ * fix must not invent a value where the operator set none. */
+static int test_resilience_preset_preserves_intra_refresh_qp(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	/* The real-world sequence: both fields are MUT_RESTART, and /api/v1/set
+	 * refuses to carry two of those in one request, so an operator sets the
+	 * override and then changes the preset.  Driven through the API on both
+	 * steps so the whole staging path is exercised. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+
+	CHECK("ir_qp set rc",
+		apply_set_query_http(&cfg, "cv610", &cb,
+			"video0.intraRefreshQp=44", &status, response,
+			sizeof(response)) == 0);
+	CHECK("ir_qp set status", status == 200);
+	CHECK("ir_qp set committed", cfg.video0.intra_refresh_qp == 44);
+	venc_api_clear_reinit();
+
+	CHECK("ir_qp preset change rc",
+		apply_set_query_http(&cfg, "cv610", &cb,
+			"video0.resilience=racing", &status, response,
+			sizeof(response)) == 0);
+	CHECK("ir_qp preset change status", status == 200);
+	CHECK("ir_qp preset change took",
+		strcmp(cfg.video0.resilience, "racing") == 0);
+	CHECK("ir_qp survives preset change",
+		cfg.video0.intra_refresh_qp == 44);
+	venc_api_clear_reinit();
+
+	/* The preserve must not make the field STICKY: an explicit 0 still
+	 * means "use the preset's default", so an operator can undo their own
+	 * override.  (A bare "no override set" case would be a tautology --
+	 * defaults already leave it 0 and both the fixed and unfixed code
+	 * leave it 0 through a preset change.) */
+	CHECK("ir_qp explicit reset rc",
+		apply_set_query_http(&cfg, "cv610", &cb,
+			"video0.intraRefreshQp=0", &status, response,
+			sizeof(response)) == 0);
+	CHECK("ir_qp explicit reset status", status == 200);
+	CHECK("ir_qp explicit reset clears the override",
+		cfg.video0.intra_refresh_qp == 0);
+	venc_api_clear_reinit();
+
+	/* The range check added alongside: FT_UINT8 would otherwise take
+	 * 0..255, persist it, and echo back a value the encoder never uses. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+
+	(void)apply_set_query_http(&cfg, "cv610", &cb,
+		"video0.intraRefreshQp=200", &status, response,
+		sizeof(response));
+	CHECK("ir_qp out of range rejected", status == 409);
+	CHECK("ir_qp out of range not committed",
+		cfg.video0.intra_refresh_qp == 0);
+	/* Correct today only because request_reinit() runs after validation, so
+	 * a 409 stages nothing.  Clear it anyway: if the range check ever
+	 * regresses, a leaked g_reinit turns one failure into a cascade through
+	 * every test that follows. */
+	venc_api_clear_reinit();
+
+	return failures;
+}
+
 static int test_capabilities_emits_ui(void)
 {
 	int failures = 0;
@@ -2021,8 +2311,10 @@ int test_venc_api(void)
 	failures += test_live_set_endpoint_volatile_no_disk_write();
 	failures += test_restart_set_rejects_legacy_codec_field();
 	failures += test_single_set_url_decodes_outgoing_server();
+	failures += test_live_apply_sees_already_committed_config();
 	failures += test_multi_set_url_decodes_values();
 	failures += test_set_rejects_malformed_percent_escape();
+	failures += test_resilience_preset_preserves_intra_refresh_qp();
 	failures += test_capabilities_emits_ui();
 	failures += test_capabilities_awb_fps_backend_gate();
 	failures += test_capabilities_routes_track_callbacks();

@@ -458,11 +458,10 @@ static td_s32 cmos_get_isp_black_level(ot_vi_pipe vi_pipe, ot_isp_cmos_black_lev
 					  sizeof(ot_isp_cmos_black_level));
 
 	black_level->auto_attr.update = TD_TRUE;
-	/* RAW10 uses the same black pedestal scaled from 12-bit 200 to 50. */
+	/* One value for every mode -- the field is a fixed 14-bit ISP domain, not
+	 * the sensor's output depth.  See IMX662_BLACK_LEVEL. */
 	for (i = 0; i < OT_ISP_BAYER_CHN_NUM; i++) {
-		black_level->auto_attr.black_level[0][i] =
-			(imx662_get_ctx(vi_pipe)->img_mode >= IMX662_SENSOR_2M_90FPS_10BIT_LINEAR_MODE) ?
-			(IMX662_BLACK_LEVEL_12BIT >> 2) : IMX662_BLACK_LEVEL_12BIT;
+		black_level->auto_attr.black_level[0][i] = IMX662_BLACK_LEVEL;
 	}
 	return TD_SUCCESS;
 }
