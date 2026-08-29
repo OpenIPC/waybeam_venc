@@ -564,7 +564,25 @@ static void mirror_record_locks_ready(Star6ePipelineState *ps)
  * recorders.  The join is the barrier — after it the sink is guaranteed not
  * to run again, so the descriptor it writes by cannot be closed underneath
  * it.  Safe to call when nothing is recording. */
-static void mirror_record_close(Star6ePipelineState *ps, unsigned grace_ms)
+/* Runs once the writer has been joined and freed -- inline on the encode loop
+ * when the sink finished inside the deadline, on the reaper thread when it did
+ * not.  The closes live here so that on both paths they happen after the sink
+ * is guaranteed never to run again. */
+static void mirror_record_reap(void *opaque)
+{
+	Star6ePipelineState *ps = opaque;
+
+	star6e_ts_recorder_stop(&ps->ts_recorder);
+	star6e_recorder_stop(&ps->recorder);
+	__atomic_store_n(&ps->rec_reap_pending, 0, __ATOMIC_RELEASE);
+}
+
+/* `async` picks whether this may join.  Mid-run (the encode loop) it must not:
+ * a medium that has stopped completing would park live video inside a
+ * record/stop.  At teardown it must, because there is no later for a reaper to
+ * run in. */
+static void mirror_record_close_mode(Star6ePipelineState *ps, unsigned grace_ms,
+	int async)
 {
 	VencRecWriter *w;
 
@@ -588,12 +606,25 @@ static void mirror_record_close(Star6ePipelineState *ps, unsigned grace_ms)
 	ps->rec_writer = NULL;
 	pthread_mutex_unlock(&ps->rec_writer_lock);
 
-	if (grace_ms) {
+	/* Independent of the writer, so it need not wait on one. */
+	ps->audio.rec_ring = NULL;
+
+	{
 		uint64_t dropped = 0;
 
-		venc_rec_writer_stop_bounded(w, grace_ms, &dropped);
-		/* Only if there WAS a writer: stop_bounded leaves *dropped at 0
-		 * for a NULL one, which would clobber the harvest above.  Stored
+		if (async) {
+			/* Claimed before the stop: on the fast path the callback
+			 * runs inside it and clears this again before it
+			 * returns. */
+			__atomic_store_n(&ps->rec_reap_pending, 1,
+				__ATOMIC_RELEASE);
+			venc_rec_writer_stop_bounded_async(w, grace_ms,
+				&dropped, mirror_record_reap, ps);
+		} else {
+			venc_rec_writer_stop_bounded(w, grace_ms, &dropped);
+		}
+		/* Only if there WAS a writer: the stop leaves *dropped at 0 for
+		 * a NULL one, which would clobber the harvest above.  Stored
 		 * under the lock because the httpd thread reads it and an
 		 * unlocked 64-bit store tears on ARM32. */
 		if (w) {
@@ -601,12 +632,15 @@ static void mirror_record_close(Star6ePipelineState *ps, unsigned grace_ms)
 			ps->rec_dropped_frames = dropped;
 			pthread_mutex_unlock(&ps->rec_writer_lock);
 		}
-	} else {
-		venc_rec_writer_stop(w);
 	}
-	ps->audio.rec_ring = NULL;
-	star6e_ts_recorder_stop(&ps->ts_recorder);
-	star6e_recorder_stop(&ps->recorder);
+	if (!async)
+		mirror_record_reap(ps);
+}
+
+/* Mid-run close: never joins past the deadline. */
+static void mirror_record_close(Star6ePipelineState *ps, unsigned grace_ms)
+{
+	mirror_record_close_mode(ps, grace_ms, 1);
 }
 
 /* Begin a recording: open the recorder, then start the writer that feeds it.
@@ -621,6 +655,17 @@ static void mirror_record_open(Star6ePipelineState *ps, const VencConfig *vcfg,
 	/* Stop first: a start over a live recording must not leak the open fd,
 	 * and only one of the two recorders may ever be active. */
 	mirror_record_close(ps, MIRROR_REC_STOP_GRACE_MS);
+
+	/* On a healthy card the stop above completed inline and this is clear.
+	 * If it did not, a detached reaper still owns both recorders'
+	 * descriptors -- the previous recording's sink has not returned -- and
+	 * starting over them would race the close. */
+	if (__atomic_load_n(&ps->rec_reap_pending, __ATOMIC_ACQUIRE)) {
+		fprintf(stderr, "WARN: record start refused; the previous "
+			"recording's writer has not released the file yet "
+			"(storage not completing writes)\n");
+		return;
+	}
 
 	/* Before the open, not after it: these describe the recording being
 	 * started, and a start that FAILS must not leave the previous
@@ -2190,7 +2235,7 @@ static void star6e_runner_teardown(void *opaque)
 	/* Bounded — see MIRROR_REC_TEARDOWN_GRACE_MS: this teardown is
 	 * watchdogged, so waiting out a stalled card here trades a lost
 	 * recording tail for an emergency reboot. */
-	mirror_record_close(&ctx->ps, MIRROR_REC_TEARDOWN_GRACE_MS);
+	mirror_record_close_mode(&ctx->ps, MIRROR_REC_TEARDOWN_GRACE_MS, 0);
 	audio_ring_destroy(&ctx->ps.audio_ring);
 	if (ctx->ps.rec_locks_ready) {
 		pthread_mutex_destroy(&ctx->ps.rec_writer_lock);

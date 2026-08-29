@@ -4053,7 +4053,24 @@ void mk_mirror_record_locks_init_public(MarukoBackendContext *ctx)
  * grace_ms bounds how long a queued tail may hold the caller up; 0 means
  * flush it all.  Maruko never passes 0: even teardown is watchdogged (see
  * MARUKO_REC_TEARDOWN_GRACE_MS). */
-static void mk_mirror_record_close(MarukoBackendContext *ctx, unsigned grace_ms)
+/* Runs once the writer has been joined and freed -- inline on the encode loop
+ * when the sink finished inside the deadline, on the reaper thread when it did
+ * not.  The closes live here so that on both paths they happen only after the
+ * sink is guaranteed never to run again. */
+static void mk_mirror_record_reap(void *opaque)
+{
+	MarukoBackendContext *ctx = opaque;
+
+	star6e_ts_recorder_stop(&ctx->ts_recorder);
+	star6e_recorder_stop(&ctx->recorder);
+	__atomic_store_n(&ctx->rec_reap_pending, 0, __ATOMIC_RELEASE);
+}
+
+/* `async` picks whether this may join.  Mid-run (the encode loop) it must not:
+ * a medium that has stopped completing would park live video inside a
+ * record/stop.  At teardown it must, because there is no later. */
+static void mk_mirror_record_close_mode(MarukoBackendContext *ctx,
+	unsigned grace_ms, int async)
 {
 	VencRecWriter *w;
 
@@ -4079,12 +4096,22 @@ static void mk_mirror_record_close(MarukoBackendContext *ctx, unsigned grace_ms)
 	ctx->rec_writer = NULL;
 	pthread_mutex_unlock(&ctx->rec_writer_lock);
 
-	if (grace_ms) {
+	/* Independent of the writer, so it need not wait on one. */
+	ctx->audio.rec_ring = NULL;
+
+	{
 		uint64_t dropped = 0;
 
-		venc_rec_writer_stop_bounded(w, grace_ms, &dropped);
-		/* Only if there WAS a writer: stop_bounded leaves *dropped at 0
-		 * for a NULL one, which would clobber the harvest above.  Stored
+		if (async) {
+			__atomic_store_n(&ctx->rec_reap_pending, 1,
+				__ATOMIC_RELEASE);
+			venc_rec_writer_stop_bounded_async(w, grace_ms,
+				&dropped, mk_mirror_record_reap, ctx);
+		} else {
+			venc_rec_writer_stop_bounded(w, grace_ms, &dropped);
+		}
+		/* Only if there WAS a writer: the stop leaves *dropped at 0 for
+		 * a NULL one, which would clobber the harvest above.  Stored
 		 * under the lock because the httpd thread reads it and an
 		 * unlocked 64-bit store tears on ARM32. */
 		if (w) {
@@ -4092,13 +4119,16 @@ static void mk_mirror_record_close(MarukoBackendContext *ctx, unsigned grace_ms)
 			ctx->rec_dropped_frames = dropped;
 			pthread_mutex_unlock(&ctx->rec_writer_lock);
 		}
-	} else {
-		venc_rec_writer_stop(w);
 	}
-	ctx->audio.rec_ring = NULL;
-	star6e_ts_recorder_stop(&ctx->ts_recorder);
-	star6e_recorder_stop(&ctx->recorder);
+	if (!async)
+		mk_mirror_record_reap(ctx);
 }
+/* Mid-run close: never joins past the deadline. */
+static void mk_mirror_record_close(MarukoBackendContext *ctx, unsigned grace_ms)
+{
+	mk_mirror_record_close_mode(ctx, grace_ms, 1);
+}
+
 
 /* Begin a recording: open the recorder, then start the writer that feeds it.
  * The single entry point for every start — boot auto-start and HTTP alike.
@@ -4114,6 +4144,17 @@ static int mk_mirror_record_open(MarukoBackendContext *ctx, const char *dir)
 	/* Stop first: a start over a live recording must not leak the open fd,
 	 * and only one of the two recorders may ever be active. */
 	mk_mirror_record_close(ctx, MARUKO_REC_STOP_GRACE_MS);
+
+	/* On a healthy card the stop above completed inline and this is clear.
+	 * If it did not, a detached reaper still owns both recorders'
+	 * descriptors -- the previous recording's sink has not returned -- and
+	 * starting over them would race the close. */
+	if (__atomic_load_n(&ctx->rec_reap_pending, __ATOMIC_ACQUIRE)) {
+		fprintf(stderr, "WARN: [maruko] record start refused; the "
+			"previous recording's writer has not released the file "
+			"yet (storage not completing writes)\n");
+		return 0;
+	}
 
 	if (strcmp(ctx->cfg.record.format, "hevc") == 0) {
 		started = star6e_recorder_start(&ctx->recorder, dir) == 0;
@@ -4970,7 +5011,7 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 * Stop both — at most one is open, the inactive call is a no-op. */
 	/* The join inside this is what makes the close safe; bounded because
 	 * this teardown is watchdogged. */
-	mk_mirror_record_close(ctx, MARUKO_REC_TEARDOWN_GRACE_MS);
+	mk_mirror_record_close_mode(ctx, MARUKO_REC_TEARDOWN_GRACE_MS, 0);
 	if (ctx->rec_locks_ready) {
 		pthread_mutex_destroy(&ctx->rec_writer_lock);
 		ctx->rec_locks_ready = 0;

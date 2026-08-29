@@ -90,6 +90,10 @@ typedef struct {
    * not in the file. */
   uint64_t rec_flatten_failures;
   uint32_t rec_writer_peak_depth;
+  /* Non-zero while a detached reaper still owns the recorders: it has not
+   * joined a writer whose sink outlived the stop deadline, so their
+   * descriptors are still live and a new recording must not reuse them. */
+  int rec_reap_pending;
   /* SCL crop base after optional binning and AR-matched precrop.  Stored
    * here so maruko_pipeline_apply_zoom can reposition the zoom rect on
    * live x/y pan without recomputing pipeline geometry. */

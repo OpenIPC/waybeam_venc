@@ -37,6 +37,15 @@ struct VencRecWriter {
 
 	VencRecSinkFn    sink;
 	void            *ctx;
+
+	/* Set by the writer as its last act, under the lock.  Lets a caller ask
+	 * "has the sink really finished?" without committing to a join it
+	 * cannot bound -- pthread_timedjoin_np does not exist on musl. */
+	bool             exited;
+
+	/* Where to hand the reap when the sink outlives the grace. */
+	VencRecReapFn    on_exit;
+	void            *on_exit_ctx;
 };
 
 static void au_free(VencRecAu *e)
@@ -89,6 +98,9 @@ static void *writer_thread(void *opaque)
 		au_free(e);
 		pthread_mutex_lock(&w->lock);
 	}
+	/* Under the lock, before the unlock, so a caller polling exited cannot
+	 * observe it true while this thread is still inside the sink. */
+	w->exited = true;
 	pthread_mutex_unlock(&w->lock);
 	return NULL;
 }
@@ -253,6 +265,117 @@ static int queue_wait_empty(VencRecWriter *w, unsigned grace_ms)
 		usleep(2000);
 		waited += 2;
 	}
+}
+
+/* Wait up to grace_ms for the writer thread to leave the sink and exit.
+ * Returns 1 if it did, 0 on timeout.  Unlike queue_wait_empty() this DOES
+ * cover the access unit already in the sink's hands -- which is the one thing
+ * a caller on the encode loop must not block on indefinitely. */
+static int wait_exited(VencRecWriter *w, unsigned grace_ms)
+{
+	unsigned waited = 0;
+
+	for (;;) {
+		int done;
+
+		pthread_mutex_lock(&w->lock);
+		done = w->exited;
+		pthread_mutex_unlock(&w->lock);
+		if (done)
+			return 1;
+		if (waited >= grace_ms)
+			return 0;
+		usleep(2000);
+		waited += 2;
+	}
+}
+
+/* Joins and frees a writer whose sink outlived the caller's deadline, then
+ * runs the reap callback.  Detached: nothing waits for it. */
+static void *reaper_thread(void *opaque)
+{
+	VencRecWriter *w = opaque;
+	VencRecReapFn on_exit = w->on_exit;
+	void *ctx = w->on_exit_ctx;
+
+	pthread_join(w->thread, NULL);
+	writer_destroy(w, NULL);
+	/* AFTER the join and the free: by here the sink can never run again, so
+	 * the callback may close the descriptor it was writing by. */
+	if (on_exit)
+		on_exit(ctx);
+	return NULL;
+}
+
+void venc_rec_writer_stop_bounded_async(VencRecWriter *w, unsigned grace_ms,
+	uint64_t *dropped, VencRecReapFn on_exit, void *on_exit_ctx)
+{
+	pthread_t reaper;
+	pthread_attr_t rattr;
+
+	if (!w) {
+		if (on_exit)
+			on_exit(on_exit_ctx);
+		return;
+	}
+
+	pthread_mutex_lock(&w->lock);
+	w->stopping = true;
+	pthread_cond_signal(&w->cond);
+	pthread_mutex_unlock(&w->lock);
+
+	if (!w->thread_started) {
+		writer_destroy(w, dropped);
+		if (on_exit)
+			on_exit(on_exit_ctx);
+		return;
+	}
+
+	/* Same two steps as the synchronous stop: let the grace deliver as much
+	 * of the tail as it can, then abandon the rest. */
+	(void)queue_wait_empty(w, grace_ms);
+	pthread_mutex_lock(&w->lock);
+	queue_abandon(w);
+	if (dropped)
+		*dropped = w->dropped;
+	pthread_mutex_unlock(&w->lock);
+
+	/* The step the synchronous stop cannot take.  An abandoned queue leaves
+	 * the thread at most the access unit already in its hands -- but on a
+	 * medium that has stopped completing, that one write never returns, and
+	 * an unconditional join would park the caller there.  Callers here are
+	 * encode loops servicing an HTTP stop or a recorder self-stop, so that
+	 * is live video stalled by a stopping recording: exactly the coupling
+	 * this writer exists to remove. */
+	if (wait_exited(w, grace_ms)) {
+		pthread_join(w->thread, NULL);
+		writer_destroy(w, NULL);
+		if (on_exit)
+			on_exit(on_exit_ctx);
+		return;
+	}
+
+	w->on_exit = on_exit;
+	w->on_exit_ctx = on_exit_ctx;
+	if (pthread_attr_init(&rattr) == 0) {
+		(void)pthread_attr_setdetachstate(&rattr,
+			PTHREAD_CREATE_DETACHED);
+		if (pthread_create(&reaper, &rattr, reaper_thread, w) == 0) {
+			pthread_attr_destroy(&rattr);
+			return;
+		}
+		pthread_attr_destroy(&rattr);
+	}
+
+	/* Could not spawn the reaper.  Fall back to the blocking join rather
+	 * than leak the thread and the descriptor it holds: worse for latency,
+	 * but never unsafe. */
+	fprintf(stderr, "[rec_writer] reaper spawn failed (%s); joining inline\n",
+		strerror(errno));
+	pthread_join(w->thread, NULL);
+	writer_destroy(w, NULL);
+	if (on_exit)
+		on_exit(on_exit_ctx);
 }
 
 void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,

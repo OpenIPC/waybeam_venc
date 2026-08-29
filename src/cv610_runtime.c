@@ -128,6 +128,10 @@ typedef struct {
 	 * added to prevent. */
 	uint64_t rec_dropped_frames;
 	uint32_t rec_writer_peak_depth;
+	/* Non-zero while a detached reaper still owns the recorders: it has not
+	 * yet joined a writer whose sink outlived the stop deadline, so their
+	 * descriptors are still live and a new recording must not reuse them. */
+	int rec_reap_pending;
 } Cv610RunnerContext;
 
 /* Backend selection and the vendor MPP graph are process-singleton. The
@@ -401,6 +405,20 @@ static void cv610_record_sink(void *opaque, const uint8_t *au, size_t len,
 		(void)star6e_recorder_write_au(&ctx->recorder, au, len);
 }
 
+/* Runs once the writer thread has been joined and freed, inline on the encode
+ * loop when the sink finished inside the deadline and on the reaper thread
+ * when it did not.  Closing the descriptors here rather than at the call site
+ * is what makes the asynchronous stop safe: on both paths the sink is
+ * guaranteed never to run again by the time this runs. */
+static void cv610_record_reap(void *opaque)
+{
+	Cv610RunnerContext *ctx = opaque;
+
+	star6e_ts_recorder_stop(&ctx->ts_recorder);
+	star6e_recorder_stop(&ctx->recorder);
+	__atomic_store_n(&ctx->rec_reap_pending, 0, __ATOMIC_RELEASE);
+}
+
 /* Close whichever recorder is open and drop the audio tee.  Idempotent.
  *
  * Order matters: the writer thread is the only thread that touches recorder
@@ -413,7 +431,7 @@ static void cv610_record_sink(void *opaque, const uint8_t *au, size_t len,
  * the whole thing this writer removes.  At teardown the video path is going
  * away regardless, so blocking is free and the full flush is what gets the
  * recording's last seconds onto disk instead of discarding them. */
-static void cv610_record_stop(Cv610RunnerContext *ctx, int bounded)
+static void cv610_record_stop(Cv610RunnerContext *ctx, int async)
 {
 	VencRecWriter *w;
 
@@ -444,25 +462,45 @@ static void cv610_record_stop(Cv610RunnerContext *ctx, int bounded)
 	 * disk stall back on the encode loop at every stop — the very thing
 	 * the writer removes — so a stalled queue is abandoned instead: the
 	 * recording loses its tail, the live link loses nothing. */
-	if (bounded) {
+	/* Detach the audio tee now either way: it stops the capture thread
+	 * feeding the ring, which is independent of the writer and must not
+	 * wait on it. */
+	cv610_audio_set_record_ring(ctx->audio, NULL);
+
+	if (async) {
 		uint64_t dropped = 0;
 
-		venc_rec_writer_stop_bounded(w, 250, &dropped);
-		/* Only if there WAS a writer: stop_bounded leaves *dropped at 0
-		 * for a NULL one, which would clobber the harvest above.  Stored
-		 * under the lock because the httpd thread reads it and an
+		/* Claim the recorders for the reap before the stop, because on
+		 * the fast path the callback runs inside it and clears this
+		 * again before the call returns. */
+		__atomic_store_n(&ctx->rec_reap_pending, 1, __ATOMIC_RELEASE);
+		venc_rec_writer_stop_bounded_async(w, 250, &dropped,
+			cv610_record_reap, ctx);
+		/* Only if there WAS a writer: the async stop leaves *dropped at
+		 * 0 for a NULL one, which would clobber the harvest above.
+		 * Stored under the lock because the httpd thread reads it and an
 		 * unlocked 64-bit store tears on ARM32. */
 		if (w) {
 			pthread_mutex_lock(&ctx->rec_writer_lock);
 			ctx->rec_dropped_frames = dropped;
 			pthread_mutex_unlock(&ctx->rec_writer_lock);
 		}
-	} else {
-		venc_rec_writer_stop(w);
+		return;
 	}
-	cv610_audio_set_record_ring(ctx->audio, NULL);
-	star6e_ts_recorder_stop(&ctx->ts_recorder);
-	star6e_recorder_stop(&ctx->recorder);
+
+	/* Teardown: there is no "later" for a reaper to run in, so join here.
+	 * Still bounded -- the backlog is abandoned first. */
+	{
+		uint64_t dropped = 0;
+
+		venc_rec_writer_stop_bounded(w, 250, &dropped);
+		if (w) {
+			pthread_mutex_lock(&ctx->rec_writer_lock);
+			ctx->rec_dropped_frames = dropped;
+			pthread_mutex_unlock(&ctx->rec_writer_lock);
+		}
+	}
+	cv610_record_reap(ctx);
 }
 
 static void cv610_record_start(Cv610RunnerContext *ctx, const char *dir)
@@ -475,6 +513,18 @@ static void cv610_record_start(Cv610RunnerContext *ctx, const char *dir)
 	/* Stop first: a start over a live recording must not leak the open fd,
 	 * and only one of the two recorders may ever be active. */
 	cv610_record_stop(ctx, 1);
+
+	/* On a healthy card the stop above completed inline and this is clear.
+	 * If it did not, a detached reaper still owns both recorders'
+	 * descriptors -- the previous recording's sink has not returned -- and
+	 * starting over them would race the close.  Refuse rather than corrupt:
+	 * the medium is not accepting writes anyway. */
+	if (__atomic_load_n(&ctx->rec_reap_pending, __ATOMIC_ACQUIRE)) {
+		fprintf(stderr, "WARN: record start refused; the previous "
+			"recording's writer has not released the file yet "
+			"(storage not completing writes)\n");
+		return;
+	}
 
 	/* Before the open, not after it: these describe the recording being
 	 * started, and a start that FAILS must not leave the previous
@@ -1735,8 +1785,11 @@ static void cv610_teardown(void *opaque)
 	 * vanish under load — a hang here never reaches the VENC/VPSS teardown
 	 * below, which is exactly the leak the comment beneath describes, and
 	 * this backend has no watchdog to cut it short.  Losing the tail of a
-	 * recording on shutdown is the correct trade. */
-	cv610_record_stop(ctx, 1);
+	 * recording on shutdown is the correct trade.  SYNCHRONOUS (async=0): the
+	 * process is going away, so there is no later for a reaper to run in, and
+	 * the VENC/VPSS teardown below must not race a writer still holding a
+	 * descriptor. */
+	cv610_record_stop(ctx, 0);
 	cv610_audio_stop(ctx->audio);
 	ctx->audio = NULL;
 	/* AFTER cv610_audio_stop(), which is what joins the capture thread.

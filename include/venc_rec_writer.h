@@ -120,6 +120,32 @@ void venc_rec_writer_stop(VencRecWriter *w);
  * accept 4 MB would put the stall straight back on the live video path at
  * every record/stop — the exact failure this module removes, just relocated
  * to a rarer event.  Losing the tail of a recording is the correct trade. */
+/* Run after the writer thread has been joined and freed -- inline on the
+ * caller's thread when the sink finishes inside the grace, on a detached
+ * reaper thread when it does not.  Whichever thread runs it, the sink is
+ * guaranteed never to run again by the time it does, so this is where the
+ * recorder's descriptor may be closed. */
+typedef void (*VencRecReapFn)(void *ctx);
+
+/* Stop the writer without ever parking the caller on a sink that has stopped
+ * completing.  Bounded by roughly 2 * grace_ms: one grace to let the queued
+ * tail reach the disk, one to let the access unit already in the sink's hands
+ * finish.  If the sink is still inside that write when both expire, the
+ * writer is handed to a detached reaper and this returns immediately.
+ *
+ * This is the stop for a MID-RUN close on the encode loop. Unlike
+ * venc_rec_writer_stop_bounded(), it never performs an unbounded join, so a
+ * medium that has stopped completing cannot stall live video through a
+ * record/stop. `*dropped` is filled synchronously either way -- the abandon
+ * happens on the caller's thread -- but the recorder close moves into
+ * `on_exit`, because only that runs after the join in BOTH paths.
+ *
+ * Cost of the hand-off: the recorder stays open until the reaper finishes, so
+ * the caller must not start a new recording on the same recorder state until
+ * `on_exit` has run. */
+void venc_rec_writer_stop_bounded_async(VencRecWriter *w, unsigned grace_ms,
+	uint64_t *dropped, VencRecReapFn on_exit, void *on_exit_ctx);
+
 void venc_rec_writer_stop_bounded(VencRecWriter *w, unsigned grace_ms,
 	uint64_t *dropped);
 
