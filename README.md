@@ -751,7 +751,9 @@ knob does not move the bitstream: across `-12`, `-4`, `0`, `+12`, applied both
 live and at channel create, and in both a saturated and an unsaturated CBR
 regime, IDR size held at 16.1-20.3 KB (<=1.2% spread) where Star6E spans 9x
 over the same range. IDR access units were confirmed well-formed
-(`19, 32, 33, 34, 39` — IDR_W_RADL + VPS/SPS/PPS/SEI).
+(`19, 32, 33, 34, 39` — IDR_W_RADL + VPS/SPS/PPS/SEI).  A working
+alternative does exist on CV610 — see `request_i_qp` below — but it is not
+this field.
 
 The cause is not venc's write. Reading the channel back through the SDK shows
 `ip_qp_delta=-4` correctly in force. On CV610 **every rate-control input to
@@ -772,17 +774,53 @@ move. `min_qp`/`max_qp` are not inert on CV610 — `max_qp=30` drove a 2.1x
 overshoot (16.4 -> 34.8 Mbps) — so the RC honours the P-side bounds and
 ignores the I-side ones.
 
-The one control that does work is the super-frame strategy, a post-encode
-re-encode trigger rather than an RC parameter
-(`ss_mpi_venc_set_super_frame_strategy`, `i_frame_bits_threshold`):
+**The working lever is the intra-refresh I-frame QP**,
+`ot_venc_intra_refresh.request_i_qp` — a rate-control input, not a re-encode,
+so it costs no extra encode pass. venc already carries the field it needs
+(`VencConfig.video0.intra_refresh_qp`, plumbed into `intra_refresh_compute()`
+as `override_qp`) but **never parses it from JSON**, so it is always 0 and
+every craft runs on `mode_default_qp()` — 36 for `racing`.
 
-| max IDR | disabled | 12 KiB | 8 KiB | 4 KiB |
-|---|---|---|---|---|
-| IRAP median | 16395 | 5040 | 4414 | 4293 |
+Measured on .181, 10 forced IDRs per point, re-programmed live, delivered rate
+constant at 1.49-1.51 Mbps throughout (CBR 1500 kbps):
 
-It is a re-encode threshold, not an exact cap — 4 KiB and 8 KiB both settle
-near 4.3 KB — but it is monotonic and it is the only working IDR-cost lever on
-CV610. venc does not use it today.
+| `request_i_qp` | 34 | 35 | 36 | 37 | 38 | 40 | 44 | 48 | 51 |
+|---|---|---|---|---|---|---|---|---|---|
+| IRAP median | 22337 | 17871 | 14957 | 13605 | 12435 | 9974 | 7405 | 5669 | 4497 |
+
+Smooth, monotonic and reversible — 36 measured three times across the sweep
+gave 14957 / 14941 / 14888, and a re-program to the *same* value matched an
+untouched do-nothing control (14941), so the call has no effect of its own.
+Like `qp_delta` on the SigmaStar parts this is a redistribution knob: the rate
+does not move, and the P-frame tail grows as the IDR shrinks.
+
+**It has a lower cliff that tracks the bitrate.** Ask for an I-frame QP the
+rate cannot fund and the IDR collapses to a floor instead of growing:
+
+| target | usable floor | at the floor | one step below |
+|---|---|---|---|
+| 1500 kbps | 34 | 22337 | 33 -> 6704, <=28 -> ~4770 |
+| 8000 kbps | 26 | 105018 | 22 -> 6568 |
+
+At 8 Mbps the usable span is 26..51, giving a 10x range (105018 -> 10598 at
+40) — comparable to `qp_delta`'s 9.9x on Maruko. This is the same shape as the
+`min_qp` cliff above: the bound is only real while the encoder can afford it,
+so it must be measured per craft, scene and bitrate rather than ported.
+
+Two constraints on using it. It exists only while intra refresh is enabled,
+i.e. `resilience` != `off` — which is the FPV case, but means it is not a
+general knob. And `ss_mpi_venc_set_debreath_effect`, the other candidate, is
+**mutually exclusive with intra refresh**: it returns `OT_ERR_NOT_PERM` on a
+running channel, succeeds if called between `create_chn` and `start_chn`, and
+then makes `ss_mpi_venc_set_intra_refresh` fail with the same error so venc
+does not start. On a GDR craft you can have intra refresh or debreath, not
+both.
+
+The super-frame strategy (`ss_mpi_venc_set_super_frame_strategy`,
+`i_frame_bits_threshold`) also bounds the IDR — 16395 -> 5040 / 4414 / 4293 at
+12 / 8 / 4 KiB — but it works by re-encoding a frame that came out too large,
+which buys IDR size with latency. That is the wrong trade for a per-frame-FEC
+link, so it is recorded here and deliberately not used.
 
 Note also that CV610's `ip_qp_delta` field range is **`[-10, 30]`**, not
 venc's `-12..12`, and `cv610_validation.c` enforces it as a hard config
