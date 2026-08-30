@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.22.0`
+- `contract_version`: `0.23.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -32,6 +32,7 @@
 | `video0.qpDelta` | true | true | **false** |
 | `video0.minQp` / `maxQp` | true | true | true |
 | `video0.intraRefreshQp` | **false** | **false** | true |
+| `outgoing.sidecarPort` | true | true | true (**from 0.74.0**) |
 
 `video0.qpDelta` is `false` on CV610 and `video0.intraRefreshQp` is `false` on
 the SigmaStar backends because in each case the encoder accepts the value and
@@ -96,8 +97,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.73.3",
-    "contract_version": "0.22.0",
+    "app_version": "0.74.0",
+    "contract_version": "0.23.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1858,7 +1859,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.22.0`:
+in Notes. As of `contract_version: 0.23.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1872,6 +1873,7 @@ in Notes. As of `contract_version: 0.22.0`:
 | `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Star6E/Maruko share one IQ table schema. **CV610 also serves these from 0.18.4, in a DIFFERENT shape** — see "CV610 IQ response shape" below. `/api/v1/iq/import` stays Star6E/Maruko-only and 501s on CV610 (advertised as `routes.iq_import:false`). |
 | `/api/v1/awb` | live | live | Both backends register `query_awb_info`. CV610: **501**. |
 | `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
+| RTP sidecar (`outgoing.sidecarPort`, UDP :5602) | yes | yes | **CV610 from 0.74.0**; before that `src/rtp_sidecar.c` was not compiled into the CV610 binary at all, so the field was accepted, persisted and silently did nothing. CV610 emits the base FRAME plus TRANSPORT_INFO. It has no IMU and no detector, so ATTITUDE and DETECT trailers are never appended; ENC_INFO carries `frame_size_bytes`, `frame_type`, `idr_inserted`, `qp` (the encoder's `h265_info.start_qp`) and `frames_since_idr`; `complexity` and `scene_change` stay 0 because the shared scene detector is not compiled in on this backend; `gop_state` is 0 on all three backends, as nothing in the tree writes it. Under `frame-shm://` only `seq_count` is 0 on every backend (the packetizer never runs, so no sequence numbers are consumed); `ssrc`, `rtp_timestamp` and `seq_first` are seeded and non-zero, because the RTP session is gated on the *stream mode* rather than the transport. The trailer carries the ring state. |
 | `/api/v1/transport/status` | yes | yes | Three distinct field sets by transport: `frame-shm://` (ring fields plus `ringLowWaterSlots`/`otherDrops`), `shm://` (packet-ring fields), and UDP/Unix (socket subset). `badAuDrops` appears on every transport. **CV610** serves the same endpoint but emits no `badAuDrops` (no packet-table validation in its stream path); its `frame-shm` branch does carry `ringLowWaterSlots` and `otherDrops`. |
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
@@ -1883,6 +1885,19 @@ in Notes. As of `contract_version: 0.22.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.23.0` (additive — the RTP sidecar reaches CV610): `outgoing.sidecarPort`
+    flips from `supported:false` to `true` on CV610. `src/rtp_sidecar.c` was
+    never compiled into that binary, so the field was accepted, validated and
+    persisted while no datagram was ever sent — the ground station's attitude
+    and link-log consumers had no source on a CV610 craft, and the per-frame
+    timing probe had nothing to read. No wire change: CV610 emits the same
+    FRAME the SigmaStar backends do. ENC_INFO carries `frame_size_bytes`,
+    `frame_type`, `idr_inserted`, `qp` and `frames_since_idr`; `complexity` and
+    `scene_change` stay 0 because the shared scene detector is not compiled in
+    here; `gop_state` is 0 on all three backends, as nothing writes it. ATTITUDE and DETECT are never appended (no IMU, no detector), so a
+    consumer whose only input is the ATTITUDE trailer has no source here. Under `frame-shm://` `seq_count` is 0 on every
+    backend and the other RTP identifiers are seeded non-zero; the session is
+    gated on stream mode, not transport.
 - `0.21.0` (**breaking**, `video0.maxIBytes`/`video0.maxPBytes` removed): the
     per-frame size caps are gone from the config, the capabilities payload and
     both SigmaStar backends. They never imposed the ceiling they named.

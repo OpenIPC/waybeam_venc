@@ -528,6 +528,22 @@ static int test_field_support_by_backend(void)
 	CHECK("rc mode unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"video0.rc_mode") == 0);
+	/* The sidecar producer is compiled into the CV610 binary, so the port
+	 * is a field the backend genuinely reads rather than one that accepts
+	 * a value and does nothing.  Checked on all three backends: the entry
+	 * was added to CV610's allowlist, not to the shared gate. */
+	CHECK("sidecar port supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"outgoing.sidecar_port") == 1);
+	CHECK("sidecar port alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"outgoing.sidecarPort") == 1);
+	CHECK("sidecar port supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"outgoing.sidecar_port") == 1);
+	CHECK("sidecar port supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"outgoing.sidecar_port") == 1);
 	/* Recording and snapshot arrived on CV610 in mirror mode: the main
 	 * channel's access unit is teed to file, and the JPEG channel is a
 	 * second bind target on the main stream's VPSS output. */

@@ -1,5 +1,107 @@
 # History
 
+## [0.74.0] - 2026-08-30
+
+The RTP sidecar reaches CV610. `contract_version` 0.22.0 -> **0.23.0**
+(additive; one per-backend `supported` flag changes).
+
+- **`src/rtp_sidecar.c` was never compiled into the CV610 binary.** It sits in
+  `HELPER_SRC` and in the host test suite, but not in `CV610_SRC`, so a CV610
+  craft emitted no per-frame metadata at all while `outgoing.sidecarPort` was
+  parsed, range-validated and persisted like any other field. Nothing errored;
+  the port simply accepted a value and did nothing.
+
+  The cost was downstream and silent: the ground station's attitude consumer
+  takes the sidecar ATTITUDE trailer as its only input and, on a board with no
+  flight controller, has no MSP fallback either — so it was compiled out of the
+  CV610 build entirely, as was the link-log probe that binds through
+  `MSG_SUBSCRIBE`. The ground pipeline-stats consumer had no clock-sync or
+  end-to-end latency source for such a craft, and `tools/rtp_timing_probe` had
+  nothing to read, which is why CV610's VPSS latency has stayed unquantified —
+  the instrument was missing, not the bench time.
+
+  CV610 now emits the same FRAME the SigmaStar backends do, so every existing
+  consumer and probe works against it unchanged. No wire change.
+
+- **What the CV610 trailers carry.** ENC_INFO reports `frame_size_bytes`,
+  `frame_type`, `idr_inserted`, `qp` and `frames_since_idr`. `qp` is the
+  encoder's own `h265_info.start_qp`, exactly what the contract asks for
+  ("start QP / closest available per-frame QP") and already in hand — the
+  SVC-T enhance check reads `ref_type` from the same struct. `complexity` and
+  `scene_change` stay 0 because both come from the shared scene detector, which
+  this backend does not compile in; `gop_state` stays 0 because it is the
+  shared GOP controller's enum and CV610 does not run that controller. A zero
+  meaning "not produced" beats a fabricated value a consumer would trend.
+  TRANSPORT_INFO carries ring or socket fill, pressure state, drops and
+  delivery count. **ATTITUDE and DETECT are never appended** — this board has
+  no IMU and no detector — so a consumer whose only input is the ATTITUDE
+  trailer still has no source on CV610.
+
+  Device-verified on `.181`: `qp` 31–38 (mean 32.6) across 783 frames, and
+  `frames_since_idr` climbing under `resilience=racing` (no periodic IDR) then
+  resetting **4922 → 0** exactly on a `/request/idr`, with that frame typed IDR
+  at 22321 B against ~2000 B for its neighbours.
+
+- **`capture_us` is converted from the MPP timebase, not published raw.** The
+  sidecar contract says `capture_us` is CLOCK_MONOTONIC µs; the encoder's PTS
+  is on MPP's own clock, measured on `.181` running **~4.63 s ahead** of it.
+  Publishing the raw PTS put `capture_us` *after* `frame_ready_us` on every
+  frame, so the probe's encode-duration derivation went negative and printed
+  `-` — a field that looked populated and could not be trended.
+  `cv610_capture_us_from_pts()` samples `ss_mpi_sys_get_cur_pts()` against
+  `wb_monotonic_us()` once, lazily, on the first frame that needs it (MI_SYS
+  need not be up when the output starts) and applies the offset. While the
+  epoch is unknown it returns 0 — the contract's "not available" — rather than
+  a number on the wrong base. Device-verified on `.181`: ordering correct on
+  604/604 sampled frames, and capture-to-encode-complete resolves to a stable
+  **~24.3 ms at 720p100**.
+
+- **RTP identifiers under `frame-shm://` now match the SigmaStar backends.**
+  The first cut seeded the RTP session only on the socket path, on the belief
+  that Star6E skips it for non-RTP transports. That was wrong:
+  `star6e_output_is_rtp()` tests the *stream mode* (`rtp` vs `compact`, and the
+  shipped default is `rtp`), not the transport, so a Star6E craft on
+  `frame-shm://` does seed and does put a non-zero `ssrc`, `rtp_timestamp` and
+  `seq_first` on the sidecar wire. CV610 was the only backend sending a zero
+  `ssrc` there, which a consumer keying on "ssrc != 0 means session present"
+  would read as a different craft state. `cv610_output_start()` now seeds for
+  every transport; nothing but the sidecar reads `ctx->rtp` off the socket
+  path. `seq_count` remains 0 on the ring transports on all three backends —
+  the packetizer never runs, so no sequence numbers are consumed.
+
+- **`in_pressure` and `pressure_drops` now mean on CV610 what they mean
+  everywhere else.** `in_pressure` is defined in `include/rtp_sidecar.h` as the
+  75/50 **hysteresis** flag, and `pressure_drops` — despite the name, kept for
+  ABI stability across the v0.9.2 frame-skip rollback — is "frames observed in
+  pressure", not a drop count on any backend. The first cut published a bare
+  `fill >= 75` threshold and a hardcoded 0. Both now come from the shared
+  `venc_observe_pressure()` helper, maintained on the producer thread every
+  frame so the hysteresis sees every sample, and `/api/v1/transport/status`
+  reports the same latched values it puts on the wire.
+  Device-verified on `.181` against a deliberately unconsumed ring: flag
+  latched, counter advancing 824 over 825 frames, HTTP and wire agreeing.
+
+- **The sidecar socket is serviced on the idle path, not only alongside a
+  frame.** The poll sat inside the "a frame was produced" branch, so every
+  `continue` in the drain loop skipped it. A probe attaching while the encoder
+  is stalled would have seen a silent port — indistinguishable from a build
+  with no sidecar compiled in, which is the exact condition this release exists
+  to remove. It now runs right after `select()`, ahead of every `continue`,
+  with `errno` saved across it so the `EINTR` test still sees `select`'s value.
+
+- **The transport observation now has one collector.**
+  `cv610_collect_transport()` backs both `/api/v1/transport/status` and the
+  per-frame trailer, so the number an operator reads over HTTP and the number a
+  probe reads on the wire cannot drift. The drain loop takes the ring reading
+  once and hands it to both the low-water window and the trailer, and does the
+  whole thing only once a probe is actually subscribed — an unsubscribed craft
+  pays no clock read, no ring load and no `SIOCOUTQ` ioctl.
+
+- **`rtp_sidecar_sender_init()` runs before the `outgoing.enabled` bail**, on
+  every path, because it is what writes -1 into `fd`. The context arrives memset
+  to zero and fd 0 is a valid descriptor, so an init placed after an early
+  return would have left the per-frame gate polling stdin.
+
 ## [0.73.3] - 2026-08-29
 
 Recorder status is now a coherent snapshot instead of an unsynchronised read.
