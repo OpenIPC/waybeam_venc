@@ -18,6 +18,7 @@
 #include "venc_rec_writer.h"
 #include "output_socket.h"
 #include "rtp_session.h"
+#include "rtp_sidecar.h"
 #include "timing.h"
 #include "venc_frame_ring.h"
 #include "venc_ring.h"
@@ -67,6 +68,11 @@ typedef struct {
 	 * responsible for reacting. */
 	VencRingLowWater low_water;
 	int low_water_ready;
+	/* Per-frame metadata channel (protocols/rtp-sidecar.md).  Bound once at
+	 * output start and closed unconditionally at output stop, like every
+	 * other CV610 resource: pipeline state here survives a respawn, so a
+	 * flag-guarded teardown leaves the port held by the dead process. */
+	RtpSidecarSender sidecar;
 	RtpPacketizerState rtp;
 	H26xParamSets param_sets;
 	DebugOsdState *debug_osd;
@@ -689,11 +695,83 @@ static void cv610_record_status_callback(VencRecordStatus *out)
 	}
 }
 
-/* Star6E/Maruko parity — see star6e_service_ring_low_water().  venc measures
- * egress pressure and publishes it; it never acts on it. */
-static void cv610_service_ring_low_water(Cv610RunnerContext *ctx)
+/* One observation of whatever transport is carrying video, in the shape both
+ * consumers need: the /api/v1/transport/status route and the per-frame sidecar
+ * TRANSPORT_INFO trailer.  They read the same collector so the number an
+ * operator sees over HTTP and the number a probe sees on the wire cannot
+ * disagree. */
+typedef struct {
+	int         active;
+	int         is_ring;
+	const char *name;            /* "frame-shm" | "unix" | "udp" | "none" */
+	uint8_t     fill_pct;
+	int         in_pressure;
+	uint64_t    transport_drops; /* ring: full drops; socket: send failures */
+	uint64_t    packets_sent;    /* ring: writes;     socket: datagrams    */
+	/* Ring-only; zero on the socket transports. */
+	uint64_t    oversize_drops;
+	uint64_t    other_drops;
+	uint32_t    slot_count;
+	uint32_t    used_slots;
+} Cv610TransportSample;
+
+/* `fill` lets the drain loop hand over the ring reading it already took for
+ * the low-water window, so a subscribed sidecar costs one ring load per frame
+ * rather than two.  Pass NULL to read it here (the HTTP route, on the httpd
+ * thread).  Returns -1 only when the ring read fails. */
+static int cv610_collect_transport(Cv610RunnerContext *ctx,
+	const venc_frame_ring_fill_t *fill, Cv610TransportSample *out)
 {
-	venc_frame_ring_fill_t fill;
+	venc_frame_ring_fill_t local;
+
+	if (!ctx || !out)
+		return -1;
+	memset(out, 0, sizeof(*out));
+	out->name = "none";
+
+	if (ctx->frame_ring) {
+		if (!fill) {
+			if (venc_frame_ring_get_fill(ctx->frame_ring, &local) != 0)
+				return -1;
+			fill = &local;
+		}
+		out->active = 1;
+		out->is_ring = 1;
+		out->name = "frame-shm";
+		out->fill_pct = fill->fill_pct;
+		out->transport_drops = fill->full_drops;
+		out->packets_sent = fill->writes;
+		out->oversize_drops = fill->oversize_drops;
+		out->other_drops = fill->other_drops;
+		out->slot_count = fill->slot_count;
+		out->used_slots = fill->used_slots;
+	} else if (ctx->socket_handle >= 0) {
+		uint8_t fill_pct = 0;
+
+		if (output_socket_get_fill_pct(ctx->socket_handle, &ctx->send_queue,
+			&fill_pct) != 0)
+			fill_pct = 0;
+		out->active = 1;
+		out->name = ctx->transport == VENC_OUTPUT_URI_UNIX ? "unix" : "udp";
+		out->fill_pct = fill_pct;
+		out->transport_drops = __atomic_load_n(&ctx->output_drops,
+			__ATOMIC_RELAXED);
+		out->packets_sent = __atomic_load_n(&ctx->packets_sent,
+			__ATOMIC_RELAXED);
+	}
+	out->in_pressure = out->active &&
+		out->fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
+	return 0;
+}
+
+/* Star6E/Maruko parity — see star6e_service_ring_low_water().  venc measures
+ * egress pressure and publishes it; it never acts on it.
+ *
+ * `fill` is the reading the caller already took for this frame; NULL means
+ * there is no ring, or the read failed. */
+static void cv610_service_ring_low_water(Cv610RunnerContext *ctx,
+	const venc_frame_ring_fill_t *fill)
+{
 	uint64_t now_us;
 
 	if (!ctx)
@@ -703,8 +781,7 @@ static void cv610_service_ring_low_water(Cv610RunnerContext *ctx)
 	 * ring's first sample and publish "perfectly drained" over a ring
 	 * that is full.  Unreachable today (the context is created once per
 	 * process), kept symmetric so it stays that way. */
-	if (!ctx->frame_ring ||
-	    venc_frame_ring_get_fill(ctx->frame_ring, &fill) != 0) {
+	if (!fill) {
 		venc_ring_low_water_reset(&ctx->low_water, 0);
 		ctx->low_water_ready = 0;
 		return;
@@ -716,8 +793,8 @@ static void cv610_service_ring_low_water(Cv610RunnerContext *ctx)
 		ctx->low_water_ready = 1;
 	}
 
-	venc_ring_low_water_observe(&ctx->low_water, fill.used_slots,
-		fill.slot_count);
+	venc_ring_low_water_observe(&ctx->low_water, fill->used_slots,
+		fill->slot_count);
 	if (venc_ring_low_water_tick(&ctx->low_water, now_us))
 		venc_frame_ring_set_low_water(ctx->frame_ring,
 			venc_ring_low_water_slots(&ctx->low_water));
@@ -733,16 +810,13 @@ static char *cv610_query_transport_status(void)
 	Cv610RunnerContext *ctx = g_cv610_runner;
 	char buf[640];
 	int pos;
-	uint64_t drops;
+	Cv610TransportSample ts;
 
 	if (!ctx)
 		return NULL;
-	drops = __atomic_load_n(&ctx->output_drops, __ATOMIC_RELAXED);
-	if (ctx->frame_ring) {
-		venc_frame_ring_fill_t fill;
-
-		if (venc_frame_ring_get_fill(ctx->frame_ring, &fill) != 0)
-			return NULL;
+	if (cv610_collect_transport(ctx, NULL, &ts) != 0)
+		return NULL;
+	if (ts.is_ring) {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":true,\"transport\":\"frame-shm\","
@@ -751,33 +825,25 @@ static char *cv610_query_transport_status(void)
 			"\"framesSent\":%llu,\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,\"usedSlots\":%u,"
 			"\"ringLowWaterSlots\":%u,\"otherDrops\":%llu}}",
-			(unsigned)fill.fill_pct,
-			fill.fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT ? "true" : "false",
-			(unsigned long long)fill.full_drops,
-			(unsigned long long)fill.writes,
-			(unsigned long long)fill.oversize_drops,
-			(unsigned)fill.slot_count, (unsigned)fill.used_slots,
+			(unsigned)ts.fill_pct,
+			ts.in_pressure ? "true" : "false",
+			(unsigned long long)ts.transport_drops,
+			(unsigned long long)ts.packets_sent,
+			(unsigned long long)ts.oversize_drops,
+			(unsigned)ts.slot_count, (unsigned)ts.used_slots,
 			(unsigned)venc_ring_low_water_slots(&ctx->low_water),
-			(unsigned long long)fill.other_drops);
-	} else if (ctx->socket_handle >= 0) {
-		uint8_t fill_pct = 0;
-		const char *transport = ctx->transport == VENC_OUTPUT_URI_UNIX
-			? "unix" : "udp";
-
-		if (output_socket_get_fill_pct(ctx->socket_handle, &ctx->send_queue,
-			&fill_pct) != 0)
-			fill_pct = 0;
+			(unsigned long long)ts.other_drops);
+	} else if (ts.active) {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":true,\"transport\":\"%s\","
 			"\"fillPct\":%u,\"inPressure\":%s,"
 			"\"pressureDrops\":0,\"transportDrops\":%llu,"
 			"\"packetsSent\":%llu}}",
-			transport, (unsigned)fill_pct,
-			fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT ? "true" : "false",
-			(unsigned long long)drops,
-			(unsigned long long)__atomic_load_n(&ctx->packets_sent,
-				__ATOMIC_RELAXED));
+			ts.name, (unsigned)ts.fill_pct,
+			ts.in_pressure ? "true" : "false",
+			(unsigned long long)ts.transport_drops,
+			(unsigned long long)ts.packets_sent);
 	} else {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
@@ -1375,6 +1441,16 @@ static int cv610_output_start(Cv610RunnerContext *ctx)
 {
 	RtpSessionState session;
 
+	/* Before the outgoing.enabled bail and before the transport dispatch,
+	 * on every path.  rtp_sidecar_sender_init() is what puts -1 in fd; the
+	 * context arrives memset to zero, so an init that is skipped or that
+	 * sits after an early return leaves fd == 0 — a perfectly valid
+	 * descriptor — and the per-frame gate would poll() stdin. */
+	if (rtp_sidecar_sender_init(&ctx->sidecar,
+		ctx->config.outgoing.sidecar_port) != 0)
+		fprintf(stderr, "WARNING: CV610 sidecar disabled (port %u)\n",
+			(unsigned)ctx->config.outgoing.sidecar_port);
+
 	if (!ctx->config.outgoing.enabled)
 		return 0;
 	if (ctx->output_uri.type == VENC_OUTPUT_URI_FRAME_SHM) {
@@ -1405,6 +1481,11 @@ static int cv610_output_start(Cv610RunnerContext *ctx)
 
 static void cv610_output_stop(Cv610RunnerContext *ctx)
 {
+	/* Unconditional, like every other CV610 teardown: a restart-class set
+	 * re-execs without reloading modules, so a port this process still
+	 * holds is a port the successor cannot bind.  Safe when init never ran
+	 * or was disabled — sender_close() tolerates fd == -1. */
+	rtp_sidecar_sender_close(&ctx->sidecar);
 	if (ctx->frame_ring) {
 		venc_frame_ring_destroy(ctx->frame_ring);
 		ctx->frame_ring = NULL;
@@ -1686,6 +1767,16 @@ static int cv610_run(void *opaque)
 					OT_VENC_ENHANCE_P_SLICE_NOT_FOR_REF;
 			int is_idr;
 			size_t patched = 0;
+			/* Sidecar state for this frame; sc_fillp is the single
+			 * ring reading shared by the low-water window and the
+			 * TRANSPORT_INFO trailer. */
+			venc_frame_ring_fill_t sc_fill;
+			const venc_frame_ring_fill_t *sc_fillp = NULL;
+			int sc_send;
+			uint32_t sc_rtp_ts = 0;
+			uint16_t sc_seq_before = 0;
+			uint64_t sc_capture_us = 0;
+			uint64_t sc_ready_us = 0;
 
 			if (is_enhance)
 				patched = h26x_util_hevc_patch_trail_r_to_n(frame, frame_len);
@@ -1726,6 +1817,28 @@ static int cv610_run(void *opaque)
 				}
 			}
 
+			/* Sidecar (protocols/rtp-sidecar.md).  fd > 0, not >= 0:
+			 * the listener is always >= 3, and 0 means "never
+			 * initialised" — see rtp_sidecar_sender_close().  Poll
+			 * every frame so subscriptions are still learned while
+			 * nobody is listening; do the rest only once a probe is
+			 * actually subscribed, so an unsubscribed craft pays no
+			 * clock read, no ring load and no SIOCOUTQ ioctl. */
+			sc_send = 0;
+			if (ctx->sidecar.fd > 0) {
+				rtp_sidecar_poll(&ctx->sidecar);
+				if (rtp_sidecar_is_subscribed(&ctx->sidecar)) {
+					sc_send = 1;
+					/* Snapshot before the write: the packetizer
+					 * advances seq and timestamp as it sends. */
+					sc_rtp_ts = ctx->rtp.timestamp;
+					sc_seq_before = ctx->rtp.seq;
+					sc_capture_us = stream.pack_cnt
+						? (uint64_t)stream.pack[0].pts : 0;
+					sc_ready_us = wb_monotonic_us();
+				}
+			}
+
 			if (ctx->frame_ring) {
 				VencFrameMeta meta;
 				int write_ret;
@@ -1751,10 +1864,55 @@ static int cv610_run(void *opaque)
 				if (write_ret != 0)
 					__atomic_add_fetch(&ctx->output_drops, 1,
 						__ATOMIC_RELAXED);
-				cv610_service_ring_low_water(ctx);
+				if (venc_frame_ring_get_fill(ctx->frame_ring,
+					&sc_fill) == 0)
+					sc_fillp = &sc_fill;
+				cv610_service_ring_low_water(ctx, sc_fillp);
 			} else if (ctx->socket_handle >= 0) {
 				/* cv610_output_write owns per-datagram drop accounting. */
 				(void)cv610_send_rtp_frame(ctx, frame, frame_len);
+			}
+
+			if (sc_send) {
+				Cv610TransportSample ts;
+				RtpSidecarEncInfo enc;
+				RtpSidecarTransportInfo tinfo;
+				const RtpSidecarTransportInfo *tinfo_ptr = NULL;
+
+				/* Only what CV610 genuinely knows at this point.
+				 * qp, complexity and scene_change stay 0: there is
+				 * no per-frame QP readback and no scene detector on
+				 * this backend, and a plausible-looking zero that
+				 * means "not produced" is preferable to a fabricated
+				 * value a consumer would trend. */
+				memset(&enc, 0, sizeof(enc));
+				enc.frame_size_bytes = (uint32_t)frame_len;
+				enc.frame_type = is_idr ? RTP_SIDECAR_FRAME_IDR
+					: RTP_SIDECAR_FRAME_P;
+				enc.idr_inserted = is_idr ? 1 : 0;
+
+				if (cv610_collect_transport(ctx, sc_fillp, &ts) == 0 &&
+					ts.active) {
+					memset(&tinfo, 0, sizeof(tinfo));
+					tinfo.fill_pct = ts.fill_pct;
+					tinfo.in_pressure = ts.in_pressure ? 1 : 0;
+					tinfo.transport_drops = (uint32_t)ts.transport_drops;
+					/* CV610 publishes egress pressure and never
+					 * acts on it, so it drops nothing for it. */
+					tinfo.pressure_drops = 0;
+					tinfo.packets_sent = (uint32_t)ts.packets_sent;
+					tinfo_ptr = &tinfo;
+				}
+
+				/* Under frame-shm there is no RTP session, so ssrc,
+				 * timestamp and both seq fields are 0 — the same
+				 * thing Star6E puts on the wire for a non-RTP
+				 * transport, where rtp_session_init() is skipped.
+				 * The information lives in the trailer instead. */
+				rtp_sidecar_send_frame_transport(&ctx->sidecar,
+					ctx->rtp.ssrc, sc_rtp_ts, sc_seq_before,
+					(uint16_t)(ctx->rtp.seq - sc_seq_before),
+					sc_capture_us, sc_ready_us, &enc, tinfo_ptr);
 			}
 			__atomic_add_fetch(&ctx->frames, 1, __ATOMIC_RELAXED);
 			__atomic_add_fetch(&ctx->bytes, frame_len, __ATOMIC_RELAXED);

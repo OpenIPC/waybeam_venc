@@ -1,5 +1,56 @@
 # History
 
+## [0.74.0] - 2026-08-30
+
+The RTP sidecar reaches CV610. `contract_version` 0.22.0 -> **0.23.0**
+(additive; one per-backend `supported` flag changes).
+
+- **`src/rtp_sidecar.c` was never compiled into the CV610 binary.** It sits in
+  `HELPER_SRC` and in the host test suite, but not in `CV610_SRC`, so a CV610
+  craft emitted no per-frame metadata at all while `outgoing.sidecarPort` was
+  parsed, range-validated and persisted like any other field. Nothing errored;
+  the port simply accepted a value and did nothing.
+
+  The cost was downstream and silent: the ground station's attitude consumer
+  takes the sidecar ATTITUDE trailer as its only input and, on a board with no
+  flight controller, has no MSP fallback either — so it was compiled out of the
+  CV610 build entirely, as was the link-log probe that binds through
+  `MSG_SUBSCRIBE`. The ground pipeline-stats consumer had no clock-sync or
+  end-to-end latency source for such a craft, and `tools/rtp_timing_probe` had
+  nothing to read, which is why CV610's VPSS latency has stayed unquantified —
+  the instrument was missing, not the bench time.
+
+  CV610 now emits the same FRAME the SigmaStar backends do, so every existing
+  consumer and probe works against it unchanged. No wire change.
+
+- **What the CV610 trailers carry.** ENC_INFO reports `frame_size_bytes`,
+  `frame_type` and `idr_inserted`. `qp`, `complexity` and `scene_change` stay 0:
+  this backend has no per-frame QP readback and no scene detector, and a
+  fabricated value a consumer would trend is worse than a zero that means "not
+  produced". TRANSPORT_INFO carries ring or socket fill, pressure state, drops
+  and delivery count. ATTITUDE and DETECT are never appended — no IMU, no
+  detector.
+
+- **Under `frame-shm://` the RTP identifiers are 0.** `ssrc`, `rtp_timestamp`,
+  `seq_first` and `seq_count` are zero for a non-RTP transport because
+  `rtp_session_init()` is skipped there. This is pre-existing behaviour on
+  Star6E (`star6e_video.c` gates the init on `star6e_output_is_rtp()`), not
+  something new to CV610, and no consumer reads those fields on that path — the
+  information is in the trailer.
+
+- **The transport observation now has one collector.**
+  `cv610_collect_transport()` backs both `/api/v1/transport/status` and the
+  per-frame trailer, so the number an operator reads over HTTP and the number a
+  probe reads on the wire cannot drift. The drain loop takes the ring reading
+  once and hands it to both the low-water window and the trailer, and does the
+  whole thing only once a probe is actually subscribed — an unsubscribed craft
+  pays no clock read, no ring load and no `SIOCOUTQ` ioctl.
+
+- **`rtp_sidecar_sender_init()` runs before the `outgoing.enabled` bail**, on
+  every path, because it is what writes -1 into `fd`. The context arrives memset
+  to zero and fd 0 is a valid descriptor, so an init placed after an early
+  return would have left the per-frame gate polling stdin.
+
 ## [0.73.3] - 2026-08-29
 
 Recorder status is now a coherent snapshot instead of an unsynchronised read.

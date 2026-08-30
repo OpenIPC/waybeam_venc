@@ -877,6 +877,12 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"outgoing.max_payload_size", "outgoing.audio_port",
 			"outgoing.connected_udp",
 			"outgoing.allow_unix_encoder_stall",
+			/* Read once by cv610_output_start(), which binds the
+			 * sidecar listener before the transport dispatch.  The
+			 * shared table already marks it MUT_RESTART, so there is
+			 * no cv610_field_is_restart_only() entry to add and no
+			 * mutability widening here. */
+			"outgoing.sidecar_port",
 			"audio.enabled", "audio.mute",
 			/* Snapshot: the JPEG channel is a second bind target on
 			 * the main stream's VPSS output, so it inherits that
