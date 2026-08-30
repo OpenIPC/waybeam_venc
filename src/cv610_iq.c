@@ -760,6 +760,115 @@ out:
 }
 
 /* ==========================================================================
+ *  Portable AE ceilings
+ *
+ *  isp.gain_max and isp.shutter_max_us are the fleet-wide names for the two
+ *  AE limits every backend has.  They map onto this ISP's exposure group
+ *  with NO unit conversion, which is the only reason they are wired at all:
+ *
+ *    isp.shutter_max_us -> exposure.auto.exp_time_max
+ *         ot_isp_ae_range exp_time_range, "sensor exposure time (unit: us)"
+ *    isp.gain_max       -> exposure.auto.a_gain_max
+ *         ot_isp_ae_range a_gain_range, "Format:22.10 ... sensor analog gain
+ *         (unit: times, 10bit precision)" -- 1024 == 1x, the same scale the
+ *         SigmaStar supervisory AE uses (maruko_cus3a.c AE_GAIN_MIN).
+ *
+ *  Analog gain, not sys_gain: the portable name means the SENSOR's gain
+ *  ceiling on every other backend, and sys_gain_range caps the product of
+ *  analog, sensor-digital and ISP-digital gain.  Capping the product would
+ *  make the same number mean something different here.
+ *
+ *  Both live under auto_attr, so cv610_iq_set() selects AE auto mode for
+ *  them -- which is the mode a ceiling is meant to apply in.
+ *
+ *  0 means "use the sensor plugin's default" on every backend, so the
+ *  default has to survive a non-zero write.  Without the snapshot below,
+ *  setting a ceiling and then clearing it would leave the ISP on the last
+ *  non-zero value forever while the config read 0: a one-way door, and
+ *  exactly the shape of bug this milestone keeps finding.  The snapshot is
+ *  taken on the first apply, before any write of ours has landed.
+ * ========================================================================== */
+
+static uint32_t g_ae_default_gain_max;
+static uint32_t g_ae_default_exp_time_max;
+static int      g_ae_defaults_valid;
+
+/* Caller must NOT hold g_iq_mutex: this takes it, and cv610_iq_set() takes
+ * it again on the way out.
+ *
+ * The readiness check is the same one cv610_iq_set() and both query paths
+ * make, and it is what lets the snapshot below trust the value it latches:
+ * the plugin seeds the exposure attr inside ss_mpi_isp_init(), which runs
+ * before cv610_pipeline_isp_ready() turns true, so there is no window where
+ * this reads an unseeded struct and caches it as "the default". */
+static int ae_defaults(uint32_t *gain_max, uint32_t *exp_time_max)
+{
+	int rc = -1;
+
+	if (!cv610_pipeline_isp_ready()) {
+		fprintf(stderr, "[cv610-iq] AE defaults: ISP is not running\n");
+		return -1;
+	}
+
+	pthread_mutex_lock(&g_iq_mutex);
+	if (!g_ae_defaults_valid) {
+		int ret;
+
+		/* Reuses the shared scratch the mutex exists to guard, rather
+		 * than putting an ot_isp_exposure_attr on the caller's stack. */
+		memset(&g_attr, 0, sizeof(g_attr));
+		ret = iq_get_exposure(&g_attr);
+		if (ret != 0) {
+			fprintf(stderr, "[cv610-iq] AE defaults: get failed: 0x%x\n",
+				(unsigned)ret);
+			goto out;
+		}
+		g_ae_default_gain_max =
+			(uint32_t)g_attr.exposure.auto_attr.a_gain_range.max;
+		g_ae_default_exp_time_max =
+			(uint32_t)g_attr.exposure.auto_attr.exp_time_range.max;
+		g_ae_defaults_valid = 1;
+		printf("[cv610-iq] AE defaults from the sensor plugin: "
+			"a_gain_max=%u (%.2fx) exp_time_max=%u us\n",
+			g_ae_default_gain_max,
+			(double)g_ae_default_gain_max / 1024.0,
+			g_ae_default_exp_time_max);
+	}
+	*gain_max = g_ae_default_gain_max;
+	*exp_time_max = g_ae_default_exp_time_max;
+	rc = 0;
+out:
+	pthread_mutex_unlock(&g_iq_mutex);
+	return rc;
+}
+
+static int ae_set_limit(const char *param, uint32_t value, uint32_t dflt)
+{
+	char buf[16];
+
+	snprintf(buf, sizeof(buf), "%u", value ? value : dflt);
+	return cv610_iq_set(param, buf);
+}
+
+int cv610_iq_set_gain_max(uint32_t gain)
+{
+	uint32_t dflt_gain, dflt_exp;
+
+	if (ae_defaults(&dflt_gain, &dflt_exp) != 0)
+		return -1;
+	return ae_set_limit("exposure.auto.a_gain_max", gain, dflt_gain);
+}
+
+int cv610_iq_set_shutter_max_us(uint32_t us)
+{
+	uint32_t dflt_gain, dflt_exp;
+
+	if (ae_defaults(&dflt_gain, &dflt_exp) != 0)
+		return -1;
+	return ae_set_limit("exposure.auto.exp_time_max", us, dflt_exp);
+}
+
+/* ==========================================================================
  *  Applied AWB result
  *
  *  None of the groups above can show this.  f_wb reads back ot_isp_wb_attr,

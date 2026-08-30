@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.26.0`
+- `contract_version`: `0.27.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -36,6 +36,8 @@
 | `image.mirror` / `image.flip` | true | true | true (**from 0.75.0**) |
 | `image.rotate` | true | true | **false** |
 | `fpv.roiEnabled` / `roiQp` / `roiSteps` / `roiCenter` | true | true | true (**from 0.25.0**) |
+| `isp.gainMax` / `isp.shutterMaxUs` | true | true | true (**from 0.78.0**) |
+| `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** |
 | `outgoing.server` / `outgoing.enabled` mutability | live | live | **live from 0.26.0** (restart_required before) |
 
 `video0.qpDelta` is `false` on CV610 and `video0.intraRefreshQp` is `false` on
@@ -101,8 +103,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.77.1",
-    "contract_version": "0.26.0",
+    "app_version": "0.78.0",
+    "contract_version": "0.27.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1863,7 +1865,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.26.0`:
+in Notes. As of `contract_version: 0.27.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1875,7 +1877,7 @@ in Notes. As of `contract_version: 0.26.0`:
 | `/api/v1/dual/status`, `/dual/idr` | yes | yes | `/dual/status` always 200 (`active:false` when off, `active:true,channel,bitrate,fps,gop` when on).  `/dual/idr` returns 200 when active, 404 when not. Maruko HTTP registration landed in 0.10.4 — earlier Maruko builds returned 404 from these even when `record.mode=dual` was running. |
 | `/api/v1/dual/set` | yes | **501** | Star6E-only: the underlying `MI_VENC_*ChnAttr` write path binds to `i6_venc_chn`, but Maruko's venc library expects `i6c_venc_chn` (different layout). Maruko returns 501 until the call path is ported. |
 | `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Star6E/Maruko share one IQ table schema. **CV610 also serves these from 0.18.4, in a DIFFERENT shape** — see "CV610 IQ response shape" below. `/api/v1/iq/import` stays Star6E/Maruko-only and 501s on CV610 (advertised as `routes.iq_import:false`). |
-| `/api/v1/awb` | live | live | Both backends register `query_awb_info`. CV610: **501**. |
+| `/api/v1/awb` | live | live | All three backends register `query_awb_info`. CV610 serves `ot_isp_wb_info` plus `ot_isp_exp_info` (the AE's own applied `exp_time`, `a_gain`, `isp_d_gain`, `ave_lum`) — a different payload from the SigmaStar one, and the instrument the `isp.gainMax`/`isp.shutterMaxUs` mapping was verified against. |
 | `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
 | RTP sidecar (`outgoing.sidecarPort`, UDP :5602) | yes | yes | **CV610 from 0.74.0**; before that `src/rtp_sidecar.c` was not compiled into the CV610 binary at all, so the field was accepted, persisted and silently did nothing. CV610 emits the base FRAME plus TRANSPORT_INFO. It has no IMU and no detector, so ATTITUDE and DETECT trailers are never appended; ENC_INFO carries `frame_size_bytes`, `frame_type`, `idr_inserted`, `qp` (the encoder's `h265_info.start_qp`) and `frames_since_idr`; `complexity` and `scene_change` stay 0 because the shared scene detector is not compiled in on this backend; `gop_state` is 0 on all three backends, as nothing in the tree writes it. Under `frame-shm://` only `seq_count` is 0 on every backend (the packetizer never runs, so no sequence numbers are consumed); `ssrc`, `rtp_timestamp` and `seq_first` are seeded and non-zero, because the RTP session is gated on the *stream mode* rather than the transport. The trailer carries the ring state. |
 | `/api/v1/transport/status` | yes | yes | Three distinct field sets by transport: `frame-shm://` (ring fields plus `ringLowWaterSlots`/`otherDrops`), `shm://` (packet-ring fields), and UDP/Unix (socket subset). `badAuDrops` appears on every transport. **CV610** serves the same endpoint but emits no `badAuDrops` (no packet-table validation in its stream path); its `frame-shm` branch does carry `ringLowWaterSlots` and `otherDrops`. |
@@ -1887,9 +1889,36 @@ in Notes. As of `contract_version: 0.26.0`:
 | `detect.net_width` / `net_height` | restart | restart | Tap geometry is fixed when the VPE/SCL detector port is created. |
 | `video0.min_qp` / `max_qp` | live | live | RC QP bounds, live and from config at startup on all three. **Maruko gained them in 0.73.0**; before that it reported unsupported. **CV610 from 0.18.4** — it sets the P bounds and the I-frame ceiling, but the I-frame floor is not steerable there (`video0.qp_delta` is not offered on CV610; see Per-Backend Field Support). |
 | `fpv.roi_enabled` / `roi_qp` / `roi_steps` / `roi_center` | live | live | Centre-priority horizontal delta-QP bands. **CV610 from 0.76.0** (`ss_mpi_venc_set_roi_attr`); before that the fields were accepted by a config parse, reported `supported:false` and never reached the encoder. All three backends share one band geometry (`pipeline_common_roi_band`). `roi_qp == 0` clears every region regardless of `roi_enabled` — a zero delta is not a region worth programming — and the disabled log line names which of the two caused it. The shipped pair is `roiEnabled:false, roiQp:-25` **from 0.76.0**, so the flag reads true only when ROI is really running; it previously shipped `true`/`0`, which read as on while every region was cleared. **Maruko applied it only on a live write until 0.76.0** — a value already in the config file was never programmed at boot. |
-| `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
+| `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.27.0` (additive — the portable AE ceilings reach CV610): `isp.gain_max`
+    and `isp.shutter_max_us` change from `supported:false` to `supported:true`
+    on CV610 only; both were already `MUT_LIVE` in the shared table, so no
+    mutability changes. They map onto the exposure group `/api/v1/iq` already
+    exposes, with **no unit conversion** — `exp_time_range` is documented
+    "unit: us" and `a_gain_range` "Format:22.10 ... unit: times, 10bit
+    precision", i.e. 1024 == 1x, the same scale the SigmaStar supervisory AE
+    uses. `isp.gain_max` maps to `auto.a_gain_max` (the *analog* ceiling, which
+    is what the name means on the other backends) rather than
+    `auto.sys_gain_max` (the product of analog, sensor-digital and ISP-digital
+    gain).
+  - `0` still means "use the sensor plugin's default" and now restores it: the
+    default is snapshotted before the first write, so clearing a ceiling is not
+    a one-way door.
+  - Both also apply at cold boot, not only on a live write — the ISP is seeded
+    by the sensor plugin, which never sees the config file.
+  - `isp.gain_min`, `isp.shutter_min_us`, `isp.awb_mode` and `isp.awb_ct` stay
+    `supported:false` on CV610 and still return **501**. The floors were simply
+    not measured in this slice. For the AWB pair that is a two-call flow rather
+    than a missing capability: where SigmaStar has one call
+    (`MI_ISP_AWB_SetCTMwbAttr(ct)`), this SDK has
+    `ss_mpi_isp_cal_gain_by_temp()`, which converts Kelvin to r/gr/gb/b gains
+    against the current `ot_isp_wb_attr`; those gains then go back through
+    `set_wb_attr` with `op_type` manual. Calibration-dependent, so it needs the
+    same device measurement every other CV610 field had to clear. Manual white
+    balance on CV610 is reachable today, under its own name, through
+    `/api/v1/iq`'s `wb` group.
 - `0.26.0` (additive — live output retarget reaches CV610): `outgoing.server`
     and `outgoing.enabled` change from `restart_required` to `live` on CV610
     only. Both SigmaStar backends already reported `live`; CV610 read the URI
