@@ -896,13 +896,18 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"video0.min_qp", "video0.max_qp",
 			/* Read by cv610_apply_roi_qp(), live and at cold boot.
 			 * Listed only because the delta reaches the encoder and
-			 * moves the picture: measured on the Maruko bench with the
-			 * same shared band geometry, the decoded detail steps by
-			 * 14-25x exactly at the programmed rect edges and inverts
-			 * with the sign of roiQp.  That measurement is the bar for
-			 * this list -- issue #259 is the counter-example, where an
-			 * SDK call returned success, logged as applied and read
-			 * back clean while the bitstream never moved. */
+			 * moves the picture ON THIS PART -- a measurement on a
+			 * sibling SoC would not qualify it, because the SDK call
+			 * differs (ss_mpi_venc_set_roi_attr here,
+			 * MI_VENC_SetRoiCfg there).  Measured on a CV610 bench,
+			 * 720p100 CBR: with a 384-px band at x=448, decoded
+			 * detail inside the band drops 7.4x between roiQp -30 and
+			 * +30 while the columns just outside it move the opposite
+			 * way, and a repeat of the -30 arm lands within 8.8%.
+			 * That measurement is the bar for this list -- issue #259
+			 * is the counter-example, where an SDK call returned
+			 * success, logged as applied and read back clean while
+			 * the bitstream never moved. */
 			"fpv.roi_enabled", "fpv.roi_qp",
 			"fpv.roi_steps", "fpv.roi_center",
 			"outgoing.enabled", "outgoing.server",

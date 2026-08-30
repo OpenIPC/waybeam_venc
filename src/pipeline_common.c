@@ -311,6 +311,15 @@ int pipeline_common_roi_band(uint32_t width, uint32_t height,
 	if (!out || index < 0 || index >= steps)
 		return -1;
 
+	/* Clamp rather than trust the caller -- see the header comment.  Without
+	 * it, frac outside [0,1] returns success with an underflowed origin or a
+	 * multi-gigabyte width, and a negative frac is undefined behaviour at the
+	 * float-to-unsigned conversion. */
+	if (!(center_frac >= 0.1f))   /* also catches NaN */
+		center_frac = 0.1f;
+	else if (center_frac > 0.9f)
+		center_frac = 0.9f;
+
 	level = index + 1;
 	frac = center_frac + (1.0f - center_frac) *
 		(float)(steps - level) / (float)steps;

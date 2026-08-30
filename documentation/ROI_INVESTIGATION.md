@@ -35,6 +35,8 @@ All rect coordinates are aligned to 32 pixels for H.265 CTU compatibility.
     "roiSteps": 2,
     "roiCenter": 0.25
 }
+// An EXAMPLE of ROI switched on, not the shipped defaults.
+// Those are roiEnabled:false, roiQp:-25, roiSteps:2, roiCenter:0.4.
 ```
 
 - `roiEnabled`: bool, MUT_LIVE — enable/disable ROI bands. Ships **`false`**

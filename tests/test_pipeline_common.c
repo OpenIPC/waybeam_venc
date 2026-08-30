@@ -217,6 +217,42 @@ int test_pipeline_common(void)
 			pipeline_common_roi_band(16, 720, 0.3f, -30, 1, 0, &b) != 0);
 		CHECK("roi band height rounds away",
 			pipeline_common_roi_band(1280, 16, 0.3f, -30, 1, 0, &b) != 0);
+
+		/* Out-of-domain center_frac is clamped, not trusted.  Before the
+		 * clamp both of these returned SUCCESS with a garbage rect:
+		 * frac>1 underflowed the unsigned (width-rw)/2 to ~2^31, and a
+		 * negative frac is an out-of-range float-to-unsigned conversion
+		 * (undefined behaviour) that produced a ~4 GB width.  Asserted
+		 * as "identical to the clamped value" rather than "not huge", so
+		 * the test pins the behaviour and not just the absence of one
+		 * symptom. */
+		{
+			PipelineRoiBand hi, lo, ref_hi, ref_lo;
+
+			CHECK("roi band frac>1 rc",
+				pipeline_common_roi_band(1280, 720, 1.5f, -30,
+					1, 0, &hi) == 0);
+			CHECK("roi band frac 0.9 rc",
+				pipeline_common_roi_band(1280, 720, 0.9f, -30,
+					1, 0, &ref_hi) == 0);
+			CHECK("roi band frac>1 clamps x", hi.x == ref_hi.x);
+			CHECK("roi band frac>1 clamps w",
+				hi.width == ref_hi.width);
+			CHECK("roi band frac>1 inside frame",
+				hi.x + hi.width <= 1280);
+
+			CHECK("roi band frac<0 rc",
+				pipeline_common_roi_band(1280, 720, -2.0f, -30,
+					1, 0, &lo) == 0);
+			CHECK("roi band frac 0.1 rc",
+				pipeline_common_roi_band(1280, 720, 0.1f, -30,
+					1, 0, &ref_lo) == 0);
+			CHECK("roi band frac<0 clamps x", lo.x == ref_lo.x);
+			CHECK("roi band frac<0 clamps w",
+				lo.width == ref_lo.width);
+			CHECK("roi band frac<0 inside frame",
+				lo.x + lo.width <= 1280);
+		}
 	}
 
 	/* cleanup */

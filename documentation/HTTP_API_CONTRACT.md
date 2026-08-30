@@ -35,6 +35,7 @@
 | `outgoing.sidecarPort` | true | true | true (**from 0.74.0**) |
 | `image.mirror` / `image.flip` | true | true | true (**from 0.75.0**) |
 | `image.rotate` | true | true | **false** |
+| `fpv.roiEnabled` / `roiQp` / `roiSteps` / `roiCenter` | true | true | true (**from 0.25.0**) |
 
 `video0.qpDelta` is `false` on CV610 and `video0.intraRefreshQp` is `false` on
 the SigmaStar backends because in each case the encoder accepts the value and
@@ -1894,11 +1895,22 @@ in Notes. As of `contract_version: 0.25.0`:
     every craft carried an `fpv` block nothing on the board read. Programmed
     through `ss_mpi_venc_set_roi_attr()`; `ot_venc_roi_attr` is field-for-field
     `MI_VENC_RoiCfg_t`, so the three backends now share one band geometry.
-    Verified in the bitstream rather than by return code (issue #259 is the
-    counter-example): decoded detail steps 14-25x exactly at the programmed
-    rect edges and inverts with the sign of `roiQp`. No wire or field-name
-    change; a client that already renders the CV610 capability map sees four
-    controls ungrey.
+    Verified in the bitstream **on CV610 itself**, not by return code and not
+    by inference from a sibling SoC — the SDK call differs per part, and issue
+    #259 is the counter-example where a QP control returned success, logged as
+    applied and read back clean while the picture never moved. CV610 720p100
+    CBR: in-band detail drops 7.4x between `roiQp` -30 and +30, the columns
+    just outside the band move the opposite way, and a repeat of the -30 arm
+    lands within 8.8%. Measured separately on Maruko for the shared band
+    geometry. No wire or field-name change; a client that already renders the
+    CV610 capability map sees four controls ungrey.
+
+    Shipped **defaults** also change, which `/api/v1/defaults` actuates and a
+    freshly provisioned craft reads back: `fpv.roiEnabled` `true` -> **false**
+    and `fpv.roiQp` `0` -> **-25**. The old pair read as "ROI on" while the
+    apply cleared every region (a zero delta is not a region worth
+    programming). Existing crafts are unaffected — their own config values
+    win.
 - `0.24.0` (additive — sensor orientation reaches CV610): `image.mirror` and
     `image.flip` flip from `supported:false` to `true` on CV610. Both were
     hardcoded `TD_FALSE` on the VI channel attribute, so an inverted lens mount

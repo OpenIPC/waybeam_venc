@@ -191,7 +191,18 @@ static int maruko_runner_init(void *opaque)
 	 * is the missing half, not a new control. */
 	if (ctx->vcfg.fpv.roi_enabled &&
 	    maruko_controls_callbacks()->apply_roi_qp) {
-		maruko_controls_callbacks()->apply_roi_qp(ctx->vcfg.fpv.roi_qp);
+		/* Not (void): maruko_apply_roi_qp() returns -1 with NO output at
+		 * all when the frame geometry is still zero, which would
+		 * reproduce the exact symptom this call site exists to fix -- a
+		 * boot with roiQp configured and no ROI line in the log.  Same
+		 * reporting as the qpBounds apply below and the CV610 twin. */
+		if (maruko_controls_callbacks()->apply_roi_qp(
+			    ctx->vcfg.fpv.roi_qp) != 0)
+			fprintf(stderr, "WARN: ROI from config not applied "
+				"(qp=%+d steps=%u center=%.2f)\n",
+				ctx->vcfg.fpv.roi_qp,
+				(unsigned)ctx->vcfg.fpv.roi_steps,
+				ctx->vcfg.fpv.roi_center);
 	}
 	if (ctx->vcfg.video0.qp_delta != 0 &&
 	    maruko_controls_callbacks()->apply_qp_delta) {

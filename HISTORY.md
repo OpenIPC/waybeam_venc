@@ -48,10 +48,16 @@ flags change).
   | 768-832 (inside) | 854.0 | 6.3 |
   | 832-896 (outside) | 34.7 | 792.7 |
 
-  The step lands exactly on the programmed rect edges and inverts with the sign
-  of the delta. A repeat of the `-30` arm held the in-band figure to within 6.6%
-  (1739 -> 1854), against an 18x swing between arms. Whatever #259 is, it does
-  not generalise to `SetRoiCfg`.
+  The step lands exactly on the programmed rect edges: 13.9x across x=448 and
+  24.6x across x=832 in the `-30` arm, reversing in the `+30` arm (13.6x down at
+  the left edge, 126x up at the right). The repeatability figure is a different
+  aggregation and is named here so it can be checked: median Laplacian variance
+  over the **whole band** (x=448..832), which came out 1739 then 1854 across two
+  runs of the `-30` arm -- 6.6% apart -- against 94.8 in the `+30` arm, an 18x
+  swing. CV610 was measured the same way on its own silicon (the SDK call
+  differs, so Maruko's result does not carry): whole-band 67.0 / 9.1 / 61.6 for
+  `-30` / `+30` / repeat, a 7.4x swing against an 8.8% control. Whatever #259
+  is, it does not generalise to ROI on either part.
 
 - **The shipped ROI defaults now agree with themselves.** They were
   `roiEnabled:true, roiQp:0` — which reads as "ROI is on" while `apply_roi_qp()`

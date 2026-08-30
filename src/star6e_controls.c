@@ -697,6 +697,7 @@ static int apply_roi_qp(int qp)
 	uint32_t width = g_star6e_control_ctx.frame_width;
 	uint32_t height = g_star6e_control_ctx.frame_height;
 	int ok = 1;
+	int programmed = 0;
 	uint16_t steps;
 	float center_frac;
 
@@ -705,9 +706,21 @@ static int apply_roi_qp(int qp)
 
 	for (int i = 0; i < PIPELINE_ROI_MAX_STEPS; i++) {
 		MI_VENC_RoiCfg_t roi = {0};
+		MI_S32 cret;
+
 		roi.u32Index = i;
 		roi.bEnable = 0;
-		MI_VENC_SetRoiCfg(g_star6e_control_ctx.venc_chn, &roi);
+		cret = MI_VENC_SetRoiCfg(g_star6e_control_ctx.venc_chn, &roi);
+		/* Checked, not discarded: a refused clear leaves the stale band
+		 * enabled with its previous geometry, so shrinking roiSteps
+		 * would overlap the new bands with the old ones while this
+		 * function logged success. */
+		if (cret != 0) {
+			printf("> ROI[%d] clear failed (ret=0x%08x), stale "
+				"band may still be enabled\n", i,
+				(unsigned)cret);
+			ok = 0;
+		}
 	}
 
 	if (!g_star6e_control_ctx.vcfg ||
@@ -716,12 +729,14 @@ static int apply_roi_qp(int qp)
 		 * single line could not tell them apart, so an operator who set
 		 * roiEnabled:true and left roiQp at 0 read "disabled" as "my
 		 * flag was ignored". */
-		printf("> ROI disabled (%s), all regions cleared\n",
+		printf("> ROI disabled (%s), %s\n",
 			!g_star6e_control_ctx.vcfg ? "no config bound" :
 			!g_star6e_control_ctx.vcfg->fpv.roi_enabled ?
 				"roiEnabled=false" :
-				"roiQp=0, no delta to apply");
-		return 0;
+				"roiQp=0, no delta to apply",
+			ok ? "all regions cleared" :
+				"CLEAR FAILED, see above");
+		return ok ? 0 : -1;
 	}
 
 	if (qp < -30) qp = -30;
@@ -752,6 +767,16 @@ static int apply_roi_qp(int qp)
 				roi.s32Qp);
 			ok = 0;
 		}
+		programmed++;
+	}
+
+	if (programmed == 0) {
+		/* Every band was skipped as degenerate.  Logging "ROI
+		 * horizontal" here would assert an ROI that does not exist. */
+		printf("> ROI programmed no bands at %ux%u (steps=%u "
+			"center=%.2f)\n", width, height, steps,
+			(double)center_frac);
+		return -1;
 	}
 
 	if (ok) {

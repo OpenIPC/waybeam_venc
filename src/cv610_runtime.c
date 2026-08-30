@@ -987,6 +987,7 @@ static int cv610_apply_roi_qp(int qp)
 	float center_frac;
 	int i;
 	int ok = 1;
+	int programmed = 0;
 
 	if (!cfg)
 		return -1;
@@ -1004,20 +1005,36 @@ static int cv610_apply_roi_qp(int qp)
 	 * use.  Only the indices this backend ever writes are cleared; the part
 	 * offers OT_VENC_MAX_ROI_NUM (8) and nothing here touches 4..7. */
 	for (i = 0; i < PIPELINE_ROI_MAX_STEPS; i++) {
+		td_s32 cret;
+
 		memset(&roi, 0, sizeof(roi));
 		roi.idx = (td_u32)i;
 		roi.enable = TD_FALSE;
-		(void)ss_mpi_venc_set_roi_attr(CV610_VENC_CHN, &roi);
+		cret = ss_mpi_venc_set_roi_attr(CV610_VENC_CHN, &roi);
+		/* Checked, not discarded.  The rect is all-zero here, and the
+		 * SDK header documents no rule on whether a disable still
+		 * range-checks it.  If a clear is refused, the stale band stays
+		 * enabled with its previous geometry -- so shrinking roiSteps
+		 * from 4 to 2 would leave indices 2 and 3 holding the 4-step
+		 * rects, overlapping the new pair with the wrong taper, while
+		 * this function logged success. */
+		if (cret != TD_SUCCESS) {
+			fprintf(stderr, "ERROR: ROI[%d] clear=0x%x (stale band "
+				"may still be enabled)\n", i, (unsigned)cret);
+			ok = 0;
+		}
 	}
 
 	if (!cfg->fpv.roi_enabled || qp == 0) {
 		/* Name the cause -- see the matching comment in
 		 * star6e_controls.c's apply_roi_qp().  A NULL cfg returned -1
 		 * above, so only two states reach here. */
-		printf("> ROI disabled (%s), all regions cleared\n",
+		printf("> ROI disabled (%s), %s\n",
 			!cfg->fpv.roi_enabled ? "roiEnabled=false" :
-				"roiQp=0, no delta to apply");
-		return 0;
+				"roiQp=0, no delta to apply",
+			ok ? "all regions cleared" :
+				"CLEAR FAILED, see above");
+		return ok ? 0 : -1;
 	}
 
 	if (qp < -30) qp = -30;
@@ -1065,16 +1082,36 @@ static int cv610_apply_roi_qp(int qp)
 			fprintf(stderr, "ERROR: ROI[%d] readback failed\n", i);
 			ok = 0;
 		} else if (!back.enable || back.qp != band.qp ||
+			back.rect.x != (td_s32)band.x ||
+			back.rect.y != (td_s32)band.y ||
 			back.rect.width != band.width ||
 			back.rect.height != band.height) {
+			/* The ORIGIN is compared too.  A driver that re-aligns
+			 * or clamps x displaces the band horizontally, which is
+			 * the one failure this check exists to catch and the
+			 * least visible in the picture. */
 			fprintf(stderr, "ERROR: ROI[%d] readback disagrees: "
-				"enable=%d qp=%+d %ux%u, wrote enable=1 qp=%+d "
-				"%ux%u\n", i, (int)back.enable, (int)back.qp,
+				"enable=%d qp=%+d (%d,%d %ux%u), wrote "
+				"enable=1 qp=%+d (%u,%u %ux%u)\n",
+				i, (int)back.enable, (int)back.qp,
+				(int)back.rect.x, (int)back.rect.y,
 				(unsigned)back.rect.width,
 				(unsigned)back.rect.height,
-				band.qp, band.width, band.height);
+				band.qp, band.x, band.y,
+				band.width, band.height);
 			ok = 0;
 		}
+		programmed++;
+	}
+
+	if (programmed == 0) {
+		/* Every band was skipped as degenerate.  Saying "ROI horizontal"
+		 * here would assert an ROI that does not exist -- the exact
+		 * class of lie this whole change set is about. */
+		fprintf(stderr, "ERROR: ROI programmed no bands at %ux%u "
+			"(steps=%u center=%.2f)\n", width, height, steps,
+			(double)center_frac);
+		return -1;
 	}
 
 	if (ok) {
