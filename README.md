@@ -1339,7 +1339,7 @@ audio track). Settable via the config file or the runtime API
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `fpv.roi_enabled` | bool | live | Enable horizontal ROI bands. Ships **off**, paired with a non-zero `roi_qp`, so switching it on has an effect |
-| `fpv.roi_qp` | int | live | Signed ROI delta QP (-30..30, negative = sharper center). **`0` clears every region regardless of `roi_enabled`** — a zero delta is not a region worth programming. Ships at `-25`. All three backends **from 0.76.0** (CV610 had no implementation before it) |
+| `fpv.roi_qp` | int | live | Signed ROI delta QP (-20..20, negative = sharper center). **`0` clears every region regardless of `roi_enabled`** — a zero delta is not a region worth programming. Ships at `-20`. Range narrowed from `-30..30` **in 0.79.0**: past `±20` the delta exceeds the encoder's QP range, and a large negative value saturates rate control and overruns the bitrate target. All three backends **from 0.76.0** (CV610 had no implementation before it) |
 | `fpv.roi_steps` | uint16 | live | Number of horizontal bands (1-4) |
 | `fpv.roi_center` | double | live | Center band width ratio (0.1-0.9) |
 | `fpv.noise_level` | int | restart | 3DNR noise reduction level |

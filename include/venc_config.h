@@ -262,7 +262,7 @@ typedef struct {
 
 typedef struct {
 	bool roi_enabled;
-	int roi_qp;            /* signed ROI delta QP, -30..30 */
+	int roi_qp;            /* signed ROI delta QP, -20..20 */
 	uint16_t roi_steps;    /* 1..4 horizontal band regions */
 	double roi_center;     /* center region fraction 0.1..0.9 */
 	int noise_level;       /* 0..7 */

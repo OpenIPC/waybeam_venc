@@ -43,7 +43,7 @@ All rect coordinates are aligned to 32 pixels for H.265 CTU compatibility.
   since 0.76.0, paired with a non-zero `roiQp` so switching it on does
   something. It previously shipped `true` alongside `roiQp: 0`, i.e. on with
   nothing to apply.
-- `roiQp`: int, MUT_LIVE, range `-30..30`
+- `roiQp`: int, MUT_LIVE, range `-20..20` (was `-30..30` before 0.79.0)
 - `roiSteps`: uint16, MUT_LIVE, range `1..4`
 - `roiCenter`: double, MUT_LIVE, range `0.1..0.9`
 

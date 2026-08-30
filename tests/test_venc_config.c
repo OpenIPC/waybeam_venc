@@ -952,6 +952,61 @@ static int test_sample_config_file(void)
 			cfg.video0.bitrate == seeded.video0.bitrate);
 		CHECK("sample_web_port_matches_seed",
 			cfg.system.web_port == seeded.system.web_port);
+		/* roiQp is stated by BOTH shipped JSONs, so a bound change that
+		 * moves the compiled seed and forgets them ships a default
+		 * outside the range it documents.  Read the RAW json, not the
+		 * loaded struct: load_fpv() clamps into range, so a stale -25
+		 * loads as -20 and a comparison against the seed passes while
+		 * the shipped file is still wrong.  Mutation-checked -- against
+		 * the loaded value, seeding -25 into either file produced no
+		 * failure here at all. */
+		static const char *const shipped[] = {
+			"config/waybeam.default.json",
+			"config/waybeam.default.maruko.json",
+		};
+		size_t si;
+
+		for (si = 0; si < sizeof(shipped) / sizeof(shipped[0]); si++) {
+			char name[96];
+			char *text = NULL;
+			cJSON *root, *fpv, *qp;
+			long len;
+			FILE *jf = fopen(shipped[si], "rb");
+
+			snprintf(name, sizeof(name), "shipped_open_%zu", si);
+			CHECK(name, jf != NULL);
+			if (!jf)
+				continue;
+			fseek(jf, 0, SEEK_END);
+			len = ftell(jf);
+			fseek(jf, 0, SEEK_SET);
+			if (len > 0 && (text = malloc((size_t)len + 1)) != NULL) {
+				size_t got = fread(text, 1, (size_t)len, jf);
+				text[got] = '\0';
+			}
+			fclose(jf);
+			snprintf(name, sizeof(name), "shipped_read_%zu", si);
+			CHECK(name, text != NULL);
+			if (!text)
+				continue;
+			root = cJSON_Parse(text);
+			free(text);
+			snprintf(name, sizeof(name), "shipped_parse_%zu", si);
+			CHECK(name, root != NULL);
+			if (!root)
+				continue;
+			fpv = cJSON_GetObjectItem(root, "fpv");
+			qp = fpv ? cJSON_GetObjectItem(fpv, "roiQp") : NULL;
+			snprintf(name, sizeof(name), "shipped_roi_qp_present_%zu",
+				si);
+			CHECK(name, qp != NULL && cJSON_IsNumber(qp));
+			snprintf(name, sizeof(name),
+				"shipped_roi_qp_matches_seed_%zu", si);
+			CHECK(name, qp != NULL && cJSON_IsNumber(qp) &&
+				(int)cJSON_GetNumberValue(qp) ==
+					seeded.fpv.roi_qp);
+			cJSON_Delete(root);
+		}
 	}
 	CHECK("sample_enabled", cfg.outgoing.enabled == false);
 	CHECK("sample_server", strcmp(cfg.outgoing.server, "") == 0);
