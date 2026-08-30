@@ -391,7 +391,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.76.0","backend":"star6e","contract_version":"0.25.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.77.0","backend":"star6e","contract_version":"0.26.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -1273,7 +1273,7 @@ Notes:
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `outgoing.enabled` | bool | live | Enable/disable streaming output |
-| `outgoing.server` | string | live | Destination URI (`udp://ip:port`, `unix://name`, `shm://name`, or `frame-shm://name`) |
+| `outgoing.server` | string | live | Destination URI (`udp://ip:port`, `unix://name`, `shm://name`, or `frame-shm://name`). Live on all three backends — **CV610 from 0.77.0**. Socket transports only: a live switch to or from `shm://`/`frame-shm://` is refused on every backend (the ring is created once at start), so on a ring-configured craft this field reads `live` and the write errors |
 | `outgoing.stream_mode` | string | restart | `"rtp"` or `"compact"` |
 | `outgoing.max_payload_size` | uint16 | restart | Max UDP payload bytes |
 | `outgoing.connected_udp` | bool | restart | Connect UDP socket (applies only to `udp://`) |

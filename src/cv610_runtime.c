@@ -28,6 +28,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -58,6 +59,40 @@ typedef struct {
 	socklen_t destination_len;
 	VencOutputUriType transport;
 	int connected_udp;
+	/* Live retarget, seqlock-protected.  The four transport fields above are
+	 * written by cv610_apply_server() on the httpd thread and read by the
+	 * drain loop on the producer thread, so a naive read can tear a
+	 * sockaddr mid-rewrite.  Odd generation = a write is in progress.
+	 *
+	 * The common case never churns the fd: output_socket_configure() reuses
+	 * the socket whenever the transport TYPE is unchanged, so a
+	 * udp://a -> udp://b retarget only rewrites destination/destination_len
+	 * (and possibly connect()s).  Only a udp <-> unix switch closes and
+	 * reopens, which is the same narrow window both SigmaStar backends
+	 * already live with. */
+	unsigned transport_gen;
+	/* Producer-thread snapshot, refreshed once per frame.  Same shape as
+	 * Maruko's output batch: take the seqlock once, then every datagram of
+	 * that frame sends from a stable copy. */
+	struct {
+		int socket_handle;
+		struct sockaddr_storage destination;
+		socklen_t destination_len;
+		int connected_udp;
+		int output_enabled;
+	} tx;
+	/* outgoing.enabled as ACTUALLY applied.  Gates both transports: a
+	 * disable has to stop the ring writes too, or the field would mean
+	 * "stop sending" on a udp:// craft and nothing at all on a frame-shm://
+	 * one. */
+	int output_enabled;
+	/* The destination this backend actually programmed.  Compared against
+	 * in cv610_apply_server() INSTEAD of the config: venc_api commits the
+	 * new value into g_cfg before dispatching the apply, so a vcfg
+	 * comparison reads equal even for a real change and would skip the
+	 * repoint -- device-verified on Star6E, where the socket stayed on the
+	 * startup destination while /api/v1/config advertised the new one. */
+	char applied_server[256];
 	OutputSocketQueue send_queue;
 	venc_frame_ring_t *frame_ring;
 	/* frame-shm ring low-water measurement.  Every frame-shm producer must
@@ -1122,6 +1157,143 @@ static int cv610_apply_roi_qp(int qp)
 	return ok ? 0 : -1;
 }
 
+/* Live destination change.  Socket transports only, matching both SigmaStar
+ * backends: the ring transports are created once at start and a live switch
+ * across that boundary would have to destroy a ring while a consumer is
+ * attached, so it is refused in both directions rather than half-supported.
+ *
+ * NOTE the consequence, which is inherited from Star6E rather than invented
+ * here: outgoing.server advertises `live` on every backend, so on a craft
+ * configured with frame-shm:// the field is live in the capability map and the
+ * write fails with the message below.  That is the existing fleet-wide
+ * behaviour; making CV610 differ would be the surprise. */
+static int cv610_apply_server(const char *uri)
+{
+	VencOutputUri parsed;
+
+	if (!g_cv610_runner || !uri)
+		return -1;
+	if (venc_config_parse_output_uri(uri, &parsed) != 0)
+		return -1;
+
+	/* Ring transports are RESTART-CLASS here, not refused.
+	 *
+	 * The ring is created once at start, so it genuinely cannot be switched
+	 * in place -- but refusing outright (which is what both SigmaStar
+	 * backends do) would REGRESS this backend.  Before outgoing.server
+	 * became live on CV610 it was restart-required, so writing
+	 * frame-shm://... persisted and took effect on the next boot; a hard
+	 * refusal would make the fleet's normal production transport
+	 * unreachable through the API, leaving hand-editing /etc/waybeam.json
+	 * as the only way to provision a craft.
+	 *
+	 * So: commit the value, ask for the respawn, and report it.  Returning
+	 * 0 is what keeps venc_api from rolling the config back;
+	 * venc_api_request_reinit() is what makes the new URI actually take
+	 * effect; and the live-set response carries reinit_pending so the
+	 * caller is told this one is not live. */
+	if (g_cv610_runner->frame_ring ||
+	    parsed.type == VENC_OUTPUT_URI_SHM ||
+	    parsed.type == VENC_OUTPUT_URI_FRAME_SHM) {
+		printf("> Destination %s requires a restart (ring transports are "
+			"created once); committed, respawning\n", uri);
+		venc_api_request_reinit();
+		return 0;
+	}
+
+	/* Compare the APPLIED destination, not the config -- see the
+	 * applied_server comment on the context.  An unchanged re-POST must
+	 * cost nothing: it is not a bootstrap event, and firing the
+	 * un-coalescible IDR on it would turn a no-op write into a keyframe at
+	 * the caller's request rate. */
+	if (g_cv610_runner->applied_server[0] &&
+	    strcmp(g_cv610_runner->applied_server, uri) == 0)
+		return 0;
+
+	__atomic_fetch_add(&g_cv610_runner->transport_gen, 1, __ATOMIC_RELEASE);
+	if (output_socket_configure(&g_cv610_runner->socket_handle,
+		&g_cv610_runner->destination, &g_cv610_runner->destination_len,
+		&g_cv610_runner->transport, &parsed,
+		g_cv610_runner->config.outgoing.connected_udp,
+		g_cv610_runner->config.outgoing.allow_unix_encoder_stall,
+		&g_cv610_runner->connected_udp) != 0) {
+		__atomic_fetch_add(&g_cv610_runner->transport_gen, 1,
+			__ATOMIC_RELEASE);
+		return -1;
+	}
+	(void)output_socket_capture_capacity(g_cv610_runner->socket_handle,
+		&g_cv610_runner->send_queue);
+	g_cv610_runner->output_uri = parsed;
+	__atomic_fetch_add(&g_cv610_runner->transport_gen, 1, __ATOMIC_RELEASE);
+
+	snprintf(g_cv610_runner->applied_server,
+		sizeof(g_cv610_runner->applied_server), "%s", uri);
+
+	/* Deliberately NOT fatal past this point, and the reason matters: the
+	 * socket has already moved.  Returning -1 sends venc_api into
+	 * rollback_live_groups(), which re-enters this same call -- and if that
+	 * also fails it commits the NEW outgoing.server while the socket sits
+	 * on the OLD one, leaving /api/v1/config advertising a destination venc
+	 * is not sending to.  Both SigmaStar backends made the same call. */
+	if (cv610_request_idr() != 0)
+		fprintf(stderr, "WARN: destination changed but the bootstrap IDR "
+			"request failed; the new receiver has no start point "
+			"until the next one\n");
+	printf("> Destination changed to %s\n", uri);
+	return 0;
+}
+
+/* Live output enable/disable.
+ *
+ * DIVERGENCE FROM STAR6E, deliberate: Star6E also drops the encoder to 5 fps
+ * while the output is off, to stop burning bitrate on frames nobody receives.
+ * CV610 cannot -- video0.fps is restart-only on this backend (it reprograms the
+ * MIPI raw_bit and the RTP clock), so there is no live rate to idle to.  This
+ * gates the send only; the encoder keeps running at its configured rate.
+ *
+ * Gates BOTH transports.  A disable that stopped udp:// but left the frame-shm
+ * ring writing would make the field mean two different things depending on how
+ * the craft happens to be configured. */
+static int cv610_apply_output_enabled(bool on)
+{
+	if (!g_cv610_runner)
+		return -1;
+
+	if (g_cv610_runner->output_enabled == (on ? 1 : 0))
+		return 0;
+
+	if (!on) {
+		__atomic_store_n(&g_cv610_runner->output_enabled, 0,
+			__ATOMIC_RELEASE);
+		printf("> Output disabled (encoder keeps running; video0.fps is "
+			"restart-only on this backend, so there is no idle rate "
+			"to drop to)\n");
+		return 0;
+	}
+
+	/* Enabling needs a transport.  A craft that booted with
+	 * outgoing.enabled=false never ran cv610_output_start()'s dispatch, so
+	 * socket_handle is -1 and the RTP session was never seeded -- enabling
+	 * without configuring would send from a closed fd with ssrc/seq 0. */
+	if (g_cv610_runner->socket_handle < 0 && !g_cv610_runner->frame_ring) {
+		if (!g_cv610_runner->config.outgoing.server[0]) {
+			fprintf(stderr, "> Cannot enable output: no server "
+				"configured\n");
+			return -1;
+		}
+		if (cv610_apply_server(g_cv610_runner->config.outgoing.server) != 0)
+			return -1;
+	}
+
+	__atomic_store_n(&g_cv610_runner->output_enabled, 1, __ATOMIC_RELEASE);
+	if (cv610_request_idr() != 0)
+		fprintf(stderr, "WARN: output enabled but the bootstrap IDR "
+			"request failed; the receiver has no start point until "
+			"the next one\n");
+	printf("> Output enabled\n");
+	return 0;
+}
+
 static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.apply_bitrate = cv610_apply_bitrate,
 	.apply_gop = cv610_apply_gop,
@@ -1136,6 +1308,8 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.apply_iq_param = cv610_iq_set,
 	.apply_qp_bounds = cv610_apply_qp_bounds,
 	.apply_roi_qp = cv610_apply_roi_qp,
+	.apply_server = cv610_apply_server,
+	.apply_output_enabled = cv610_apply_output_enabled,
 	/* Same shared implementation Star6E and Maruko register; it dispatches
 	 * to venc_jpeg_backend_set_quality() under the snapshot module lock, so
 	 * a live q change cannot interleave with a capture in progress. Without
@@ -1150,6 +1324,35 @@ static void cv610_signal_handler(int signo)
 	cv610_pipeline_request_stop();
 }
 
+/* Seqlock read of the transport state, once per frame on the producer thread.
+ * Retries while cv610_apply_server() holds an odd generation.  Mirrors the
+ * reader in maruko_output_begin_frame(); yields rather than spinning, because
+ * the writer is a short memcpy-class critical section on another thread and a
+ * spin here burns the frame budget on a single-core SoC. */
+static void cv610_transport_begin_frame(Cv610RunnerContext *ctx)
+{
+	unsigned gen_before, gen_after;
+
+	for (;;) {
+		gen_before = __atomic_load_n(&ctx->transport_gen,
+			__ATOMIC_ACQUIRE);
+		if (gen_before & 1u) {
+			sched_yield();
+			continue;
+		}
+		ctx->tx.socket_handle = ctx->socket_handle;
+		ctx->tx.destination = ctx->destination;
+		ctx->tx.destination_len = ctx->destination_len;
+		ctx->tx.connected_udp = ctx->connected_udp;
+		ctx->tx.output_enabled =
+			__atomic_load_n(&ctx->output_enabled, __ATOMIC_ACQUIRE);
+		gen_after = __atomic_load_n(&ctx->transport_gen,
+			__ATOMIC_ACQUIRE);
+		if (gen_before == gen_after)
+			break;
+	}
+}
+
 static int cv610_output_write(const uint8_t *header, size_t header_len,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len, void *opaque)
@@ -1157,8 +1360,13 @@ static int cv610_output_write(const uint8_t *header, size_t header_len,
 	Cv610RunnerContext *ctx = opaque;
 	int ret;
 
-	ret = output_socket_send_parts(ctx->socket_handle, &ctx->destination,
-		ctx->destination_len, ctx->connected_udp, header, header_len,
+	/* From the per-frame snapshot, never the live fields: every datagram of
+	 * one frame must go to the same destination, or a retarget landing
+	 * mid-frame splits an access unit across two receivers and neither can
+	 * decode it. */
+	ret = output_socket_send_parts(ctx->tx.socket_handle,
+		&ctx->tx.destination,
+		ctx->tx.destination_len, ctx->tx.connected_udp, header, header_len,
 		payload1, payload1_len, payload2, payload2_len);
 	if (ret != 0) {
 		__atomic_add_fetch(&ctx->output_drops, 1, __ATOMIC_RELAXED);
@@ -1682,6 +1890,7 @@ static int cv610_output_start(Cv610RunnerContext *ctx)
 		fprintf(stderr, "WARNING: CV610 sidecar disabled (port %u)\n",
 			(unsigned)ctx->config.outgoing.sidecar_port);
 
+	ctx->output_enabled = ctx->config.outgoing.enabled ? 1 : 0;
 	if (!ctx->config.outgoing.enabled)
 		return 0;
 
@@ -1719,6 +1928,11 @@ static int cv610_output_start(Cv610RunnerContext *ctx)
 		&ctx->connected_udp) != 0)
 		return -1;
 	(void)output_socket_capture_capacity(ctx->socket_handle, &ctx->send_queue);
+	/* Seed the applied-destination record so the first live retarget has
+	 * something to compare against.  No seqlock here: the drain loop has
+	 * not started yet. */
+	snprintf(ctx->applied_server, sizeof(ctx->applied_server), "%s",
+		ctx->config.outgoing.server);
 	/* The RTP session was seeded above, for every transport; re-seeding here
 	 * would re-randomise ssrc/seq/timestamp behind any reader added between
 	 * the two points. */
@@ -2131,7 +2345,15 @@ static int cv610_run(void *opaque)
 				}
 			}
 
-			if (ctx->frame_ring) {
+			/* One seqlock read per frame, before either transport is
+			 * touched, so every datagram of this access unit uses
+			 * the same destination and one enable state. */
+			cv610_transport_begin_frame(ctx);
+
+			if (!ctx->tx.output_enabled) {
+				/* outgoing.enabled=false: encoder keeps running,
+				 * nothing leaves the box. */
+			} else if (ctx->frame_ring) {
 				VencFrameMeta meta;
 				int write_ret;
 
@@ -2160,7 +2382,7 @@ static int cv610_run(void *opaque)
 					&sc_fill) == 0)
 					sc_fillp = &sc_fill;
 				cv610_service_ring_low_water(ctx, sc_fillp);
-			} else if (ctx->socket_handle >= 0) {
+			} else if (ctx->tx.socket_handle >= 0) {
 				/* cv610_output_write owns per-datagram drop accounting. */
 				(void)cv610_send_rtp_frame(ctx, frame, frame_len);
 			}
