@@ -858,6 +858,27 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"system.web_port", "system.verbose",
 			"sensor.index", "sensor.mode",
 			"isp.keep_aspect",
+			/* Applied at the SENSOR by apply_sensor_orientation(),
+			 * through the plugin's pfn_mirror_flip — the same place
+			 * both SigmaStar backends apply orientation, so image.*
+			 * means one thing across the fleet.  Both are already
+			 * MUT_RESTART in the shared table, so no
+			 * cv610_field_is_restart_only() entry and no mutability
+			 * widening.
+			 *
+			 * image.rotate is deliberately ABSENT, though the pair it
+			 * decomposes into is here.  The decomposition lives in
+			 * venc_config's load_image(), which runs on a FILE parse
+			 * and nowhere else, so it never sees a value that arrives
+			 * through /api/v1/set.  Listing it would turn today's
+			 * clean 501 into: accept 90, persist 90, raise
+			 * reinit_pending, restart the encoder, and read back 0
+			 * once load_image() coerces it — measured on .181.  A
+			 * config file carrying rotate:180 still works, because
+			 * load_image() decomposes it before the backend reads
+			 * mirror/flip; the field reads unsupported because no
+			 * backend reads ROTATE, which is what this list means. */
+			"image.mirror", "image.flip",
 			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size",
 			"video0.slice_count", "video0.resilience",

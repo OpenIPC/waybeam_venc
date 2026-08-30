@@ -309,7 +309,10 @@ omitted fields keep their compiled-in defaults.
   userspace cus3a; on Maruko `custom` additionally installs the no-op
   adaptor + supervisory thread for the CPU win), AE rate, gain
   ceiling, AWB mode, aspect-preserving crop.
-- **`image`** — mirror / flip / rotate.
+- **`image`** — mirror / flip / rotate. mirror and flip are applied at the
+  sensor on all three backends. `rotate` is file-level sugar: `load_image()`
+  turns `180` into mirror + flip and anything else into 0, on a config parse
+  only — it is not reachable through `/api/v1/set`.
 - **`video0`** — rate control, fps, resolution, bitrate, GOP,
   per-section QP delta. Video codec is hardcoded H.265 (HEVC).
   Scene-change-triggered IDR (`sceneThreshold`,
@@ -388,7 +391,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.74.0","backend":"star6e","contract_version":"0.23.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.75.0","backend":"star6e","contract_version":"0.24.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -633,9 +636,9 @@ load cleanly; the keys are silently ignored.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `image.mirror` | bool | restart | Horizontal mirror. Applied at the sensor (`MI_SNR_SetOrien`) once at bring-up. Star6E + Maruko. |
-| `image.flip` | bool | restart | Vertical flip. Applied at the sensor (`MI_SNR_SetOrien`) once at bring-up. Star6E + Maruko. |
-| `image.rotate` | int | restart | Rotation (0, 90, 180, 270) |
+| `image.mirror` | bool | restart | Horizontal mirror. Applied at the sensor once at bring-up — `MI_SNR_SetOrien` on Star6E/Maruko, the sensor plugin's `pfn_mirror_flip` on CV610. All three backends **from 0.75.0**. |
+| `image.flip` | bool | restart | Vertical flip. Applied at the sensor once at bring-up — `MI_SNR_SetOrien` on Star6E/Maruko, the sensor plugin's `pfn_mirror_flip` on CV610. All three backends **from 0.75.0**. |
+| `image.rotate` | int | restart | `180` or `0`. File-level sugar only: `load_image()` turns `180` into `mirror`+`flip` and **anything else into `0`**, on a config parse. Not reachable through `/api/v1/set` — `supported:false` on CV610 for that reason. Star6E + Maruko report it supported because they have no per-backend allowlist. |
 
 #### Video
 

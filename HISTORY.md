@@ -1,5 +1,71 @@
 # History
 
+## [0.75.0] - 2026-08-30
+
+Sensor orientation reaches CV610. `contract_version` 0.23.0 -> **0.24.0**
+(additive; two per-backend `supported` flags change).
+
+- **`image.mirror` / `image.flip` were hardcoded `TD_FALSE`** on the CV610 VI
+  channel attribute (`src/cv610_pipeline.c`), and absent from the backend's
+  advertised field list. An inverted lens mount had no software fix on that
+  board: a config file could carry the values and the picture never moved,
+  while `/api/v1/set` answered `501 not_implemented`.
+
+  They are now applied at the **sensor**, through the plugin vtable's
+  `pfn_mirror_flip`, which is where both SigmaStar backends already apply
+  orientation (`MI_SNR_SetOrien`). Same place, same meaning, so a shared craft
+  config reads the same on all three boards and the encoder is never asked to
+  do geometry. The VI channel attribute stays `TD_FALSE` and now says why.
+
+- **The Bayer start phase does NOT move on IMX662, and that is measured.** The
+  sensor driver carries a "flipping changes the Bayer start phase — VERIFY on
+  hardware" note, and the textbook answer is one XOR per axis into
+  `ot_isp_bayer_format`. On this sensor it is wrong: the reverse shifts the
+  readout window with the direction, so the phase the ISP sees is unchanged.
+  Bench A/B with `mirror` on, same scene, same binary but for that one line —
+  with the XOR, mean RGB went 106/98/141 -> **163/33/195**, green collapsing
+  because the ISP was demosaicing green sites as red and blue; without it,
+  105/96/145, which is the unmirrored frame's colour. Geometry was right in
+  both arms, so the failure presents as a white-balance fault rather than an
+  orientation one. All three reachable states were then checked for colour on
+  the shipped path — mirror 106/97/144, flip 106/97/145, rotate-180
+  106/97/144, against a 106/98/141 baseline — so the result is not generalised
+  from the mirror arm alone. The driver's VERIFY note can now be closed.
+
+- Orientation is programmed immediately after `isp_setup()`, and the gate is
+  narrower than "once streaming": the plugin's i2c file descriptor is opened by
+  `imx662_init()` as `pfn_cmos_sns_init` from inside `ss_mpi_isp_init()`,
+  synchronously on the calling thread. Before that the driver's writes return
+  `TD_SUCCESS` against a closed fd and do nothing. Deliberately **before** the
+  ISP thread starts: applied after, the first frames and the first AE/AWB
+  statistics are gathered in the old orientation and the readout then flips
+  under a converging 3A loop.
+
+- It is written **unconditionally, including the disable**, matching
+  `MI_SNR_SetOrien` on both SigmaStar backends and the rule `vpss_setup()`
+  already states about the crop — an external sensor chip holds whatever it was
+  last given, more stubbornly than any MPP group. The SoC's MIPI reset happens
+  to clear `0x3020`/`0x3021` on this board, but that is board wiring, not a
+  property of the sensor.
+
+- The log says **"requested"**, not "ok". `pfn_mirror_flip` returns `td_void`,
+  the driver casts both register writes to `(td_void)`, and
+  `imx662_write_register()` returns `TD_SUCCESS` even against a closed i2c fd —
+  there is no success to report at any of the three layers. Claiming one would
+  reproduce the exact failure this change exists to abolish: an orientation that
+  silently did nothing, with a log line asserting otherwise.
+
+- **`image.rotate` stays unsupported on CV610**, and the first draft of this
+  change had it the other way round. The decomposition it relies on —
+  `venc_config`'s `load_image()` turning `rotate: 180` into `mirror + flip` —
+  runs on a **file parse and nowhere else**, so a value arriving through
+  `/api/v1/set` is never decomposed and never read. Advertising it was measured
+  on `.181` to turn a clean `501` into: accept `90`, persist `90` to the config
+  file, raise `reinit_pending`, restart the encoder, then read back `0` once
+  `load_image()` coerces it — leaving the file and the running config
+  permanently disagreeing. A config file carrying `rotate: 180` still works;
+  the field reports unsupported because nothing reads *rotate*.
+
 ## [0.74.0] - 2026-08-30
 
 The RTP sidecar reaches CV610. `contract_version` 0.22.0 -> **0.23.0**

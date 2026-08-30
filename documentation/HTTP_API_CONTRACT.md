@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.23.0`
+- `contract_version`: `0.24.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -33,6 +33,8 @@
 | `video0.minQp` / `maxQp` | true | true | true |
 | `video0.intraRefreshQp` | **false** | **false** | true |
 | `outgoing.sidecarPort` | true | true | true (**from 0.74.0**) |
+| `image.mirror` / `image.flip` | true | true | true (**from 0.75.0**) |
+| `image.rotate` | true | true | **false** |
 
 `video0.qpDelta` is `false` on CV610 and `video0.intraRefreshQp` is `false` on
 the SigmaStar backends because in each case the encoder accepts the value and
@@ -97,8 +99,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.74.0",
-    "contract_version": "0.23.0",
+    "app_version": "0.75.0",
+    "contract_version": "0.24.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1859,7 +1861,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.23.0`:
+in Notes. As of `contract_version: 0.24.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1885,6 +1887,24 @@ in Notes. As of `contract_version: 0.23.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.24.0` (additive — sensor orientation reaches CV610): `image.mirror` and
+    `image.flip` flip from `supported:false` to `true` on CV610. Both were
+    hardcoded `TD_FALSE` on the VI channel attribute, so an inverted lens mount
+    had no software fix on that board. They are now applied at the **sensor**,
+    through the plugin's `pfn_mirror_flip`, which is where both SigmaStar
+    backends already apply orientation (`MI_SNR_SetOrien`) — so `image.*` means
+    one thing across the fleet and the encoder is never asked to do geometry.
+    Mutability is unchanged (`restart_required` on all three; the sensor is
+    programmed once at bring-up). `image.rotate` does **not** flip and stays
+    `supported:false` on CV610: the decomposition it relies on —
+    `venc_config`'s `load_image()` turning `rotate: 180` into `mirror + flip` —
+    runs on a **file parse and nowhere else**, so a value arriving through
+    `/api/v1/set` is never decomposed and never read by any backend.
+    Advertising it was measured to turn a clean `501` into: accept `90`,
+    persist `90`, raise `reinit_pending`, restart the encoder, then read back
+    `0`. A config file carrying `rotate: 180` still works on all three
+    backends. The SigmaStar backends report it `true` only because they have no
+    per-backend allowlist.
 - `0.23.0` (additive — the RTP sidecar reaches CV610): `outgoing.sidecarPort`
     flips from `supported:false` to `true` on CV610. `src/rtp_sidecar.c` was
     never compiled into that binary, so the field was accepted, validated and

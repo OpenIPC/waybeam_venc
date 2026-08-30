@@ -544,6 +544,33 @@ static int test_field_support_by_backend(void)
 	CHECK("sidecar port supported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"outgoing.sidecar_port") == 1);
+	/* Sensor orientation reaches CV610 through the plugin's
+	 * pfn_mirror_flip, the same place the SigmaStar backends apply it.
+	 * Checked on all three so the entry lands in CV610's allowlist rather
+	 * than the shared gate. */
+	CHECK("image mirror supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"image.mirror") == 1);
+	CHECK("image flip supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"image.flip") == 1);
+	CHECK("image mirror supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"image.mirror") == 1);
+	CHECK("image flip supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"image.flip") == 1);
+	/* image.rotate stays UNSUPPORTED on cv610 even though the pair it
+	 * decomposes into is now supported.  The decomposition runs in
+	 * venc_config's load_image(), on a file parse only, so a value that
+	 * arrives through /api/v1/set is never decomposed and never read by
+	 * any backend — advertising it would accept 90, persist it, raise
+	 * reinit_pending and read back 0.  A config file with rotate:180
+	 * still works; the field is unsupported because nothing reads ROTATE.
+	 * Device-measured on .181 before this was reverted. */
+	CHECK("image rotate unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"image.rotate") == 0);
 	/* Recording and snapshot arrived on CV610 in mirror mode: the main
 	 * channel's access unit is teed to file, and the JPEG channel is a
 	 * second bind target on the main stream's VPSS output. */
@@ -614,6 +641,28 @@ static int test_cv610_restart_only_mutability(void)
 	CHECK("cv610 live fps cfg untouched", cfg.video0.fps == 100);
 	CHECK("cv610 live fps not applied",
 		g_api_cb_state.apply_fps_calls == 0);
+
+	/* image.mirror is newly SUPPORTED on cv610 but still restart-required:
+	 * the sensor is programmed once at bring-up, so there is no live apply
+	 * callback behind it.  Advertising `supported` without this check is
+	 * exactly how a dashboard ends up offering a control that 501s. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	cfg.image.mirror = false;
+	CHECK("cv610 live mirror handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"image.mirror=true", &status, response,
+			sizeof(response)) == 0);
+	CHECK("cv610 live mirror rejected", status == 400);
+	CHECK("cv610 live mirror cfg untouched", cfg.image.mirror == false);
+	/* Same on star6e — this one is not a backend gate but the shared
+	 * table's mutability, so both must reject. */
+	venc_config_defaults(&cfg);
+	CHECK("star6e live mirror handled",
+		apply_query_http_path(&cfg, "star6e", &cb, "/api/v1/live/set",
+			"image.mirror=true", &status, response,
+			sizeof(response)) == 0);
+	CHECK("star6e live mirror rejected", status == 400);
 
 	/* Control 1: the same field on star6e is still a live apply, so the
 	 * rejection above is the backend gate and not a blanket fps block. */
