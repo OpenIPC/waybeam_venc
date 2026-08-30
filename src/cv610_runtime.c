@@ -808,13 +808,23 @@ static int cv610_collect_transport(Cv610RunnerContext *ctx,
 		out->packets_sent = __atomic_load_n(&ctx->packets_sent,
 			__ATOMIC_RELAXED);
 	}
-	/* Report the latched flag rather than recomputing fill >= high-water:
+	/* Sample-point divergence, deliberate and worth knowing: this backend
+	 * reads the ring fill AFTER writing the current frame, while Star6E
+	 * observes before its send.  On an 8-slot ring that is a systematic one
+	 * slot (12.5 percentage points) of extra occupancy in fill_pct.  Moving
+	 * it would also move the low-water window, which is pre-existing
+	 * behaviour outside this change's scope; recorded here so a consumer
+	 * comparing fill_pct across craft types is not surprised.
+	 *
+	 * Report the latched flag rather than recomputing fill >= high-water:
 	 * the header defines this field as the hysteresis flag, and a bare
 	 * threshold would make an operator's HTTP reading and a probe's wire
 	 * reading disagree with the SigmaStar backends for identical ring
 	 * behaviour.  The producer thread does the observing. */
-	out->in_pressure = out->active && ctx->pressure_state;
-	out->pressure_frames = ctx->pressure_frames;
+	out->in_pressure = out->active &&
+		__atomic_load_n(&ctx->pressure_state, __ATOMIC_RELAXED);
+	out->pressure_frames = __atomic_load_n(&ctx->pressure_frames,
+		__ATOMIC_RELAXED);
 	return 0;
 }
 
@@ -1544,13 +1554,9 @@ static int cv610_output_start(Cv610RunnerContext *ctx)
 		&ctx->connected_udp) != 0)
 		return -1;
 	(void)output_socket_capture_capacity(ctx->socket_handle, &ctx->send_queue);
-	rtp_session_init(&session, rtp_session_payload_type(PT_H265),
-		ctx->pipeline.fps);
-	ctx->rtp.seq = session.seq;
-	ctx->rtp.timestamp = session.timestamp;
-	ctx->rtp.ssrc = session.ssrc;
-	ctx->rtp.payload_type = session.payload_type;
-	ctx->frame_ticks = session.frame_ticks;
+	/* The RTP session was seeded above, for every transport; re-seeding here
+	 * would re-randomise ssrc/seq/timestamp behind any reader added between
+	 * the two points. */
 	return 0;
 }
 
@@ -1861,6 +1867,8 @@ static int cv610_run(void *opaque)
 			venc_frame_ring_fill_t sc_fill;
 			const venc_frame_ring_fill_t *sc_fillp = NULL;
 			int sc_send;
+			Cv610TransportSample sc_ts;
+			int sc_have_ts = 0;
 			uint32_t sc_rtp_ts = 0;
 			uint16_t sc_seq_before = 0;
 			uint64_t sc_capture_us = 0;
@@ -1979,18 +1987,33 @@ static int cv610_run(void *opaque)
 			 * and the flag's 75/50 hysteresis needs to see every
 			 * sample to release correctly.  Same shared helper the
 			 * SigmaStar backends use, so the wire means one thing. */
-			{
-				Cv610TransportSample pts_ts;
+			if (cv610_collect_transport(ctx, sc_fillp, &sc_ts) == 0 &&
+				sc_ts.active) {
+				int p_state = __atomic_load_n(&ctx->pressure_state,
+					__ATOMIC_RELAXED);
+				uint32_t p_frames = __atomic_load_n(
+					&ctx->pressure_frames, __ATOMIC_RELAXED);
 
-				if (cv610_collect_transport(ctx, sc_fillp, &pts_ts) == 0 &&
-					pts_ts.active)
-					venc_observe_pressure(pts_ts.fill_pct,
-						&ctx->pressure_state,
-						&ctx->pressure_frames);
+				venc_observe_pressure(sc_ts.fill_pct, &p_state,
+					&p_frames);
+				/* Single writer (this thread); relaxed is enough, and
+				 * it is what Star6E publishes this state with. */
+				__atomic_store_n(&ctx->pressure_state, p_state,
+					__ATOMIC_RELAXED);
+				__atomic_store_n(&ctx->pressure_frames, p_frames,
+					__ATOMIC_RELAXED);
+				/* Fold this frame's observation back into the sample
+				 * the trailer will use, so fill_pct, in_pressure and
+				 * the counter all describe ONE observation.  Sampling
+				 * twice let a trailer carry fill_pct=10 beside
+				 * in_pressure=1 on the socket transports, where each
+				 * call is its own SIOCOUTQ. */
+				sc_ts.in_pressure = p_state;
+				sc_ts.pressure_frames = p_frames;
+				sc_have_ts = 1;
 			}
 
 			if (sc_send) {
-				Cv610TransportSample ts;
 				RtpSidecarEncInfo enc;
 				RtpSidecarTransportInfo tinfo;
 				const RtpSidecarTransportInfo *tinfo_ptr = NULL;
@@ -2018,19 +2041,20 @@ static int cv610_run(void *opaque)
 					? 255u : (uint8_t)stream.h265_info.start_qp;
 				enc.frames_since_idr = ctx->frames_since_idr;
 
-				if (cv610_collect_transport(ctx, sc_fillp, &ts) == 0 &&
-					ts.active) {
+				if (sc_have_ts) {
+					const Cv610TransportSample *ts = &sc_ts;
+
 					memset(&tinfo, 0, sizeof(tinfo));
-					tinfo.fill_pct = ts.fill_pct;
-					tinfo.in_pressure = ts.in_pressure ? 1 : 0;
-					tinfo.transport_drops = (uint32_t)ts.transport_drops;
+					tinfo.fill_pct = ts->fill_pct;
+					tinfo.in_pressure = ts->in_pressure ? 1 : 0;
+					tinfo.transport_drops = (uint32_t)ts->transport_drops;
 					/* Despite the name this is "frames observed in
 					 * pressure" on every backend — see venc_ring.h;
 					 * the wire name is kept for ABI stability across
 					 * the v0.9.2 frame-skip rollback and no backend
 					 * has ever dropped for pressure. */
-					tinfo.pressure_drops = ts.pressure_frames;
-					tinfo.packets_sent = (uint32_t)ts.packets_sent;
+					tinfo.pressure_drops = ts->pressure_frames;
+					tinfo.packets_sent = (uint32_t)ts->packets_sent;
 					tinfo_ptr = &tinfo;
 				}
 
