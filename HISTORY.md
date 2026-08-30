@@ -1,5 +1,48 @@
 # History
 
+## [0.75.0] - 2026-08-30
+
+Sensor orientation reaches CV610. `contract_version` 0.23.0 -> **0.24.0**
+(additive; two per-backend `supported` flags change).
+
+- **`image.mirror` / `image.flip` were hardcoded `TD_FALSE`** on the CV610 VI
+  channel attribute (`src/cv610_pipeline.c`), and absent from the backend's
+  advertised field list. An inverted lens mount had no software fix on that
+  board — the fields were accepted and persisted, and the picture never moved.
+
+  They are now applied at the **sensor**, through the plugin vtable's
+  `pfn_mirror_flip`, which is where both SigmaStar backends already apply
+  orientation (`MI_SNR_SetOrien`). Same place, same meaning, so a shared craft
+  config reads the same on all three boards and the encoder is never asked to
+  do geometry. The VI channel attribute stays `TD_FALSE` and now says why.
+
+- **The Bayer start phase does NOT move on IMX662, and that is measured.** The
+  sensor driver carries a "flipping changes the Bayer start phase — VERIFY on
+  hardware" note, and the textbook answer is one XOR per axis into
+  `ot_isp_bayer_format`. On this sensor it is wrong: the reverse shifts the
+  readout window with the direction, so the phase the ISP sees is unchanged.
+  Bench A/B, same scene, same binary but for that one line — with the XOR, mean
+  RGB went 106/98/141 -> **163/33/195**, green collapsing because the ISP was
+  demosaicing green sites as red and blue; without it, 105/96/145, which is the
+  unmirrored frame's colour. Geometry was right in both arms, so the failure
+  presents as a white-balance fault rather than an orientation one. The driver's
+  VERIFY note can now be closed.
+
+- Orientation is programmed after the ISP thread is up. The sensor's power-on
+  and per-mode register blocks run out of the plugin's own init and neither
+  touches `0x3020`/`0x3021`, so writing the reverse registers once the sensor
+  is streaming is both safe and the point at which the write is known to
+  survive. The call is non-fatal and logs when the vtable entry is missing —
+  an orientation that silently does nothing is indistinguishable from a
+  mis-mounted lens.
+
+- `image.rotate` becomes supported on CV610 at the same time, because it is not
+  a separate control: `venc_config`'s image parser turns `rotate: 180` into
+  `mirror + flip` and anything else back into `0`, before any backend sees the
+  struct. It was already advertised on the SigmaStar backends, so leaving it
+  `false` here would have meant a craft that honours `rotate` while reporting it
+  unsupported.
+
 ## [0.74.0] - 2026-08-30
 
 The RTP sidecar reaches CV610. `contract_version` 0.22.0 -> **0.23.0**

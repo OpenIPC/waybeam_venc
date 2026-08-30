@@ -93,6 +93,8 @@ typedef struct {
 	unsigned int out_height;
 	int          keep_aspect;  /* isp.keepAspect: crop before scaling */
 	int          vi_online;    /* VI -> ISP online/realtime mode */
+	int          mirror;       /* image.mirror: sensor H reverse */
+	int          flip;         /* image.flip:   sensor V reverse */
 } Cv610PipelineRuntimeConfig;
 
 static volatile sig_atomic_t g_stop;
@@ -427,6 +429,11 @@ static int vi_start_chn(const Cv610PipelineRuntimeConfig *c)
 	chn_attr.dynamic_range = OT_DYNAMIC_RANGE_SDR8;
 	chn_attr.video_format  = OT_VIDEO_FORMAT_LINEAR;
 	chn_attr.compress_mode = OT_COMPRESS_MODE_NONE;
+	/* Orientation is applied at the sensor, not here — same call the
+	 * SigmaStar backends make, and for the same reason: the VI/VPE digital
+	 * path costs bandwidth and behaves inconsistently across sensor combos,
+	 * while the sensor's own H/V reverse is free.  See
+	 * apply_sensor_orientation(). */
 	chn_attr.mirror_en     = TD_FALSE;
 	chn_attr.flip_en       = TD_FALSE;
 	chn_attr.depth         = 0;
@@ -490,6 +497,21 @@ static int isp_setup(const Cv610PipelineRuntimeConfig *c)
 	pub.sns_size.width  = c->width;
 	pub.sns_size.height = c->height;
 	pub.frame_rate      = c->fps;
+	/* Unchanged by mirror/flip, and that is a measured result rather than
+	 * an assumption.  The sensor driver carries a "flipping changes the
+	 * Bayer start phase -- VERIFY on hardware" note, and the textbook
+	 * answer is one XOR per axis into this enum (it is ordered
+	 * (row_phase << 1 | col_phase): RGGB 0, GRBG 1, GBRG 2, BGGR 3).
+	 *
+	 * On IMX662 that is wrong: the reverse shifts the readout window with
+	 * the direction, so the phase the ISP sees does not move.  A/B on the
+	 * bench with mirror on, same scene, same binary but for this line —
+	 * with the XOR, mean RGB went 106/98/141 -> 163/33/195, green
+	 * collapsing because the ISP was demosaicing green sites as red and
+	 * blue; without it, 105/96/145, which is the unmirrored frame's colour.
+	 * Geometry was correct in both, so the failure looks like a white
+	 * balance fault rather than an orientation one -- exactly the trap the
+	 * driver comment warns about. */
 	pub.bayer_format    = (ot_isp_bayer_format)c->bayer;
 	pub.wdr_mode        = OT_WDR_MODE_NONE;
 	pub.sns_mode        = 0;
@@ -506,6 +528,44 @@ static int isp_setup(const Cv610PipelineRuntimeConfig *c)
 	CV610_CHECK(ss_mpi_isp_set_pub_attr(VI_PIPE, &pub));
 	CV610_CHECK(ss_mpi_isp_init(VI_PIPE));
 	return 0;
+}
+
+/* Program the sensor's H/V reverse through the plugin vtable.
+ *
+ * Deliberately after the ISP thread is up: the sensor's power-on and per-mode
+ * register blocks run out of the plugin's own init, and neither of them
+ * touches 0x3020/0x3021, so writing the reverse registers once the sensor is
+ * streaming is both safe and the only point at which the write is known to
+ * survive.
+ *
+ * Non-fatal, and it logs on both the missing-vtable-entry and the
+ * nothing-to-do paths, because an orientation that silently does nothing is
+ * indistinguishable from a mis-mounted lens. */
+static void apply_sensor_orientation(const Cv610PipelineRuntimeConfig *c)
+{
+	ot_isp_sns_mirrorflip_type type;
+
+	if (!c->mirror && !c->flip)
+		return;
+
+	if (g_sns_obj == NULL || g_sns_obj->pfn_mirror_flip == NULL) {
+		fprintf(stderr,
+			"[pipeline] WARNING: image.mirror/flip requested but the "
+			"sensor plugin exposes no pfn_mirror_flip — orientation "
+			"NOT applied\n");
+		return;
+	}
+
+	if (c->mirror && c->flip)
+		type = ISP_SNS_MIRROR_FLIP;
+	else if (c->mirror)
+		type = ISP_SNS_MIRROR;
+	else
+		type = ISP_SNS_FLIP;
+
+	g_sns_obj->pfn_mirror_flip(VI_PIPE, type);
+	printf("  ok  sensor orientation: mirror=%d flip=%d\n",
+		c->mirror ? 1 : 0, c->flip ? 1 : 0);
 }
 
 static int configure_output_color(void)
@@ -733,6 +793,8 @@ int cv610_pipeline_start(const Cv610PipelineConfig *config)
 	c.out_height = config->out_height;
 	c.keep_aspect = config->keep_aspect;
 	c.vi_online = config->vi_online;
+	c.mirror = config->mirror ? 1 : 0;
+	c.flip = config->flip ? 1 : 0;
 	g_stop = 0;
 
 	printf("== cv610 sys/vb ==\n");
@@ -764,6 +826,7 @@ int cv610_pipeline_start(const Cv610PipelineConfig *config)
 	if (enable_sensor_ccm() != 0) {
 		return -1;
 	}
+	apply_sensor_orientation(&c);
 	return 0;
 }
 

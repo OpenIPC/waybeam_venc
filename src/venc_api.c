@@ -858,6 +858,17 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"system.web_port", "system.verbose",
 			"sensor.index", "sensor.mode",
 			"isp.keep_aspect",
+			/* Applied at the SENSOR by apply_sensor_orientation(),
+			 * through the plugin's pfn_mirror_flip — the same place
+			 * both SigmaStar backends apply orientation, so image.*
+			 * means one thing across the fleet.  image.rotate is
+			 * listed with them because it is not a separate control:
+			 * venc_config's image parser turns rotate=180 into
+			 * mirror+flip before any backend sees it, and anything
+			 * else back into 0.  All three are already MUT_RESTART in
+			 * the shared table, so no cv610_field_is_restart_only()
+			 * entry and no mutability widening. */
+			"image.mirror", "image.flip", "image.rotate",
 			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size",
 			"video0.slice_count", "video0.resilience",

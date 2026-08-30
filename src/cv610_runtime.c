@@ -1620,6 +1620,8 @@ static int cv610_prepare(void *opaque)
 	ctx->pipeline.lanes = 4;
 	ctx->pipeline.data_rate_x2 = 0;
 	ctx->pipeline.bayer = 0;
+	ctx->pipeline.mirror = cfg->image.mirror ? 1 : 0;
+	ctx->pipeline.flip = cfg->image.flip ? 1 : 0;
 	ctx->pipeline.raw_bit = (int)mode->raw_bit;
 	ctx->pipeline.sensor_clock_hz = mode->sensor_clock_hz;
 	/* Match the standalone streamer's production graph. The CV610 module
