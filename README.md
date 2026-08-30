@@ -391,7 +391,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.79.0","backend":"star6e","contract_version":"0.28.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.80.0","backend":"star6e","contract_version":"0.28.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -1339,7 +1339,7 @@ audio track). Settable via the config file or the runtime API
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `fpv.roi_enabled` | bool | live | Enable horizontal ROI bands. Ships **off**, paired with a non-zero `roi_qp`, so switching it on has an effect |
-| `fpv.roi_qp` | int | live | Signed ROI delta QP (-20..20, negative = sharper center). **`0` clears every region regardless of `roi_enabled`** — a zero delta is not a region worth programming. Ships at `-20`. Range narrowed from `-30..30` **in 0.79.0**: past `±20` the delta exceeds the encoder's QP range, and a large negative value saturates rate control and overruns the bitrate target. All three backends **from 0.76.0** (CV610 had no implementation before it) |
+| `fpv.roi_qp` | int | live | Signed ROI delta QP (-20..20, negative = sharper center). **`0` clears every region regardless of `roi_enabled`** — a zero delta is not a region worth programming. Ships at `-20`. **The safe magnitude depends on `video0.maxQp`**: the delta is subtracted from the frame QP, so the controller raises the base QP ~1:1 to compensate and pins at the ceiling once `base + |roiQp|` passes it — at `maxQp 40`, even `-20` delivered 5.8x its target. `±20` is calibrated for the *default* ceiling. Range narrowed from `-30..30` **in 0.79.0**: past `±20` the delta exceeds the encoder's QP range, and a large negative value saturates rate control and overruns the bitrate target. All three backends **from 0.76.0** (CV610 had no implementation before it) |
 | `fpv.roi_steps` | uint16 | live | Number of horizontal bands (1-4) |
 | `fpv.roi_center` | double | live | Center band width ratio (0.1-0.9) |
 | `fpv.noise_level` | int | restart | 3DNR noise reduction level |

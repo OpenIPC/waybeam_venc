@@ -6,6 +6,7 @@
 #include "maruko_bindings.h"
 #include "maruko_config.h"
 #include "maruko_output.h"
+#include "pipeline_common.h"
 #include "scene_detector.h"
 #include "sensor_select.h"
 #include "star6e_recorder.h"
@@ -53,6 +54,7 @@ typedef struct {
   SensorSelectResult sensor;
   MarukoBackendConfig cfg;
   SceneDetector scene;
+  PipelineRateWatch rate_watch;
   struct DebugOsdState *debug_osd;  /* NULL if debug OSD disabled */
   ImuState *imu;                    /* NULL if IMU disabled or init failed */
   /* Dual VENC (gemini-style) — heap-allocated, NULL when inactive. */

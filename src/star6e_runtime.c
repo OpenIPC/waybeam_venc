@@ -415,6 +415,7 @@ typedef struct {
 	int httpd_started;
 	int pipeline_started;
 	SceneDetector scene;
+	PipelineRateWatch rate_watch;
 	/* Configured base size this pipeline started with — used at reinit to
 	 * detect a video0.size change (the only config field that crosses a
 	 * sensor-mode boundary), so the respawn can cold-init VIF/VPE. */
@@ -1581,6 +1582,8 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		scene_update(&ctx->scene, frame_size, is_idr,
 			star6e_scene_request_idr, &ps->venc_channel);
 		scene_fill_sidecar(&ctx->scene, &enc_info);
+		pipeline_common_rate_watch(&ctx->rate_watch, vcfg,
+			frame_size, wb_monotonic_us());
 
 		/* Observe pressure only when a sidecar probe is subscribed
 		 * — it is the only consumer of in_pressure / fill_pct / the

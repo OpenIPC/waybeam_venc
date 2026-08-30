@@ -300,6 +300,79 @@ static uint32_t roi_align_down(uint32_t value, uint32_t align)
 	return value / align * align;
 }
 
+/* Window long enough that one IDR cannot carry it, short enough that a real
+ * collapse is reported within a few seconds.  Two consecutive windows are
+ * required, which is what separates a sustained loss of control from the
+ * 1.43x single-window transient a moving scene produced on the bench. */
+#define RATE_WATCH_WINDOW_US    2000000ULL
+#define RATE_WATCH_TRIP_X100    150u
+#define RATE_WATCH_CLEAR_X100   120u
+#define RATE_WATCH_WINDOWS      2u
+
+void pipeline_common_rate_watch(PipelineRateWatch *rw, const VencConfig *cfg,
+	uint32_t frame_bytes, uint64_t now_us)
+{
+	uint64_t elapsed, delivered_kbps;
+	uint32_t ratio_x100;
+
+	if (!rw || !cfg || cfg->video0.bitrate == 0)
+		return;
+
+	if (rw->window_start_us == 0)
+		rw->window_start_us = now_us;
+	rw->window_bytes += frame_bytes;
+
+	/* Unsigned, so a clock that went backwards wraps huge rather than
+	 * negative; treat any implausible span as a restart of the window. */
+	elapsed = now_us - rw->window_start_us;
+	if (now_us < rw->window_start_us) {
+		rw->window_start_us = now_us;
+		rw->window_bytes = 0;
+		return;
+	}
+	if (elapsed < RATE_WATCH_WINDOW_US)
+		return;
+
+	/* bytes * 8 bits / (elapsed us / 1e6) / 1000 == bytes * 8000 / elapsed. */
+	delivered_kbps = (rw->window_bytes * 8000ULL) / elapsed;
+	ratio_x100 = (uint32_t)((delivered_kbps * 100ULL) / cfg->video0.bitrate);
+	rw->window_start_us = now_us;
+	rw->window_bytes = 0;
+
+	if (ratio_x100 >= RATE_WATCH_TRIP_X100) {
+		if (rw->over_windows < 255u)
+			rw->over_windows++;
+		if (rw->over_windows >= RATE_WATCH_WINDOWS && !rw->reported) {
+			rw->reported = 1;
+			if (rw->reports < UINT16_MAX)
+				rw->reports++;
+			fprintf(stderr,
+				"WARNING: encoder delivered %u%% of the %u kbps target "
+				"for %llu s -- rate control has no headroom left\n",
+				ratio_x100, cfg->video0.bitrate,
+				(unsigned long long)
+					((RATE_WATCH_WINDOW_US * RATE_WATCH_WINDOWS)
+						/ 1000000ULL));
+			if (cfg->fpv.roi_enabled && cfg->fpv.roi_qp != 0)
+				fprintf(stderr,
+					"         fpv.roiQp is %+d against a QP ceiling of "
+					"%s: the ROI delta is subtracted from the frame QP, "
+					"so the controller raises the base QP to compensate "
+					"and cannot go past that ceiling.  Reduce |roiQp| or "
+					"raise video0.maxQp.\n",
+					cfg->fpv.roi_qp,
+					cfg->video0.max_qp ? "video0.maxQp" :
+						"the encoder default");
+		}
+	} else if (ratio_x100 <= RATE_WATCH_CLEAR_X100) {
+		if (rw->reported)
+			printf("> Bitrate overrun cleared (%u%% of target)\n",
+				ratio_x100);
+		rw->over_windows = 0;
+		rw->reported = 0;
+	}
+}
+
 int pipeline_common_roi_band(uint32_t width, uint32_t height,
 	float center_frac, int qp, int steps, int index,
 	PipelineRoiBand *out)
