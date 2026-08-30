@@ -31,6 +31,20 @@ The RTP sidecar reaches CV610. `contract_version` 0.22.0 -> **0.23.0**
   and delivery count. ATTITUDE and DETECT are never appended — no IMU, no
   detector.
 
+- **`capture_us` is converted from the MPP timebase, not published raw.** The
+  sidecar contract says `capture_us` is CLOCK_MONOTONIC µs; the encoder's PTS
+  is on MPP's own clock, measured on `.181` running **~4.63 s ahead** of it.
+  Publishing the raw PTS put `capture_us` *after* `frame_ready_us` on every
+  frame, so the probe's encode-duration derivation went negative and printed
+  `-` — a field that looked populated and could not be trended.
+  `cv610_capture_us_from_pts()` samples `ss_mpi_sys_get_cur_pts()` against
+  `wb_monotonic_us()` once, lazily, on the first frame that needs it (MI_SYS
+  need not be up when the output starts) and applies the offset. While the
+  epoch is unknown it returns 0 — the contract's "not available" — rather than
+  a number on the wrong base. Device-verified on `.181`: ordering correct on
+  604/604 sampled frames, and capture-to-encode-complete resolves to a stable
+  **~24.3 ms at 720p100**.
+
 - **Under `frame-shm://` the RTP identifiers are 0.** `ssrc`, `rtp_timestamp`,
   `seq_first` and `seq_count` are zero for a non-RTP transport because
   `rtp_session_init()` is skipped there. This is pre-existing behaviour on

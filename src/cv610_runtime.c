@@ -39,6 +39,7 @@
 #include "ot_common.h"
 #include "ot_common_sys.h"
 #include "ot_common_venc.h"
+#include "ss_mpi_sys.h"
 #include "ss_mpi_sys_bind.h"
 #include "ss_mpi_venc.h"
 
@@ -73,6 +74,12 @@ typedef struct {
 	 * other CV610 resource: pipeline state here survives a respawn, so a
 	 * flag-guarded teardown leaves the port held by the dead process. */
 	RtpSidecarSender sidecar;
+	/* MPP PTS epoch -> CLOCK_MONOTONIC, sampled once (see
+	 * cv610_capture_us_from_pts).  The sidecar contract says capture_us is
+	 * CLOCK_MONOTONIC µs; the encoder's PTS is on the MPP timebase, which
+	 * on this SoC sits seconds away from it. */
+	int64_t pts_to_mono_us;
+	int pts_epoch_valid;
 	RtpPacketizerState rtp;
 	H26xParamSets param_sets;
 	DebugOsdState *debug_osd;
@@ -693,6 +700,36 @@ static void cv610_record_status_callback(VencRecordStatus *out)
 				ctx->config.record.format);
 		}
 	}
+}
+
+/* Convert an encoder PTS to the CLOCK_MONOTONIC µs the sidecar contract
+ * requires for capture_us.  MPP keeps its own timebase: measured on .181 it
+ * ran ~4.63 s ahead of CLOCK_MONOTONIC, so publishing the raw PTS put
+ * capture_us *after* frame_ready_us and made the encode-duration derivation
+ * come out negative — a field that looks populated and cannot be trended.
+ *
+ * The offset is sampled once, lazily, on the first frame that needs it: by
+ * then MI_SYS is up, which it need not be when the output is started.  Both
+ * clocks are read microseconds apart, which is noise against a seconds-scale
+ * offset.  Returns 0 — the contract's "not available" — while the epoch is
+ * unknown, rather than a number on the wrong base. */
+static uint64_t cv610_capture_us_from_pts(Cv610RunnerContext *ctx, uint64_t pts)
+{
+	int64_t mono_us;
+
+	if (pts == 0)
+		return 0;
+	if (!ctx->pts_epoch_valid) {
+		td_u64 cur_pts = 0;
+		uint64_t now_us = wb_monotonic_us();
+
+		if (ss_mpi_sys_get_cur_pts(&cur_pts) != TD_SUCCESS || cur_pts == 0)
+			return 0;
+		ctx->pts_to_mono_us = (int64_t)now_us - (int64_t)cur_pts;
+		ctx->pts_epoch_valid = 1;
+	}
+	mono_us = (int64_t)pts + ctx->pts_to_mono_us;
+	return mono_us > 0 ? (uint64_t)mono_us : 0;
 }
 
 /* One observation of whatever transport is carrying video, in the shape both
@@ -1834,7 +1871,9 @@ static int cv610_run(void *opaque)
 					sc_rtp_ts = ctx->rtp.timestamp;
 					sc_seq_before = ctx->rtp.seq;
 					sc_capture_us = stream.pack_cnt
-						? (uint64_t)stream.pack[0].pts : 0;
+						? cv610_capture_us_from_pts(ctx,
+							(uint64_t)stream.pack[0].pts)
+						: 0;
 					sc_ready_us = wb_monotonic_us();
 				}
 			}
