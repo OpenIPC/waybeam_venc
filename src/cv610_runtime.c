@@ -1192,23 +1192,35 @@ static int cv610_apply_server(const char *uri)
 	 * venc_api_request_reinit() is what makes the new URI actually take
 	 * effect; and the live-set response carries reinit_pending so the
 	 * caller is told this one is not live. */
+	/* The no-op guard comes FIRST, ahead of the ring branch below.  Compare
+	 * the APPLIED destination, not the config -- see the applied_server
+	 * comment on the context.  An unchanged re-POST must cost nothing: it is
+	 * not a bootstrap event, and firing the un-coalescible IDR on it would
+	 * turn a no-op write into a keyframe at the caller's request rate.
+	 *
+	 * Ordering is load-bearing, not tidiness.  With the ring branch first, a
+	 * craft already running frame-shm://venc_frame answered an identical
+	 * re-POST by latching a reinit and respawning -- so every idempotent
+	 * config re-apply from the ground cost a full pipeline restart and a
+	 * multi-second video outage.  Star6E compares before it refuses for the
+	 * same reason. */
+	if (g_cv610_runner->applied_server[0] &&
+	    strcmp(g_cv610_runner->applied_server, uri) == 0)
+		return 0;
+
 	if (g_cv610_runner->frame_ring ||
 	    parsed.type == VENC_OUTPUT_URI_SHM ||
 	    parsed.type == VENC_OUTPUT_URI_FRAME_SHM) {
 		printf("> Destination %s requires a restart (ring transports are "
 			"created once); committed, respawning\n", uri);
+		/* Record it as applied so the respawn window is idempotent too:
+		 * a second identical write before the drain loop acts must not
+		 * latch a second reinit. */
+		snprintf(g_cv610_runner->applied_server,
+			sizeof(g_cv610_runner->applied_server), "%s", uri);
 		venc_api_request_reinit();
 		return 0;
 	}
-
-	/* Compare the APPLIED destination, not the config -- see the
-	 * applied_server comment on the context.  An unchanged re-POST must
-	 * cost nothing: it is not a bootstrap event, and firing the
-	 * un-coalescible IDR on it would turn a no-op write into a keyframe at
-	 * the caller's request rate. */
-	if (g_cv610_runner->applied_server[0] &&
-	    strcmp(g_cv610_runner->applied_server, uri) == 0)
-		return 0;
 
 	__atomic_fetch_add(&g_cv610_runner->transport_gen, 1, __ATOMIC_RELEASE);
 	if (output_socket_configure(&g_cv610_runner->socket_handle,
@@ -1217,6 +1229,16 @@ static int cv610_apply_server(const char *uri)
 		g_cv610_runner->config.outgoing.connected_udp,
 		g_cv610_runner->config.outgoing.allow_unix_encoder_stall,
 		&g_cv610_runner->connected_udp) != 0) {
+		/* output_socket_configure() closes the socket when it fails
+		 * partway -- including on the fd-REUSE path, where a bad
+		 * destination (an unresolvable udp:// host; nothing validates
+		 * outgoing.server) closes a working fd and leaves
+		 * socket_handle -1.  Clear the applied record so the rollback
+		 * that venc_api runs next actually re-configures instead of
+		 * hitting the no-op guard above and returning 0 -- which left
+		 * the craft with a rolled-back config, an HTTP 500, and no
+		 * video at all until the process restarted. */
+		g_cv610_runner->applied_server[0] = '\0';
 		__atomic_fetch_add(&g_cv610_runner->transport_gen, 1,
 			__ATOMIC_RELEASE);
 		return -1;
@@ -1891,8 +1913,27 @@ static int cv610_output_start(Cv610RunnerContext *ctx)
 			(unsigned)ctx->config.outgoing.sidecar_port);
 
 	ctx->output_enabled = ctx->config.outgoing.enabled ? 1 : 0;
-	if (!ctx->config.outgoing.enabled)
+
+	/* Seed the RTP session BEFORE the outgoing.enabled bail, not after.
+	 * outgoing.enabled is live from 0.77.0, so a craft can boot disabled and
+	 * be enabled over HTTP -- and the context is calloc'd, so bailing first
+	 * left ssrc/seq/timestamp AND frame_ticks at 0.  Every packet then went
+	 * out with ssrc 0 and a timestamp that never advanced (timestamp +=
+	 * frame_ticks, with frame_ticks 0), which a depacketizer keying AU
+	 * boundaries on the timestamp cannot follow.  Star6E seeds
+	 * unconditionally at init and gates only the sends; this now matches. */
+	if (!ctx->config.outgoing.enabled) {
+		RtpSessionState idle;
+
+		rtp_session_init(&idle, rtp_session_payload_type(PT_H265),
+			ctx->pipeline.fps);
+		ctx->rtp.seq = idle.seq;
+		ctx->rtp.timestamp = idle.timestamp;
+		ctx->rtp.ssrc = idle.ssrc;
+		ctx->rtp.payload_type = idle.payload_type;
+		ctx->frame_ticks = idle.frame_ticks;
 		return 0;
+	}
 
 	/* Seed the RTP session for EVERY transport, not just the socket path.
 	 * The SigmaStar backends gate this on the *stream mode* (rtp vs
@@ -1912,6 +1953,16 @@ static int cv610_output_start(Cv610RunnerContext *ctx)
 	ctx->rtp.payload_type = session.payload_type;
 	ctx->frame_ticks = session.frame_ticks;
 
+	/* Seed the applied-destination record for EVERY transport, before the
+	 * dispatch below returns early on the ring paths.  Seeding it only on
+	 * the socket path left a frame-shm:// craft with an empty record, so the
+	 * no-op guard in cv610_apply_server() never matched and an identical
+	 * re-POST of the URI already running fell through to the restart branch
+	 * and respawned the craft -- measured on the bench.  No seqlock: the
+	 * drain loop has not started yet. */
+	snprintf(ctx->applied_server, sizeof(ctx->applied_server), "%s",
+		ctx->config.outgoing.server);
+
 	if (ctx->output_uri.type == VENC_OUTPUT_URI_FRAME_SHM) {
 		ctx->frame_ring = venc_frame_ring_create(ctx->output_uri.endpoint,
 			CV610_FRAME_RING_SLOTS, CV610_FRAME_RING_BYTES);
@@ -1928,11 +1979,6 @@ static int cv610_output_start(Cv610RunnerContext *ctx)
 		&ctx->connected_udp) != 0)
 		return -1;
 	(void)output_socket_capture_capacity(ctx->socket_handle, &ctx->send_queue);
-	/* Seed the applied-destination record so the first live retarget has
-	 * something to compare against.  No seqlock here: the drain loop has
-	 * not started yet. */
-	snprintf(ctx->applied_server, sizeof(ctx->applied_server), "%s",
-		ctx->config.outgoing.server);
 	/* The RTP session was seeded above, for every transport; re-seeding here
 	 * would re-randomise ssrc/seq/timestamp behind any reader added between
 	 * the two points. */
@@ -2294,6 +2340,8 @@ static int cv610_run(void *opaque)
 						(unsigned)ctx->trail_n_patched);
 				}
 			}
+			VencFrameMeta frame_meta;
+
 			is_idr = cv610_frame_is_idr(frame, frame_len);
 			/* Outside the sidecar gate on purpose: a counter that only
 			 * advances while a probe is subscribed would report the
@@ -2350,39 +2398,52 @@ static int cv610_run(void *opaque)
 			 * the same destination and one enable state. */
 			cv610_transport_begin_frame(ctx);
 
-			if (!ctx->tx.output_enabled) {
-				/* outgoing.enabled=false: encoder keeps running,
-				 * nothing leaves the box. */
-			} else if (ctx->frame_ring) {
-				VencFrameMeta meta;
-				int write_ret;
-
-				memset(&meta, 0, sizeof(meta));
-				meta.pts = stream.pack_cnt ? (uint32_t)stream.pack[0].pts : 0;
-				meta.codec = VENC_FRAME_CODEC_H265;
-				meta.flags = is_idr ? VENC_FRAME_FLAG_IDR : 0;
-				if (is_enhance)
-					meta.flags |= VENC_FRAME_FLAG_ENHANCE;
-				if (is_idr) {
+			/* GDR bookkeeping tracks the ENCODER's intra-refresh
+			 * phase, so it advances every frame regardless of whether
+			 * the frame is transmitted.  Skipping it while
+			 * outgoing.enabled=false desynced meta.gdr_pos from the
+			 * real wavefront for every frame after a re-enable, until
+			 * the next IDR happened to resync it -- and the link
+			 * consumer assigns slice importance from that position. */
+			memset(&frame_meta, 0, sizeof(frame_meta));
+			frame_meta.pts = stream.pack_cnt ?
+				(uint32_t)stream.pack[0].pts : 0;
+			frame_meta.codec = VENC_FRAME_CODEC_H265;
+			frame_meta.flags = is_idr ? VENC_FRAME_FLAG_IDR : 0;
+			if (is_enhance)
+				frame_meta.flags |= VENC_FRAME_FLAG_ENHANCE;
+			if (is_idr) {
+				ctx->gdr_counter = 0;
+			} else if (ctx->gdr_active && ctx->gdr_cycle_len > 0) {
+				frame_meta.flags |= VENC_FRAME_FLAG_GDR;
+				frame_meta.gdr_pos = ctx->gdr_counter;
+				frame_meta.gdr_len = ctx->gdr_cycle_len;
+				ctx->gdr_counter++;
+				if (ctx->gdr_counter >= ctx->gdr_cycle_len)
 					ctx->gdr_counter = 0;
-				} else if (ctx->gdr_active && ctx->gdr_cycle_len > 0) {
-					meta.flags |= VENC_FRAME_FLAG_GDR;
-					meta.gdr_pos = ctx->gdr_counter;
-					meta.gdr_len = ctx->gdr_cycle_len;
-					ctx->gdr_counter++;
-					if (ctx->gdr_counter >= ctx->gdr_cycle_len)
-						ctx->gdr_counter = 0;
+			}
+
+			if (ctx->frame_ring) {
+				/* The ring's low-water gauge is published
+				 * unconditionally, so it has to keep being
+				 * measured even while nothing is written --
+				 * otherwise it freezes at its last value and a
+				 * consumer cannot tell a stale reading from a
+				 * live one. */
+				if (ctx->tx.output_enabled) {
+					int write_ret = venc_frame_ring_write(
+						ctx->frame_ring, &frame_meta,
+						frame, (uint32_t)frame_len);
+					if (write_ret != 0)
+						__atomic_add_fetch(&ctx->output_drops,
+							1, __ATOMIC_RELAXED);
 				}
-				write_ret = venc_frame_ring_write(ctx->frame_ring, &meta,
-					frame, (uint32_t)frame_len);
-				if (write_ret != 0)
-					__atomic_add_fetch(&ctx->output_drops, 1,
-						__ATOMIC_RELAXED);
 				if (venc_frame_ring_get_fill(ctx->frame_ring,
 					&sc_fill) == 0)
 					sc_fillp = &sc_fill;
 				cv610_service_ring_low_water(ctx, sc_fillp);
-			} else if (ctx->tx.socket_handle >= 0) {
+			} else if (ctx->tx.output_enabled &&
+				ctx->tx.socket_handle >= 0) {
 				/* cv610_output_write owns per-datagram drop accounting. */
 				(void)cv610_send_rtp_frame(ctx, frame, frame_len);
 			}

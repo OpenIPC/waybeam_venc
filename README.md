@@ -1273,7 +1273,7 @@ Notes:
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `outgoing.enabled` | bool | live | Enable/disable streaming output |
-| `outgoing.server` | string | live | Destination URI (`udp://ip:port`, `unix://name`, `shm://name`, or `frame-shm://name`). Live on all three backends — **CV610 from 0.77.0**. Socket transports only: a live switch to or from `shm://`/`frame-shm://` is refused on every backend (the ring is created once at start), so on a ring-configured craft this field reads `live` and the write errors |
+| `outgoing.server` | string | live | Destination URI (`udp://ip:port`, `unix://name`, `shm://name`, or `frame-shm://name`). Live on all three backends — **CV610 from 0.77.0**. A `udp://` ↔ `unix://` change takes effect in place. The ring transports are created once at start and cannot move in place: Star6E and Maruko **refuse** such a write, while CV610 **commits it and respawns**, answering `200` with `reinit_pending` (it was restart-required there until 0.77.0, and refusing would have made `frame-shm://` unreachable through the API) |
 | `outgoing.stream_mode` | string | restart | `"rtp"` or `"compact"` |
 | `outgoing.max_payload_size` | uint16 | restart | Max UDP payload bytes |
 | `outgoing.connected_udp` | bool | restart | Connect UDP socket (applies only to `udp://`) |

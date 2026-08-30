@@ -813,6 +813,42 @@ static int test_cv610_restart_only_mutability(void)
 		strstr(response, "\"field\":") != NULL &&
 		strstr(response, "\"applied\":") == NULL);
 
+	/* The BATCH path must report a requested respawn too.  This had no test,
+	 * which is exactly how it shipped reporting nothing while the single
+	 * path had just been fixed to report it. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	venc_api_clear_reinit();
+	cb.apply_server = test_apply_server_needs_restart;
+	cb.apply_bitrate = test_apply_bitrate;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 batch restart-class handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=frame-shm://venc_frame&video0.bitrate=9000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("cv610 batch restart-class accepted", status == 200);
+	CHECK("cv610 batch is the batch form",
+		strstr(response, "\"applied\":") != NULL);
+	CHECK("cv610 batch reports reinit",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+
+	/* Control: a batch with no reinit-requesting apply must stay silent, or
+	 * the flag is noise on every multi-field write. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	venc_api_clear_reinit();
+	cb.apply_server = test_apply_server;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 batch live handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=udp://10.0.0.4:5600&video0.bitrate=9000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("cv610 batch live accepted", status == 200);
+	CHECK("cv610 batch live reports no reinit",
+		strstr(response, "reinit_pending") == NULL);
+
 	/* Control 1: the same field on star6e is still a live apply, so the
 	 * rejection above is the backend gate and not a blanket fps block. */
 	venc_config_defaults(&cfg);

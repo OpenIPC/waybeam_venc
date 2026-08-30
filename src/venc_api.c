@@ -1653,7 +1653,7 @@ static int make_single_set_success_json(const char *field_key,
 }
 
 static int make_multi_live_set_success_json(const SetQueryParam *params,
-	size_t count, char **out_json)
+	size_t count, int reinit_requested, char **out_json)
 {
 	cJSON *root;
 	cJSON *data;
@@ -1670,6 +1670,12 @@ static int make_multi_live_set_success_json(const SetQueryParam *params,
 
 	cJSON_AddBoolToObject(root, "ok", 1);
 	data = cJSON_AddObjectToObject(root, "data");
+	/* Same contract as the single-field response: a batch whose apply asked
+	 * for a respawn has to say so, or a caller batching outgoing.server with
+	 * anything else is told the whole set went live while the craft is about
+	 * to restart under it. */
+	if (reinit_requested)
+		cJSON_AddBoolToObject(data, "reinit_pending", 1);
 	applied = cJSON_AddArrayToObject(data, "applied");
 
 	for (i = 0; i < count; i++) {
@@ -2500,7 +2506,7 @@ static int make_live_set_response_locked(const VencConfig *cfg,
 			return -1;
 	} else {
 		if (make_multi_live_set_success_json(params, param_count,
-		    response_json) != 0) {
+		    reinit_requested, response_json) != 0) {
 			return -1;
 		}
 	}
@@ -2596,7 +2602,18 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	 * automated writers (waybeam-link adaptive actuation); a later
 	 * persisting /set snapshots the whole running config, volatile
 	 * changes included (one config struct, by design). */
-	if (persist)
+	/* `persist || reinit` is the condition, not `persist`.
+	 *
+	 * /api/v1/live/set passes persist=0 by design, and that is safe for a
+	 * change that took effect in the running process.  It is NOT safe once a
+	 * backend's apply has asked for a respawn: the respawn re-execs and
+	 * reloads /etc/waybeam.json, so an unpersisted value is silently
+	 * discarded by a restart the caller did not ask for.  The restart-class
+	 * path already refuses this shape outright ("restart-class field
+	 * requires persistence; use /api/v1/set"); a backend-level restart class
+	 * reaches the same hazard through the live path, so the value is written
+	 * out instead of lost. */
+	if (persist || (!reinit_before && venc_api_get_reinit()))
 		(void)venc_api_save_config_to_disk(&actual_cfg);
 	return 0;
 }

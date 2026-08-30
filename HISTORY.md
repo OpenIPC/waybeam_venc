@@ -50,6 +50,29 @@ Live output retarget reaches CV610. `contract_version` 0.25.0 -> **0.26.0**
   consumes on its own schedule, so reading it absolutely made an unrelated live
   set claim a respawn that belonged to an earlier request.
 
+- **Review fixes folded in before merge**, each a real defect this change
+  introduced: the applied-destination no-op guard now runs *before* the ring
+  branch (an identical re-POST of the running `frame-shm://` URI was latching a
+  reinit and respawning the craft, so every idempotent re-apply from the ground
+  cost a video outage); a live apply that requests a respawn now forces the
+  config to disk, because `/api/v1/live/set` passes `persist=0` and the respawn
+  reloads from `/etc/waybeam.json`, silently discarding the write; the RTP
+  session is seeded *before* the `outgoing.enabled` bail, or a craft booted
+  disabled and enabled over HTTP sent every packet with `ssrc 0` and a timestamp
+  frozen at 0 (`frame_ticks` was 0 too); the batch response reports
+  `reinit_pending` like the single one; a failed `output_socket_configure()`
+  clears `applied_server`, because it closes the socket even on the fd-reuse
+  path and the stale record made the rollback a silent no-op that left the craft
+  mute until restart; and the GDR counter plus the ring low-water gauge keep
+  advancing while output is disabled, since both describe the encoder and the
+  ring rather than the transmission.
+
+- **Known gap, not fixed here:** the Opus side-channel destination is derived
+  from the video URI once at start (`cv610_audio.c`), so a live retarget moves
+  video and leaves audio pointed at the old host. Star6E has the same gap; on
+  CV610 it was unreachable while the field was restart-only, and it is called
+  out rather than half-fixed.
+
 - **One deliberate divergence from Star6E.** Star6E also drops the encoder to
   5 fps while the output is disabled, so it is not burning bitrate on frames
   nobody receives. CV610 cannot: `video0.fps` is restart-only there (it
