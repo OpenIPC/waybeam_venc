@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "venc_config.h"
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -16,6 +18,109 @@ static int touch_file(const char *path)
 		return 0;
 	fclose(f);
 	return 1;
+}
+
+
+/* Drive the watch one window at a time.
+ *
+ * The first version of this fed N seconds of 10 ms frames and let the 2 s
+ * boundary fall where it may.  The feed lengths did not line up with the
+ * window, so a "one window at 2x" arm actually straddled two windows and
+ * diluted below the trip threshold -- every assertion passed, and so did
+ * mutants with the two-window rule, the hysteresis and the zero-target guard
+ * all removed.  Each call here closes EXACTLY one window at EXACTLY the
+ * requested rate, so the assertions are pinned to window counts. */
+static void rw_prime(PipelineRateWatch *rw, const VencConfig *cfg, uint64_t *t)
+{
+	pipeline_common_rate_watch(rw, cfg, 0, *t);   /* opens the window */
+}
+
+static void rw_window(PipelineRateWatch *rw, const VencConfig *cfg,
+	uint32_t kbps, uint64_t *t)
+{
+	/* bytes carrying `kbps` for one 2 s window = kbps * 1000 * 2 / 8. */
+	uint32_t bytes = (uint32_t)((uint64_t)kbps * 250ULL);
+
+	*t += 2000000ULL;
+	pipeline_common_rate_watch(rw, cfg, bytes, *t);
+}
+
+static int test_rate_watch(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	PipelineRateWatch rw;
+	uint64_t t = 1000000ULL;
+
+	venc_config_defaults(&cfg);
+	cfg.video0.bitrate = 4000;
+
+	/* At target: never trips, however long it runs. */
+	memset(&rw, 0, sizeof(rw));
+	rw_prime(&rw, &cfg, &t);
+	for (int i = 0; i < 6; i++)
+		rw_window(&rw, &cfg, 4000, &t);
+	CHECK("rate_watch_at_target_quiet", rw.reported == 0);
+	CHECK("rate_watch_at_target_no_streak", rw.over_windows == 0);
+
+	/* ONE window at 2x is not enough -- the rule the two-window requirement
+	 * exists for.  A moving scene produced 1.43x for a single window on the
+	 * bench and reporting that would make the warning noise. */
+	memset(&rw, 0, sizeof(rw));
+	rw_prime(&rw, &cfg, &t);
+	rw_window(&rw, &cfg, 4000, &t);
+	rw_window(&rw, &cfg, 8000, &t);
+	CHECK("rate_watch_one_over_window_quiet", rw.reported == 0);
+	CHECK("rate_watch_one_over_window_counted", rw.over_windows == 1);
+	rw_window(&rw, &cfg, 4000, &t);
+	CHECK("rate_watch_transient_leaves_no_latch", rw.reported == 0);
+	CHECK("rate_watch_transient_resets_streak", rw.over_windows == 0);
+
+	/* TWO consecutive over-windows trip it. */
+	memset(&rw, 0, sizeof(rw));
+	rw_prime(&rw, &cfg, &t);
+	rw_window(&rw, &cfg, 24000, &t);
+	CHECK("rate_watch_first_window_quiet", rw.reported == 0);
+	rw_window(&rw, &cfg, 24000, &t);
+	CHECK("rate_watch_second_window_trips", rw.reported == 1);
+
+	/* Latched: no re-report while the overrun persists. */
+	rw_window(&rw, &cfg, 24000, &t);
+	CHECK("rate_watch_stays_latched", rw.reported == 1);
+	CHECK("rate_watch_keeps_counting", rw.over_windows == 3);
+	/* One episode, one report.  `reported` stays 1 whether or not the latch
+	 * works, so it cannot show this on its own -- a mutant that re-reports
+	 * every window passes every other assertion here. */
+	CHECK("rate_watch_reports_once_per_episode", rw.reports == 1);
+
+	/* 1.3x sits between the clear and trip thresholds: it must neither trip
+	 * nor clear, which is what makes this a hysteresis band rather than one
+	 * threshold.  Latched from above, so a clear here would show. */
+	rw_window(&rw, &cfg, 5200, &t);
+	CHECK("rate_watch_hysteresis_holds_latch", rw.reported == 1);
+	CHECK("rate_watch_hysteresis_holds_streak", rw.over_windows == 3);
+
+	/* Back under the clear threshold: releases, and can arm again. */
+	rw_window(&rw, &cfg, 4000, &t);
+	CHECK("rate_watch_clears", rw.reported == 0);
+	CHECK("rate_watch_resets_streak", rw.over_windows == 0);
+	rw_window(&rw, &cfg, 24000, &t);
+	rw_window(&rw, &cfg, 24000, &t);
+	CHECK("rate_watch_rearms", rw.reported == 1);
+	CHECK("rate_watch_second_episode_reported", rw.reports == 2);
+
+	/* Zero target disables the check outright.  Without the guard this
+	 * divides by zero once a window closes, so the mutant does not merely
+	 * fail -- it faults. */
+	memset(&rw, 0, sizeof(rw));
+	cfg.video0.bitrate = 0;
+	rw_prime(&rw, &cfg, &t);
+	rw_window(&rw, &cfg, 24000, &t);
+	rw_window(&rw, &cfg, 24000, &t);
+	CHECK("rate_watch_zero_target_disabled",
+		rw.reported == 0 && rw.window_bytes == 0);
+
+	return failures;
 }
 
 int test_pipeline_common(void)
@@ -31,6 +136,8 @@ int test_pipeline_common(void)
 	char fixture_a[160];
 	char fixture_b[160];
 	int rc;
+
+	failures += test_rate_watch();
 
 	CHECK("pipeline common gop zero", pipeline_common_gop_frames(0.0, 120) == 1);
 	CHECK("pipeline common gop fps zero", pipeline_common_gop_frames(1.0, 0) == 30);

@@ -5,6 +5,8 @@
 #include "sensor_select.h"
 #endif
 
+#include "venc_config.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -76,6 +78,43 @@ static inline int pipeline_common_scale_roi_qp(int qp, int level, int steps)
 	mag = (mag * level + steps / 2) / steps;
 	return qp < 0 ? -mag : mag;
 }
+
+/** Rolling delivered-vs-target bitrate check.
+ *
+ * The encoder can lose rate control entirely and there is no in-band signal
+ * for it on two of the three backends: the frame QP that shows the failure is
+ * CV610-only (see rtp_sidecar.h -- SigmaStar fills only refType).  What every
+ * backend does have is the frame size, and the failure is far easier to see in
+ * the consequence than in the cause.
+ *
+ * The mechanism worth catching: fpv.roiQp is a RELATIVE delta, so CBR pays for
+ * the ROI discount by raising the frame's base QP roughly 1:1.  Once
+ * base_qp + |roiQp| passes the controller's QP ceiling the base pins there and
+ * the target is missed by multiples -- measured on a CV610 bench at 5.8x with
+ * video0.max_qp 40 and 12.0x at 35, both at a roiQp of only -20.
+ *
+ * Thresholds are compiled in, not configurable, because the measurement leaves
+ * no room to tune: normal operation ran 0.96-1.06x of target across every arm,
+ * the worst benign scene transient hit 1.43x for a single window, and a real
+ * collapse ran 1.9x-39x and did not decay.  Zero bitrate disables the check.
+ *
+ * Scope: the main video0 channel on each backend.  Maruko's second "dual"
+ * VENC channel runs its own thread and never passes through the drain loop
+ * this is called from, so that stream is not watched -- video0 is the one
+ * with a configured target to compare against. */
+typedef struct {
+	uint64_t window_start_us;
+	uint64_t window_bytes;
+	uint8_t  over_windows;
+	uint8_t  reported;    /* latched, so one episode logs once */
+	uint16_t reports;     /* episodes actually reported; the latch is not
+	                       * observable from `reported` alone, since that
+	                       * stays 1 either way */
+} PipelineRateWatch;
+
+/** Call once per encoded frame, with the configured (not measured) target. */
+void pipeline_common_rate_watch(PipelineRateWatch *rw, const VencConfig *cfg,
+	uint32_t frame_bytes, uint64_t now_us);
 
 /** Maximum number of ROI band regions. */
 #define PIPELINE_ROI_MAX_STEPS 4

@@ -191,6 +191,7 @@ typedef struct {
 	 * yet joined a writer whose sink outlived the stop deadline, so their
 	 * descriptors are still live and a new recording must not reuse them. */
 	int rec_reap_pending;
+	PipelineRateWatch rate_watch;
 } Cv610RunnerContext;
 
 /* Backend selection and the vendor MPP graph are process-singleton. The
@@ -2569,6 +2570,14 @@ static int cv610_run(void *opaque)
 			}
 			__atomic_add_fetch(&ctx->frames, 1, __ATOMIC_RELAXED);
 			__atomic_add_fetch(&ctx->bytes, frame_len, __ATOMIC_RELAXED);
+			/* Beside the frame/byte counters, NOT inside the sidecar
+			 * block above: that one is gated on a live subscriber, so
+			 * putting the watch there made it observe only while a probe
+			 * happened to be attached -- measured on .181, an overrun
+			 * that delivered 12x its target logged nothing with no probe
+			 * running. */
+			pipeline_common_rate_watch(&ctx->rate_watch, &ctx->config,
+				(uint32_t)frame_len, wb_monotonic_us());
 			if (ctx->debug_osd)
 				debug_osd_sample_cpu(ctx->debug_osd);
 			cv610_report_frame_status(ctx);

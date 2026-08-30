@@ -4699,6 +4699,8 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		maruko_scene_request_idr, ctx);
 	RtpSidecarEncInfo enc_info = {0};
 	scene_fill_sidecar(&ctx->scene, &enc_info);
+	pipeline_common_rate_watch(&ctx->rate_watch, maruko_controls_vcfg(),
+		frame_size, ready_us);
 
 	size_t total_bytes = 0;
 	HevcRtpStats frame_pktzr = {0};

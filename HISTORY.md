@@ -1,5 +1,51 @@
 # History
 
+## [0.80.0] - 2026-08-30
+
+A sustained bitrate overrun is now reported instead of being silent, and the
+`roiQp` bound gets the caveat 0.79.0 shipped without. `contract_version` stays
+**0.28.0** — no field, endpoint or payload changes.
+
+- **The ±20 bound in 0.79.0 is calibrated for the DEFAULT QP ceiling, and
+  `video0.maxQp` moves that ceiling.** `roiQp` is a relative delta, so CBR
+  raises the base QP ~1:1 to pay for it and pins once
+  `base_qp + |roiQp|` passes the ceiling. Measured on a CV610 bench at a fixed
+  `roiQp -20` — a value 0.79.0 calls safe — against a 9264 kbps target:
+
+  | `video0.maxQp` | frame QP | delivered | vs target |
+  |---|---|---|---|
+  | default | 44.9 (44-47) | 9502 | 1.0x |
+  | 45 | 45.0 (36-45) | 12528 | 1.4x |
+  | 40 | **40.0 (40-40)** | 53493 | **5.8x** |
+  | 35 | **35.0 (35-35)** | 111085 | **12.0x** |
+
+  So an operator who lowers `maxQp` to control bitrate silently re-enters the
+  failure 0.79.0 closed. Documented in the field table and the backend matrix.
+
+- **Star6E's default ceiling is 48, not 51** — `MaxQp 48 MinQp 12` from
+  `/proc/mi_modules/mi_venc/mi_venc0`. It therefore has three fewer QP of
+  margin than CV610 at the same `roiQp`. `MinQp 12` may also be why Star6E
+  never reproduced the collapse: if the post-ROI QP is clamped into
+  `[MinQp, MaxQp]` the band cannot starve the controller. Not tested.
+
+- **`pipeline_common_rate_watch()` reports a sustained overrun.** Two
+  consecutive 2 s windows delivering >=150% of the configured target log once,
+  naming `roiQp` and the ceiling when ROI is on. It clears below 120% and can
+  arm again.
+
+- **It watches the consequence, not the cause, and that is deliberate.** The
+  frame QP that explains the failure is CV610-only — SigmaStar fills only
+  `refType` in its stream info (0.79.0 HISTORY). Frame size is available on
+  every backend, and the collapse is far easier to see in the delivered rate
+  than in the QP anyway: 1.9x-39x, sustained, versus a controller reading a
+  number near its ceiling.
+
+- **Thresholds are compiled in, not configurable.** The measurement left no
+  room to tune: normal operation ran 0.96-1.06x of target across every arm, the
+  worst benign scene transient reached 1.43x for a single window, and a real
+  collapse ran 1.9x-39x and did not decay. Two windows is what separates the
+  transient from the failure.
+
 ## [0.79.0] - 2026-08-30
 
 `fpv.roiQp` is bounded to **±20**, down from ±30. `contract_version` **0.27.0
