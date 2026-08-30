@@ -12,6 +12,8 @@
  * directly, so the attribute structs are the SDK's own types and the field
  * table is built from offsetof() rather than hand-computed offsets. */
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -29,6 +31,18 @@ char *cv610_iq_query(void);
  *  no visible effect.
  *  Returns 0 on success, -1 on unknown name, bad value, or an MPI error. */
 int cv610_iq_set(const char *param, const char *value);
+
+/** Apply the portable AE ceilings, in the fleet-wide units.
+ *  `gain` is analog sensor gain in 22.10 fixed point (1024 == 1x) and maps to
+ *  exposure.auto.a_gain_max; `us` is microseconds and maps to
+ *  exposure.auto.exp_time_max.  Neither needs a unit conversion -- that is
+ *  why they are wired rather than approximated.
+ *  0 restores the value the sensor plugin seeded, captured on the first call
+ *  so that clearing a ceiling is not a one-way door.
+ *  Returns 0 on success, -1 when the ISP is not running or the MPI rejects
+ *  the write. */
+int cv610_iq_set_gain_max(uint32_t gain);
+int cv610_iq_set_shutter_max_us(uint32_t us);
 
 /** Query the AWB loop's applied result plus the exposure that selected it.
  *  Returns malloc'd JSON, caller frees.  NULL when the ISP is not running.

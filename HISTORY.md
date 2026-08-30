@@ -1,5 +1,63 @@
 # History
 
+## [0.78.0] - 2026-08-30
+
+The two portable AE ceilings reach the CV610 ISP. `contract_version` **0.26.0
+-> 0.27.0**: `isp.gain_max` and `isp.shutter_max_us` flip from
+`supported:false` to `supported:true` on that backend. Both were already
+`MUT_LIVE` in the shared table, so nothing about mutability changes.
+
+- **They map with no unit conversion, which is the only reason they are wired
+  at all.** `isp.shutter_max_us` -> `exposure.auto.exp_time_max`, documented
+  "sensor exposure time (unit: us)"; `isp.gain_max` ->
+  `exposure.auto.a_gain_max`, documented "Format:22.10 ... unit: times, 10bit
+  precision", i.e. 1024 == 1x, which is the same scale the SigmaStar
+  supervisory AE uses (`maruko_cus3a.c`'s `AE_GAIN_MIN 1024`). The live board
+  confirms the gain format independently of the header: `sys_gain_max` 1630616
+  == `a_gain_max` 407654 x `ispd_gain_max` 4096 / 1024.
+
+- **Analog gain, not system gain.** `sys_gain_range` caps the product of
+  analog, sensor-digital and ISP-digital gain; the portable name means the
+  SENSOR's ceiling on every other backend. Mapping it to the product would
+  make the same number mean something different here.
+
+- **Measured, not assumed.** On a CV610 bench (sc4336p, `ave_lum` 43), capping
+  `shutterMaxUs` to 4000 pulled the applied `exp_time` from 16560 to exactly
+  4000 us and the AE raised `a_gain` 1497 -> 6611 to hold the same luma.
+  Capping `gainMax` to 2048 clamped the applied `a_gain` to 2043 while the ISP
+  took up the slack in DIGITAL gain (`isp_d_gain` 1024 -> 1948) — which is also
+  what shows the field is the analog ceiling rather than the system one.
+  Readings come from `/api/v1/awb`, which reports the AE's own output, so this
+  is the loop moving rather than a value reading back.
+
+- **`0` restores the plugin default instead of sticking.** `0` means "use the
+  sensor plugin's default" on every backend. The default is snapshotted before
+  the first write of ours lands, so clearing a ceiling puts 873800 / 407654
+  back. Without that snapshot, setting a ceiling and then clearing it would
+  have left the ISP on the last non-zero value forever while the config read
+  `0` — a one-way door, and the exact shape of bug this milestone keeps
+  finding.
+
+- **Applied at cold boot, not only on a live write.** The ISP is seeded by the
+  sensor plugin, which has never seen the config file, so a value already in
+  the file would otherwise never be programmed. Verified: a restart with
+  6000/8192 in the file came up honouring both, `exp_time` 6000 and `a_gain`
+  4220.
+
+- **`isp.gain_min`, `isp.shutter_min_us`, `isp.awb_mode` and `isp.awb_ct` stay
+  unsupported and still 501.** The floors were simply not measured in this
+  slice. The AWB pair cannot be honoured at all: `ct_manual` means "pin white
+  balance to a colour temperature", and this ISP has no Kelvin input —
+  `ot_isp_mwb_attr` is r/gr/gb/b gains in `Format:4.8`, and `ss_mpi_awb.h`
+  exports only register/unregister. Wiring `awbMode` and ignoring `awbCt`
+  would ship a name that reads back fine and means something different per
+  backend; manual white balance on CV610 is reachable exactly, under its own
+  name, through `/api/v1/iq`'s `wb` group.
+
+- Docs: the backend support matrix said `/api/v1/awb` was **501** on CV610.
+  It has not been since `cv610_awb_query()` landed, and it is the instrument
+  this change was verified with, so the row is corrected here.
+
 ## [0.77.1] - 2026-08-30
 
 Closes the audio gap 0.77.0 shipped with. `contract_version` stays **0.26.0** —

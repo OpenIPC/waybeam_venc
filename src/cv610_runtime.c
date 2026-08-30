@@ -1345,6 +1345,8 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.query_awb_info = cv610_awb_query,
 	.apply_iq_param = cv610_iq_set,
 	.apply_qp_bounds = cv610_apply_qp_bounds,
+	.apply_gain_max = cv610_iq_set_gain_max,
+	.apply_shutter_max = cv610_iq_set_shutter_max_us,
 	.apply_roi_qp = cv610_apply_roi_qp,
 	.apply_server = cv610_apply_server,
 	.apply_output_enabled = cv610_apply_output_enabled,
@@ -2153,6 +2155,19 @@ static int cv610_init(void *opaque)
 		return -1;
 	venc_api_set_record_status_fn(cv610_record_status_callback);
 	venc_api_set_record_http_control_supported(true);
+
+	/* isp.gain_max / isp.shutter_max_us are MUT_LIVE for the same reason
+	 * fpv.roi* is, and need the same cold-boot apply: the ISP is seeded by
+	 * the sensor plugin, which has never seen the config file.  A 0 here is
+	 * "keep the plugin default", and cv610_iq_set_gain_max(0) captures that
+	 * default and writes it back -- so this also fixes the snapshot before
+	 * any live write can move the value it is supposed to restore. */
+	if (cv610_iq_set_gain_max(ctx->config.isp.gain_max) != 0)
+		fprintf(stderr, "WARN: isp.gainMax from config not applied (%u)\n",
+			(unsigned)ctx->config.isp.gain_max);
+	if (cv610_iq_set_shutter_max_us(ctx->config.isp.shutter_max_us) != 0)
+		fprintf(stderr, "WARN: isp.shutterMaxUs from config not applied "
+			"(%u)\n", (unsigned)ctx->config.isp.shutter_max_us);
 
 	/* fpv.roi* are MUT_LIVE and must also take effect on a cold boot: the
 	 * config is read before the channel exists, so the live path never runs

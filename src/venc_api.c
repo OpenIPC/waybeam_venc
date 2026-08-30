@@ -863,6 +863,40 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"system.web_port", "system.verbose",
 			"sensor.index", "sensor.mode",
 			"isp.keep_aspect",
+			/* The two portable AE ceilings, mapped onto the exposure
+			 * group cv610_iq.c already owns.  Wired because the units
+			 * match exactly and need no conversion: exp_time_range is
+			 * documented "unit: us" and a_gain_range "Format:22.10 ...
+			 * unit: times, 10bit precision", i.e. 1024 == 1x, which is
+			 * the scale the SigmaStar supervisory AE uses.  The live
+			 * board confirms the format independently -- sys_gain_max
+			 * 1630616 == a_gain_max 407654 x ispd_gain_max 4096 / 1024.
+			 * Listed because the ceilings MOVE THE AE LOOP on this
+			 * part, not merely because the write returns success.
+			 * Measured on a CV610 bench, sc4336p, ave_lum 43: capping
+			 * shutterMaxUs to 4000 pulled the applied exp_time from
+			 * 16560 to exactly 4000 us and the AE raised a_gain 1497
+			 * -> 6611 to hold the same luma, and capping gainMax to
+			 * 2048 clamped the applied a_gain to 2043 while the ISP
+			 * took up the slack in DIGITAL gain (isp_d_gain 1024 ->
+			 * 1948) -- which is also what shows the field is the
+			 * ANALOG ceiling rather than the system one.  Clearing
+			 * each back to 0 restored 873800 / 407654 and the
+			 * original applied values, and a restart with 6000/8192
+			 * in the file came up honouring both.  All readings from
+			 * /api/v1/awb, which reports the AE's own output.
+			 *
+			 * isp.gain_min / isp.shutter_min_us are deliberately ABSENT:
+			 * the floors are a separate pair and this slice did not
+			 * measure them.  isp.awb_mode / isp.awb_ct are absent for a
+			 * harder reason -- ct_manual means "pin white balance to a
+			 * colour temperature", and this ISP has no Kelvin input.
+			 * ot_isp_mwb_attr is r/gr/gb/b gains in Format:4.8 and
+			 * ss_mpi_awb.h exports only register/unregister, so honouring
+			 * awbCt would mean inventing a Kelvin -> RGB-gain conversion.
+			 * Manual white balance is reachable exactly, under its own
+			 * name, through /api/v1/iq's "wb" group. */
+			"isp.gain_max", "isp.shutter_max_us",
 			/* Applied at the SENSOR by apply_sensor_orientation(),
 			 * through the plugin's pfn_mirror_flip — the same place
 			 * both SigmaStar backends apply orientation, so image.*

@@ -596,6 +596,50 @@ static int test_field_support_by_backend(void)
 	CHECK("roi qp supported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"fpv.roi_qp") == 1);
+	/* The two portable AE ceilings map onto CV610's exposure group with no
+	 * unit conversion (us and 22.10 gain, both documented in the SDK header
+	 * and confirmed on the live board).  The floors and the AWB pair are the
+	 * controls here: gain_min/shutter_min_us were not measured in this
+	 * slice, and awb_mode/awb_ct cannot be honoured at all because the ISP
+	 * has no Kelvin input.  All four must stay unsupported on CV610 while
+	 * remaining supported on the SigmaStar backends -- which is what
+	 * distinguishes a per-field allowlist entry from an "isp." prefix. */
+	CHECK("gain max supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.gain_max") == 1);
+	CHECK("shutter max supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.shutter_max_us") == 1);
+	CHECK("gain max alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.gainMax") == 1);
+	CHECK("shutter max alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.shutterMaxUs") == 1);
+	CHECK("gain min unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.gain_min") == 0);
+	CHECK("shutter min unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.shutter_min_us") == 0);
+	CHECK("awb mode unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.awb_mode") == 0);
+	CHECK("awb ct unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.awb_ct") == 0);
+	CHECK("gain max supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"isp.gain_max") == 1);
+	CHECK("shutter max supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"isp.shutter_max_us") == 1);
+	CHECK("awb mode supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"isp.awb_mode") == 1);
+	CHECK("gain min supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"isp.gain_min") == 1);
 	/* Sensor orientation reaches CV610 through the plugin's
 	 * pfn_mirror_flip, the same place the SigmaStar backends apply it.
 	 * Checked on all three so the entry lands in CV610's allowlist rather
