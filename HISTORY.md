@@ -1,5 +1,39 @@
 # History
 
+## [0.77.1] - 2026-08-30
+
+Closes the audio gap 0.77.0 shipped with. `contract_version` stays **0.26.0** —
+no field, endpoint or payload changes, only where the audio side channel points
+after a live retarget.
+
+- **A live `outgoing.server` change moved video and left audio behind.** The
+  Opus destination is derived from the video URI — the peer host for `udp://`,
+  loopback for the local transports — and that derivation ran once, at
+  `cv610_audio_start()`. So a retarget sent video to the new receiver while
+  audio kept going to the old one, silently, because nothing in the audio path
+  knows the video URI changed. `cv610_apply_server()` now calls
+  `cv610_audio_apply_server()`, which re-derives and repoints.
+
+- **The derivation is now written once.** `cv610_audio_derive_output()` is
+  shared by the start path and the retarget, so the mapping cannot drift
+  between them — which is the actual failure mode for a rule that has to be
+  applied in two places.
+
+- **Same seqlock as the video path.** The audio transport fields are read by
+  the capture thread in `cv610_audio_write()` and would be rewritten by the
+  httpd thread, so they are seqlock-protected and the capture thread snapshots
+  them once per encoded frame. Every packet of one Opus access unit therefore
+  reaches the same destination.
+
+- Not fatal on failure: the video socket has already moved by that point, and
+  returning an error would send `venc_api` into a rollback that re-enters the
+  function. A craft with video retargeted and a logged audio failure is better
+  than one where the rollback leaves both half-applied.
+
+Star6E and Maruko have the same gap and are **not** changed here — their
+retarget path is separate code and no SigmaStar craft was available to verify
+against.
+
 ## [0.77.0] - 2026-08-30
 
 Live output retarget reaches CV610. `contract_version` 0.25.0 -> **0.26.0**
