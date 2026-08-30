@@ -83,6 +83,14 @@ typedef struct {
 	/* Sidecar ENC_INFO frames_since_idr; advanced every frame, not only
 	 * while a probe is subscribed. */
 	uint16_t frames_since_idr;
+	/* Latched egress-pressure state, maintained by venc_observe_pressure()
+	 * on the producer thread exactly as the SigmaStar backends do.  The
+	 * wire field is defined as a 75/50 HYSTERESIS flag, not a bare
+	 * threshold, and pressure_frames is "frames observed in pressure" --
+	 * the `pressure_drops` wire name is retained for ABI stability across
+	 * the v0.9.2 frame-skip rollback and was never a drop count. */
+	int pressure_state;
+	uint32_t pressure_frames;
 	RtpPacketizerState rtp;
 	H26xParamSets param_sets;
 	DebugOsdState *debug_osd;
@@ -745,7 +753,8 @@ typedef struct {
 	int         is_ring;
 	const char *name;            /* "frame-shm" | "unix" | "udp" | "none" */
 	uint8_t     fill_pct;
-	int         in_pressure;
+	int         in_pressure;      /* latched hysteresis flag, not fill>=HW */
+	uint32_t    pressure_frames;  /* frames observed in pressure           */
 	uint64_t    transport_drops; /* ring: full drops; socket: send failures */
 	uint64_t    packets_sent;    /* ring: writes;     socket: datagrams    */
 	/* Ring-only; zero on the socket transports. */
@@ -799,8 +808,13 @@ static int cv610_collect_transport(Cv610RunnerContext *ctx,
 		out->packets_sent = __atomic_load_n(&ctx->packets_sent,
 			__ATOMIC_RELAXED);
 	}
-	out->in_pressure = out->active &&
-		out->fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
+	/* Report the latched flag rather than recomputing fill >= high-water:
+	 * the header defines this field as the hysteresis flag, and a bare
+	 * threshold would make an operator's HTTP reading and a probe's wire
+	 * reading disagree with the SigmaStar backends for identical ring
+	 * behaviour.  The producer thread does the observing. */
+	out->in_pressure = out->active && ctx->pressure_state;
+	out->pressure_frames = ctx->pressure_frames;
 	return 0;
 }
 
@@ -861,13 +875,14 @@ static char *cv610_query_transport_status(void)
 			"{\"ok\":true,\"data\":{"
 			"\"active\":true,\"transport\":\"frame-shm\","
 			"\"fillPct\":%u,\"inPressure\":%s,"
-			"\"transportDrops\":%llu,\"pressureDrops\":0,"
+			"\"transportDrops\":%llu,\"pressureDrops\":%u,"
 			"\"framesSent\":%llu,\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,\"usedSlots\":%u,"
 			"\"ringLowWaterSlots\":%u,\"otherDrops\":%llu}}",
 			(unsigned)ts.fill_pct,
 			ts.in_pressure ? "true" : "false",
 			(unsigned long long)ts.transport_drops,
+			(unsigned)ts.pressure_frames,
 			(unsigned long long)ts.packets_sent,
 			(unsigned long long)ts.oversize_drops,
 			(unsigned)ts.slot_count, (unsigned)ts.used_slots,
@@ -878,10 +893,11 @@ static char *cv610_query_transport_status(void)
 			"{\"ok\":true,\"data\":{"
 			"\"active\":true,\"transport\":\"%s\","
 			"\"fillPct\":%u,\"inPressure\":%s,"
-			"\"pressureDrops\":0,\"transportDrops\":%llu,"
+			"\"pressureDrops\":%u,\"transportDrops\":%llu,"
 			"\"packetsSent\":%llu}}",
 			ts.name, (unsigned)ts.fill_pct,
 			ts.in_pressure ? "true" : "false",
+			(unsigned)ts.pressure_frames,
 			(unsigned long long)ts.transport_drops,
 			(unsigned long long)ts.packets_sent);
 	} else {
@@ -1493,6 +1509,25 @@ static int cv610_output_start(Cv610RunnerContext *ctx)
 
 	if (!ctx->config.outgoing.enabled)
 		return 0;
+
+	/* Seed the RTP session for EVERY transport, not just the socket path.
+	 * The SigmaStar backends gate this on the *stream mode* (rtp vs
+	 * compact), not the transport — star6e_output_is_rtp() reads
+	 * output->stream_mode, and the shipped default is "rtp" — so a Star6E
+	 * craft on frame-shm:// still seeds ssrc/timestamp/seq and puts them on
+	 * the sidecar wire.  Seeding only on the socket path made CV610 the one
+	 * backend sending a zero ssrc there, which a consumer keying on
+	 * "ssrc != 0 means session present" would read as a different craft
+	 * state.  Nothing else consumes ctx->rtp or frame_ticks off the socket
+	 * path, so this is inert for the ring transports beyond the sidecar. */
+	rtp_session_init(&session, rtp_session_payload_type(PT_H265),
+		ctx->pipeline.fps);
+	ctx->rtp.seq = session.seq;
+	ctx->rtp.timestamp = session.timestamp;
+	ctx->rtp.ssrc = session.ssrc;
+	ctx->rtp.payload_type = session.payload_type;
+	ctx->frame_ticks = session.frame_ticks;
+
 	if (ctx->output_uri.type == VENC_OUTPUT_URI_FRAME_SHM) {
 		ctx->frame_ring = venc_frame_ring_create(ctx->output_uri.endpoint,
 			CV610_FRAME_RING_SLOTS, CV610_FRAME_RING_BYTES);
@@ -1745,6 +1780,7 @@ static int cv610_run(void *opaque)
 		size_t frame_len = 0;
 		td_s32 ret;
 		int ready;
+	int select_errno;
 
 		if (venc_api_get_reinit()) {
 			venc_api_clear_reinit();
@@ -1781,7 +1817,19 @@ static int cv610_run(void *opaque)
 		FD_ZERO(&readfds);
 		FD_SET(venc_fd, &readfds);
 		ready = select(venc_fd + 1, &readfds, NULL, NULL, &timeout);
-		if (ready < 0 && errno == EINTR)
+		select_errno = errno;
+		/* Service the sidecar here, ahead of every `continue` below:
+		 * subscription and clock-sync traffic has to be answered while
+		 * the encoder is producing nothing.  Polling only alongside a
+		 * frame leaves a probe that attaches during a stall staring at
+		 * a silent port — indistinguishable from a build with no
+		 * sidecar at all, which is exactly the state an operator is
+		 * trying to instrument.  Star6E has idle_wait() for this; this
+		 * loop had no equivalent.  Note the saved errno: poll() runs
+		 * recvfrom and would otherwise clobber select's EINTR. */
+		if (ctx->sidecar.fd > 0)
+			rtp_sidecar_poll(&ctx->sidecar);
+		if (ready < 0 && select_errno == EINTR)
 			continue;
 		if (ready < 0)
 			return -1;
@@ -1864,16 +1912,18 @@ static int cv610_run(void *opaque)
 				}
 			}
 
-			/* Sidecar (protocols/rtp-sidecar.md).  fd > 0, not >= 0:
-			 * the listener is always >= 3, and 0 means "never
-			 * initialised" — see rtp_sidecar_sender_close().  Poll
-			 * every frame so subscriptions are still learned while
-			 * nobody is listening; do the rest only once a probe is
-			 * actually subscribed, so an unsubscribed craft pays no
-			 * clock read, no ring load and no SIOCOUTQ ioctl. */
+			/* Sidecar (protocols/rtp-sidecar.md).  The socket itself
+			 * is polled at the top of the loop so it stays responsive
+			 * while no frames are produced; here we only decide
+			 * whether to build a datagram.  fd > 0, not >= 0: the
+			 * listener is always >= 3 and 0 means "never initialised",
+			 * per rtp_sidecar_sender_close().  Gating on an actual
+			 * subscriber spares an unsubscribed craft the clock read,
+			 * the datagram assembly and up to four sendto calls; the
+			 * ring fill is read every frame regardless, for the
+			 * low-water window. */
 			sc_send = 0;
 			if (ctx->sidecar.fd > 0) {
-				rtp_sidecar_poll(&ctx->sidecar);
 				if (rtp_sidecar_is_subscribed(&ctx->sidecar)) {
 					sc_send = 1;
 					/* Snapshot before the write: the packetizer
@@ -1922,6 +1972,23 @@ static int cv610_run(void *opaque)
 				(void)cv610_send_rtp_frame(ctx, frame, frame_len);
 			}
 
+			/* Maintain the latched pressure flag on the producer
+			 * thread, every frame and whether or not anyone is
+			 * subscribed — a counter that only advanced under a
+			 * subscription would report frames since the subscription,
+			 * and the flag's 75/50 hysteresis needs to see every
+			 * sample to release correctly.  Same shared helper the
+			 * SigmaStar backends use, so the wire means one thing. */
+			{
+				Cv610TransportSample pts_ts;
+
+				if (cv610_collect_transport(ctx, sc_fillp, &pts_ts) == 0 &&
+					pts_ts.active)
+					venc_observe_pressure(pts_ts.fill_pct,
+						&ctx->pressure_state,
+						&ctx->pressure_frames);
+			}
+
 			if (sc_send) {
 				Cv610TransportSample ts;
 				RtpSidecarEncInfo enc;
@@ -1931,11 +1998,12 @@ static int cv610_run(void *opaque)
 				/* Only what CV610 genuinely knows at this point.
 				 * complexity and scene_change stay 0: both come from
 				 * the shared scene detector, which this backend does
-				 * not compile in.  gop_state stays 0 for the same
-				 * reason -- it is the shared GOP controller's enum,
-				 * and CV610 does not run that controller.  A zero
-				 * meaning "not produced" beats a fabricated value a
-				 * consumer would trend. */
+				 * not compile in.  gop_state stays 0 because
+				 * nothing in this tree ever writes it — no backend
+				 * produces it, so this is not a CV610 gap.  Note the
+				 * spec reserves no "absent" sentinel for these, so a
+				 * consumer cannot tell a real 0 from an unproduced
+				 * one; see the follow-up on protocols/rtp-sidecar.md. */
 				memset(&enc, 0, sizeof(enc));
 				enc.frame_size_bytes = (uint32_t)frame_len;
 				enc.frame_type = is_idr ? RTP_SIDECAR_FRAME_IDR
@@ -1956,9 +2024,12 @@ static int cv610_run(void *opaque)
 					tinfo.fill_pct = ts.fill_pct;
 					tinfo.in_pressure = ts.in_pressure ? 1 : 0;
 					tinfo.transport_drops = (uint32_t)ts.transport_drops;
-					/* CV610 publishes egress pressure and never
-					 * acts on it, so it drops nothing for it. */
-					tinfo.pressure_drops = 0;
+					/* Despite the name this is "frames observed in
+					 * pressure" on every backend — see venc_ring.h;
+					 * the wire name is kept for ABI stability across
+					 * the v0.9.2 frame-skip rollback and no backend
+					 * has ever dropped for pressure. */
+					tinfo.pressure_drops = ts.pressure_frames;
 					tinfo.packets_sent = (uint32_t)ts.packets_sent;
 					tinfo_ptr = &tinfo;
 				}

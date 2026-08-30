@@ -56,12 +56,38 @@ The RTP sidecar reaches CV610. `contract_version` 0.22.0 -> **0.23.0**
   604/604 sampled frames, and capture-to-encode-complete resolves to a stable
   **~24.3 ms at 720p100**.
 
-- **Under `frame-shm://` the RTP identifiers are 0.** `ssrc`, `rtp_timestamp`,
-  `seq_first` and `seq_count` are zero for a non-RTP transport because
-  `rtp_session_init()` is skipped there. This is pre-existing behaviour on
-  Star6E (`star6e_video.c` gates the init on `star6e_output_is_rtp()`), not
-  something new to CV610, and no consumer reads those fields on that path — the
-  information is in the trailer.
+- **RTP identifiers under `frame-shm://` now match the SigmaStar backends.**
+  The first cut seeded the RTP session only on the socket path, on the belief
+  that Star6E skips it for non-RTP transports. That was wrong:
+  `star6e_output_is_rtp()` tests the *stream mode* (`rtp` vs `compact`, and the
+  shipped default is `rtp`), not the transport, so a Star6E craft on
+  `frame-shm://` does seed and does put a non-zero `ssrc`, `rtp_timestamp` and
+  `seq_first` on the sidecar wire. CV610 was the only backend sending a zero
+  `ssrc` there, which a consumer keying on "ssrc != 0 means session present"
+  would read as a different craft state. `cv610_output_start()` now seeds for
+  every transport; nothing but the sidecar reads `ctx->rtp` off the socket
+  path. `seq_count` remains 0 on the ring transports on all three backends —
+  the packetizer never runs, so no sequence numbers are consumed.
+
+- **`in_pressure` and `pressure_drops` now mean on CV610 what they mean
+  everywhere else.** `in_pressure` is defined in `include/rtp_sidecar.h` as the
+  75/50 **hysteresis** flag, and `pressure_drops` — despite the name, kept for
+  ABI stability across the v0.9.2 frame-skip rollback — is "frames observed in
+  pressure", not a drop count on any backend. The first cut published a bare
+  `fill >= 75` threshold and a hardcoded 0. Both now come from the shared
+  `venc_observe_pressure()` helper, maintained on the producer thread every
+  frame so the hysteresis sees every sample, and `/api/v1/transport/status`
+  reports the same latched values it puts on the wire.
+  Device-verified on `.181` against a deliberately unconsumed ring: flag
+  latched, counter advancing 824 over 825 frames, HTTP and wire agreeing.
+
+- **The sidecar socket is serviced on the idle path, not only alongside a
+  frame.** The poll sat inside the "a frame was produced" branch, so every
+  `continue` in the drain loop skipped it. A probe attaching while the encoder
+  is stalled would have seen a silent port — indistinguishable from a build
+  with no sidecar compiled in, which is the exact condition this release exists
+  to remove. It now runs right after `select()`, ahead of every `continue`,
+  with `errno` saved across it so the `EINTR` test still sees `select`'s value.
 
 - **The transport observation now has one collector.**
   `cv610_collect_transport()` backs both `/api/v1/transport/status` and the

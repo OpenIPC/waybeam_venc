@@ -362,7 +362,16 @@ static int send_frame_impl(RtpSidecarSender *s,
 		ssize_t sent = sendto(s->fd, buf, off, MSG_DONTWAIT,
 			(struct sockaddr *)&s->subs[i].addr,
 			sizeof(s->subs[i].addr));
-		if (sent < 0 && errno != EAGAIN) {
+		/* Routine, not worth a line each: a full socket buffer, and the
+		 * transient unreachables a vehicle sees every time its RF link
+		 * drops.  This runs between get_stream and release_stream on the
+		 * encode drain loop, so an unthrottled fprintf here is frames of
+		 * jitter plus a log flood for the whole 5 s subscriber TTL —
+		 * cv610_output_write already treats the same errnos as routine
+		 * on the video path. */
+		if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+		    errno != ENOBUFS && errno != ENETUNREACH &&
+		    errno != EHOSTUNREACH && errno != ENETDOWN) {
 			fprintf(stderr, "[sidecar] sendto: %s\n", strerror(errno));
 			rc = -1;
 		}
