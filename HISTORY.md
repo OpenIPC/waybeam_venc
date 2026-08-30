@@ -24,12 +24,23 @@ The RTP sidecar reaches CV610. `contract_version` 0.22.0 -> **0.23.0**
   consumer and probe works against it unchanged. No wire change.
 
 - **What the CV610 trailers carry.** ENC_INFO reports `frame_size_bytes`,
-  `frame_type` and `idr_inserted`. `qp`, `complexity` and `scene_change` stay 0:
-  this backend has no per-frame QP readback and no scene detector, and a
-  fabricated value a consumer would trend is worse than a zero that means "not
-  produced". TRANSPORT_INFO carries ring or socket fill, pressure state, drops
-  and delivery count. ATTITUDE and DETECT are never appended — no IMU, no
-  detector.
+  `frame_type`, `idr_inserted`, `qp` and `frames_since_idr`. `qp` is the
+  encoder's own `h265_info.start_qp`, exactly what the contract asks for
+  ("start QP / closest available per-frame QP") and already in hand — the
+  SVC-T enhance check reads `ref_type` from the same struct. `complexity` and
+  `scene_change` stay 0 because both come from the shared scene detector, which
+  this backend does not compile in; `gop_state` stays 0 because it is the
+  shared GOP controller's enum and CV610 does not run that controller. A zero
+  meaning "not produced" beats a fabricated value a consumer would trend.
+  TRANSPORT_INFO carries ring or socket fill, pressure state, drops and
+  delivery count. **ATTITUDE and DETECT are never appended** — this board has
+  no IMU and no detector — so a consumer whose only input is the ATTITUDE
+  trailer still has no source on CV610.
+
+  Device-verified on `.181`: `qp` 31–38 (mean 32.6) across 783 frames, and
+  `frames_since_idr` climbing under `resilience=racing` (no periodic IDR) then
+  resetting **4922 → 0** exactly on a `/request/idr`, with that frame typed IDR
+  at 22321 B against ~2000 B for its neighbours.
 
 - **`capture_us` is converted from the MPP timebase, not published raw.** The
   sidecar contract says `capture_us` is CLOCK_MONOTONIC µs; the encoder's PTS

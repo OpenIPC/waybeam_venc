@@ -1873,7 +1873,7 @@ in Notes. As of `contract_version: 0.23.0`:
 | `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Star6E/Maruko share one IQ table schema. **CV610 also serves these from 0.18.4, in a DIFFERENT shape** — see "CV610 IQ response shape" below. `/api/v1/iq/import` stays Star6E/Maruko-only and 501s on CV610 (advertised as `routes.iq_import:false`). |
 | `/api/v1/awb` | live | live | Both backends register `query_awb_info`. CV610: **501**. |
 | `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
-| RTP sidecar (`outgoing.sidecarPort`, UDP :5602) | yes | yes | **CV610 from 0.74.0**; before that `src/rtp_sidecar.c` was not compiled into the CV610 binary at all, so the field was accepted, persisted and silently did nothing. CV610 emits the base FRAME plus TRANSPORT_INFO. It has no IMU and no detector, so ATTITUDE and DETECT trailers are never appended; `qp`, `complexity` and `scene_change` in ENC_INFO stay 0 (no per-frame QP readback, no scene detector), while `frame_size_bytes`, `frame_type` and `idr_inserted` are populated. Under `frame-shm://` the RTP identifiers (`ssrc`, `rtp_timestamp`, `seq_first`, `seq_count`) are 0 on every backend — there is no RTP session for a non-RTP transport — and the trailer carries the ring state instead. |
+| RTP sidecar (`outgoing.sidecarPort`, UDP :5602) | yes | yes | **CV610 from 0.74.0**; before that `src/rtp_sidecar.c` was not compiled into the CV610 binary at all, so the field was accepted, persisted and silently did nothing. CV610 emits the base FRAME plus TRANSPORT_INFO. It has no IMU and no detector, so ATTITUDE and DETECT trailers are never appended; ENC_INFO carries `frame_size_bytes`, `frame_type`, `idr_inserted`, `qp` (the encoder's `h265_info.start_qp`) and `frames_since_idr`; `complexity`, `scene_change` and `gop_state` stay 0 because they come from the shared scene detector and GOP controller, neither of which this backend compiles in. Under `frame-shm://` the RTP identifiers (`ssrc`, `rtp_timestamp`, `seq_first`, `seq_count`) are 0 on every backend — there is no RTP session for a non-RTP transport — and the trailer carries the ring state instead. |
 | `/api/v1/transport/status` | yes | yes | Three distinct field sets by transport: `frame-shm://` (ring fields plus `ringLowWaterSlots`/`otherDrops`), `shm://` (packet-ring fields), and UDP/Unix (socket subset). `badAuDrops` appears on every transport. **CV610** serves the same endpoint but emits no `badAuDrops` (no packet-table validation in its stream path); its `frame-shm` branch does carry `ringLowWaterSlots` and `otherDrops`. |
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
@@ -1892,9 +1892,11 @@ in Notes. As of `contract_version: 0.23.0`:
     and link-log consumers had no source on a CV610 craft, and the per-frame
     timing probe had nothing to read. No wire change: CV610 emits the same
     FRAME the SigmaStar backends do. ENC_INFO carries `frame_size_bytes`,
-    `frame_type` and `idr_inserted`; `qp`, `complexity` and `scene_change`
-    stay 0 because this backend has no per-frame QP readback and no scene
-    detector. Under `frame-shm://` the RTP identifiers are 0, which is
+    `frame_type`, `idr_inserted`, `qp` and `frames_since_idr`; `complexity`,
+    `scene_change` and `gop_state` stay 0 because they come from the shared
+    scene detector and GOP controller, neither of which this backend compiles
+    in. ATTITUDE and DETECT are never appended (no IMU, no detector), so a
+    consumer whose only input is the ATTITUDE trailer has no source here. Under `frame-shm://` the RTP identifiers are 0, which is
     pre-existing behaviour on every backend (`rtp_session_init()` is skipped
     for a non-RTP transport) and not new to CV610.
 - `0.21.0` (**breaking**, `video0.maxIBytes`/`video0.maxPBytes` removed): the

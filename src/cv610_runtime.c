@@ -80,6 +80,9 @@ typedef struct {
 	 * on this SoC sits seconds away from it. */
 	int64_t pts_to_mono_us;
 	int pts_epoch_valid;
+	/* Sidecar ENC_INFO frames_since_idr; advanced every frame, not only
+	 * while a probe is subscribed. */
+	uint16_t frames_since_idr;
 	RtpPacketizerState rtp;
 	H26xParamSets param_sets;
 	DebugOsdState *debug_osd;
@@ -1837,6 +1840,13 @@ static int cv610_run(void *opaque)
 				}
 			}
 			is_idr = cv610_frame_is_idr(frame, frame_len);
+			/* Outside the sidecar gate on purpose: a counter that only
+			 * advances while a probe is subscribed would report the
+			 * frames since the subscription, not since the IDR. */
+			if (is_idr)
+				ctx->frames_since_idr = 0;
+			else if (ctx->frames_since_idr < UINT16_MAX)
+				ctx->frames_since_idr++;
 			if (!ctx->slice_census_done &&
 			    ctx->requested_slice_count > 1) {
 				uint32_t vcl_nals = cv610_frame_vcl_nal_count(frame,
@@ -1919,16 +1929,26 @@ static int cv610_run(void *opaque)
 				const RtpSidecarTransportInfo *tinfo_ptr = NULL;
 
 				/* Only what CV610 genuinely knows at this point.
-				 * qp, complexity and scene_change stay 0: there is
-				 * no per-frame QP readback and no scene detector on
-				 * this backend, and a plausible-looking zero that
-				 * means "not produced" is preferable to a fabricated
-				 * value a consumer would trend. */
+				 * complexity and scene_change stay 0: both come from
+				 * the shared scene detector, which this backend does
+				 * not compile in.  gop_state stays 0 for the same
+				 * reason -- it is the shared GOP controller's enum,
+				 * and CV610 does not run that controller.  A zero
+				 * meaning "not produced" beats a fabricated value a
+				 * consumer would trend. */
 				memset(&enc, 0, sizeof(enc));
 				enc.frame_size_bytes = (uint32_t)frame_len;
 				enc.frame_type = is_idr ? RTP_SIDECAR_FRAME_IDR
 					: RTP_SIDECAR_FRAME_P;
 				enc.idr_inserted = is_idr ? 1 : 0;
+				/* start_qp is the encoder's own per-frame value and is
+				 * exactly what the contract asks for ("start QP /
+				 * closest available per-frame QP").  The struct is
+				 * already in hand -- the SVC-T check above reads
+				 * h265_info.ref_type from it. */
+				enc.qp = stream.h265_info.start_qp > 255u
+					? 255u : (uint8_t)stream.h265_info.start_qp;
+				enc.frames_since_idr = ctx->frames_since_idr;
 
 				if (cv610_collect_transport(ctx, sc_fillp, &ts) == 0 &&
 					ts.active) {
