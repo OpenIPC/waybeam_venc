@@ -532,27 +532,42 @@ static int isp_setup(const Cv610PipelineRuntimeConfig *c)
 
 /* Program the sensor's H/V reverse through the plugin vtable.
  *
- * Deliberately after the ISP thread is up: the sensor's power-on and per-mode
- * register blocks run out of the plugin's own init, and neither of them
- * touches 0x3020/0x3021, so writing the reverse registers once the sensor is
- * streaming is both safe and the only point at which the write is known to
- * survive.
+ * Call site: immediately after isp_setup().  The gate is the plugin's i2c
+ * file descriptor, which imx662_init() opens as pfn_cmos_sns_init from
+ * inside ss_mpi_isp_init() — synchronously, on this thread.  Before that
+ * point the driver's register writes return TD_SUCCESS against a closed fd
+ * and do nothing.  It is deliberately BEFORE the ISP thread starts: applied
+ * after, the first frames and the first AE/AWB statistics are gathered in
+ * the old orientation and the readout then flips under a converging 3A loop.
  *
- * Non-fatal, and it logs on both the missing-vtable-entry and the
- * nothing-to-do paths, because an orientation that silently does nothing is
- * indistinguishable from a mis-mounted lens. */
+ * Written UNCONDITIONALLY, including the disable, for the reason vpss_setup()
+ * gives about the crop: an external sensor chip holds whatever it was last
+ * given, and more stubbornly than any MPP group.  The SoC's MIPI reset
+ * happens to clear 0x3020/0x3021 on this board, but that is board wiring,
+ * not a property of the sensor — both SigmaStar backends call MI_SNR_SetOrien
+ * unconditionally and this now matches them.
+ *
+ * Non-fatal on a missing vtable entry, matching star6e_pipeline.c and
+ * maruko_pipeline.c: a craft that boots upside-down beats one that does not
+ * boot.
+ *
+ * The log says "requested", not "ok", and that wording is load-bearing.
+ * pfn_mirror_flip returns td_void, the driver casts both register writes to
+ * (td_void), and imx662_write_register() returns TD_SUCCESS even when the
+ * i2c fd is closed — so there is no success to report at any of the three
+ * layers.  Claiming one would reproduce exactly the failure this function
+ * exists to abolish: an orientation that silently did nothing, with a log
+ * line asserting otherwise. */
 static void apply_sensor_orientation(const Cv610PipelineRuntimeConfig *c)
 {
 	ot_isp_sns_mirrorflip_type type;
 
-	if (!c->mirror && !c->flip)
-		return;
-
 	if (g_sns_obj == NULL || g_sns_obj->pfn_mirror_flip == NULL) {
-		fprintf(stderr,
-			"[pipeline] WARNING: image.mirror/flip requested but the "
-			"sensor plugin exposes no pfn_mirror_flip — orientation "
-			"NOT applied\n");
+		if (c->mirror || c->flip)
+			fprintf(stderr,
+				"[pipeline] WARNING: image.mirror/flip requested "
+				"but the sensor plugin exposes no "
+				"pfn_mirror_flip — orientation NOT applied\n");
 		return;
 	}
 
@@ -560,11 +575,13 @@ static void apply_sensor_orientation(const Cv610PipelineRuntimeConfig *c)
 		type = ISP_SNS_MIRROR_FLIP;
 	else if (c->mirror)
 		type = ISP_SNS_MIRROR;
-	else
+	else if (c->flip)
 		type = ISP_SNS_FLIP;
+	else
+		type = ISP_SNS_NORMAL;
 
 	g_sns_obj->pfn_mirror_flip(VI_PIPE, type);
-	printf("  ok  sensor orientation: mirror=%d flip=%d\n",
+	printf("  ok  sensor orientation requested: mirror=%d flip=%d\n",
 		c->mirror ? 1 : 0, c->flip ? 1 : 0);
 }
 
@@ -814,6 +831,7 @@ int cv610_pipeline_start(const Cv610PipelineConfig *config)
 		configure_output_color() != 0) {
 		return -1;
 	}
+	apply_sensor_orientation(&c);
 	printf("== cv610 vpss ==\n");
 	if (vpss_setup(&c) != 0) {
 		return -1;
@@ -826,7 +844,6 @@ int cv610_pipeline_start(const Cv610PipelineConfig *config)
 	if (enable_sensor_ccm() != 0) {
 		return -1;
 	}
-	apply_sensor_orientation(&c);
 	return 0;
 }
 

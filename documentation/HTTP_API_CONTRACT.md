@@ -33,7 +33,8 @@
 | `video0.minQp` / `maxQp` | true | true | true |
 | `video0.intraRefreshQp` | **false** | **false** | true |
 | `outgoing.sidecarPort` | true | true | true (**from 0.74.0**) |
-| `image.mirror` / `image.flip` / `image.rotate` | true | true | true (**from 0.75.0**) |
+| `image.mirror` / `image.flip` | true | true | true (**from 0.75.0**) |
+| `image.rotate` | true | true | **false** |
 
 `video0.qpDelta` is `false` on CV610 and `video0.intraRefreshQp` is `false` on
 the SigmaStar backends because in each case the encoder accepts the value and
@@ -1894,12 +1895,16 @@ in Notes. As of `contract_version: 0.24.0`:
     backends already apply orientation (`MI_SNR_SetOrien`) — so `image.*` means
     one thing across the fleet and the encoder is never asked to do geometry.
     Mutability is unchanged (`restart_required` on all three; the sensor is
-    programmed once at bring-up). `image.rotate` flips with them, because it is
-    not a separate control: `venc_config`'s image parser turns `rotate: 180`
-    into `mirror + flip` and anything else back into `0`, before any backend
-    sees the struct. It was already advertised on the SigmaStar backends, so
-    leaving it `false` on CV610 would have meant a craft that honours `rotate`
-    while reporting it unsupported.
+    programmed once at bring-up). `image.rotate` does **not** flip and stays
+    `supported:false` on CV610: the decomposition it relies on —
+    `venc_config`'s `load_image()` turning `rotate: 180` into `mirror + flip` —
+    runs on a **file parse and nowhere else**, so a value arriving through
+    `/api/v1/set` is never decomposed and never read by any backend.
+    Advertising it was measured to turn a clean `501` into: accept `90`,
+    persist `90`, raise `reinit_pending`, restart the encoder, then read back
+    `0`. A config file carrying `rotate: 180` still works on all three
+    backends. The SigmaStar backends report it `true` only because they have no
+    per-backend allowlist.
 - `0.23.0` (additive — the RTP sidecar reaches CV610): `outgoing.sidecarPort`
     flips from `supported:false` to `true` on CV610. `src/rtp_sidecar.c` was
     never compiled into that binary, so the field was accepted, validated and

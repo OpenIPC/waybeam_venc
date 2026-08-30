@@ -23,8 +23,12 @@ typedef struct {
 	/* image.mirror / image.flip.  Applied at the SENSOR (the plugin's
 	 * pfn_mirror_flip), matching what both SigmaStar backends do, so
 	 * `image.*` means the same thing on every board and the encoder is not
-	 * asked to do geometry.  Reversing the readout also moves the Bayer
-	 * start phase, which the ISP has to be told about — see isp_setup(). */
+	 * asked to do geometry.
+	 *
+	 * The Bayer start phase does NOT move with the readout on IMX662 —
+	 * measured, see isp_setup().  The textbook answer is one XOR per axis
+	 * into pub.bayer_format and it is the WRONG one here; do not add it
+	 * back without re-running that A/B. */
 	int mirror;
 	int flip;
 	/* MCLK this mode's sensor line timing assumes.  Zero leaves whatever

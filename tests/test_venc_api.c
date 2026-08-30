@@ -547,9 +547,7 @@ static int test_field_support_by_backend(void)
 	/* Sensor orientation reaches CV610 through the plugin's
 	 * pfn_mirror_flip, the same place the SigmaStar backends apply it.
 	 * Checked on all three so the entry lands in CV610's allowlist rather
-	 * than the shared gate.  image.rotate stays unsupported everywhere —
-	 * no backend implements it, and advertising it would accept a value
-	 * that never reaches the picture. */
+	 * than the shared gate. */
 	CHECK("image mirror supported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"image.mirror") == 1);
@@ -562,18 +560,17 @@ static int test_field_support_by_backend(void)
 	CHECK("image flip supported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"image.flip") == 1);
-	/* image.rotate is not a third control: venc_config's image parser
-	 * turns rotate=180 into mirror+flip and anything else back into 0,
-	 * before any backend sees the struct.  It was already advertised on
-	 * the SigmaStar backends, so it has to become supported on CV610 at
-	 * the same time as the pair it decomposes into — otherwise a craft
-	 * would honour rotate while reporting it unsupported. */
-	CHECK("image rotate supported cv610",
+	/* image.rotate stays UNSUPPORTED on cv610 even though the pair it
+	 * decomposes into is now supported.  The decomposition runs in
+	 * venc_config's load_image(), on a file parse only, so a value that
+	 * arrives through /api/v1/set is never decomposed and never read by
+	 * any backend — advertising it would accept 90, persist it, raise
+	 * reinit_pending and read back 0.  A config file with rotate:180
+	 * still works; the field is unsupported because nothing reads ROTATE.
+	 * Device-measured on .181 before this was reverted. */
+	CHECK("image rotate unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
-			"image.rotate") == 1);
-	CHECK("image rotate supported star6e",
-		venc_api_field_supported_for_backend("star6e",
-			"image.rotate") == 1);
+			"image.rotate") == 0);
 	/* Recording and snapshot arrived on CV610 in mirror mode: the main
 	 * channel's access unit is teed to file, and the JPEG channel is a
 	 * second bind target on the main stream's VPSS output. */
