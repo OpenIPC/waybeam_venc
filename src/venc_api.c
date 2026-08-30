@@ -889,13 +889,19 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			 * isp.gain_min / isp.shutter_min_us are deliberately ABSENT:
 			 * the floors are a separate pair and this slice did not
 			 * measure them.  isp.awb_mode / isp.awb_ct are absent for a
-			 * harder reason -- ct_manual means "pin white balance to a
-			 * colour temperature", and this ISP has no Kelvin input.
-			 * ot_isp_mwb_attr is r/gr/gb/b gains in Format:4.8 and
-			 * ss_mpi_awb.h exports only register/unregister, so honouring
-			 * awbCt would mean inventing a Kelvin -> RGB-gain conversion.
-			 * Manual white balance is reachable exactly, under its own
-			 * name, through /api/v1/iq's "wb" group. */
+			 * different reason.  ct_manual means "pin white balance to a
+			 * colour temperature", and unlike SigmaStar -- one call,
+			 * MI_ISP_AWB_SetCTMwbAttr(ct) -- this SDK has no single CT
+			 * setter.  It has ss_mpi_isp_cal_gain_by_temp() (ss_mpi_awb.h,
+			 * present in libss_mpi_awb.so), which converts Kelvin to
+			 * r/gr/gb/b gains against the CURRENT ot_isp_wb_attr; those
+			 * gains then go back through set_wb_attr with op_type manual.
+			 * A two-call flow whose result depends on the sensor's AWB
+			 * calibration, and this slice neither implemented nor measured
+			 * it -- so the pair stays unsupported pending measurement, the
+			 * same bar every other entry in this list had to clear.
+			 * Manual white balance is reachable today, under its own name,
+			 * through /api/v1/iq's "wb" group. */
 			"isp.gain_max", "isp.shutter_max_us",
 			/* Applied at the SENSOR by apply_sensor_orientation(),
 			 * through the plugin's pfn_mirror_flip — the same place

@@ -45,14 +45,24 @@ The two portable AE ceilings reach the CV610 ISP. `contract_version` **0.26.0
   4220.
 
 - **`isp.gain_min`, `isp.shutter_min_us`, `isp.awb_mode` and `isp.awb_ct` stay
-  unsupported and still 501.** The floors were simply not measured in this
-  slice. The AWB pair cannot be honoured at all: `ct_manual` means "pin white
-  balance to a colour temperature", and this ISP has no Kelvin input —
-  `ot_isp_mwb_attr` is r/gr/gb/b gains in `Format:4.8`, and `ss_mpi_awb.h`
-  exports only register/unregister. Wiring `awbMode` and ignoring `awbCt`
-  would ship a name that reads back fine and means something different per
-  backend; manual white balance on CV610 is reachable exactly, under its own
+  unsupported and still 501.** Neither pair was measured in this slice. For
+  the AWB pair that is a two-call flow, not a missing capability: `ct_manual`
+  means "pin white balance to a colour temperature", and where SigmaStar has
+  one call (`MI_ISP_AWB_SetCTMwbAttr(ct)`) this SDK has
+  `ss_mpi_isp_cal_gain_by_temp()` — declared in `ss_mpi_awb.h` and present in
+  `libss_mpi_awb.so` — which converts Kelvin to r/gr/gb/b gains against the
+  *current* `ot_isp_wb_attr`, after which those gains go back through
+  `set_wb_attr` with `op_type` manual. The result depends on the sensor's AWB
+  calibration, so it needs the same device measurement every other entry in
+  the allowlist had to clear. Wiring `awbMode` while ignoring `awbCt` would
+  meanwhile ship a name that reads back fine and means something different per
+  backend. Manual white balance on CV610 is reachable today, under its own
   name, through `/api/v1/iq`'s `wb` group.
+
+  An earlier draft of this entry claimed the ISP had "no Kelvin input" and
+  that `ss_mpi_awb.h` exported "only register/unregister". Both were wrong —
+  that header exports 14 functions, and a grep pattern anchored on
+  `ss_mpi_awb` hid every `ss_mpi_isp_*` symbol in it.
 
 - Docs: the backend support matrix said `/api/v1/awb` was **501** on CV610.
   It has not been since `cv610_awb_query()` landed, and it is the instrument

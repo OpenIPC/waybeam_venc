@@ -794,10 +794,21 @@ static uint32_t g_ae_default_exp_time_max;
 static int      g_ae_defaults_valid;
 
 /* Caller must NOT hold g_iq_mutex: this takes it, and cv610_iq_set() takes
- * it again on the way out. */
+ * it again on the way out.
+ *
+ * The readiness check is the same one cv610_iq_set() and both query paths
+ * make, and it is what lets the snapshot below trust the value it latches:
+ * the plugin seeds the exposure attr inside ss_mpi_isp_init(), which runs
+ * before cv610_pipeline_isp_ready() turns true, so there is no window where
+ * this reads an unseeded struct and caches it as "the default". */
 static int ae_defaults(uint32_t *gain_max, uint32_t *exp_time_max)
 {
 	int rc = -1;
+
+	if (!cv610_pipeline_isp_ready()) {
+		fprintf(stderr, "[cv610-iq] AE defaults: ISP is not running\n");
+		return -1;
+	}
 
 	pthread_mutex_lock(&g_iq_mutex);
 	if (!g_ae_defaults_valid) {

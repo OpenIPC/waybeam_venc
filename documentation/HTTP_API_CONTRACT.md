@@ -1910,12 +1910,15 @@ in Notes. As of `contract_version: 0.27.0`:
     by the sensor plugin, which never sees the config file.
   - `isp.gain_min`, `isp.shutter_min_us`, `isp.awb_mode` and `isp.awb_ct` stay
     `supported:false` on CV610 and still return **501**. The floors were simply
-    not measured in this slice. The AWB pair cannot be honoured at all:
-    `ct_manual` means "pin white balance to a colour temperature", and this ISP
-    has no Kelvin input — `ot_isp_mwb_attr` is r/gr/gb/b gains in `Format:4.8`
-    and `ss_mpi_awb.h` exports only register/unregister. Manual white balance
-    on CV610 is reachable exactly, under its own name, through `/api/v1/iq`'s
-    `wb` group.
+    not measured in this slice. For the AWB pair that is a two-call flow rather
+    than a missing capability: where SigmaStar has one call
+    (`MI_ISP_AWB_SetCTMwbAttr(ct)`), this SDK has
+    `ss_mpi_isp_cal_gain_by_temp()`, which converts Kelvin to r/gr/gb/b gains
+    against the current `ot_isp_wb_attr`; those gains then go back through
+    `set_wb_attr` with `op_type` manual. Calibration-dependent, so it needs the
+    same device measurement every other CV610 field had to clear. Manual white
+    balance on CV610 is reachable today, under its own name, through
+    `/api/v1/iq`'s `wb` group.
 - `0.26.0` (additive — live output retarget reaches CV610): `outgoing.server`
     and `outgoing.enabled` change from `restart_required` to `live` on CV610
     only. Both SigmaStar backends already reported `live`; CV610 read the URI
