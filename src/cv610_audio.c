@@ -13,6 +13,8 @@
 #include "audio_ring.h"
 #include "rtp_packetizer.h"
 
+#include <sched.h>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -54,6 +56,17 @@ struct Cv610AudioState {
 	socklen_t destination_len;
 	VencOutputUriType transport;
 	int connected_udp;
+	/* Live retarget, seqlock-protected -- the same shape the video path uses
+	 * in cv610_runtime.c.  These four are rewritten by
+	 * cv610_audio_apply_server() on the httpd thread and read by the capture
+	 * thread in cv610_audio_write(); odd generation = a write in progress. */
+	unsigned transport_gen;
+	struct {
+		int socket_handle;
+		struct sockaddr_storage destination;
+		socklen_t destination_len;
+		int connected_udp;
+	} tx;
 	RtpPacketizerState rtp;
 	uint32_t ticks_per_frame;
 	pthread_t thread;
@@ -224,14 +237,17 @@ static int cv610_aenc_start(Cv610AudioState *state)
 	return 0;
 }
 
-static int cv610_audio_output_start(Cv610AudioState *state,
-	const VencConfig *config, const VencOutputUri *video_output)
+/* Derive the audio destination from the video transport.  Shared by the
+ * start path and the live retarget so the two cannot drift -- the mapping
+ * below (UDP follows the peer, local transports go to loopback) is the whole
+ * contract, and having it in one place is what makes a retarget correct by
+ * construction rather than by remembering to update a second copy. */
+static int cv610_audio_derive_output(const VencConfig *config,
+	const VencOutputUri *video_output, VencOutputUri *out, uint16_t *out_port)
 {
 	VencOutputUri audio_output;
 	uint16_t port;
 
-	if (config->outgoing.audio_port < 0)
-		return 0;
 	if (!video_output) {
 		fprintf(stderr, "ERROR: CV610 audio has no video transport context\n");
 		return -1;
@@ -261,6 +277,22 @@ static int cv610_audio_output_start(Cv610AudioState *state,
 		return -1;
 	}
 	audio_output.port = port;
+	*out = audio_output;
+	*out_port = port;
+	return 0;
+}
+
+static int cv610_audio_output_start(Cv610AudioState *state,
+	const VencConfig *config, const VencOutputUri *video_output)
+{
+	VencOutputUri audio_output;
+	uint16_t port;
+
+	if (config->outgoing.audio_port < 0)
+		return 0;
+	if (cv610_audio_derive_output(config, video_output, &audio_output,
+		&port) != 0)
+		return -1;
 	if (output_socket_configure(&state->socket_handle, &state->destination,
 		&state->destination_len, &state->transport, &audio_output,
 		config->outgoing.connected_udp, 0, &state->connected_udp) != 0)
@@ -270,14 +302,70 @@ static int cv610_audio_output_start(Cv610AudioState *state,
 	return 0;
 }
 
+int cv610_audio_apply_server(Cv610AudioState *state, const VencConfig *config,
+	const VencOutputUri *video_output)
+{
+	VencOutputUri audio_output;
+	uint16_t port;
+
+	/* A craft with audio off, or audio_port < 0, has nothing to retarget --
+	 * not an error, just no work. */
+	if (!state || !config || config->outgoing.audio_port < 0)
+		return 0;
+	if (state->socket_handle < 0)
+		return 0;
+	if (cv610_audio_derive_output(config, video_output, &audio_output,
+		&port) != 0)
+		return -1;
+
+	__atomic_fetch_add(&state->transport_gen, 1, __ATOMIC_RELEASE);
+	if (output_socket_configure(&state->socket_handle, &state->destination,
+		&state->destination_len, &state->transport, &audio_output,
+		config->outgoing.connected_udp, 0, &state->connected_udp) != 0) {
+		__atomic_fetch_add(&state->transport_gen, 1, __ATOMIC_RELEASE);
+		return -1;
+	}
+	__atomic_fetch_add(&state->transport_gen, 1, __ATOMIC_RELEASE);
+	printf("> CV610 audio retargeted to udp://%s:%u\n", audio_output.host,
+		port);
+	return 0;
+}
+
+/* Seqlock read, once per encoded audio frame.  Mirrors
+ * cv610_transport_begin_frame() on the video side. */
+static void cv610_audio_begin_frame(Cv610AudioState *state)
+{
+	unsigned gen_before, gen_after;
+
+	for (;;) {
+		gen_before = __atomic_load_n(&state->transport_gen,
+			__ATOMIC_ACQUIRE);
+		if (gen_before & 1u) {
+			sched_yield();
+			continue;
+		}
+		state->tx.socket_handle = state->socket_handle;
+		state->tx.destination = state->destination;
+		state->tx.destination_len = state->destination_len;
+		state->tx.connected_udp = state->connected_udp;
+		gen_after = __atomic_load_n(&state->transport_gen,
+			__ATOMIC_ACQUIRE);
+		if (gen_before == gen_after)
+			break;
+	}
+}
+
 static int cv610_audio_write(const uint8_t *header, size_t header_len,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len, void *opaque)
 {
 	Cv610AudioState *state = opaque;
 
-	return output_socket_send_parts(state->socket_handle,
-		&state->destination, state->destination_len, state->connected_udp,
+	/* From the per-frame snapshot, never the live fields -- every packet of
+	 * one Opus access unit must reach the same destination. */
+	return output_socket_send_parts(state->tx.socket_handle,
+		&state->tx.destination, state->tx.destination_len,
+		state->tx.connected_udp,
 		header, header_len, payload1, payload1_len, payload2, payload2_len);
 }
 
@@ -349,7 +437,8 @@ static void *cv610_audio_thread(void *opaque)
 					(uint64_t)now.tv_sec * 1000000ull +
 						(uint64_t)now.tv_nsec / 1000ull);
 			}
-			if (state->socket_handle < 0) {
+			cv610_audio_begin_frame(state);
+			if (state->tx.socket_handle < 0) {
 				sent = 1;
 			} else {
 				int send_ret = rtp_packetizer_send_packet(&state->rtp,

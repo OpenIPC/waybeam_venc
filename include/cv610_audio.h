@@ -28,4 +28,15 @@ void cv610_audio_set_record_ring(Cv610AudioState *state, AudioRing *ring);
 /** Non-zero while the capture thread is alive; clears when it exits. */
 int cv610_audio_is_running(Cv610AudioState *state);
 
+/** Re-derive the audio destination from `video_output` and repoint the socket,
+ *  for a live `outgoing.server` change.  Safe to call from the httpd thread
+ *  while the capture thread runs: the transport fields are seqlock-protected
+ *  and the capture thread snapshots them once per frame.
+ *
+ *  Returns 0 when there was nothing to do (no state, audio disabled, or
+ *  `audio_port < 0`) as well as on success; -1 only when a destination was
+ *  wanted and could not be programmed. */
+int cv610_audio_apply_server(Cv610AudioState *state, const VencConfig *config,
+	const VencOutputUri *video_output);
+
 #endif /* CV610_AUDIO_H */

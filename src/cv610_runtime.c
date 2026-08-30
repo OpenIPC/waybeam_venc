@@ -1251,6 +1251,22 @@ static int cv610_apply_server(const char *uri)
 	snprintf(g_cv610_runner->applied_server,
 		sizeof(g_cv610_runner->applied_server), "%s", uri);
 
+	/* Move the audio side channel with the video.  Its destination is derived
+	 * from the video URI (peer host for udp://, loopback for the local
+	 * transports), so leaving it behind pointed the Opus stream at the OLD
+	 * receiver while video went to the new one -- silently, because nothing
+	 * in the audio path knows the video URI changed.
+	 *
+	 * Not fatal: the video socket has already moved, and returning -1 here
+	 * would send venc_api into a rollback that re-enters this function. A
+	 * craft with video retargeted and audio stale is worse than one with
+	 * video retargeted and a logged audio failure. */
+	if (cv610_audio_apply_server(g_cv610_runner->audio,
+		&g_cv610_runner->config, &parsed) != 0)
+		fprintf(stderr, "WARN: video retargeted to %s but the audio side "
+			"channel could not follow; audio is still going to the "
+			"previous destination\n", uri);
+
 	/* Deliberately NOT fatal past this point, and the reason matters: the
 	 * socket has already moved.  Returning -1 sends venc_api into
 	 * rollback_live_groups(), which re-enters this same call -- and if that
