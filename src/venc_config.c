@@ -128,9 +128,16 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->outgoing.connected_udp = true;
 	cfg->outgoing.allow_unix_encoder_stall = false;
 
-	/* fpv */
-	cfg->fpv.roi_enabled = true;
-	cfg->fpv.roi_qp = 0;
+	/* fpv.
+	 *
+	 * The pair ships coherent: OFF, but carrying a delta that does something
+	 * the moment it is switched on.  The old default was the other way round
+	 * -- roiEnabled:true with roiQp:0 -- which reads as "ROI is on" while
+	 * apply_roi_qp() clears every region, because a zero delta is not a
+	 * region worth programming.  Nothing was ignored, but the flag and the
+	 * log disagreed, and that is what an operator sees first. */
+	cfg->fpv.roi_enabled = false;
+	cfg->fpv.roi_qp = -25;
 	cfg->fpv.roi_steps = 2;
 	cfg->fpv.roi_center = 0.4;
 	cfg->fpv.noise_level = 0;

@@ -80,6 +80,44 @@ static inline int pipeline_common_scale_roi_qp(int qp, int level, int steps)
 /** Maximum number of ROI band regions. */
 #define PIPELINE_ROI_MAX_STEPS 4
 
+/** One horizontal ROI band, in encoder pixel coordinates.
+ *
+ * Horizontal bands, delta QP tapering from the innermost band (full qp)
+ * outward.  Higher index = narrower = stronger, so on a backend where a
+ * higher-index region overrides a lower one in the overlap the centre lands the
+ * full delta and the edges the weakest step.
+ *
+ * "Full-height, centred" is the intent, not the arithmetic: every edge is
+ * rounded DOWN to a 32-px multiple for H.265 CTU compatibility, so a 1080-row
+ * frame yields height 1056 and leaves the bottom 24 rows outside every band,
+ * and an origin that rounds down can sit up to 31 px left of true centre
+ * (1920 wide, centre 0.35, index 3 -> x=608, w=672, band centre 944 vs 960).
+ *
+ * Shared because all three backends draw the identical rectangle; only the SDK
+ * struct it is copied into differs (MI_VENC_RoiCfg_t on the two SigmaStar
+ * parts, ot_venc_roi_attr on CV610). */
+typedef struct {
+	uint32_t x, y, width, height;
+	int qp;
+} PipelineRoiBand;
+
+/** Compute band `index` of `steps`.  Returns 0 and fills *out when the band is
+ * usable, -1 when the caller should skip it: a NULL out, an index outside
+ * [0, steps), or a rectangle that degenerates to zero width or height once
+ * aligned (a frame under 32 px, or a centre fraction that rounds away).
+ *
+ * center_frac is CLAMPED to [0.1, 0.9] here, not merely assumed.  All three
+ * backends clamp before calling and config load validates the field, so an
+ * out-of-range value is unreachable today -- but this is now a cross-TU
+ * primitive with three callers, and the failure mode without the clamp is not a
+ * bad number: frac > 1 underflows the unsigned (width - rw)/2 to ~2^31, and a
+ * negative frac makes (uint32_t)(frac * width) an out-of-range float-to-unsigned
+ * conversion, i.e. undefined behaviour.  Both returned SUCCESS with a garbage
+ * rect.  A shared primitive should be total over its declared domain. */
+int pipeline_common_roi_band(uint32_t width, uint32_t height,
+	float center_frac, int qp, int steps, int index,
+	PipelineRoiBand *out);
+
 /** Upper bound the live-apply path accepts for video0.fps.
  *
  * A live `fps` request above the current sensor mode's max is intentionally

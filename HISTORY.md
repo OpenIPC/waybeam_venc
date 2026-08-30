@@ -1,5 +1,79 @@
 # History
 
+## [0.76.0] - 2026-08-30
+
+Centre-priority ROI reaches CV610, and stops being skipped at boot on Maruko.
+`contract_version` 0.24.0 -> **0.25.0** (additive; four per-backend `supported`
+flags change).
+
+- **`fpv.roi*` had no CV610 implementation at all.** No `apply_roi_qp` in the
+  backend callback table and no cold-boot apply, so every CV610 craft carried an
+  `fpv` block in `/etc/waybeam.json` that nothing on the board read. The write
+  path was honest about it (`/api/v1/capabilities` reported `supported:false`
+  and `/api/v1/set` answered `501`), but `/api/v1/get` returned the stored value
+  and the config file kept round-tripping it, so a craft could sit for months
+  with `roiQp:-15` configured and no region ever programmed.
+
+  `cv610_apply_roi_qp()` now programs the bands through
+  `ss_mpi_venc_set_roi_attr()`. `ot_venc_roi_attr` is field-for-field
+  `MI_VENC_RoiCfg_t`, and the part accepts a wider delta than the shared
+  +/-30 clamp, so no per-backend range was needed. Geometry is read from the
+  channel attr rather than a cached width: it is what the encoder is actually
+  running, and the get doubles as the "channel exists" guard.
+
+- **Maruko never applied ROI on a cold boot.** `fpv.roi*` are `MUT_LIVE`, and
+  only the live path ever called `maruko_apply_roi_qp()`. Star6E has always
+  applied it in `star6e_runtime_apply_startup_controls()`; Maruko applied
+  `qp_delta` and `qp_bounds` there and not ROI. Witnessed on the bench: a craft
+  booting with `roiEnabled:true, roiQp:-8` in its file logged the qpDelta apply
+  and **no ROI line at all**, then logged the band immediately on one live set.
+  Every craft that configured ROI in its file was flying without it.
+
+- **The band geometry is now computed once.** `compute_horizontal_roi()` was
+  byte-identical in `star6e_controls.c` and `maruko_controls.c` down to the
+  32-px alignment; CV610 would have made a third copy. The rectangle and the
+  QP taper move to `pipeline_common_roi_band()`, and each backend copies the
+  result into its own SDK struct.
+
+- **ROI is measured, not assumed.** Issue #259 is a QP control on these same
+  SigmaStar parts that returns success, logs as applied, reads back clean and
+  never moves the bitstream, so an SDK return code is not evidence. Maruko,
+  1280x720@30 CBR 5754 kbps, `roiSteps:1 roiCenter:0.3` (a 384-px band at
+  x=448), decoded and profiled as median Laplacian variance per 64-px column:
+
+  | column | `roiQp:-30` | `roiQp:+30` |
+  |---|---|---|
+  | 384-448 (outside) | 54.5 | 640.1 |
+  | 448-512 (inside) | 755.7 | 46.9 |
+  | 768-832 (inside) | 854.0 | 6.3 |
+  | 832-896 (outside) | 34.7 | 792.7 |
+
+  The step lands exactly on the programmed rect edges: 13.9x across x=448 and
+  24.6x across x=832 in the `-30` arm, reversing in the `+30` arm (13.6x down at
+  the left edge, 126x up at the right). The repeatability figure is a different
+  aggregation and is named here so it can be checked: median Laplacian variance
+  over the **whole band** (x=448..832), which came out 1739 then 1854 across two
+  runs of the `-30` arm -- 6.6% apart -- against 94.8 in the `+30` arm, an 18x
+  swing. CV610 was measured the same way on its own silicon (the SDK call
+  differs, so Maruko's result does not carry): whole-band 67.0 / 9.1 / 61.6 for
+  `-30` / `+30` / repeat, a 7.4x swing against an 8.8% control. Whatever #259
+  is, it does not generalise to ROI on either part.
+
+- **The shipped ROI defaults now agree with themselves.** They were
+  `roiEnabled:true, roiQp:0` — which reads as "ROI is on" while `apply_roi_qp()`
+  clears every region, because a zero delta is not a region worth programming.
+  Nothing was ignored, but the flag and the log disagreed, and that is the first
+  thing an operator sees. They ship **`roiEnabled:false, roiQp:-25`**: off, but
+  carrying a delta that bites the moment it is switched on. Existing crafts are
+  unaffected — their own `/etc/waybeam.json` values win; this changes the
+  compiled defaults, `config/waybeam.default*.json` and `/api/v1/defaults`.
+
+- **The disabled log line names its cause.** `> ROI disabled (all regions
+  cleared)` covered three different states. It now reads
+  `> ROI disabled (roiEnabled=false), all regions cleared` or
+  `> ROI disabled (roiQp=0, no delta to apply), all regions cleared`, on all
+  three backends.
+
 ## [0.75.0] - 2026-08-30
 
 Sensor orientation reaches CV610. `contract_version` 0.23.0 -> **0.24.0**
