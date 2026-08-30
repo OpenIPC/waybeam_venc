@@ -274,7 +274,7 @@ omitted fields keep their compiled-in defaults.
     "audioPort": 5601, "sidecarPort": 5602
   },
   "fpv":      {
-    "roiEnabled": true, "roiQp": 0, "roiSteps": 2,
+    "roiEnabled": false, "roiQp": -25, "roiSteps": 2,
     "roiCenter": 0.4, "noiseLevel": 0
   },
   "audio":    {
@@ -1338,8 +1338,8 @@ audio track). Settable via the config file or the runtime API
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `fpv.roi_enabled` | bool | live | Enable horizontal ROI bands. **Not the switch** — `roi_qp: 0` clears every region regardless, and that is the shipped default |
-| `fpv.roi_qp` | int | live | Signed ROI delta QP (-30..30, negative = sharper center). **0 disables ROI.** All three backends **from 0.76.0** (CV610 had no implementation before it) |
+| `fpv.roi_enabled` | bool | live | Enable horizontal ROI bands. Ships **off**, paired with a non-zero `roi_qp`, so switching it on has an effect |
+| `fpv.roi_qp` | int | live | Signed ROI delta QP (-30..30, negative = sharper center). **`0` clears every region regardless of `roi_enabled`** — a zero delta is not a region worth programming. Ships at `-25`. All three backends **from 0.76.0** (CV610 had no implementation before it) |
 | `fpv.roi_steps` | uint16 | live | Number of horizontal bands (1-4) |
 | `fpv.roi_center` | double | live | Center band width ratio (0.1-0.9) |
 | `fpv.noise_level` | int | restart | 3DNR noise reduction level |

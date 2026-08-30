@@ -712,7 +712,15 @@ static int apply_roi_qp(int qp)
 
 	if (!g_star6e_control_ctx.vcfg ||
 	    !g_star6e_control_ctx.vcfg->fpv.roi_enabled || qp == 0) {
-		printf("> ROI disabled (all regions cleared)\n");
+		/* Name the cause.  Three different states land here and the old
+		 * single line could not tell them apart, so an operator who set
+		 * roiEnabled:true and left roiQp at 0 read "disabled" as "my
+		 * flag was ignored". */
+		printf("> ROI disabled (%s), all regions cleared\n",
+			!g_star6e_control_ctx.vcfg ? "no config bound" :
+			!g_star6e_control_ctx.vcfg->fpv.roi_enabled ?
+				"roiEnabled=false" :
+				"roiQp=0, no delta to apply");
 		return 0;
 	}
 

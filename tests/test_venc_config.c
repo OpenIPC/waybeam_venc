@@ -68,8 +68,10 @@ static int test_defaults(void)
 	CHECK("defaults_allow_unix_encoder_stall",
 		cfg.outgoing.allow_unix_encoder_stall == false);
 
-	CHECK("defaults_roi_on", cfg.fpv.roi_enabled == true);
-	CHECK("defaults_roi_qp", cfg.fpv.roi_qp == 0);
+	/* Off, but pre-loaded with a delta that bites when switched on -- the
+	 * two halves of the shipped pair are asserted together on purpose. */
+	CHECK("defaults_roi_off", cfg.fpv.roi_enabled == false);
+	CHECK("defaults_roi_qp", cfg.fpv.roi_qp == -25);
 	CHECK("defaults_roi_steps", cfg.fpv.roi_steps == 2);
 	CHECK("defaults_noise", cfg.fpv.noise_level == 0);
 

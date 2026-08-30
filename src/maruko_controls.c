@@ -1172,7 +1172,12 @@ static int maruko_apply_roi_qp(int qp)
 	}
 
 	if (!g_ctx.vcfg || !g_ctx.vcfg->fpv.roi_enabled || qp == 0) {
-		printf("> ROI disabled (all regions cleared)\n");
+		/* Name the cause -- see the matching comment in
+		 * star6e_controls.c's apply_roi_qp(). */
+		printf("> ROI disabled (%s), all regions cleared\n",
+			!g_ctx.vcfg ? "no config bound" :
+			!g_ctx.vcfg->fpv.roi_enabled ? "roiEnabled=false" :
+				"roiQp=0, no delta to apply");
 		return 0;
 	}
 

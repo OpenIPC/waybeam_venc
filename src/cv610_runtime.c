@@ -1011,7 +1011,12 @@ static int cv610_apply_roi_qp(int qp)
 	}
 
 	if (!cfg->fpv.roi_enabled || qp == 0) {
-		printf("> ROI disabled (all regions cleared)\n");
+		/* Name the cause -- see the matching comment in
+		 * star6e_controls.c's apply_roi_qp().  A NULL cfg returned -1
+		 * above, so only two states reach here. */
+		printf("> ROI disabled (%s), all regions cleared\n",
+			!cfg->fpv.roi_enabled ? "roiEnabled=false" :
+				"roiQp=0, no delta to apply");
 		return 0;
 	}
 

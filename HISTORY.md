@@ -53,11 +53,20 @@ flags change).
   (1739 -> 1854), against an 18x swing between arms. Whatever #259 is, it does
   not generalise to `SetRoiCfg`.
 
-- **`fpv.roi_enabled` is not the switch, and never was.** `apply_roi_qp()`
-  clears every region when `roiQp == 0`, which is the shipped default, so a
-  craft boots logging `> ROI disabled (all regions cleared)` with
-  `roiEnabled:true`. Documented rather than changed: `roiQp` is the control and
-  `roiEnabled` is the override that forces it off.
+- **The shipped ROI defaults now agree with themselves.** They were
+  `roiEnabled:true, roiQp:0` — which reads as "ROI is on" while `apply_roi_qp()`
+  clears every region, because a zero delta is not a region worth programming.
+  Nothing was ignored, but the flag and the log disagreed, and that is the first
+  thing an operator sees. They ship **`roiEnabled:false, roiQp:-25`**: off, but
+  carrying a delta that bites the moment it is switched on. Existing crafts are
+  unaffected — their own `/etc/waybeam.json` values win; this changes the
+  compiled defaults, `config/waybeam.default*.json` and `/api/v1/defaults`.
+
+- **The disabled log line names its cause.** `> ROI disabled (all regions
+  cleared)` covered three different states. It now reads
+  `> ROI disabled (roiEnabled=false), all regions cleared` or
+  `> ROI disabled (roiQp=0, no delta to apply), all regions cleared`, on all
+  three backends.
 
 ## [0.75.0] - 2026-08-30
 
