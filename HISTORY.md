@@ -1,5 +1,64 @@
 # History
 
+## [0.76.0] - 2026-08-30
+
+Centre-priority ROI reaches CV610, and stops being skipped at boot on Maruko.
+`contract_version` 0.24.0 -> **0.25.0** (additive; four per-backend `supported`
+flags change).
+
+- **`fpv.roi*` had no CV610 implementation at all.** No `apply_roi_qp` in the
+  backend callback table and no cold-boot apply, so every CV610 craft carried an
+  `fpv` block in `/etc/waybeam.json` that nothing on the board read. The write
+  path was honest about it (`/api/v1/capabilities` reported `supported:false`
+  and `/api/v1/set` answered `501`), but `/api/v1/get` returned the stored value
+  and the config file kept round-tripping it, so a craft could sit for months
+  with `roiQp:-15` configured and no region ever programmed.
+
+  `cv610_apply_roi_qp()` now programs the bands through
+  `ss_mpi_venc_set_roi_attr()`. `ot_venc_roi_attr` is field-for-field
+  `MI_VENC_RoiCfg_t`, and the part accepts a wider delta than the shared
+  +/-30 clamp, so no per-backend range was needed. Geometry is read from the
+  channel attr rather than a cached width: it is what the encoder is actually
+  running, and the get doubles as the "channel exists" guard.
+
+- **Maruko never applied ROI on a cold boot.** `fpv.roi*` are `MUT_LIVE`, and
+  only the live path ever called `maruko_apply_roi_qp()`. Star6E has always
+  applied it in `star6e_runtime_apply_startup_controls()`; Maruko applied
+  `qp_delta` and `qp_bounds` there and not ROI. Witnessed on the bench: a craft
+  booting with `roiEnabled:true, roiQp:-8` in its file logged the qpDelta apply
+  and **no ROI line at all**, then logged the band immediately on one live set.
+  Every craft that configured ROI in its file was flying without it.
+
+- **The band geometry is now computed once.** `compute_horizontal_roi()` was
+  byte-identical in `star6e_controls.c` and `maruko_controls.c` down to the
+  32-px alignment; CV610 would have made a third copy. The rectangle and the
+  QP taper move to `pipeline_common_roi_band()`, and each backend copies the
+  result into its own SDK struct.
+
+- **ROI is measured, not assumed.** Issue #259 is a QP control on these same
+  SigmaStar parts that returns success, logs as applied, reads back clean and
+  never moves the bitstream, so an SDK return code is not evidence. Maruko,
+  1280x720@30 CBR 5754 kbps, `roiSteps:1 roiCenter:0.3` (a 384-px band at
+  x=448), decoded and profiled as median Laplacian variance per 64-px column:
+
+  | column | `roiQp:-30` | `roiQp:+30` |
+  |---|---|---|
+  | 384-448 (outside) | 54.5 | 640.1 |
+  | 448-512 (inside) | 755.7 | 46.9 |
+  | 768-832 (inside) | 854.0 | 6.3 |
+  | 832-896 (outside) | 34.7 | 792.7 |
+
+  The step lands exactly on the programmed rect edges and inverts with the sign
+  of the delta. A repeat of the `-30` arm held the in-band figure to within 6.6%
+  (1739 -> 1854), against an 18x swing between arms. Whatever #259 is, it does
+  not generalise to `SetRoiCfg`.
+
+- **`fpv.roi_enabled` is not the switch, and never was.** `apply_roi_qp()`
+  clears every region when `roiQp == 0`, which is the shipped default, so a
+  craft boots logging `> ROI disabled (all regions cleared)` with
+  `roiEnabled:true`. Documented rather than changed: `roiQp` is the control and
+  `roiEnabled` is the override that forces it off.
+
 ## [0.75.0] - 2026-08-30
 
 Sensor orientation reaches CV610. `contract_version` 0.23.0 -> **0.24.0**

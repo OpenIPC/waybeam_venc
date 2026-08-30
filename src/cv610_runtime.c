@@ -958,6 +958,128 @@ static char *cv610_query_audio_status(void)
 	return strdup(buf);
 }
 
+/* Horizontal centre-priority ROI bands -- the same geometry the two SigmaStar
+ * backends draw (pipeline_common_roi_band); only the SDK struct differs.
+ * ot_venc_roi_attr is field-for-field MI_VENC_RoiCfg_t, and this part accepts a
+ * wider delta ([-51, 51] for H.265) than the +/-30 the shared API clamps to, so
+ * nothing here needs a per-backend range.
+ *
+ * Geometry comes from the channel attr rather than a cached width: it is what
+ * the encoder is actually running, and the get doubles as the "channel exists"
+ * guard, so a live set arriving before cv610_venc_start() refuses instead of
+ * programming bands against a zero-size frame.
+ *
+ * The readback is a WRITE check, not an effect check.  It catches an SDK that
+ * clamped or silently dropped a rectangle; it cannot tell whether the rate
+ * controller acts on the delta.  That distinction is not theoretical here --
+ * issue #259 is a QP control on the sibling parts that returns success, logs as
+ * applied, reads back clean, and never moves the bitstream, and this part's own
+ * CBR does the same with ip_qp_delta (see the create-time comment in
+ * cv610_venc_start).  The effect is a decoded-bitstream measurement, not an API
+ * call: a horizontal detail profile has to step at the programmed rect edges. */
+static int cv610_apply_roi_qp(int qp)
+{
+	ot_venc_chn_attr attr;
+	ot_venc_roi_attr roi;
+	const VencConfig *cfg = g_cv610_runner ? &g_cv610_runner->config : NULL;
+	uint32_t width, height;
+	uint16_t steps;
+	float center_frac;
+	int i;
+	int ok = 1;
+
+	if (!cfg)
+		return -1;
+
+	memset(&attr, 0, sizeof(attr));
+	if (ss_mpi_venc_get_chn_attr(CV610_VENC_CHN, &attr) != TD_SUCCESS)
+		return -1;
+	width = attr.venc_attr.pic_width;
+	height = attr.venc_attr.pic_height;
+	if (width == 0 || height == 0)
+		return -1;
+
+	/* Clear first, unconditionally, so a shrinking steps count cannot leave
+	 * a stale outer band enabled -- the same order both SigmaStar backends
+	 * use.  Only the indices this backend ever writes are cleared; the part
+	 * offers OT_VENC_MAX_ROI_NUM (8) and nothing here touches 4..7. */
+	for (i = 0; i < PIPELINE_ROI_MAX_STEPS; i++) {
+		memset(&roi, 0, sizeof(roi));
+		roi.idx = (td_u32)i;
+		roi.enable = TD_FALSE;
+		(void)ss_mpi_venc_set_roi_attr(CV610_VENC_CHN, &roi);
+	}
+
+	if (!cfg->fpv.roi_enabled || qp == 0) {
+		printf("> ROI disabled (all regions cleared)\n");
+		return 0;
+	}
+
+	if (qp < -30) qp = -30;
+	if (qp > 30) qp = 30;
+
+	steps = cfg->fpv.roi_steps;
+	if (steps < 1) steps = 1;
+	if (steps > PIPELINE_ROI_MAX_STEPS) steps = PIPELINE_ROI_MAX_STEPS;
+
+	center_frac = (float)cfg->fpv.roi_center;
+	if (center_frac < 0.1f) center_frac = 0.1f;
+	if (center_frac > 0.9f) center_frac = 0.9f;
+
+	for (i = 0; i < steps; i++) {
+		PipelineRoiBand band;
+		ot_venc_roi_attr back;
+		td_s32 ret;
+
+		if (pipeline_common_roi_band(width, height, center_frac, qp,
+		    steps, i, &band) != 0)
+			continue;
+
+		memset(&roi, 0, sizeof(roi));
+		roi.idx = (td_u32)i;
+		roi.enable = TD_TRUE;
+		roi.is_abs_qp = TD_FALSE;
+		roi.qp = band.qp;
+		roi.rect.x = (td_s32)band.x;
+		roi.rect.y = (td_s32)band.y;
+		roi.rect.width = band.width;
+		roi.rect.height = band.height;
+
+		ret = ss_mpi_venc_set_roi_attr(CV610_VENC_CHN, &roi);
+		if (ret != TD_SUCCESS) {
+			fprintf(stderr, "ERROR: ROI[%d] set=0x%x rect=(%u,%u %ux%u) "
+				"qp=%+d\n", i, (unsigned)ret, band.x, band.y,
+				band.width, band.height, band.qp);
+			ok = 0;
+			continue;
+		}
+
+		memset(&back, 0, sizeof(back));
+		if (ss_mpi_venc_get_roi_attr(CV610_VENC_CHN, (td_u32)i,
+			&back) != TD_SUCCESS) {
+			fprintf(stderr, "ERROR: ROI[%d] readback failed\n", i);
+			ok = 0;
+		} else if (!back.enable || back.qp != band.qp ||
+			back.rect.width != band.width ||
+			back.rect.height != band.height) {
+			fprintf(stderr, "ERROR: ROI[%d] readback disagrees: "
+				"enable=%d qp=%+d %ux%u, wrote enable=1 qp=%+d "
+				"%ux%u\n", i, (int)back.enable, (int)back.qp,
+				(unsigned)back.rect.width,
+				(unsigned)back.rect.height,
+				band.qp, band.width, band.height);
+			ok = 0;
+		}
+	}
+
+	if (ok) {
+		printf("> ROI horizontal: %ux%u, %u steps, center=%.0f%%, qp=%+d\n",
+			width, height, steps, center_frac * 100.0f, qp);
+	}
+
+	return ok ? 0 : -1;
+}
+
 static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.apply_bitrate = cv610_apply_bitrate,
 	.apply_gop = cv610_apply_gop,
@@ -971,6 +1093,7 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.query_awb_info = cv610_awb_query,
 	.apply_iq_param = cv610_iq_set,
 	.apply_qp_bounds = cv610_apply_qp_bounds,
+	.apply_roi_qp = cv610_apply_roi_qp,
 	/* Same shared implementation Star6E and Maruko register; it dispatches
 	 * to venc_jpeg_backend_set_quality() under the snapshot module lock, so
 	 * a live q change cannot interleave with a capture in progress. Without
@@ -1712,6 +1835,24 @@ static int cv610_init(void *opaque)
 		return -1;
 	venc_api_set_record_status_fn(cv610_record_status_callback);
 	venc_api_set_record_http_control_supported(true);
+
+	/* fpv.roi* are MUT_LIVE and must also take effect on a cold boot: the
+	 * config is read before the channel exists, so the live path never runs
+	 * for a value already in the file.  Placed here rather than beside the
+	 * qpBounds cold-boot apply because cv610_apply_roi_qp() reads the config
+	 * through g_cv610_runner, which is assigned just above -- calling it
+	 * earlier would refuse with no channel and no config. */
+	if (ctx->config.fpv.roi_enabled) {
+		/* Not (void): a rejected apply would otherwise leave the operator
+		 * booting with an ROI the dashboard reports as configured and the
+		 * encoder never received. */
+		if (cv610_apply_roi_qp(ctx->config.fpv.roi_qp) != 0)
+			fprintf(stderr, "WARN: ROI from config not applied "
+				"(qp=%+d steps=%u center=%.2f)\n",
+				ctx->config.fpv.roi_qp,
+				(unsigned)ctx->config.fpv.roi_steps,
+				ctx->config.fpv.roi_center);
+	}
 
 	/* Auto-start.  Only "mirror" is implemented here: dual and dual-stream
 	 * need a second VENC channel, deliberately deferred (docs/CV610_BACKEND.md).

@@ -156,6 +156,69 @@ int test_pipeline_common(void)
 	rc = pipeline_common_resolve_isp_bin(fixture_a, "imx335", resolved, 0);
 	CHECK("isp_bin zero size rc", rc == 0);
 
+	/* ── ROI bands ──────────────────────────────────────────────────
+	 * The 1280x720 / center 0.3 / steps 1 case is the exact geometry the
+	 * Maruko bitstream measurement used, so the numbers here and the
+	 * device evidence describe the same rectangle. */
+	{
+		PipelineRoiBand b;
+		int i;
+
+		CHECK("roi band 720p c0.3 s1 rc",
+			pipeline_common_roi_band(1280, 720, 0.3f, -30, 1, 0, &b) == 0);
+		CHECK("roi band 720p c0.3 s1 x", b.x == 448);
+		CHECK("roi band 720p c0.3 s1 w", b.width == 384);
+		CHECK("roi band 720p c0.3 s1 y", b.y == 0);
+		CHECK("roi band 720p c0.3 s1 h", b.height == 704);
+		CHECK("roi band 720p c0.3 s1 qp", b.qp == -30);
+
+		/* Two steps: outer band is wider and weaker, inner takes the full
+		 * delta.  A backend where a higher index overrides a lower one in
+		 * the overlap therefore lands full strength in the centre. */
+		CHECK("roi band s2 outer rc",
+			pipeline_common_roi_band(1280, 720, 0.4f, -30, 2, 0, &b) == 0);
+		CHECK("roi band s2 outer w", b.width == 896);
+		CHECK("roi band s2 outer x", b.x == 192);
+		CHECK("roi band s2 outer qp", b.qp == -15);
+		CHECK("roi band s2 inner rc",
+			pipeline_common_roi_band(1280, 720, 0.4f, -30, 2, 1, &b) == 0);
+		CHECK("roi band s2 inner w", b.width == 512);
+		CHECK("roi band s2 inner x", b.x == 384);
+		CHECK("roi band s2 inner qp", b.qp == -30);
+
+		/* A positive delta keeps its sign through the taper — the centre
+		 * gets SOFTER, which is the arm the device A/B inverted on. */
+		CHECK("roi band positive taper rc",
+			pipeline_common_roi_band(1280, 720, 0.4f, 30, 2, 0, &b) == 0);
+		CHECK("roi band positive taper qp", b.qp == 15);
+
+		/* Every edge 32-px aligned, at every step count, or the SDK
+		 * refuses the rect (H.265 CTU constraint). */
+		for (i = 0; i < 4; i++) {
+			if (pipeline_common_roi_band(1920, 1080, 0.35f, -12,
+				4, i, &b) != 0)
+				continue;
+			CHECK("roi band aligned x", b.x % 32 == 0);
+			CHECK("roi band aligned w", b.width % 32 == 0);
+			CHECK("roi band aligned h", b.height % 32 == 0);
+			CHECK("roi band inside frame", b.x + b.width <= 1920);
+		}
+
+		/* Skips, not silent zero-size regions: a rect that rounds away
+		 * must be dropped rather than programmed, or the encoder gets an
+		 * enabled region of zero area. */
+		CHECK("roi band index negative",
+			pipeline_common_roi_band(1280, 720, 0.3f, -30, 1, -1, &b) != 0);
+		CHECK("roi band index past steps",
+			pipeline_common_roi_band(1280, 720, 0.3f, -30, 2, 2, &b) != 0);
+		CHECK("roi band null out",
+			pipeline_common_roi_band(1280, 720, 0.3f, -30, 1, 0, NULL) != 0);
+		CHECK("roi band width rounds away",
+			pipeline_common_roi_band(16, 720, 0.3f, -30, 1, 0, &b) != 0);
+		CHECK("roi band height rounds away",
+			pipeline_common_roi_band(1280, 16, 0.3f, -30, 1, 0, &b) != 0);
+	}
+
 	/* cleanup */
 	unlink(fixture_a);
 	rmdir(tmp_dir);

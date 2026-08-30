@@ -391,7 +391,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.75.0","backend":"star6e","contract_version":"0.24.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.76.0","backend":"star6e","contract_version":"0.25.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -752,7 +752,8 @@ overshoot.
 | `video0.qp_delta` | yes | yes | **not offered** |
 | `video0.min_qp` / `max_qp` | yes | yes | yes |
 | `video0.intra_refresh_qp` | **inert, not offered** | **inert, not offered** | yes |
-| `outgoing.sidecar_port` | yes | yes | not implemented |
+| `fpv.roi_*` | yes | yes | yes **from 0.76.0** |
+| `outgoing.sidecar_port` | yes | yes | yes **from 0.74.0** |
 
 `video0.intra_refresh_qp` is advertised on CV610 only. It reaches
 `MI_VENC_SetIntraRefresh` on Star6E and Maruko as well, and both log it as
@@ -1337,8 +1338,8 @@ audio track). Settable via the config file or the runtime API
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `fpv.roi_enabled` | bool | live | Enable horizontal ROI bands |
-| `fpv.roi_qp` | int | live | Signed ROI delta QP (-30..30, negative = sharper center) |
+| `fpv.roi_enabled` | bool | live | Enable horizontal ROI bands. **Not the switch** — `roi_qp: 0` clears every region regardless, and that is the shipped default |
+| `fpv.roi_qp` | int | live | Signed ROI delta QP (-30..30, negative = sharper center). **0 disables ROI.** All three backends **from 0.76.0** (CV610 had no implementation before it) |
 | `fpv.roi_steps` | uint16 | live | Number of horizontal bands (1-4) |
 | `fpv.roi_center` | double | live | Center band width ratio (0.1-0.9) |
 | `fpv.noise_level` | int | restart | 3DNR noise reduction level |

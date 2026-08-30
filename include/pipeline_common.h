@@ -80,6 +80,30 @@ static inline int pipeline_common_scale_roi_qp(int qp, int level, int steps)
 /** Maximum number of ROI band regions. */
 #define PIPELINE_ROI_MAX_STEPS 4
 
+/** One horizontal ROI band, in encoder pixel coordinates.
+ *
+ * Full-height bands centred horizontally, delta QP tapering from the innermost
+ * band (full qp) outward.  Higher index = narrower = stronger, so on a backend
+ * where a higher-index region overrides a lower one in the overlap the centre
+ * lands the full delta and the edges the weakest step.  Every edge is 32-px
+ * aligned for H.265 CTU compatibility.
+ *
+ * Shared because all three backends draw the identical rectangle; only the SDK
+ * struct it is copied into differs (MI_VENC_RoiCfg_t on the two SigmaStar
+ * parts, ot_venc_roi_attr on CV610). */
+typedef struct {
+	uint32_t x, y, width, height;
+	int qp;
+} PipelineRoiBand;
+
+/** Compute band `index` of `steps`.  Returns 0 and fills *out when the band is
+ * usable, -1 when the caller should skip it: a NULL out, an index outside
+ * [0, steps), or a rectangle that degenerates to zero width or height once
+ * aligned (a frame under 32 px, or a centre fraction that rounds away). */
+int pipeline_common_roi_band(uint32_t width, uint32_t height,
+	float center_frac, int qp, int steps, int index,
+	PipelineRoiBand *out);
+
 /** Upper bound the live-apply path accepts for video0.fps.
  *
  * A live `fps` request above the current sensor mode's max is intentionally

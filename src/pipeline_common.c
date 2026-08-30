@@ -294,3 +294,36 @@ int pipeline_common_resolve_isp_bin(const char *configured_path,
 		fallback, normalized);
 	return 0;
 }
+
+static uint32_t roi_align_down(uint32_t value, uint32_t align)
+{
+	return value / align * align;
+}
+
+int pipeline_common_roi_band(uint32_t width, uint32_t height,
+	float center_frac, int qp, int steps, int index,
+	PipelineRoiBand *out)
+{
+	float frac;
+	uint32_t rw, rh, rx;
+	int level;
+
+	if (!out || index < 0 || index >= steps)
+		return -1;
+
+	level = index + 1;
+	frac = center_frac + (1.0f - center_frac) *
+		(float)(steps - level) / (float)steps;
+	rw = roi_align_down((uint32_t)(frac * width), 32);
+	rh = roi_align_down(height, 32);
+	rx = roi_align_down((width - rw) / 2, 32);
+	if (rw == 0 || rh == 0)
+		return -1;
+
+	out->x = rx;
+	out->y = 0;
+	out->width = rw;
+	out->height = rh;
+	out->qp = pipeline_common_scale_roi_qp(qp, level, steps);
+	return 0;
+}

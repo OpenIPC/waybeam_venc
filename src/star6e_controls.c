@@ -159,11 +159,6 @@ static int apply_encoder_gop(uint32_t gop_size);
 static int request_idr(void);
 static int request_idr_bootstrap(void);
 
-static uint32_t align_down(uint32_t value, uint32_t align)
-{
-	return value / align * align;
-}
-
 static int apply_rc_qp_delta(const MI_VENC_ChnAttr_t *attr, MI_VENC_RcParam_t *param,
 	int delta)
 {
@@ -679,30 +674,20 @@ static int compute_horizontal_roi(uint32_t width, uint32_t height,
 	float center_frac, int qp, int steps, int index,
 	MI_VENC_RoiCfg_t *roi)
 {
-	float frac;
-	uint32_t rw, rh, rx;
-	int level;
+	PipelineRoiBand band;
 
-	if (!roi || index < 0 || index >= steps)
-		return -1;
-
-	level = index + 1;
-	frac = center_frac + (1.0f - center_frac) *
-		(float)(steps - level) / (float)steps;
-	rw = align_down((uint32_t)(frac * width), 32);
-	rh = align_down(height, 32);
-	rx = align_down((width - rw) / 2, 32);
-	if (rw == 0 || rh == 0)
+	if (!roi || pipeline_common_roi_band(width, height, center_frac, qp,
+	    steps, index, &band) != 0)
 		return -1;
 
 	roi->u32Index = (uint32_t)index;
 	roi->bEnable = 1;
 	roi->bAbsQp = 0;
-	roi->s32Qp = pipeline_common_scale_roi_qp(qp, level, steps);
-	roi->stRect.u32Left = rx;
-	roi->stRect.u32Top = 0;
-	roi->stRect.u32Width = rw;
-	roi->stRect.u32Height = rh;
+	roi->s32Qp = band.qp;
+	roi->stRect.u32Left = band.x;
+	roi->stRect.u32Top = band.y;
+	roi->stRect.u32Width = band.width;
+	roi->stRect.u32Height = band.height;
 	return 0;
 }
 

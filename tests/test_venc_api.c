@@ -544,6 +544,38 @@ static int test_field_support_by_backend(void)
 	CHECK("sidecar port supported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"outgoing.sidecar_port") == 1);
+	/* ROI reaches CV610 through ss_mpi_venc_set_roi_attr().  fpv.noise_level
+	 * is the control here and is deliberately NOT in the list: it proves the
+	 * allowlist matches whole field names, so a prefix match on "fpv." would
+	 * fail this block rather than quietly advertising a field the backend
+	 * never reads. */
+	CHECK("roi enabled supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roi_enabled") == 1);
+	CHECK("roi qp supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roi_qp") == 1);
+	CHECK("roi steps supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roi_steps") == 1);
+	CHECK("roi center supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roi_center") == 1);
+	CHECK("roi qp alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roiQp") == 1);
+	CHECK("roi center alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roiCenter") == 1);
+	CHECK("fpv noise level unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.noise_level") == 0);
+	CHECK("roi qp supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"fpv.roi_qp") == 1);
+	CHECK("roi qp supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"fpv.roi_qp") == 1);
 	/* Sensor orientation reaches CV610 through the plugin's
 	 * pfn_mirror_flip, the same place the SigmaStar backends apply it.
 	 * Checked on all three so the entry lands in CV610's allowlist rather

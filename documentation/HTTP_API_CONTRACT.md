@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.24.0`
+- `contract_version`: `0.25.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -99,8 +99,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.75.0",
-    "contract_version": "0.24.0",
+    "app_version": "0.76.0",
+    "contract_version": "0.25.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1861,7 +1861,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.24.0`:
+in Notes. As of `contract_version: 0.25.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1884,9 +1884,21 @@ in Notes. As of `contract_version: 0.24.0`:
 | `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **live** | Both backends hot-swap the NPU detector on the pipeline thread without respawning video. Star6E uses VPE port 1; Maruko uses SCL port 3 and its drain-while-disable teardown. A model whose reported input geometry disagrees with the configured tap is refused and leaves detection off. |
 | `detect.net_width` / `net_height` | restart | restart | Tap geometry is fixed when the VPE/SCL detector port is created. |
 | `video0.min_qp` / `max_qp` | live | live | RC QP bounds, live and from config at startup on all three. **Maruko gained them in 0.73.0**; before that it reported unsupported. **CV610 from 0.18.4** — it sets the P bounds and the I-frame ceiling, but the I-frame floor is not steerable there (`video0.qp_delta` is not offered on CV610; see Per-Backend Field Support). |
+| `fpv.roi_enabled` / `roi_qp` / `roi_steps` / `roi_center` | live | live | Centre-priority horizontal delta-QP bands. **CV610 from 0.76.0** (`ss_mpi_venc_set_roi_attr`); before that the fields were accepted by a config parse, reported `supported:false` and never reached the encoder. All three backends share one band geometry (`pipeline_common_roi_band`). **`roi_qp` is the switch, not `roi_enabled`**: the apply clears every region when `roi_qp == 0`, which is the shipped default, so a craft can boot with `roiEnabled:true` and log `> ROI disabled (all regions cleared)`. **Maruko applied it only on a live write until 0.76.0** — a value already in the config file was never programmed at boot. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.25.0` (additive — centre-priority ROI reaches CV610): `fpv.roi_enabled`,
+    `fpv.roi_qp`, `fpv.roi_steps` and `fpv.roi_center` flip from
+    `supported:false` to `true` on CV610, which had no `apply_roi_qp` at all —
+    every craft carried an `fpv` block nothing on the board read. Programmed
+    through `ss_mpi_venc_set_roi_attr()`; `ot_venc_roi_attr` is field-for-field
+    `MI_VENC_RoiCfg_t`, so the three backends now share one band geometry.
+    Verified in the bitstream rather than by return code (issue #259 is the
+    counter-example): decoded detail steps 14-25x exactly at the programmed
+    rect edges and inverts with the sign of `roiQp`. No wire or field-name
+    change; a client that already renders the CV610 capability map sees four
+    controls ungrey.
 - `0.24.0` (additive — sensor orientation reaches CV610): `image.mirror` and
     `image.flip` flip from `supported:false` to `true` on CV610. Both were
     hardcoded `TD_FALSE` on the VI channel attribute, so an inverted lens mount
