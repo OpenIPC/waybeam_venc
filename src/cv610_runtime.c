@@ -1072,8 +1072,8 @@ static int cv610_apply_roi_qp(int qp)
 		return ok ? 0 : -1;
 	}
 
-	if (qp < -30) qp = -30;
-	if (qp > 30) qp = 30;
+	if (qp < -20) qp = -20;
+	if (qp > 20) qp = 20;
 
 	steps = cfg->fpv.roi_steps;
 	if (steps < 1) steps = 1;

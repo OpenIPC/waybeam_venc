@@ -1,5 +1,58 @@
 # History
 
+## [0.79.0] - 2026-08-30
+
+`fpv.roiQp` is bounded to **±20**, down from ±30. `contract_version` **0.27.0
+-> 0.28.0** — this is a *narrowing*, not an addition: a client sending ±21..±30
+now gets 400 where it previously got 200.
+
+- **Past ±20 the delta stops being honoured, at both ends.** `roiQp` is a
+  RELATIVE delta and H.265 caps QP at 51. Positive is the benign end and merely
+  truncates: at `+30` the frame's base QP sat at 21.5, so the region wanted 51.5
+  and got 51.
+
+- **Negative is the expensive end, and it was a real defect.** CBR pays for the
+  ROI discount by raising the frame's base QP roughly 1:1 with `|roiQp|`. Once
+  `base_qp + |roiQp|` passes 51 the rate controller saturates — every frame at
+  `qp 51/51/51`, zero variance, no authority left — while the ROI band still
+  encodes at `51 - |roiQp|`, which is expensive. Measured on a CV610 bench,
+  720p60, via the sidecar's per-frame `frame_size_bytes` and `qp`:
+
+  | target kbps | roiQp | base QP | delivered | vs target |
+  |---|---|---|---|---|
+  | 2829 | 0 | 25.4 | 2849 | 1.01x |
+  | 2829 | -20 | 45.1 | 2802 | 0.99x |
+  | 2829 | -25 | 49.9 (max 51) | 2991 | 1.06x |
+  | 2829 | **-30** | **51/51/51** | 16976 | **6.0x** |
+  | 9000 | -20 | 42.5 | 8888 | 0.99x |
+  | 9000 | **-30** | **51/51/51** | 17300 | **1.9x** |
+  | 1200 | -15 | 42.4 (max 51) | 1186 | 0.99x |
+
+  The rule `base_qp + |roiQp| > 51` predicts all three targets. **The QP column
+  is the instrument** — delivered rate alone cannot see this, because below the
+  cliff CBR absorbs the whole delta and the total does not move.
+
+- **The band width does not move the cliff, only its severity.** At `roiQp -30`,
+  `roiCenter` 0.6 / 0.4 / 0.2 all pinned at qp 51 and delivered 17661 / 12520 /
+  6977 kbps. Base QP rises by the full delta however narrow the band is, so
+  there is nothing to bound on that axis instead.
+
+- **A config file is clamped, not rejected.** `load_fpv()` clamps at parse time,
+  so a craft already carrying `-30` still boots and lands on `-20` — the fix
+  applying itself. Only `/api/v1/set` rejects, so an operator typing `-30` is
+  told rather than reading back a value they did not write.
+
+- Shipped default `fpv.roiQp` **-25 -> -20**, so the default sits inside the
+  range it documents (`venc_config.c`, `config/waybeam.default.json`,
+  `config/waybeam.default.maruko.json`).
+
+- **NOT reproduced on Star6E.** 1080p60 held its target at `roiQp` 0/-15/-25/-30,
+  both at its configured 19092 kbps and forced down to 1500. Its sidecar reports
+  `qp=0`, so its rate controller could not be watched directly — that is
+  unreproduced, not immune. The bound applies on all three backends anyway,
+  because the QP ceiling it derives from is an H.265 limit rather than a vendor
+  one.
+
 ## [0.78.0] - 2026-08-30
 
 The two portable AE ceilings reach the CV610 ISP. `contract_version` **0.26.0

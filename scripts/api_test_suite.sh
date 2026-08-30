@@ -647,10 +647,22 @@ section "10. ROI QP — Enable, sweep, disable"
 assert_set "fpv.roi_enabled" "true"
 settle 0.5
 
-for qp in -30 -18 -9 0 9 18 30; do
+for qp in -20 -18 -9 0 9 18 20; do
 	assert_set "fpv.roi_qp" "${qp}" "SET roi_qp=${qp}"
 	settle 0.3
 done
+
+# Past +-20 the delta stops reaching the encoder, and on the negative side it
+# saturates rate control and overruns the bitrate target (contract 0.28.0).
+# The boundary is asserted on BOTH sides of the edge: +-20 accepted above,
+# +-21 and the old +-30 refused here.  Without the +-21 pair a validator that
+# had drifted to, say, +-25 would still pass this block.
+for qp in -30 -21 21 30; do
+	assert_set_fail "fpv.roi_qp" "${qp}" "REJECT roi_qp=${qp} (out of +-20)"
+	settle 0.3
+done
+assert_set "fpv.roi_qp" "-15" "SET roi_qp=-15 (restore in-range)"
+settle 0.3
 
 for steps in 1 2 3 4; do
 	assert_set "fpv.roi_steps" "${steps}" "SET roi_steps=${steps}"

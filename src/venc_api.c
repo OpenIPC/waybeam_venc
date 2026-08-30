@@ -1309,8 +1309,25 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 				"(0 = stop the userspace AWB loop)";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
-		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
-			return "roi_qp must be in range [-30, 30]";
+		/* +-20, not +-30.  Beyond 20 the delta stops being honoured at
+		 * BOTH ends, because it is a RELATIVE delta and H.265 caps QP at
+		 * 51.  Negative is the expensive end: CBR pays for the ROI
+		 * discount by raising the frame's base QP roughly 1:1 with
+		 * |roiQp|, so once base + |roiQp| passes 51 the rate controller
+		 * saturates -- measured on a CV610 bench at 720p60, roiQp -30
+		 * pinned every frame at qp 51/51/51 and delivered 16976 kbps
+		 * against a 2829 kbps target, a 6x overrun, while -20 landed at
+		 * qp 45 and held the target at 2802.  Positive is the benign end
+		 * but truncates just as quietly: at +30 the base sat at 21.5, so
+		 * the region wanted 51.5 and got 51.  The band width does NOT
+		 * move the cliff, only its severity -- at -30, roiCenter 0.6 /
+		 * 0.4 / 0.2 all pinned at 51 and delivered 17661 / 12520 / 6977
+		 * kbps -- so there is nothing to clamp on that axis instead. */
+		if (cfg->fpv.roi_qp < -20 || cfg->fpv.roi_qp > 20)
+			return "roi_qp must be in range [-20, 20] (beyond that the "
+				"delta exceeds the encoder's QP range: a large "
+				"negative value saturates rate control and overruns "
+				"the bitrate target)";
 	}
 	if (strcmp(key, "fpv.roi_steps") == 0) {
 		if (cfg->fpv.roi_steps < 1 ||
