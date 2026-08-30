@@ -96,7 +96,12 @@ static inline int pipeline_common_scale_roi_qp(int qp, int level, int steps)
  * Thresholds are compiled in, not configurable, because the measurement leaves
  * no room to tune: normal operation ran 0.96-1.06x of target across every arm,
  * the worst benign scene transient hit 1.43x for a single window, and a real
- * collapse ran 1.9x-39x and did not decay.  Zero bitrate disables the check. */
+ * collapse ran 1.9x-39x and did not decay.  Zero bitrate disables the check.
+ *
+ * Scope: the main video0 channel on each backend.  Maruko's second "dual"
+ * VENC channel runs its own thread and never passes through the drain loop
+ * this is called from, so that stream is not watched -- video0 is the one
+ * with a configured target to compare against. */
 typedef struct {
 	uint64_t window_start_us;
 	uint64_t window_bytes;

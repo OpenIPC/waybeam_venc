@@ -315,6 +315,14 @@ void pipeline_common_rate_watch(PipelineRateWatch *rw, const VencConfig *cfg,
 	uint64_t elapsed, delivered_kbps;
 	uint32_t ratio_x100;
 
+	/* cfg->video0.bitrate is read on the encode thread while the httpd
+	 * thread may be committing a new config under g_cfg_mutex.  Deliberately
+	 * unlocked: this is a per-frame path, the field is a naturally aligned
+	 * uint32_t, and the two-window rule already absorbs the only damage a
+	 * mid-commit read could do -- one window computed against the wrong
+	 * target cannot raise a report on its own, and the next window uses the
+	 * settled value.  Taking the config mutex once per encoded frame to
+	 * protect a diagnostic would be the worse trade. */
 	if (!rw || !cfg || cfg->video0.bitrate == 0)
 		return;
 
