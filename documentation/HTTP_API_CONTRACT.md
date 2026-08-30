@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.25.0`
+- `contract_version`: `0.26.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -36,6 +36,7 @@
 | `image.mirror` / `image.flip` | true | true | true (**from 0.75.0**) |
 | `image.rotate` | true | true | **false** |
 | `fpv.roiEnabled` / `roiQp` / `roiSteps` / `roiCenter` | true | true | true (**from 0.25.0**) |
+| `outgoing.server` / `outgoing.enabled` mutability | live | live | **live from 0.26.0** (restart_required before) |
 
 `video0.qpDelta` is `false` on CV610 and `video0.intraRefreshQp` is `false` on
 the SigmaStar backends because in each case the encoder accepts the value and
@@ -100,8 +101,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.76.0",
-    "contract_version": "0.25.0",
+    "app_version": "0.77.0",
+    "contract_version": "0.26.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1862,7 +1863,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.25.0`:
+in Notes. As of `contract_version: 0.26.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1889,6 +1890,34 @@ in Notes. As of `contract_version: 0.25.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.26.0` (additive — live output retarget reaches CV610): `outgoing.server`
+    and `outgoing.enabled` change from `restart_required` to `live` on CV610
+    only. Both SigmaStar backends already reported `live`; CV610 read the URI
+    once in `cv610_prepare()` and ran `cv610_output_start()` once, so the
+    fields were honestly advertised restart-class. They are now backed by
+    `cv610_apply_server()` / `cv610_apply_output_enabled()`. The callbacks
+    landed BEFORE the mutability widened, not after: the live-apply gate keys
+    on the callback being present, so the reverse order would have advertised
+    `live` while every write was refused.
+
+    **Socket transports switch live; ring transports stay restart-class.** A
+    `udp://` <-> `unix://` change takes effect in place. A write naming
+    `shm://` or `frame-shm://` (or made while a ring is running) is COMMITTED
+    and answered `200` with `"reinit_pending": true`, and the craft respawns
+    onto it — the ring is created once at start and cannot move in place.
+    CV610 deliberately differs from Star6E and Maruko here, which refuse such
+    a write: on this backend `outgoing.server` was restart-required until
+    0.26.0, so refusing would have made the fleet's normal production
+    transport unreachable through the API.
+
+    Clients should therefore treat a `200` with `reinit_pending` on
+    `outgoing.server` as "accepted, applying after respawn", exactly as they
+    already do for restart-class fields.
+
+    **One deliberate divergence:** Star6E drops the encoder to 5 fps while
+    output is disabled. CV610 cannot — `video0.fps` is restart-only there — so
+    a disable gates the send and the encoder keeps running at its configured
+    rate.
 - `0.25.0` (additive — centre-priority ROI reaches CV610): `fpv.roi_enabled`,
     `fpv.roi_qp`, `fpv.roi_steps` and `fpv.roi_center` flip from
     `supported:false` to `true` on CV610, which had no `apply_roi_qp` at all —

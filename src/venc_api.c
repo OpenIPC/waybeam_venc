@@ -806,8 +806,13 @@ static int cv610_field_is_restart_only(const char *canonical_key)
 {
 	static const char *const restart_only[] = {
 		"video0.fps",        /* pipeline fps, MIPI raw_bit, RTP clock */
-		"outgoing.enabled",  /* output_start() runs once, in cv610_init */
-		"outgoing.server",   /* URI parsed in cv610_prepare */
+		/* outgoing.enabled and outgoing.server LEFT this list in 0.77.0,
+		 * once cv610_apply_output_enabled() and cv610_apply_server()
+		 * existed to honour them.  Order matters and is not cosmetic:
+		 * live_group_supported_for_cfg() gates LIVE_GROUP_OUTGOING on
+		 * those callbacks being present, so widening first would have
+		 * advertised `live` in /api/v1/capabilities while every write
+		 * was rejected -- the exact lie this list exists to prevent. */
 		"audio.mute",        /* acodec gain set once, at audio start */
 	};
 	size_t i;
@@ -1648,7 +1653,7 @@ static int make_single_set_success_json(const char *field_key,
 }
 
 static int make_multi_live_set_success_json(const SetQueryParam *params,
-	size_t count, char **out_json)
+	size_t count, int reinit_requested, char **out_json)
 {
 	cJSON *root;
 	cJSON *data;
@@ -1665,6 +1670,12 @@ static int make_multi_live_set_success_json(const SetQueryParam *params,
 
 	cJSON_AddBoolToObject(root, "ok", 1);
 	data = cJSON_AddObjectToObject(root, "data");
+	/* Same contract as the single-field response: a batch whose apply asked
+	 * for a respawn has to say so, or a caller batching outgoing.server with
+	 * anything else is told the whole set went live while the craft is about
+	 * to restart under it. */
+	if (reinit_requested)
+		cJSON_AddBoolToObject(data, "reinit_pending", 1);
 	applied = cJSON_AddArrayToObject(data, "applied");
 
 	for (i = 0; i < count; i++) {
@@ -2465,7 +2476,7 @@ static int apply_live_group_sequence_locked(const LiveApplyGroup *group_order,
 
 static int make_live_set_response_locked(const VencConfig *cfg,
 	const SetQueryParam *params, size_t param_count, int single_response,
-	int *status_code, char **response_json)
+	int reinit_requested, int *status_code, char **response_json)
 {
 	if (!cfg || !params || param_count == 0 || !status_code || !response_json)
 		return -1;
@@ -2481,14 +2492,21 @@ static int make_live_set_response_locked(const VencConfig *cfg,
 				response_json);
 		}
 
-		rc = make_single_set_success_json(params[0].key, jval, 0,
-			response_json);
+		/* Report a respawn the apply itself asked for.  A backend can
+		 * accept a live-class field and still need a restart to honour
+		 * it -- CV610's apply_server() does exactly that for the ring
+		 * transports, committing the value and calling
+		 * venc_api_request_reinit() rather than refusing.  Answering a
+		 * flat "ok" there would tell the operator the change was live
+		 * when the craft is about to respawn under them. */
+		rc = make_single_set_success_json(params[0].key, jval,
+			reinit_requested, response_json);
 		free(jval);
 		if (rc != 0)
 			return -1;
 	} else {
 		if (make_multi_live_set_success_json(params, param_count,
-		    response_json) != 0) {
+		    reinit_requested, response_json) != 0) {
 			return -1;
 		}
 	}
@@ -2508,6 +2526,12 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	VencConfig new_cfg;
 	VencConfig actual_cfg;
 	int rc;
+	/* g_reinit is a LATCH the runtime consumes on its own schedule, so it
+	 * can already be set from an earlier request when this one arrives.
+	 * Only a false->true transition across THIS apply means this write is
+	 * the one that needs a respawn -- reading the flag absolutely made an
+	 * unrelated live set report reinit_pending. */
+	int reinit_before = venc_api_get_reinit() ? 1 : 0;
 
 	rc = collect_live_groups(params, param_count, group_order, &group_count,
 		&touched, status_code, response_json);
@@ -2557,7 +2581,9 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	}
 
 	rc = make_live_set_response_locked(&actual_cfg, params, param_count,
-		single_response, status_code, response_json);
+		single_response,
+		(!reinit_before && venc_api_get_reinit()) ? 1 : 0,
+		status_code, response_json);
 	if (rc != 0) {
 		pthread_mutex_unlock(&g_cfg_mutex);
 		return rc;
@@ -2576,7 +2602,18 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	 * automated writers (waybeam-link adaptive actuation); a later
 	 * persisting /set snapshots the whole running config, volatile
 	 * changes included (one config struct, by design). */
-	if (persist)
+	/* `persist || reinit` is the condition, not `persist`.
+	 *
+	 * /api/v1/live/set passes persist=0 by design, and that is safe for a
+	 * change that took effect in the running process.  It is NOT safe once a
+	 * backend's apply has asked for a respawn: the respawn re-execs and
+	 * reloads /etc/waybeam.json, so an unpersisted value is silently
+	 * discarded by a restart the caller did not ask for.  The restart-class
+	 * path already refuses this shape outright ("restart-class field
+	 * requires persistence; use /api/v1/set"); a backend-level restart class
+	 * reaches the same hazard through the live path, so the value is written
+	 * out instead of lost. */
+	if (persist || (!reinit_before && venc_api_get_reinit()))
 		(void)venc_api_save_config_to_disk(&actual_cfg);
 	return 0;
 }

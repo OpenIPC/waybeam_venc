@@ -45,6 +45,8 @@ typedef struct {
 	int apply_awb_rate_calls;
 	uint32_t last_awb_rate;
 	int apply_server_calls;
+	int apply_output_enabled_calls;
+	bool last_output_enabled;
 	int apply_max_payload_calls;
 	int apply_zoom_calls;
 	int apply_isp_bin_calls;
@@ -309,6 +311,24 @@ static int test_apply_awb_rate(uint32_t hz)
 {
 	g_api_cb_state.apply_awb_rate_calls++;
 	g_api_cb_state.last_awb_rate = hz;
+	return 0;
+}
+
+static int test_apply_output_enabled(bool on)
+{
+	g_api_cb_state.apply_output_enabled_calls++;
+	g_api_cb_state.last_output_enabled = on;
+	return 0;
+}
+
+/* Accepts the value but asks for a respawn -- the shape CV610's apply_server()
+ * uses for the ring transports, which cannot be switched in place but must
+ * still be settable through the API. */
+static int test_apply_server_needs_restart(const char *uri)
+{
+	(void)uri;
+	g_api_cb_state.apply_server_calls++;
+	venc_api_request_reinit();
 	return 0;
 }
 
@@ -695,6 +715,139 @@ static int test_cv610_restart_only_mutability(void)
 			"image.mirror=true", &status, response,
 			sizeof(response)) == 0);
 	CHECK("star6e live mirror rejected", status == 400);
+
+	/* outgoing.server / outgoing.enabled LEFT the restart-only list in
+	 * 0.77.0.  Asserted as an ACCEPTED live set that reaches the callback,
+	 * not merely as "not rejected": the failure this guards against is the
+	 * ordering one, where the field is widened to `live` before a backend
+	 * callback exists to honour it, and the write is then refused by
+	 * live_group_supported_for_cfg() instead of the mutability gate.  Both
+	 * paths would show a 4xx, so only the callback count separates them. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	cb.apply_server = test_apply_server;
+	cb.apply_output_enabled = test_apply_output_enabled;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 live server handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=udp://10.0.0.2:5600", &status, response,
+			sizeof(response)) == 0);
+	CHECK("cv610 live server accepted", status == 200);
+	CHECK("cv610 live server reached the backend",
+		g_api_cb_state.apply_server_calls == 1);
+	CHECK("cv610 live server committed",
+		strcmp(cfg.outgoing.server, "udp://10.0.0.2:5600") == 0);
+
+	/* Control: strip the callback and the SAME request must fail, which is
+	 * what proves the accept above came from the widening rather than from
+	 * the field having been live all along. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	cb.apply_server = NULL;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 live server w/o callback handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=udp://10.0.0.2:5600", &status, response,
+			sizeof(response)) == 0);
+	CHECK("cv610 live server w/o callback rejected", status != 200);
+	cb.apply_server = test_apply_server;
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	cfg.outgoing.enabled = true;
+	CHECK("cv610 live enabled handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.enabled=false", &status, response,
+			sizeof(response)) == 0);
+	CHECK("cv610 live enabled accepted", status == 200);
+	CHECK("cv610 live enabled reached the backend",
+		g_api_cb_state.apply_output_enabled_calls == 1);
+	CHECK("cv610 live enabled committed", cfg.outgoing.enabled == false);
+
+	/* A live apply that requests a respawn must SAY so.  Without this the
+	 * caller is told the change took effect live while the craft is about
+	 * to restart under it. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	venc_api_clear_reinit();
+	cb.apply_server = test_apply_server_needs_restart;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 restart-class server handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=frame-shm://venc_frame", &status,
+			response, sizeof(response)) == 0);
+	CHECK("cv610 restart-class server accepted", status == 200);
+	CHECK("cv610 restart-class server committed",
+		strcmp(cfg.outgoing.server, "frame-shm://venc_frame") == 0);
+	CHECK("cv610 restart-class server reports reinit",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+	/* Assert the response SHAPE too, not just the flag.  A single-field set
+	 * must answer the single form ("field": ...), never the batch form
+	 * ("applied": [...]).  Without this the suite is blind to the
+	 * single_response / reinit_requested arguments being swapped at the
+	 * call site -- which happened, and which both flag-only checks passed
+	 * straight through because the two values correlate in these cases. */
+	CHECK("cv610 restart-class server single-form response",
+		strstr(response, "\"field\":") != NULL &&
+		strstr(response, "\"applied\":") == NULL);
+
+	/* Control: the same field with a plain live apply must NOT claim a
+	 * respawn, or the flag would be noise on every write. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	venc_api_clear_reinit();
+	cb.apply_server = test_apply_server;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 live server handled 2",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=udp://10.0.0.3:5600", &status,
+			response, sizeof(response)) == 0);
+	CHECK("cv610 live server accepted 2", status == 200);
+	CHECK("cv610 live server reports no reinit",
+		strstr(response, "reinit_pending") == NULL);
+	CHECK("cv610 live server single-form response",
+		strstr(response, "\"field\":") != NULL &&
+		strstr(response, "\"applied\":") == NULL);
+
+	/* The BATCH path must report a requested respawn too.  This had no test,
+	 * which is exactly how it shipped reporting nothing while the single
+	 * path had just been fixed to report it. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	venc_api_clear_reinit();
+	cb.apply_server = test_apply_server_needs_restart;
+	cb.apply_bitrate = test_apply_bitrate;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 batch restart-class handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=frame-shm://venc_frame&video0.bitrate=9000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("cv610 batch restart-class accepted", status == 200);
+	CHECK("cv610 batch is the batch form",
+		strstr(response, "\"applied\":") != NULL);
+	CHECK("cv610 batch reports reinit",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+
+	/* Control: a batch with no reinit-requesting apply must stay silent, or
+	 * the flag is noise on every multi-field write. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	venc_api_clear_reinit();
+	cb.apply_server = test_apply_server;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 batch live handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=udp://10.0.0.4:5600&video0.bitrate=9000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("cv610 batch live accepted", status == 200);
+	CHECK("cv610 batch live reports no reinit",
+		strstr(response, "reinit_pending") == NULL);
 
 	/* Control 1: the same field on star6e is still a live apply, so the
 	 * rejection above is the backend gate and not a blanket fps block. */
