@@ -30,9 +30,19 @@ after a live retarget.
   function. A craft with video retargeted and a logged audio failure is better
   than one where the rollback leaves both half-applied.
 
-Star6E and Maruko have the same gap and are **not** changed here — their
-retarget path is separate code and no SigmaStar craft was available to verify
-against.
+**Star6E and Maruko do NOT have this gap** — corrected 2026-08-30 after
+checking, having first claimed they did. Their audio output holds a *pointer*
+to the live video output rather than a copy, and resolves the destination at
+send time through a cache keyed on the video output's `transport_gen`
+(`star6e_output.c` `resolve_cached_audio_target()`, `maruko_audio.c:61-85`). A
+retarget bumps that generation, which invalidates the cache, so audio
+re-resolves to the new destination on its own. Device-confirmed on a Star6E
+craft running the *released* 0.76.0 binary with no fix applied: a live
+`udp://:5700` -> `udp://:5800` retarget moved video (PT=97, ~1750/s) and audio
+(PT=98, ~50/s) together in the same second, PID unchanged.
+
+CV610 differed because `cv610_audio.c` COPIED the resolved destination into its
+own state at start. That is the whole bug, and it is CV610-only.
 
 ## [0.77.0] - 2026-08-30
 
@@ -103,9 +113,10 @@ Live output retarget reaches CV610. `contract_version` 0.25.0 -> **0.26.0**
 
 - **Known gap, not fixed here:** the Opus side-channel destination is derived
   from the video URI once at start (`cv610_audio.c`), so a live retarget moves
-  video and leaves audio pointed at the old host. Star6E has the same gap; on
-  CV610 it was unreachable while the field was restart-only, and it is called
-  out rather than half-fixed.
+  video and leaves audio pointed at the old host. Fixed in 0.77.1.
+  (This bullet originally added "Star6E has the same gap" — **that was wrong**,
+  see the 0.77.1 entry. Both SigmaStar backends resolve the audio destination
+  at send time against the live video output, so they already follow.)
 
 - **One deliberate divergence from Star6E.** Star6E also drops the encoder to
   5 fps while the output is disabled, so it is not burning bitrate on frames
