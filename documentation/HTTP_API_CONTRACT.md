@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.27.0`
+- `contract_version`: `0.28.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -37,6 +37,7 @@
 | `image.rotate` | true | true | **false** |
 | `fpv.roiEnabled` / `roiQp` / `roiSteps` / `roiCenter` | true | true | true (**from 0.25.0**) |
 | `isp.gainMax` / `isp.shutterMaxUs` | true | true | true (**from 0.78.0**) |
+| `fpv.roiQp` accepted range | ±20 | ±20 | ±20 (**±30 before 0.79.0**) |
 | `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** |
 | `outgoing.server` / `outgoing.enabled` mutability | live | live | **live from 0.26.0** (restart_required before) |
 
@@ -103,8 +104,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.78.0",
-    "contract_version": "0.27.0",
+    "app_version": "0.79.0",
+    "contract_version": "0.28.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -131,7 +132,7 @@ Response `200`:
       "image": { "mirror": false, "flip": false, "rotate": 0 },
       "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "sliceCount": 1, "resilience": "off", "intraRefreshQp": 0, "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "allowUnixEncoderStall": false },
-      "fpv": { "roiEnabled": false, "roiQp": -25, "roiSteps": 2, "roiCenter": 0.4, "noiseLevel": 0 },
+      "fpv": { "roiEnabled": false, "roiQp": -20, "roiSteps": 2, "roiCenter": 0.4, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
       "debug": { "showOsd": false }
     },
@@ -1865,7 +1866,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.27.0`:
+in Notes. As of `contract_version: 0.28.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1888,10 +1889,37 @@ in Notes. As of `contract_version: 0.27.0`:
 | `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **live** | Both backends hot-swap the NPU detector on the pipeline thread without respawning video. Star6E uses VPE port 1; Maruko uses SCL port 3 and its drain-while-disable teardown. A model whose reported input geometry disagrees with the configured tap is refused and leaves detection off. |
 | `detect.net_width` / `net_height` | restart | restart | Tap geometry is fixed when the VPE/SCL detector port is created. |
 | `video0.min_qp` / `max_qp` | live | live | RC QP bounds, live and from config at startup on all three. **Maruko gained them in 0.73.0**; before that it reported unsupported. **CV610 from 0.18.4** — it sets the P bounds and the I-frame ceiling, but the I-frame floor is not steerable there (`video0.qp_delta` is not offered on CV610; see Per-Backend Field Support). |
-| `fpv.roi_enabled` / `roi_qp` / `roi_steps` / `roi_center` | live | live | Centre-priority horizontal delta-QP bands. **CV610 from 0.76.0** (`ss_mpi_venc_set_roi_attr`); before that the fields were accepted by a config parse, reported `supported:false` and never reached the encoder. All three backends share one band geometry (`pipeline_common_roi_band`). `roi_qp == 0` clears every region regardless of `roi_enabled` — a zero delta is not a region worth programming — and the disabled log line names which of the two caused it. The shipped pair is `roiEnabled:false, roiQp:-25` **from 0.76.0**, so the flag reads true only when ROI is really running; it previously shipped `true`/`0`, which read as on while every region was cleared. **Maruko applied it only on a live write until 0.76.0** — a value already in the config file was never programmed at boot. |
+| `fpv.roi_enabled` / `roi_qp` / `roi_steps` / `roi_center` | live | live | Centre-priority horizontal delta-QP bands. **CV610 from 0.76.0** (`ss_mpi_venc_set_roi_attr`); before that the fields were accepted by a config parse, reported `supported:false` and never reached the encoder. All three backends share one band geometry (`pipeline_common_roi_band`). `roi_qp == 0` clears every region regardless of `roi_enabled` — a zero delta is not a region worth programming — and the disabled log line names which of the two caused it. The shipped pair is `roiEnabled:false, roiQp:-20` (**-25 in 0.76.0-0.78.0**), so the flag reads true only when ROI is really running; it previously shipped `true`/`0`, which read as on while every region was cleared. **Maruko applied it only on a live write until 0.76.0** — a value already in the config file was never programmed at boot. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.28.0` (**narrowing** — `fpv.roi_qp` accepted range `[-30, 30]` -> `[-20, 20]`):
+    a client that sends `±21..±30` now gets **400** where it previously got 200.
+    `roi_qp` is a *relative* delta and H.265 caps QP at 51, so past ±20 it stops
+    being honoured at both ends — and the negative end is expensive rather than
+    merely truncated: CBR pays for the ROI discount by raising the frame's base
+    QP roughly 1:1 with `|roiQp|`, so once `base + |roiQp|` passes 51 the rate
+    controller saturates and loses authority. Measured on a CV610 bench at
+    720p60: `roiQp -30` pinned every frame at `qp 51/51/51` and delivered
+    16976 kbps against a 2829 kbps target (**6.0x**), while `-20` sat at qp 45
+    and held 2802. Reproduced at three targets — the cliff is exactly
+    `base_qp + |roiQp| > 51`. The band width does not move it, only its
+    severity (at `-30`, `roiCenter` 0.6/0.4/0.2 all pinned at 51 and delivered
+    17661/12520/6977 kbps), so there is nothing to bound on that axis instead.
+    Positive `roiQp` is the benign end but truncates just as quietly: at `+30`
+    the base sat at 21.5, so the region wanted 51.5 and got 51.
+  - **A config file is clamped, not rejected.** `load_fpv()` clamps to the new
+    bound at parse time, so a craft already carrying `-30` still boots and
+    lands on `-20`. Only the API path returns 400, so an operator typing `-30`
+    is told rather than reading back a value they did not write.
+  - Shipped default `fpv.roiQp` `-25` -> **`-20`**, so the default is inside
+    the range it documents.
+  - NOT reproduced on Star6E: 1080p60 at both a 19092 and a forced 1500 kbps
+    target held rate at `roiQp` 0/-15/-25/-30. Its sidecar reports `qp=0`, so
+    its rate controller could not be watched directly — treat SigmaStar as
+    unreproduced rather than immune. The bound is applied on all three
+    backends regardless, because the QP ceiling it derives from is an H.265
+    limit, not a vendor one.
 - `0.27.0` (additive — the portable AE ceilings reach CV610): `isp.gain_max`
     and `isp.shutter_max_us` change from `supported:false` to `supported:true`
     on CV610 only; both were already `MUT_LIVE` in the shared table, so no

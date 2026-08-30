@@ -137,7 +137,7 @@ void venc_config_defaults(VencConfig *cfg)
 	 * region worth programming.  Nothing was ignored, but the flag and the
 	 * log disagreed, and that is what an operator sees first. */
 	cfg->fpv.roi_enabled = false;
-	cfg->fpv.roi_qp = -25;
+	cfg->fpv.roi_qp = -20;
 	cfg->fpv.roi_steps = 2;
 	cfg->fpv.roi_center = 0.4;
 	cfg->fpv.noise_level = 0;
@@ -877,8 +877,14 @@ static void load_fpv(const cJSON *root, VencConfigFpv *s)
 	if (!obj) return;
 	s->roi_enabled = json_get_bool(obj, "roiEnabled", s->roi_enabled);
 	s->roi_qp = json_get_int(obj, "roiQp", s->roi_qp);
-	if (s->roi_qp < -30) s->roi_qp = -30;
-	if (s->roi_qp > 30) s->roi_qp = 30;
+	/* Clamped here, not rejected: this runs on the FILE parse, and a craft
+	 * already carrying the old -30 must still boot.  It lands on the new
+	 * bound instead, which is the fix applying itself.  The API path
+	 * rejects out-of-range instead (validate_field_cfg), so an operator
+	 * typing -30 is told, rather than reading back a value they did not
+	 * write. */
+	if (s->roi_qp < -20) s->roi_qp = -20;
+	if (s->roi_qp > 20) s->roi_qp = 20;
 	s->roi_steps = (uint16_t)json_get_int(obj, "roiSteps", (int)s->roi_steps);
 	if (s->roi_steps < 1) s->roi_steps = 1;
 	if (s->roi_steps > PIPELINE_ROI_MAX_STEPS) s->roi_steps = PIPELINE_ROI_MAX_STEPS;

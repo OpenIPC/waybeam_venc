@@ -274,7 +274,7 @@ omitted fields keep their compiled-in defaults.
     "audioPort": 5601, "sidecarPort": 5602
   },
   "fpv":      {
-    "roiEnabled": false, "roiQp": -25, "roiSteps": 2,
+    "roiEnabled": false, "roiQp": -20, "roiSteps": 2,
     "roiCenter": 0.4, "noiseLevel": 0
   },
   "audio":    {
@@ -391,7 +391,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.78.0","backend":"star6e","contract_version":"0.27.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.79.0","backend":"star6e","contract_version":"0.28.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config

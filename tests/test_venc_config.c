@@ -71,7 +71,7 @@ static int test_defaults(void)
 	/* Off, but pre-loaded with a delta that bites when switched on -- the
 	 * two halves of the shipped pair are asserted together on purpose. */
 	CHECK("defaults_roi_off", cfg.fpv.roi_enabled == false);
-	CHECK("defaults_roi_qp", cfg.fpv.roi_qp == -25);
+	CHECK("defaults_roi_qp", cfg.fpv.roi_qp == -20);
 	CHECK("defaults_roi_steps", cfg.fpv.roi_steps == 2);
 	CHECK("defaults_noise", cfg.fpv.noise_level == 0);
 
@@ -347,6 +347,46 @@ static int test_load_full_json(void)
 	CHECK("load_roi_qp", cfg.fpv.roi_qp == -18);
 	CHECK("load_roi_steps", cfg.fpv.roi_steps == 2);
 	CHECK("load_noise", cfg.fpv.noise_level == 5);
+
+	/* A craft already carrying the old -30 must still BOOT, landing on the
+	 * new bound rather than failing to load: beyond +-20 the delta exceeds
+	 * what the encoder's QP range can honour, and on the negative side it
+	 * saturates rate control and overruns the bitrate target.  Clamped on
+	 * the file path, rejected on the API path -- an operator typing -30
+	 * gets told, a config file that predates the bound gets migrated. */
+	{
+		VencConfig old;
+		char *p2 = write_temp_json("{ \"fpv\": { \"roiQp\": -30 } }");
+
+		CHECK("roi_qp_tmpfile", p2 != NULL);
+		if (p2) {
+			venc_config_defaults(&old);
+			CHECK("roi_qp_old_file_loads",
+				venc_config_load(p2, &old) == 0);
+			CHECK("roi_qp_old_file_clamps", old.fpv.roi_qp == -20);
+			unlink(p2); free(p2);
+		}
+		p2 = write_temp_json("{ \"fpv\": { \"roiQp\": 30 } }");
+		CHECK("roi_qp_tmpfile_pos", p2 != NULL);
+		if (p2) {
+			venc_config_defaults(&old);
+			CHECK("roi_qp_pos_file_loads",
+				venc_config_load(p2, &old) == 0);
+			CHECK("roi_qp_pos_file_clamps", old.fpv.roi_qp == 20);
+			unlink(p2); free(p2);
+		}
+		/* In-range values must survive untouched, or the clamp above
+		 * would be indistinguishable from one that pins everything. */
+		p2 = write_temp_json("{ \"fpv\": { \"roiQp\": -17 } }");
+		CHECK("roi_qp_tmpfile_mid", p2 != NULL);
+		if (p2) {
+			venc_config_defaults(&old);
+			CHECK("roi_qp_mid_file_loads",
+				venc_config_load(p2, &old) == 0);
+			CHECK("roi_qp_mid_survives", old.fpv.roi_qp == -17);
+			unlink(p2); free(p2);
+		}
+	}
 	/* scene_threshold/scene_holdoff live in video0 section */
 
 	return failures;

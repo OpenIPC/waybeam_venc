@@ -2147,6 +2147,51 @@ static int test_live_set_isp_bin_no_callback_returns_501(void)
  * Asserts the surviving VALUE, not that the code took some path, so it fails
  * if the preserve is removed.  The third case is the do-nothing control: the
  * fix must not invent a value where the operator set none. */
+static int test_roi_qp_range_is_pm20(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	static const int accept[] = { 0, -20, 20, -19, 19 };
+	static const int reject[] = { -21, 21, -30, 30, -51, 51 };
+	size_t i;
+
+	/* +-20, not +-30.  roiQp is a RELATIVE delta and H.265 caps QP at 51,
+	 * so past 20 it stops being honoured at both ends -- and the negative
+	 * end is expensive: CBR pays for the discount by raising base QP about
+	 * 1:1, so once base + |roiQp| passes 51 the rate controller saturates.
+	 * Measured on a CV610 bench: -30 pinned every frame at qp 51 and
+	 * delivered 6x its bitrate target, -20 held it.
+	 *
+	 * Driven through venc_api_validate_loaded_config(), which is the gate
+	 * that actually runs -- validate_field_cfg() is static, and asserting
+	 * on a value assigned straight into the struct would test nothing. */
+	for (i = 0; i < sizeof(accept) / sizeof(accept[0]); i++) {
+		char name[64];
+
+		venc_config_defaults(&cfg);
+		cfg.fpv.roi_qp = accept[i];
+		snprintf(name, sizeof(name), "roi_qp %+d accepted", accept[i]);
+		CHECK(name, venc_api_validate_loaded_config(&cfg) == NULL);
+	}
+	for (i = 0; i < sizeof(reject) / sizeof(reject[0]); i++) {
+		char name[64];
+		const char *err;
+
+		venc_config_defaults(&cfg);
+		cfg.fpv.roi_qp = reject[i];
+		err = venc_api_validate_loaded_config(&cfg);
+		snprintf(name, sizeof(name), "roi_qp %+d rejected", reject[i]);
+		CHECK(name, err != NULL);
+		/* The message must name the field, not just fail: this validator
+		 * sweeps many keys and a bare non-NULL would also pass if some
+		 * unrelated default started failing. */
+		snprintf(name, sizeof(name), "roi_qp %+d names the field",
+			reject[i]);
+		CHECK(name, err != NULL && strstr(err, "roi_qp") != NULL);
+	}
+	return failures;
+}
+
 static int test_resilience_preset_preserves_intra_refresh_qp(void)
 {
 	int failures = 0;
@@ -2608,6 +2653,7 @@ int test_venc_api(void)
 	failures += test_live_apply_sees_already_committed_config();
 	failures += test_multi_set_url_decodes_values();
 	failures += test_set_rejects_malformed_percent_escape();
+	failures += test_roi_qp_range_is_pm20();
 	failures += test_resilience_preset_preserves_intra_refresh_qp();
 	failures += test_capabilities_emits_ui();
 	failures += test_capabilities_awb_fps_backend_gate();
