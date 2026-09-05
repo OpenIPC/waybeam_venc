@@ -59,8 +59,17 @@ under it survives exactly until the next reboot, after which every boot logs
 The overlay had ~2 MB free on the reference bench; a 145 KB bin fits.
 
 `libbin.so` must also be present (`/usr/lib/libbin.so`) or the import warns and
-no-ops. It is a vendor blob kept outside the firmware repo — see
-`hisilicon/vendor/pq/README.md` for provenance and the licensing note.
+no-ops. It is a third-party blob whose licensing is the vendor's, so it is not
+committed to this repo. `make stage SOC_BUILD=cv610` copies it into
+`out/cv610/lib/` when `CV610_PQ_LIB` resolves, and prints a NOTE naming the
+path when it does not:
+
+```sh
+make stage SOC_BUILD=cv610 CV610_PQ_LIB=/path/to/libbin.so
+scp out/cv610/lib/libbin.so root@<craft>:/usr/lib/
+```
+
+The firmware build installs it the same way, from the staged output.
 
 ## Exporting a new one
 

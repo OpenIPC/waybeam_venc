@@ -38,6 +38,13 @@ CV610_SDK_INC ?= ../openhisilicon
 CV610_SDK_LIB ?= ../firmware/output/target/usr/lib
 CV610_CC_SUBMAKE := $(if $(findstring /,$(CV610_CC)),$(abspath $(CV610_CC)),$(CV610_CC))
 
+# Vendor PQ library, needed for isp.sensorBin and /api/v1/iq/export_bin on
+# CV610.  It is NOT in this repo: it is a third-party blob whose licensing is
+# the vendor's, so `make stage` copies it when the path resolves and says so
+# when it does not.  A craft without it boots normally; the import warns and
+# no-ops.  Override with CV610_PQ_LIB=/path/to/libbin.so.
+CV610_PQ_LIB ?= ../hisilicon/vendor/pq/libbin.so
+
 OUT_DIR := out/$(SOC_BUILD)
 OBJ_DIR := $(OUT_DIR)/obj
 TARGET := $(OUT_DIR)/waybeam
@@ -381,6 +388,14 @@ stage: build qr-decode
 			$(OUT_DIR)/waybeam-cv610.conf; \
 		if ls iq-profiles/cv610-bin/*.bin >/dev/null 2>&1; then \
 			mkdir -p $(OUT_DIR)/isp-bins; cp -f iq-profiles/cv610-bin/*.bin $(OUT_DIR)/isp-bins/; \
+		fi; \
+		if [ -f "$(CV610_PQ_LIB)" ]; then \
+			mkdir -p $(OUT_DIR)/lib; cp -f "$(CV610_PQ_LIB)" $(OUT_DIR)/lib/libbin.so; \
+			echo "  stage: libbin.so from $(CV610_PQ_LIB)"; \
+		else \
+			echo "  stage: NOTE no libbin.so at $(CV610_PQ_LIB) -- isp.sensorBin"; \
+			echo "         and /api/v1/iq/export_bin will no-op on the craft."; \
+			echo "         Set CV610_PQ_LIB to stage it."; \
 		fi; \
 	fi
 
