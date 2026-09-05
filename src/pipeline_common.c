@@ -317,12 +317,20 @@ void pipeline_common_rate_watch(PipelineRateWatch *rw, const VencConfig *cfg,
 
 	/* cfg->video0.bitrate is read on the encode thread while the httpd
 	 * thread may be committing a new config under g_cfg_mutex.  Deliberately
-	 * unlocked: this is a per-frame path, the field is a naturally aligned
-	 * uint32_t, and the two-window rule already absorbs the only damage a
-	 * mid-commit read could do -- one window computed against the wrong
-	 * target cannot raise a report on its own, and the next window uses the
-	 * settled value.  Taking the config mutex once per encoded frame to
-	 * protect a diagnostic would be the worse trade. */
+	 * unlocked, but NOT because the field is naturally aligned -- alignment
+	 * is not a validity argument in C, and this reads bitrate more than once
+	 * plus several ROI fields that can straddle one commit.
+	 *
+	 * The argument that actually carries the weight is that no concurrently
+	 * committable value changes control flow here.  bitrate == 0 is the only
+	 * one that could (it guards below and divides further down), and
+	 * validation rejects it, defaults set 8192, and /api/v1/defaults commits
+	 * defaults -- so no HTTP path can make the field transition to 0.  The
+	 * residue is a diagnostic that may quote a target or an ROI hint from
+	 * either side of a config change, and the two-window rule bounds even
+	 * that: one window computed against a stale target cannot raise a report
+	 * on its own.  Taking the config mutex once per encoded frame to protect
+	 * a diagnostic would be the worse trade. */
 	if (!rw || !cfg || cfg->video0.bitrate == 0)
 		return;
 

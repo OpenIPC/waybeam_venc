@@ -241,9 +241,15 @@ int cv610_pq_bin_available(void)
 		cached = 0;
 		return cached;
 	}
-	cached = dlsym(h, "OT_PQ_BIN_ImportBinData") != NULL;
+	/* All four, matching what pq_lib_open() insists on: a partial blob that
+	 * resolves only the import symbol would answer "available" here and then
+	 * fail every export. */
+	cached = dlsym(h, "OT_PQ_BIN_ImportBinData") != NULL &&
+		dlsym(h, "OT_PQ_BIN_ExportBinData") != NULL &&
+		dlsym(h, "OT_PQ_GetISPDataTotalLen") != NULL &&
+		dlsym(h, "OT_PQ_GetStructParamLen") != NULL;
 	if (!cached)
-		fprintf(stderr, "WARNING: %s%s has no PQ entry point\n", PQ_LOG,
+		fprintf(stderr, "WARNING: %s%s is missing a PQ entry point\n", PQ_LOG,
 			PQ_BIN_LIB);
 	dlclose(h);
 	return cached;
@@ -432,20 +438,48 @@ int cv610_pq_bin_export(const char *path)
 	 * /tmp, and the endpoint is unauthenticated, so a local user can plant a
 	 * symlink there and redirect this write to anything the daemon may write.
 	 * O_NOFOLLOW refuses a symlinked final component; the fstat then rejects
-	 * anything that is not a plain, single-linked regular file, which also
-	 * covers a hard link planted at the same path.  Deliberately NOT
-	 * unlink-then-create: that leaves a window to re-plant between the two
-	 * calls. */
-	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
+	 * anything that is not a plain, single-linked regular file, which is what
+	 * catches a planted HARD link -- O_NOFOLLOW does not, since a hard link is
+	 * the same inode rather than a link object.
+	 *
+	 * Truncation is deliberately NOT in the open flags.  O_TRUNC executes
+	 * inside open(), i.e. BEFORE the guard below can refuse, so a planted hard
+	 * link to (say) the daemon's own log would be zeroed on the way to being
+	 * rejected -- the refusal would destroy the file it declined to write.
+	 * Truncate only once the fd is known to be a private regular file.
+	 *
+	 * O_NONBLOCK likewise matters: a planted FIFO would otherwise park open()
+	 * forever, and this runs on the single HTTP dispatch thread under its
+	 * mutex, so it would wedge the whole API and deadlock teardown's pause.
+	 * Regular files ignore the flag, so nothing needs clearing afterwards.
+	 *
+	 * Deliberately NOT unlink-then-create: that reopens a window to re-plant
+	 * between the two calls. */
+	fd = open(path, O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0644);
 	if (fd < 0) {
 		fprintf(stderr, "ERROR: %scannot write %s (%s)\n", PQ_LOG, path,
 			strerror(errno));
 		free(buf);
 		return -1;
 	}
-	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1) {
-		fprintf(stderr, "ERROR: %s%s is not a plain regular file; refusing to "
-			"write\n", PQ_LOG, path);
+	if (fstat(fd, &st) != 0) {
+		fprintf(stderr, "ERROR: %scannot stat %s (%s); refusing to write\n",
+			PQ_LOG, path, strerror(errno));
+		close(fd);
+		free(buf);
+		return -1;
+	}
+	if (!S_ISREG(st.st_mode) || st.st_nlink != 1) {
+		fprintf(stderr, "ERROR: %s%s is not a private regular file "
+			"(mode 0%o, links %lu); refusing to write\n", PQ_LOG, path,
+			(unsigned)(st.st_mode & 07777), (unsigned long)st.st_nlink);
+		close(fd);
+		free(buf);
+		return -1;
+	}
+	if (ftruncate(fd, 0) != 0) {
+		fprintf(stderr, "ERROR: %scannot truncate %s (%s)\n", PQ_LOG, path,
+			strerror(errno));
 		close(fd);
 		free(buf);
 		return -1;

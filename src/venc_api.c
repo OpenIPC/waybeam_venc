@@ -235,6 +235,9 @@ void venc_api_set_sensor_info(int pad, int mode_index, int forced_pad)
 /* ── Reinit flag (shared with backend via accessors) ─────────────────── */
 
 static volatile sig_atomic_t g_reinit = 0;
+/* Monotonic count of reinit requests.  Only the single httpd dispatch thread
+ * writes it, and only via venc_api_request_reinit(). */
+static volatile sig_atomic_t g_reinit_seq = 0;
 
 /* ── Record control flags ────────────────────────────────────────────── */
 
@@ -254,6 +257,16 @@ static bool g_record_http_control_supported;
 void venc_api_request_reinit(void)
 {
 	g_reinit = 1;
+	/* Bumped alongside the latch because the latch alone cannot answer "did
+	 * THIS apply ask for a respawn".  A caller that samples the boolean sees
+	 * no transition when a reinit is already pending from an earlier request,
+	 * which is exactly the case the persistence guard below exists for. */
+	g_reinit_seq++;
+}
+
+unsigned venc_api_reinit_seq(void)
+{
+	return (unsigned)g_reinit_seq;
 }
 
 bool venc_api_get_reinit(void)
@@ -1005,9 +1018,22 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 
 		for (i = 0; i < sizeof(supported) / sizeof(supported[0]); ++i) {
 			if (strcmp(canonical_key, supported[i]) == 0)
-				return 1;
+				break;
 		}
-		return 0;
+		if (i == sizeof(supported) / sizeof(supported[0]))
+			return 0;
+
+		/* One entry is conditional on more than the backend name.
+		 * isp.sensor_bin needs the vendor PQ blob, which is not shipped in
+		 * the source tree, so a craft flashed without it must not advertise
+		 * the field as supported and then 501 every write.  cv610_init drops
+		 * apply_isp_bin when the probe fails, so the callback is the truth --
+		 * the same thing routes.iq_export_bin already tracks.  Before
+		 * registration g_cb is NULL; answer from the list then, since no
+		 * request can be in flight yet. */
+		if (g_cb && strcmp(canonical_key, "isp.sensor_bin") == 0)
+			return g_cb->apply_isp_bin != NULL;
+		return 1;
 	}
 
 	/* video0.intra_refresh_qp reaches MI_VENC_SetIntraRefresh on Star6E and
@@ -2609,7 +2635,7 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	 * Only a false->true transition across THIS apply means this write is
 	 * the one that needs a respawn -- reading the flag absolutely made an
 	 * unrelated live set report reinit_pending. */
-	int reinit_before = venc_api_get_reinit() ? 1 : 0;
+	unsigned reinit_seq_before = venc_api_reinit_seq();
 
 	rc = collect_live_groups(params, param_count, group_order, &group_count,
 		&touched, status_code, response_json);
@@ -2660,7 +2686,7 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 
 	rc = make_live_set_response_locked(&actual_cfg, params, param_count,
 		single_response,
-		(!reinit_before && venc_api_get_reinit()) ? 1 : 0,
+		(venc_api_reinit_seq() != reinit_seq_before) ? 1 : 0,
 		status_code, response_json);
 	if (rc != 0) {
 		pthread_mutex_unlock(&g_cfg_mutex);
@@ -2690,8 +2716,16 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	 * path already refuses this shape outright ("restart-class field
 	 * requires persistence; use /api/v1/set"); a backend-level restart class
 	 * reaches the same hazard through the live path, so the value is written
-	 * out instead of lost. */
-	if (persist || (!reinit_before && venc_api_get_reinit()))
+	 * out instead of lost.
+	 *
+	 * The test is a sequence number, not a false->true transition on the
+	 * latch.  The latch is consumed by the main loop, which can be a whole
+	 * second away (its select() carries a 1 s timeout), so a second live/set
+	 * of a restart-class field while the first respawn is still pending saw
+	 * no transition, skipped this write, and was then discarded by the
+	 * re-exec that reloaded the FIRST value -- silently, in exactly the
+	 * situation this guard was written to cover. */
+	if (persist || venc_api_reinit_seq() != reinit_seq_before)
 		(void)venc_api_save_config_to_disk(&actual_cfg);
 	return 0;
 }

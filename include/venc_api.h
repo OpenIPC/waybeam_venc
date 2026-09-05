@@ -163,6 +163,10 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg);
  * /api/v1/restart, /api/v1/defaults, and MUT_RESTART /api/v1/set
  * all enqueue the same request. */
 void venc_api_request_reinit(void);
+/** Monotonic count of reinit requests.  Sample it around an apply to learn
+ *  whether THAT apply asked for a respawn; the boolean latch cannot say, since
+ *  it shows no transition when one is already pending. */
+unsigned venc_api_reinit_seq(void);
 bool venc_api_get_reinit(void);
 void venc_api_clear_reinit(void);
 

@@ -65,12 +65,27 @@ typedef struct {
 	 * drain loop on the producer thread, so a naive read can tear a
 	 * sockaddr mid-rewrite.  Odd generation = a write is in progress.
 	 *
-	 * The common case never churns the fd: output_socket_configure() reuses
-	 * the socket whenever the transport TYPE is unchanged, so a
-	 * udp://a -> udp://b retarget only rewrites destination/destination_len
-	 * (and possibly connect()s).  Only a udp <-> unix switch closes and
-	 * reopens, which is the same narrow window both SigmaStar backends
-	 * already live with. */
+	 * Two things this seqlock does NOT cover, both of which were claimed and
+	 * neither of which is true:
+	 *
+	 * 1. Under connectedUdp -- the shipped default in every config -- the
+	 *    destination lives in the KERNEL socket, not in these fields, and
+	 *    output_socket_configure() retargets it with connect() on the live
+	 *    fd.  The snapshot cannot reach that, so a udp://a -> udp://b
+	 *    retarget can still split one access unit across two receivers.  The
+	 *    outcome is bounded: the bootstrap IDR that follows re-anchors the
+	 *    stream.
+	 * 2. "Only a udp <-> unix switch closes and reopens" is wrong.
+	 *    output_socket_configure() also closes the fd when destination fill
+	 *    FAILS with the type unchanged -- reachable by setting a hostname
+	 *    URI, since nothing here resolves names -- and leaves socket_handle
+	 *    -1 across the error return.  That window is wider than the type
+	 *    switch it was compared to.
+	 *
+	 * Both are inherited: this pattern is copied from star6e_output.c and
+	 * maruko_output.c, which have the same gaps.  Fixing it properly means
+	 * validating the destination before the generation bump and routing a
+	 * live transport-TYPE change to the restart class. */
 	unsigned transport_gen;
 	/* Producer-thread snapshot, refreshed once per frame.  Same shape as
 	 * Maruko's output batch: take the seqlock once, then every datagram of
@@ -1409,7 +1424,13 @@ static int cv610_output_write(const uint8_t *header, size_t header_len,
 	/* From the per-frame snapshot, never the live fields: every datagram of
 	 * one frame must go to the same destination, or a retarget landing
 	 * mid-frame splits an access unit across two receivers and neither can
-	 * decode it. */
+	 * decode it.
+	 *
+	 * That holds only for the UNCONNECTED path.  With connectedUdp set --
+	 * the shipped default -- msg_name is NULL and the destination is kernel
+	 * state on the fd, so a concurrent connect() retargets mid-frame and the
+	 * snapshot provides none of the protection this comment used to claim.
+	 * See the seqlock note on transport_gen. */
 	ret = output_socket_send_parts(ctx->tx.socket_handle,
 		&ctx->tx.destination,
 		ctx->tx.destination_len, ctx->tx.connected_udp, header, header_len,
