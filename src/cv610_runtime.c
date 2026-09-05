@@ -2156,9 +2156,24 @@ static int cv610_init(void *opaque)
 			(uint64_t)ctx->config.record.max_mb * 1024 * 1024;
 
 	g_cv610_runner = ctx;
-	if (venc_api_register(&ctx->config, "cv610",
-		&g_cv610_apply_callbacks, NULL) != 0)
-		return -1;
+	/* A craft flashed without libbin.so cannot import or export a .bin, and
+	 * /api/v1/capabilities is what a dashboard trusts instead of probing.
+	 * routes.iq_export_bin tracks the callback pointer, so dropping the two
+	 * entries is what makes the advertisement match reality -- the alternative
+	 * is advertising a control surface whose every use returns an error.
+	 * Static: venc_api_register keeps the pointer. */
+	{
+		static VencApplyCallbacks cv610_callbacks;
+
+		cv610_callbacks = g_cv610_apply_callbacks;
+		if (!cv610_pq_bin_available()) {
+			cv610_callbacks.apply_isp_bin = NULL;
+			cv610_callbacks.export_isp_bin = NULL;
+		}
+		if (venc_api_register(&ctx->config, "cv610",
+			&cv610_callbacks, NULL) != 0)
+			return -1;
+	}
 	venc_api_set_record_status_fn(cv610_record_status_callback);
 	venc_api_set_record_http_control_supported(true);
 

@@ -916,8 +916,20 @@ scp root@<device-ip>:/tmp/isp_export.bin .
 
 Response `200`:
 ```json
-{"ok":true,"data":{"path":"/tmp/isp_export.bin"}}
+{"ok":true,"data":{"path":"/tmp/isp_export.bin","bytes":144774}}
 ```
+
+`bytes` is the length actually written, so a caller can confirm the write
+without a second round trip; `path` is a constant and on its own is no evidence
+the export happened. The value is `OT_PQ_GetISPDataTotalLen()` plus the 3DNR
+section, which is 144774 on the shipping SDK but is queried, not fixed. If the
+vendor library cannot supply 3DNR parameters the ISP half is exported alone and
+`bytes` is correspondingly smaller.
+
+The file is created with `O_NOFOLLOW` and rejected unless it is a plain,
+single-linked regular file: the path is predictable, `/tmp` is world-writable
+and the endpoint is unauthenticated, so a planted symlink must not be able to
+redirect the daemon's write.
 
 ### `POST /api/v1/iq/import`
 

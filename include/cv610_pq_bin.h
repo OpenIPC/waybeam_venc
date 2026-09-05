@@ -24,6 +24,12 @@
  * OT_PQ_BIN_ImportBinData return 0xcb000005.  Produce files with PQTools, or
  * with cv610_pq_bin_export(), and treat them as opaque. */
 
+/** Whether the vendor library is present and loadable on this craft.
+ *  Probed once and cached.  Both entry points below degrade to a warning
+ *  without it, so this exists to keep /api/v1/capabilities honest rather than
+ *  to gate the calls. */
+int cv610_pq_bin_available(void);
+
 /** Import a PQTools `.bin` into the running ISP.
  *  An empty or NULL path is a no-op and succeeds, so an unset config field
  *  costs nothing.  Returns 0 on success, -1 on any failure. */

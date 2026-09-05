@@ -16,6 +16,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "ot_type.h"
 #include "ss_mpi_sys.h"
@@ -216,6 +220,35 @@ static unsigned char *pq_read_file(const char *path, size_t *out_len)
 	return buf;
 }
 
+int cv610_pq_bin_available(void)
+{
+	/* Probed once, and deliberately narrower than pq_lib_open(): this only
+	 * answers "is the blob here and loadable", so it resolves a single entry
+	 * point and touches no globals inside the library.  The answer gates what
+	 * /api/v1/capabilities advertises -- a craft flashed without libbin.so
+	 * should not claim a control surface it cannot serve. */
+	static int cached = -1;
+	void *h;
+
+	if (cached >= 0)
+		return cached;
+
+	h = dlopen(PQ_BIN_LIB, RTLD_NOW | RTLD_LOCAL);
+	if (!h) {
+		fprintf(stderr, "WARNING: %s%s not loadable (%s); isp.sensorBin and "
+			"the .bin export are unavailable on this craft\n", PQ_LOG,
+			PQ_BIN_LIB, dlerror());
+		cached = 0;
+		return cached;
+	}
+	cached = dlsym(h, "OT_PQ_BIN_ImportBinData") != NULL;
+	if (!cached)
+		fprintf(stderr, "WARNING: %s%s has no PQ entry point\n", PQ_LOG,
+			PQ_BIN_LIB);
+	dlclose(h);
+	return cached;
+}
+
 int cv610_pq_bin_import(const char *path)
 {
 	unsigned int isp_len, nrx_len, remainder;
@@ -323,9 +356,10 @@ int cv610_pq_bin_export(const char *path)
 	PqBinModule mod;
 	PqBinLib lib;
 	unsigned char *buf;
+	struct stat st;
 	td_s32 saved;
 	FILE *f;
-	int ret;
+	int ret, fd;
 
 	if (!path || !*path) {
 		fprintf(stderr, "WARNING: %sexport needs a destination path\n", PQ_LOG);
@@ -392,9 +426,34 @@ int cv610_pq_bin_export(const char *path)
 		return -1;
 	}
 
-	f = fopen(path, "wb");
+	/* O_NOFOLLOW, and then confirm what we actually opened.
+	 *
+	 * The HTTP handler always passes a predictable path in a world-writable
+	 * /tmp, and the endpoint is unauthenticated, so a local user can plant a
+	 * symlink there and redirect this write to anything the daemon may write.
+	 * O_NOFOLLOW refuses a symlinked final component; the fstat then rejects
+	 * anything that is not a plain, single-linked regular file, which also
+	 * covers a hard link planted at the same path.  Deliberately NOT
+	 * unlink-then-create: that leaves a window to re-plant between the two
+	 * calls. */
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
+	if (fd < 0) {
+		fprintf(stderr, "ERROR: %scannot write %s (%s)\n", PQ_LOG, path,
+			strerror(errno));
+		free(buf);
+		return -1;
+	}
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1) {
+		fprintf(stderr, "ERROR: %s%s is not a plain regular file; refusing to "
+			"write\n", PQ_LOG, path);
+		close(fd);
+		free(buf);
+		return -1;
+	}
+	f = fdopen(fd, "wb");
 	if (!f) {
 		fprintf(stderr, "ERROR: %scannot write %s\n", PQ_LOG, path);
+		close(fd);
 		free(buf);
 		return -1;
 	}
