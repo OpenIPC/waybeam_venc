@@ -4,6 +4,7 @@
 #include "cv610_encoder_config.h"
 #include "pipeline_common.h"
 #include "cv610_iq.h"
+#include "cv610_pq_bin.h"
 #include "cv610_modes.h"
 #include "cv610_pipeline.h"
 #include "debug_osd.h"
@@ -1346,6 +1347,10 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.query_awb_info = cv610_awb_query,
 	.apply_iq_param = cv610_iq_set,
 	.apply_qp_bounds = cv610_apply_qp_bounds,
+	/* Unlike Star6E there is no /etc/sensors/<sensor>.bin convention to fall
+	 * back to, so an empty isp.sensorBin is a no-op rather than a resolve. */
+	.apply_isp_bin = cv610_pq_bin_import,
+	.export_isp_bin = cv610_pq_bin_export,
 	.apply_gain_max = cv610_iq_set_gain_max,
 	.apply_shutter_max = cv610_iq_set_shutter_max_us,
 	.apply_roi_qp = cv610_apply_roi_qp,
@@ -2156,6 +2161,22 @@ static int cv610_init(void *opaque)
 		return -1;
 	venc_api_set_record_status_fn(cv610_record_status_callback);
 	venc_api_set_record_http_control_supported(true);
+
+	/* isp.sensorBin lands FIRST, and the order is load-bearing.  A .bin is a
+	 * whole ISP image and carries an AE ext-register record of its own, so
+	 * applying it after the two ceilings below would overwrite them on every
+	 * boot while /api/v1/get kept reporting the config's values.  Broad image
+	 * first, narrower per-knob intent on top.
+	 *
+	 * It needs a cold-boot apply for the reason the ceilings do: the ISP is
+	 * seeded by the sensor plugin's compiled-in defaults, so a bin already
+	 * named in the config would otherwise only take effect once someone
+	 * re-wrote the field over HTTP.  Empty is the common case and costs
+	 * nothing.  Non-fatal: a craft that boots on the plugin's tuning beats
+	 * one that does not boot. */
+	if (cv610_pq_bin_import(ctx->config.isp.sensor_bin) != 0)
+		fprintf(stderr, "WARN: isp.sensorBin from config not applied (%s)\n",
+			ctx->config.isp.sensor_bin);
 
 	/* isp.gain_max / isp.shutter_max_us are MUT_LIVE for the same reason
 	 * fpv.roi* is, and need the same cold-boot apply: the ISP is seeded by

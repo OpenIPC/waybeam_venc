@@ -2455,6 +2455,97 @@ static int test_capabilities_routes_track_callbacks(void)
 	return failures;
 }
 
+/* GET /api/v1/iq/export_bin serializes the live ISP to a PQTools .bin.
+ *
+ * The middle arm is the one that earns its keep.  venc_httpd routes by
+ * first-match prefix and accepts '/' as a boundary, so "/api/v1/iq" would
+ * swallow "/api/v1/iq/export_bin" if it were ever registered first -- and the
+ * request would then answer 200 with the full ISP sweep from handle_iq
+ * instead of the path.  That is a green-looking wrong answer no other test in
+ * this file would notice, so assert on the BODY, not just the status. */
+static int api_test_stub_export_bin_ok(const char *path)
+{
+	return path && *path ? 144774 : -1;
+}
+
+static int api_test_stub_export_bin_fail(const char *path)
+{
+	(void)path;
+	return -1;
+}
+
+static int test_iq_export_bin_route(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0, fd;
+	char response[65536];
+	static const char *const req =
+		"GET /api/v1/iq/export_bin HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+	size_t req_len = strlen(req);
+	int pass;
+
+	for (pass = 0; pass < 3; pass++) {
+		size_t sent;
+
+		venc_config_defaults(&cfg);
+		memset(&cb, 0, sizeof(cb));
+		if (pass == 1)
+			cb.export_isp_bin = api_test_stub_export_bin_ok;
+		else if (pass == 2)
+			cb.export_isp_bin = api_test_stub_export_bin_fail;
+
+		if (venc_api_register(&cfg, "cv610", &cb, NULL) != 0) {
+			CHECK("export_bin register", 0);
+			return failures;
+		}
+		if (ensure_api_test_server() != 0) {
+			CHECK("export_bin server", 0);
+			return failures;
+		}
+		fd = connect_api_test_socket();
+		CHECK("export_bin connect", fd >= 0);
+		if (fd < 0)
+			return failures;
+		for (sent = 0; sent < req_len; ) {
+			ssize_t n = write(fd, req + sent, req_len - sent);
+			if (n < 0 && errno == EINTR)
+				continue;
+			if (n <= 0) {
+				close(fd);
+				CHECK("export_bin write", 0);
+				return failures;
+			}
+			sent += (size_t)n;
+		}
+		shutdown(fd, SHUT_WR);
+		CHECK("export_bin read",
+			read_http_response(fd, &status, response, sizeof(response)) == 0);
+		close(fd);
+
+		if (pass == 0) {
+			CHECK("export_bin 501 without the callback", status == 501);
+			CHECK("export_bin 501 names not_implemented",
+				strstr(response, "not_implemented") != NULL);
+		} else if (pass == 1) {
+			CHECK("export_bin 200 with the callback", status == 200);
+			/* The route-shadowing detector: handle_iq would answer 200 too. */
+			CHECK("export_bin body carries the path",
+				strstr(response, "\"path\":\"/tmp/isp_export.bin\"") != NULL);
+			CHECK("export_bin body carries the byte count",
+				strstr(response, "\"bytes\":144774") != NULL);
+			CHECK("export_bin body is not the IQ sweep",
+				strstr(response, "_schema") == NULL);
+		} else {
+			CHECK("export_bin 500 when the backend fails", status == 500);
+			CHECK("export_bin 500 points at the log",
+				strstr(response, "venc log") != NULL);
+		}
+	}
+	return failures;
+}
+
 static int test_capabilities_awb_fps_backend_gate(void)
 {
 	int failures = 0;
@@ -2658,6 +2749,7 @@ int test_venc_api(void)
 	failures += test_capabilities_emits_ui();
 	failures += test_capabilities_awb_fps_backend_gate();
 	failures += test_capabilities_routes_track_callbacks();
+	failures += test_iq_export_bin_route();
 	failures += test_snapshot_routes();
 	stop_api_test_server();
 	return failures;

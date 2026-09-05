@@ -391,7 +391,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.80.0","backend":"star6e","contract_version":"0.28.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.81.0","backend":"star6e","contract_version":"0.29.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -624,7 +624,7 @@ load cleanly; the keys are silently ignored.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `isp.sensor_bin` | string | live | ISP tuning binary path (empty = auto-detect /etc/sensors/&lt;sensor&gt;.bin) |
+| `isp.sensor_bin` | string | live | ISP tuning binary path. On Star6E/Maruko empty auto-detects `/etc/sensors/&lt;sensor&gt;.bin`; on CV610 empty is a no-op (no fallback) and the file is a HiSilicon PQTools `.bin`, not a SigmaStar one. |
 | `isp.ae_engine` | string | restart | `"sdk"` (default) lets the SDK firmware run AE on Star6E and Maruko.  `"custom"` runs userspace cus3a — on Star6E it spins the supervisory AE thread; on Maruko it installs the no-op adaptor + 15 Hz `SetAeParam` thread (~24% sys CPU saving at 120 fps).  Alias: `isp.aeEngine`. |
 | `isp.ae_fps` | uint | restart | Custom 3A processing rate in Hz (default 15) |
 | `isp.gain_max` | uint | live | AE max ISP gain ceiling (0 = use ISP bin default) |

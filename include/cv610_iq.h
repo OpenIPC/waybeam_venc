@@ -41,6 +41,11 @@ int cv610_iq_set(const char *param, const char *value);
  *  so that clearing a ceiling is not a one-way door.
  *  Returns 0 on success, -1 when the ISP is not running or the MPI rejects
  *  the write. */
+/** Drop the cached cold-boot AE ceilings.
+ *  Call after anything that rewrites the ISP's exposure attributes behind
+ *  this module's back -- a PQTools .bin import does exactly that. */
+void cv610_iq_forget_ae_defaults(void);
+
 int cv610_iq_set_gain_max(uint32_t gain);
 int cv610_iq_set_shutter_max_us(uint32_t us);
 

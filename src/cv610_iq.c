@@ -842,6 +842,18 @@ out:
 	return rc;
 }
 
+/* A whole-image .bin import rewrites the AE ext-register record, so the
+ * ceilings latched at cold boot are no longer "the plugin's defaults".  Left
+ * cached, a later isp.gainMax=0 ("keep the default") would write the
+ * PRE-import value back over the imported one.  cv610_pq_bin_import() calls
+ * this on success; the next ae_defaults() re-latches from the live ISP. */
+void cv610_iq_forget_ae_defaults(void)
+{
+	pthread_mutex_lock(&g_iq_mutex);
+	g_ae_defaults_valid = 0;
+	pthread_mutex_unlock(&g_iq_mutex);
+}
+
 static int ae_set_limit(const char *param, uint32_t value, uint32_t dflt)
 {
 	char buf[16];

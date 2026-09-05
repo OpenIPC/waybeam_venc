@@ -437,6 +437,7 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
 
 <tr><td class="api-method">GET</td><td class="api-path">/api/v1/iq/set?<i>param=value</i></td><td class="api-desc">Set a single IQ parameter. Dot-notation for sub-fields (e.g. colortrans.y_ofst=200)</td><td class="api-example">{"ok":true,"data":{"param":"contrast","value":60}}</td></tr>
 
+<tr><td class="api-method">GET</td><td class="api-path">/api/v1/iq/export_bin</td><td class="api-desc">Export the live ISP state to a PQTools .bin at /tmp/isp_export.bin. CV610 only</td><td class="api-example">{"ok":true,"data":{"path":"/tmp/isp_export.bin","bytes":144774}}</td></tr>
 <tr><td class="api-method">POST</td><td class="api-path">/api/v1/iq/import</td><td class="api-desc">Batch-import IQ parameters from JSON (output of /api/v1/iq). Star6E only</td><td class="api-example">{"ok":true,"data":{"imported":true}}</td></tr>
 
 <tr><td class="api-method">GET</td><td class="api-path">/metrics/isp</td><td class="api-desc">Raw ISP metrics as Prometheus-style plain text</td><td class="api-example">venc_exposure_us 8333\

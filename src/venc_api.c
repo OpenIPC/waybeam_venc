@@ -903,6 +903,23 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			 * Manual white balance is reachable today, under its own name,
 			 * through /api/v1/iq's "wb" group. */
 			"isp.gain_max", "isp.shutter_max_us",
+			/* The PQTools `.bin` path, applied through libbin.so by
+			 * src/cv610_pq_bin.c -- live via apply_isp_bin and once at
+			 * cold boot in cv610_init().  Listed under the same bar as
+			 * the AE ceilings above: it MOVES THE ISP on this part, not
+			 * merely returns success.  Measured on .181 (IMX662) with a
+			 * vendor tune built for a DIFFERENT sensor: the import moved
+			 * 39 of the 102 fields /api/v1/iq reads back, across ten
+			 * groups, and the operator saw the picture go red -- which is
+			 * the point, since a foreign tune brings its own CCM and AWB.
+			 * Export round-trips: importing our own exported file
+			 * restored a read-back identical to the pre-import one.
+			 *
+			 * Unlike the SigmaStar backends there is no
+			 * /etc/sensors/<sensor>.bin fallback, so an empty value is a
+			 * no-op rather than a resolve -- which is also what makes the
+			 * cold-boot apply free on a craft that names no bin. */
+			"isp.sensor_bin",
 			/* Applied at the SENSOR by apply_sensor_orientation(),
 			 * through the plugin's pfn_mirror_flip — the same place
 			 * both SigmaStar backends apply orientation, so image.*
@@ -1194,11 +1211,15 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 			return "ae_engine must be 'sdk'";
 	}
 	if (strcmp(key, "isp.sensor_bin") == 0) {
-		/* Empty string opts into the /etc/sensors/<sensor>.bin fallback;
+		/* Empty string opts into the /etc/sensors/<sensor>.bin fallback on
+		 * the SigmaStar backends -- on CV610 it is a no-op, and there is no
+		 * live way to un-apply an imported image short of importing another;
 		 * a non-empty path must point at a readable file or the live
 		 * apply callback would silently fall back to auto-detect (or to
 		 * the previously-loaded bin via dedup) while the persisted
-		 * config still names a bogus path. */
+		 * config still names a bogus path.  Note the check cannot help a
+		 * path that was readable at set time and is gone by the next boot,
+		 * which is what a bin left in tmpfs does. */
 		if (cfg->isp.sensor_bin[0] &&
 		    access(cfg->isp.sensor_bin, R_OK) != 0)
 			return "isp.sensor_bin path is not readable";
@@ -3150,6 +3171,10 @@ static int handle_capabilities(int fd, const HttpRequest *req, void *ctx)
 #else
 	cJSON_AddBoolToObject(routes, "iq_import", 0);
 #endif
+	/* Tracks the callback rather than a compile-time backend test, which is
+	 * what tests/test_venc_api.c asserts the value must do. */
+	cJSON_AddBoolToObject(routes, "iq_export_bin",
+		(g_cb && g_cb->export_isp_bin) ? 1 : 0);
 
 	cJSON *fields = cJSON_AddObjectToObject(data, "fields");
 	for (size_t i = 0; i < FIELD_COUNT; i++) {
@@ -3399,6 +3424,38 @@ static int handle_iq_import(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_error(fd, 501, "not_implemented",
 		"IQ import not available on this backend");
 #endif
+}
+
+/* Fixed export destination.  /tmp is tmpfs on these boards, which is the
+ * right lifetime for a file the operator is about to copy off. */
+#define VENC_ISP_BIN_EXPORT_PATH "/tmp/isp_export.bin"
+
+static int handle_iq_export_bin(int fd, const HttpRequest *req, void *ctx)
+{
+	char body[128];
+	int written;
+
+	(void)req; (void)ctx;
+	if (!g_cb || !g_cb->export_isp_bin) {
+		return httpd_send_error(fd, 501, "not_implemented",
+			"ISP bin export not available on this backend");
+	}
+	/* The destination is fixed rather than taken from the query string: this
+	 * endpoint is unauthenticated, and a caller-supplied path would make it a
+	 * write-anywhere primitive.  Copy the file off afterwards. */
+	written = g_cb->export_isp_bin(VENC_ISP_BIN_EXPORT_PATH);
+	if (written <= 0) {
+		/* Every distinct cause -- no libbin.so, a refused tuning connect, a
+		 * short write on a full /tmp -- is named in the venc log; the HTTP
+		 * layer has no channel for it. */
+		return httpd_send_error(fd, 500, "internal_error",
+			"ISP bin export failed; see the venc log for the reason");
+	}
+	/* Echo the byte count so a caller can confirm the write it is about to
+	 * scp off, rather than trusting a constant path string. */
+	snprintf(body, sizeof(body),
+		"{\"path\":\"%s\",\"bytes\":%d}", VENC_ISP_BIN_EXPORT_PATH, written);
+	return httpd_send_ok(fd, body);
 }
 
 static int handle_ae(int fd, const HttpRequest *req, void *ctx)
@@ -4341,8 +4398,13 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/defaults",     handle_defaults, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/ae",           handle_ae, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/awb",          handle_awb, NULL);
+	/* Longer prefix first — routing is first-match prefix and accepts '/' as
+	 * a boundary, so "/api/v1/iq" would otherwise swallow any longer
+	 * "/api/v1/iq/..." route registered after it and answer that request with
+	 * the full ISP sweep instead of 404. */
 	r |= venc_httpd_route("GET", "/api/v1/iq/set",       handle_iq_set, NULL);
 	r |= venc_httpd_route("POST", "/api/v1/iq/import",  handle_iq_import, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/iq/export_bin", handle_iq_export_bin, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/iq",           handle_iq, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/modes",        handle_modes, NULL);
 	r |= venc_httpd_route("GET", "/metrics/isp",         handle_isp_metrics, NULL);

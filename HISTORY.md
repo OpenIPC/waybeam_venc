@@ -1,5 +1,53 @@
 # History
 
+## [0.81.0] - 2026-09-05
+
+CV610 gains PQTools `.bin` import and export, so the whole ISP parameter image
+can be moved at once instead of one `/api/v1/iq` knob at a time.
+`contract_version` moves to **0.29.0** — one new endpoint, and `isp.sensorBin`
+flips from unsupported to live on this backend.
+
+- **`isp.sensorBin` is honoured on CV610**, applied live and at cold boot
+  through the vendor `libbin.so`. The call contract was recovered from the
+  stripped blob; the package we have ships the library but not `ot_pq_bin.h`,
+  and the older `HI_PQ_BIN` API on Hi3516CV100 is a different shape whose error
+  codes do not apply. A file is `[ISP image of OT_PQ_GetISPDataTotalLen()
+  bytes][OTPQNRX 3DNR section]` — asking the library for that length is also
+  the version check.
+- **`GET /api/v1/iq/export_bin`** serializes the live ISP back out to
+  `/tmp/isp_export.bin` and answers `{"path":…,"bytes":N}`. The destination is
+  fixed because the endpoint is unauthenticated. 501 on Star6E/Maruko, which
+  round-trip IQ as JSON instead; advertised as `routes.iq_export_bin`.
+- **A `.bin` is locked to the chip register map and the SDK ISP version, not
+  to the sensor.** Import validates an address/size walk against what the
+  running chip's ISP reports and carries no sensor identity. Device-verified on
+  a Hi3516CV610 + IMX662 bench: a tune built for an os02h10 imported cleanly,
+  moved 39 of the 102 fields `/api/v1/iq` reads back across ten ISP groups, and
+  turned the picture red — which is the expected outcome, since a foreign tune
+  brings its own CCM, AWB, black level and noise calibration.
+- **Round trip is exact.** Importing our own exported file restored an
+  identical read-back. A live import and a cold-boot import of the same file
+  produce read-backs that differ in **0 of 102 fields**, so the running ISP
+  thread does not re-assert over an imported image.
+- **The cold-boot order is load-bearing**: the image lands before
+  `isp.gainMax` / `isp.shutterMaxUs`, because a `.bin` carries an AE
+  ext-register record of its own and would otherwise overwrite the config's
+  ceilings on every boot while `/api/v1/get` kept reporting them. A successful
+  import also drops `cv610_iq.c`'s cached cold-boot AE ceilings, which would
+  otherwise write pre-import values back on the next `isp.gainMax=0`.
+- **A `.bin` is integrity-checked and cannot be edited or spliced in place** —
+  one flipped byte returns `0xcb000005`. Both truncation classes are rejected:
+  a file shorter than the ISP image by our own gate, naming both numbers, and a
+  headed-but-truncated 3DNR section by a length check against
+  `OT_PQ_GetStructParamLen` (the library does not bound that read itself, and
+  would otherwise push uninitialised heap into the 3DNR registers).
+- `iq-profiles/cv610-bin/imx662.bin` vendors an export of the reference bench's
+  cold-boot state as a restore point — not a measured tune; nobody has run
+  PQTools against this sensor yet. `make stage SOC_BUILD=cv610` ships it in
+  `isp-bins/`.
+- Requires `libbin.so` on the craft (`/usr/lib`); without it the import warns
+  and no-ops, and the craft still boots.
+
 ## [0.80.0] - 2026-08-30
 
 A sustained bitrate overrun is now reported instead of being silent, and the

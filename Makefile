@@ -67,6 +67,7 @@ CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
 	src/cv610_encoder_config.c \
 	src/cv610_iq.c \
 	src/cv610_modes.c \
+	src/cv610_pq_bin.c \
 	src/cv610_jpeg.c \
 	src/cv610_pipeline.c src/cv610_validation.c src/backend.c \
 	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
@@ -378,6 +379,9 @@ stage: build qr-decode
 		chmod +x $(OUT_DIR)/load-cv610-online; \
 		cp -f config/waybeam-cv610-platform.conf \
 			$(OUT_DIR)/waybeam-cv610.conf; \
+		if ls iq-profiles/cv610-bin/*.bin >/dev/null 2>&1; then \
+			mkdir -p $(OUT_DIR)/isp-bins; cp -f iq-profiles/cv610-bin/*.bin $(OUT_DIR)/isp-bins/; \
+		fi; \
 	fi
 
 print-config:

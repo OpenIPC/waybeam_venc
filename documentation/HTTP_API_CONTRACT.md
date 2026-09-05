@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.28.0`
+- `contract_version`: `0.29.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -37,6 +37,7 @@
 | `image.rotate` | true | true | **false** |
 | `fpv.roiEnabled` / `roiQp` / `roiSteps` / `roiCenter` | true | true | true (**from 0.25.0**) |
 | `isp.gainMax` / `isp.shutterMaxUs` | true | true | true (**from 0.78.0**) |
+| `isp.sensorBin` | true | true | true (**from 0.81.0**, PQTools `.bin` via libbin.so) |
 | `fpv.roiQp` accepted range | ±20 | ±20 | ±20 (**±30 before 0.79.0**) |
 | `video0.maxQp` interacts with `fpv.roiQp` | yes | yes | yes (**measured**) | 
 | `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** |
@@ -105,8 +106,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.80.0",
-    "contract_version": "0.28.0",
+    "app_version": "0.81.0",
+    "contract_version": "0.29.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -240,6 +241,7 @@ endpoint just to discover whether it exists:
 |---|---|
 | `iq` | `/api/v1/iq` and `/api/v1/iq/set` are serviced (the backend registers **both** `query_iq_info` and `apply_iq_param`). |
 | `iq_import` | `/api/v1/iq/import` is compiled in (Star6E/Maruko only). |
+| `iq_export_bin` | `/api/v1/iq/export_bin` is serviced (the backend registers `export_isp_bin`; CV610 only). |
 
 Absent `routes` means an older build: treat every route as possibly present
 and fall back to calling it.
@@ -887,6 +889,34 @@ Response `200`:
 ```json
 {"ok":true,"data":{"param":"colortrans.y_ofst","value":200}}
 {"ok":true,"data":{"param":"colortrans.matrix","value":[23,45,9,1005,987,56,56,977,1015]}}
+```
+
+### `GET /api/v1/iq/export_bin`
+
+**CV610 only** (`501 not_implemented` elsewhere — the SigmaStar backends
+round-trip IQ as JSON through `/api/v1/iq` and `/api/v1/iq/import`).
+
+Serializes the **live** ISP state into a PQTools `.bin` through the vendor
+`libbin.so`, at the fixed path `/tmp/isp_export.bin`. The destination is fixed
+deliberately: the endpoint is unauthenticated, and a caller-supplied path would
+make it a write-anywhere primitive. Copy the file off with `scp` afterwards.
+
+The written file has the same shape PQTools produces — an ISP parameter image
+of exactly `OT_PQ_GetISPDataTotalLen()` bytes followed by an `OTPQNRX` 3DNR
+section — so it can be fed back through `isp.sensorBin`.
+
+The payload is integrity-checked by the vendor library: a `.bin` cannot be
+edited or spliced in place (one flipped byte returns `0xcb000005`). Produce
+files with PQTools or with this endpoint, and treat them as opaque.
+
+```bash
+curl http://<device-ip>/api/v1/iq/export_bin
+scp root@<device-ip>:/tmp/isp_export.bin .
+```
+
+Response `200`:
+```json
+{"ok":true,"data":{"path":"/tmp/isp_export.bin"}}
 ```
 
 ### `POST /api/v1/iq/import`
@@ -1867,7 +1897,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.28.0`:
+in Notes. As of `contract_version: 0.29.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1879,6 +1909,8 @@ in Notes. As of `contract_version: 0.28.0`:
 | `/api/v1/dual/status`, `/dual/idr` | yes | yes | `/dual/status` always 200 (`active:false` when off, `active:true,channel,bitrate,fps,gop` when on).  `/dual/idr` returns 200 when active, 404 when not. Maruko HTTP registration landed in 0.10.4 — earlier Maruko builds returned 404 from these even when `record.mode=dual` was running. |
 | `/api/v1/dual/set` | yes | **501** | Star6E-only: the underlying `MI_VENC_*ChnAttr` write path binds to `i6_venc_chn`, but Maruko's venc library expects `i6c_venc_chn` (different layout). Maruko returns 501 until the call path is ported. |
 | `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Star6E/Maruko share one IQ table schema. **CV610 also serves these from 0.18.4, in a DIFFERENT shape** — see "CV610 IQ response shape" below. `/api/v1/iq/import` stays Star6E/Maruko-only and 501s on CV610 (advertised as `routes.iq_import:false`). |
+| `/api/v1/iq/export_bin` | **501** | **501** | **CV610-only from 0.81.0** (advertised as `routes.iq_export_bin`). Serializes the live ISP to a PQTools `.bin` through the vendor `libbin.so`, at the fixed path `/tmp/isp_export.bin`. The SigmaStar backends round-trip IQ as JSON instead, so they register no `export_isp_bin` callback. |
+| `isp.sensorBin` (`.bin` import) | live, `MI_ISP_*CmdLoadBinFile` | live, same | **CV610 from 0.81.0**, but a DIFFERENT format and library: HiSilicon PQ images via `OT_PQ_BIN_ImportBinData`. The two families are not interchangeable despite the shared field and extension. On CV610 an empty value is a no-op — there is no `/etc/sensors/<sensor>.bin` fallback. |
 | `/api/v1/awb` | live | live | All three backends register `query_awb_info`. CV610 serves `ot_isp_wb_info` plus `ot_isp_exp_info` (the AE's own applied `exp_time`, `a_gain`, `isp_d_gain`, `ave_lum`) — a different payload from the SigmaStar one, and the instrument the `isp.gainMax`/`isp.shutterMaxUs` mapping was verified against. |
 | `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
 | RTP sidecar (`outgoing.sidecarPort`, UDP :5602) | yes | yes | **CV610 from 0.74.0**; before that `src/rtp_sidecar.c` was not compiled into the CV610 binary at all, so the field was accepted, persisted and silently did nothing. CV610 emits the base FRAME plus TRANSPORT_INFO. It has no IMU and no detector, so ATTITUDE and DETECT trailers are never appended; ENC_INFO carries `frame_size_bytes`, `frame_type`, `idr_inserted`, `qp` (the encoder's `h265_info.start_qp`) and `frames_since_idr`; `complexity` and `scene_change` stay 0 because the shared scene detector is not compiled in on this backend; `gop_state` is 0 on all three backends, as nothing in the tree writes it. **`qp` is CV610-only**: the SigmaStar encoder populates only `refType` in its H.265 stream-info struct — `size`, all eight CU counts, `updAttrCnt` and `startQual` read 0 on the device (dumped on i6 at 0.79.0; the struct offset is correct, since `refType` lands exactly where the header says). Reading `startQual` into the trailer was tried and shipped zeros, so Star6E and Maruko leave `qp` at 0 rather than advertise a value that is always 0. Recovering a per-frame QP there means parsing `slice_qp_delta` out of the slice header. Under `frame-shm://` only `seq_count` is 0 on every backend (the packetizer never runs, so no sequence numbers are consumed); `ssrc`, `rtp_timestamp` and `seq_first` are seeded and non-zero, because the RTP session is gated on the *stream mode* rather than the transport. The trailer carries the ring state. |
@@ -1894,6 +1926,22 @@ in Notes. As of `contract_version: 0.28.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.29.0` (additive — CV610 gains PQTools `.bin` import and export):
+    Adds `GET /api/v1/iq/export_bin`, which writes the live ISP state to a
+    PQTools `.bin` at the fixed path `/tmp/isp_export.bin` and answers
+    `{"path":...,"bytes":N}`. CV610-only; the SigmaStar backends register no
+    `export_isp_bin` callback and return **501**, advertised as the new
+    `routes.iq_export_bin` capability flag. The destination is fixed rather
+    than caller-supplied because the endpoint is unauthenticated.
+    Also flips `isp.sensorBin` from unsupported to **live** on CV610 — the
+    field, its mutability and its payload are unchanged, only the set of
+    backends that honour it, so `capabilities.fields[].supported` moves from
+    `false` to `true` there. Device-verified on a Hi3516CV610 + IMX662 bench:
+    a tune built for a different sensor imports cleanly (the format is locked
+    to the chip register map and SDK ISP version, not to the sensor), and an
+    exported file re-imported restores an identical `/api/v1/iq` read-back.
+    A `.bin` is integrity-checked by the vendor library and cannot be edited
+    or spliced in place.
 - `0.28.0` (**narrowing** — `fpv.roi_qp` accepted range `[-30, 30]` -> `[-20, 20]`):
     a client that sends `±21..±30` now gets **400** where it previously got 200.
     `roi_qp` is a *relative* delta and H.265 caps QP at 51, so past ±20 it stops
