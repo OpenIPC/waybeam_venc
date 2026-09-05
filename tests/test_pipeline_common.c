@@ -76,6 +76,27 @@ static int test_rate_watch(void)
 	CHECK("rate_watch_transient_leaves_no_latch", rw.reported == 0);
 	CHECK("rate_watch_transient_resets_streak", rw.over_windows == 0);
 
+	/* The dead band must break an ARMED streak, which is what makes the
+	 * two-window rule "consecutive" rather than "cumulative".  1.3x is the
+	 * shape that matters: the worst benign transient measured on the bench
+	 * was 1.43x, i.e. inside this band, so before the fix a single benign
+	 * window between two overruns preserved the count and the pair reported
+	 * as one sustained episode -- with a duration string computed from the
+	 * window count, so two spikes 40 s apart claimed "for 4 s".
+	 *
+	 * Distinct from the latched hysteresis case below: there the streak is
+	 * deliberately held.  The difference is exactly `reported`. */
+	memset(&rw, 0, sizeof(rw));
+	rw_prime(&rw, &cfg, &t);
+	rw_window(&rw, &cfg, 24000, &t);
+	CHECK("rate_watch_armed_after_one_over", rw.over_windows == 1);
+	rw_window(&rw, &cfg, 5200, &t);
+	CHECK("rate_watch_dead_band_breaks_armed_streak", rw.over_windows == 0);
+	CHECK("rate_watch_dead_band_did_not_report", rw.reported == 0);
+	rw_window(&rw, &cfg, 24000, &t);
+	CHECK("rate_watch_non_consecutive_pair_stays_quiet", rw.reported == 0);
+	CHECK("rate_watch_non_consecutive_pair_recounts", rw.over_windows == 1);
+
 	/* TWO consecutive over-windows trip it. */
 	memset(&rw, 0, sizeof(rw));
 	rw_prime(&rw, &cfg, &t);

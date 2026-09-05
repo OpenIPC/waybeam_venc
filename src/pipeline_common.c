@@ -386,6 +386,19 @@ void pipeline_common_rate_watch(PipelineRateWatch *rw, const VencConfig *cfg,
 				ratio_x100);
 		rw->over_windows = 0;
 		rw->reported = 0;
+	} else if (!rw->reported) {
+		/* The dead band between clear and trip.  Breaking the streak here is
+		 * what makes "two CONSECUTIVE windows" true: without it a benign
+		 * window preserved the count, so two overruns an unbounded time apart
+		 * reported as one sustained episode -- and the worst measured benign
+		 * transient, 1.43x, lands squarely in this band, so that was the
+		 * common case rather than a corner.
+		 *
+		 * Only while !reported.  Once the warning is out, the hysteresis
+		 * between the two thresholds is the point: an episode oscillating in
+		 * the dead band must stay latched until it genuinely clears, or the
+		 * cleared/re-reported pair would flap. */
+		rw->over_windows = 0;
 	}
 }
 

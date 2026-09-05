@@ -920,6 +920,40 @@ static int test_rotate_180(void)
 
 	CHECK("rotate180_mirror", cfg.image.mirror == true);
 	CHECK("rotate180_flip", cfg.image.flip == true);
+	/* rotate is write-only: it decomposes and is then cleared.  Left at 180 it
+	 * re-decomposed on every parse and won permanently -- and because save()
+	 * writes the field back, a craft that once carried rotate:180 could never
+	 * turn image.mirror off again.  Checking the decomposition alone cannot
+	 * see that, which is why this assertion is here. */
+	CHECK("rotate180_cleared_after_decompose", cfg.image.rotate == 0);
+	return failures;
+}
+
+/* The failure the cleared rotate prevents, end to end: turn mirror off on a
+ * config that arrived with rotate:180, save, reload.  Before the fix the value
+ * came back true, silently, across the restart the MUT_RESTART write had just
+ * asked for. */
+static int test_rotate_180_does_not_resurrect(void)
+{
+	int failures = 0;
+	const char *json = "{ \"image\": { \"rotate\": 180 } }";
+	char *path = write_temp_json(json);
+	VencConfig cfg;
+
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	CHECK("rotate_resurrect_loaded_mirror", cfg.image.mirror == true);
+
+	cfg.image.mirror = false;
+	CHECK("rotate_resurrect_saved", venc_config_save(path, &cfg) == 0);
+
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	CHECK("rotate_resurrect_mirror_stays_off", cfg.image.mirror == false);
+	CHECK("rotate_resurrect_flip_untouched", cfg.image.flip == true);
+
+	unlink(path);
+	free(path);
 	return failures;
 }
 
@@ -1450,6 +1484,7 @@ int test_venc_config(void)
 	failures += test_framing_presets();
 	failures += test_resolution_aliases();
 	failures += test_rotate_180();
+	failures += test_rotate_180_does_not_resurrect();
 	failures += test_sample_config_file();
 	failures += test_audio_config();
 	failures += test_audio_volume_clamping();

@@ -805,6 +805,7 @@ typedef struct {
 	int         is_ring;
 	const char *name;            /* "frame-shm" | "unix" | "udp" | "none" */
 	uint8_t     fill_pct;
+	int         have_fill;        /* 0 = fill_pct is not a measurement      */
 	int         in_pressure;      /* latched hysteresis flag, not fill>=HW */
 	uint32_t    pressure_frames;  /* frames observed in pressure           */
 	uint64_t    transport_drops; /* ring: full drops; socket: send failures */
@@ -846,15 +847,20 @@ static int cv610_collect_transport(Cv610RunnerContext *ctx,
 		out->other_drops = fill->other_drops;
 		out->slot_count = fill->slot_count;
 		out->used_slots = fill->used_slots;
+		out->have_fill = 1;
 	} else if (ctx->socket_handle >= 0) {
 		uint8_t fill_pct = 0;
 
-		if (output_socket_get_fill_pct(ctx->socket_handle, &ctx->send_queue,
-			&fill_pct) != 0)
-			fill_pct = 0;
+		/* A failed SIOCOUTQ is "unknown", never "empty".  Publishing the
+		 * substituted 0 as a measurement fed a real sample to the pressure
+		 * observer and could report a full queue as fillPct 0 / inPressure
+		 * false.  star6e_output.c keys on have_fill for the same reason and
+		 * declines to observe; this now matches it. */
+		out->have_fill = output_socket_get_fill_pct(ctx->socket_handle,
+			&ctx->send_queue, &fill_pct) == 0;
 		out->active = 1;
 		out->name = ctx->transport == VENC_OUTPUT_URI_UNIX ? "unix" : "udp";
-		out->fill_pct = fill_pct;
+		out->fill_pct = out->have_fill ? fill_pct : 0;
 		out->transport_drops = __atomic_load_n(&ctx->output_drops,
 			__ATOMIC_RELAXED);
 		out->packets_sent = __atomic_load_n(&ctx->packets_sent,
@@ -2544,8 +2550,10 @@ static int cv610_run(void *opaque)
 			 * and the flag's 75/50 hysteresis needs to see every
 			 * sample to release correctly.  Same shared helper the
 			 * SigmaStar backends use, so the wire means one thing. */
+			/* have_fill, not just active: an unmeasured queue must not be
+			 * observed as an empty one. */
 			if (cv610_collect_transport(ctx, sc_fillp, &sc_ts) == 0 &&
-				sc_ts.active) {
+				sc_ts.active && sc_ts.have_fill) {
 				int p_state = __atomic_load_n(&ctx->pressure_state,
 					__ATOMIC_RELAXED);
 				uint32_t p_frames = __atomic_load_n(
@@ -2588,7 +2596,16 @@ static int cv610_run(void *opaque)
 				enc.frame_size_bytes = (uint32_t)frame_len;
 				enc.frame_type = is_idr ? RTP_SIDECAR_FRAME_IDR
 					: RTP_SIDECAR_FRAME_P;
-				enc.idr_inserted = is_idr ? 1 : 0;
+				/* Left 0 deliberately, like complexity/scene_change/
+				 * gop_state just below: the field means "the controller
+				 * REQUESTED an IDR after this frame", and this backend has
+				 * no such controller.  Setting it on every IDR made it a
+				 * duplicate of frame_type and FLAG_KEYFRAME, and a ground
+				 * consumer that sums it as "IDR insertions" would read a
+				 * once-per-GOP static scene as one insertion per second
+				 * while an identically configured SigmaStar craft reports
+				 * zero. */
+				enc.idr_inserted = 0;
 				/* start_qp is the encoder's own per-frame value and is
 				 * exactly what the contract asks for ("start QP /
 				 * closest available per-frame QP").  The struct is

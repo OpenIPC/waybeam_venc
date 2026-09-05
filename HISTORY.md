@@ -504,7 +504,10 @@ The RTP sidecar reaches CV610. `contract_version` 0.22.0 -> **0.23.0**
   consumer and probe works against it unchanged. No wire change.
 
 - **What the CV610 trailers carry.** ENC_INFO reports `frame_size_bytes`,
-  `frame_type`, `idr_inserted`, `qp` and `frames_since_idr`. `qp` is the
+  `frame_type`, `qp` and `frames_since_idr`. (`idr_inserted` was also set here
+  originally; 0.81.0 leaves it 0, because the field means "the controller
+  requested an IDR" and this backend has no such controller — setting it on
+  every IDR duplicated `frame_type` and misled a consumer that sums it.) `qp` is the
   encoder's own `h265_info.start_qp`, exactly what the contract asks for
   ("start QP / closest available per-frame QP") and already in hand — the
   SVC-T enhance check reads `ref_type` from the same struct. `complexity` and
@@ -573,9 +576,13 @@ The RTP sidecar reaches CV610. `contract_version` 0.22.0 -> **0.23.0**
   `cv610_collect_transport()` backs both `/api/v1/transport/status` and the
   per-frame trailer, so the number an operator reads over HTTP and the number a
   probe reads on the wire cannot drift. The drain loop takes the ring reading
-  once and hands it to both the low-water window and the trailer, and does the
-  whole thing only once a probe is actually subscribed — an unsubscribed craft
-  pays no clock read, no ring load and no `SIOCOUTQ` ioctl.
+  once and hands it to both the low-water window and the trailer. **Corrected in
+  0.81.0:** this entry originally also claimed the whole thing ran "only once a
+  probe is actually subscribed", so an unsubscribed craft paid no clock read,
+  ring load or `SIOCOUTQ` ioctl. The sidecar review work later in this same
+  release moved the observation out of the subscription gate — it now runs
+  every frame, which is what the neighbouring bullet in this section describes.
+  The two statements contradicted each other; this is the one that was stale.
 
 - **`rtp_sidecar_sender_init()` runs before the `outgoing.enabled` bail**, on
   every path, because it is what writes -1 into `fd`. The context arrives memset

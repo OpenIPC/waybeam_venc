@@ -375,12 +375,18 @@ static void load_image(const cJSON *root, VencConfigImage *s)
 	s->mirror = json_get_bool(obj, "mirror", s->mirror);
 	s->flip = json_get_bool(obj, "flip", s->flip);
 	s->rotate = json_get_int(obj, "rotate", s->rotate);
+	/* rotate is a WRITE-ONLY convenience: it decomposes into mirror+flip and
+	 * is then cleared, in both branches.  Leaving 180 in the struct made the
+	 * decomposition re-run on every parse and win permanently -- and since
+	 * venc_config_save() writes the field back, a craft that once had
+	 * rotate:180 could never set image.mirror=false again.  The write was
+	 * accepted, persisted, reported reinit_pending, read back false, and then
+	 * silently reverted across the restart it had just asked for. */
 	if (s->rotate == 180) {
 		s->mirror = true;
 		s->flip = true;
-	} else {
-		s->rotate = 0;
 	}
+	s->rotate = 0;
 }
 
 static int parse_resolution(const char *str, uint32_t *w, uint32_t *h)
