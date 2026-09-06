@@ -41,18 +41,112 @@ typedef enum {
 	RECORDER_STOP_SIZE_LIMIT,
 } Star6eRecorderStopReason;
 
+/* Default rotation thresholds, shared by both recorders. */
+#define RECORDER_DEFAULT_MAX_SECONDS  300
+#define RECORDER_DEFAULT_MAX_BYTES    (500ULL * 1024 * 1024)
+
+/* Reserve for the raw recorder's largest single write.  One access unit, and
+ * unlike the TS recorder's fixed mux buffer its size is the encoder's to
+ * choose -- 2 MB is comfortably above an IDR at any bitrate these SoCs reach.
+ * Only ever consulted on a 32-bit off_t build, where it is insurance. */
+#define RECORDER_RAW_WRITE_HEADROOM (2u * 1024u * 1024u)
+
+/* Segment rotation policy, shared by both recorders.
+ *
+ * The two differ only in what a segment IS -- a .ts with fresh PAT/PMT, or a
+ * raw .hevc elementary stream -- never in when to cut one.
+ *
+ * A segment must OPEN somewhere a decoder can start, and this rotation
+ * deliberately only ever WAITS for such a point.  It never asks the encoder
+ * for a keyframe: an IDR is a large frame, and manufacturing one per segment
+ * changes the bitrate the link has to carry.  On a GDR craft that is doubly
+ * wrong, because intra-refresh exists precisely to spread that cost instead
+ * of spiking it -- and in record.mode=mirror the recorder taps the LIVE
+ * channel, so the spike would go out over the air for the benefit of a file.
+ *
+ * Two kinds of point qualify, and the encoder produces one or the other
+ * without being asked:
+ *
+ *   - an IRAP (h265 NAL 19 IDR_W_RADL / 20 IDR_N_LP), on a keyframing stream.
+ *     Accepting parameter sets as well does NOT loosen this case: measured on
+ *     Star6E at resilience=off, 601 frames, every one of the 4 parameter-set
+ *     groups was immediately followed by an IDR and there were exactly 4 IRAP
+ *     access units -- 0/4 detached.  A normal-GOP cut therefore still lands on
+ *     the IRAP, which is where it has to land;
+ *   - a parameter-set boundary (NAL 32/33/34, VPS/SPS/PPS), which a GDR
+ *     stream emits once per GOP as the head of a refresh wave.  A raw
+ *     elementary stream carries no container to hold codec config, so this is
+ *     also the only place a .hevc segment can begin and still be decodable.
+ *     The picture converges over one refresh wave -- exactly what the ground
+ *     already does on every tune-in.
+ *
+ * Device-measured on Star6E (resilience=racing, gopSize 2.0, 100 fps): ONE
+ * IRAP at startup and never again, with VPS/SPS/PPS every ~200 frames.  So on
+ * the shipped FPV config the parameter-set boundary is the only one that ever
+ * arrives, and waiting for an IRAP alone would leave rotation permanently
+ * inert -- which is the defect this replaced.
+ *
+ * If a stream somehow produces NEITHER, rotation waits rather than forcing
+ * anything, and says so once so the operator is not left guessing. */
+typedef struct {
+	/* Config.  Zero max_bytes means "no size limit", which still cannot
+	 * mean past RECORDER_OFF_T_CEILING. */
+	uint32_t max_seconds;
+	uint64_t max_bytes;
+	/* Bytes the caller may still write after a "not yet" answer -- its
+	 * largest single write.  Reserved below the off_t ceiling so that
+	 * write stays on the near side of the wall. */
+	uint64_t write_headroom;
+
+	/* Per-segment counters, maintained by the caller. */
+	struct timespec segment_start_time;
+	uint64_t segment_bytes;
+
+	/* When the thresholds were first seen crossed, and whether the "no cut
+	 * point is coming" warning has been issued for this wait.  Both reset
+	 * on every cut. */
+	time_t rotation_due_since;
+	int warned_no_cut_point;
+} RecorderRotation;
+
+/** Should the caller cut a segment before writing this access unit?
+ *
+ *  Returns 1 only when a threshold is crossed AND this access unit is a point
+ *  a decoder can start from -- an IRAP, or a parameter-set boundary.  The new
+ *  segment opens on it.
+ *
+ *  Never requests anything from the encoder.  Returns 0 otherwise. */
+int recorder_rotation_due(RecorderRotation *rot, int is_cut_point);
+
+/** Reset per-segment counters after the caller has opened a new segment. */
+void recorder_rotation_segment_opened(RecorderRotation *rot,
+	uint64_t initial_bytes);
+
+/** Is this h265 NAL type a point a new segment may open on? */
+static inline int recorder_nal_is_cut_point(unsigned int nal_type)
+{
+	/* 19/20 IRAP; 32/33/34 VPS/SPS/PPS -- the head of a GDR refresh wave,
+	 * and the codec config a raw segment needs in-band. */
+	return nal_type == 19 || nal_type == 20 ||
+	       nal_type == 32 || nal_type == 33 || nal_type == 34;
+}
+
 typedef struct {
 	int fd;
-	/* Set by start(), cleared by every stop.  This recorder does not
-	 * rotate, so unlike the TS one it never has a transient fd == -1 — but
-	 * it DOES stop itself from the recorder writer thread on ENOSPC or a
-	 * write error, while the encode loop and the httpd thread read the
+	/* Set by start(), cleared by every stop.  Deliberately NOT cleared by
+	 * segment rotation, which closes and reopens `fd` inside a single
+	 * write call: `fd >= 0` answers "is a file open right now", which is
+	 * false mid-rotation, while this answers "is a recording in progress",
+	 * which is what a producer needs to decide whether to hand a frame
+	 * over.  It is also cleared from the recorder writer thread on ENOSPC
+	 * or a write error while the encode loop and the httpd thread read the
 	 * descriptor.  A plain int store racing two unsynchronised loads leaves
 	 * the producer pushing into a closed recorder, where the frames are
 	 * discarded and counted nowhere.  Accessed atomically for that. */
 	int recording;
 	uint64_t bytes_written;
 	uint32_t frames_written;
+	uint32_t segments;            /* number of .hevc files produced */
 	uint32_t sync_interval_frames;
 	uint32_t frames_since_sync;
 	uint32_t space_check_countdown;
@@ -60,6 +154,11 @@ typedef struct {
 	struct timespec start_time;
 	char dir[RECORDER_PATH_MAX];
 	char path[RECORDER_PATH_MAX];
+
+	/* Segment rotation, on exactly the policy the TS recorder uses -- a
+	 * raw elementary stream still has to open on an IRAP, and on a GDR
+	 * craft still has to ask for one. */
+	RecorderRotation rot;
 
 	/* Guards the status-visible fields above (recording, counters,
 	 * last_stop_reason, start_time, path) so a poll on the httpd thread
@@ -125,11 +224,15 @@ int star6e_recorder_start(Star6eRecorderState *state, const char *dir);
  *  the SDK's pack list into `frame` before it reaches any consumer), this is
  *  the whole recorder interface — no SDK-typed adapter is needed.
  *
+ *  is_idr: 1 if this access unit is a keyframe.  Segment rotation can only
+ *  cut on one, so a caller that always passes 0 disables rotation for this
+ *  recording -- it never disables the write.
+ *
  *  No-op if not currently recording.  Returns bytes written, 0 if not
  *  active, or -1 on error.  Automatically stops recording on disk full or
  *  write error. */
 int star6e_recorder_write_au(Star6eRecorderState *state,
-	const uint8_t *au, size_t len);
+	const uint8_t *au, size_t len, int is_idr);
 
 #if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
 /** Write one encoded frame (all NAL units) to the recording file.
@@ -143,6 +246,14 @@ int star6e_recorder_write_au(Star6eRecorderState *state,
 int star6e_recorder_write_frame(Star6eRecorderState *state,
 	const MI_VENC_Stream_t *stream);
 #endif
+
+/** Cut a segment if the thresholds are met and this access unit is a point a
+ *  new one may open on.  Closes the current file, opens the next, and returns
+ *  0 whether or not it rotated; -1 if the rotation failed, having stopped the
+ *  recorder.  Shared so backends with their own SDK-typed writer (Maruko) cut
+ *  the same way rather than reimplementing it. */
+int star6e_recorder_check_rotation(Star6eRecorderState *state,
+	int is_cut_point);
 
 /** Stop recording: fsync and close the file.  No-op if not recording. */
 void star6e_recorder_stop(Star6eRecorderState *state);

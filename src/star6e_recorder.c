@@ -27,6 +27,9 @@ void star6e_recorder_init(Star6eRecorderState *state)
 	state->fd = -1;
 	state->sync_interval_frames = RECORDER_SYNC_DEFAULT_FRAMES;
 	state->last_stop_reason = RECORDER_STOP_MANUAL;
+	state->rot.max_seconds = RECORDER_DEFAULT_MAX_SECONDS;
+	state->rot.max_bytes = RECORDER_DEFAULT_MAX_BYTES;
+	state->rot.write_headroom = RECORDER_RAW_WRITE_HEADROOM;
 	if (pthread_mutex_init(&state->status_lock, NULL) == 0)
 		state->status_lock_ready = 1;
 }
@@ -42,6 +45,121 @@ uint64_t star6e_recorder_free_space(const char *path)
 		return 0;
 
 	return (uint64_t)st.f_bavail * (uint64_t)st.f_frsize;
+}
+
+/* ── Shared rotation policy ──────────────────────────────────────────── */
+
+void recorder_rotation_segment_opened(RecorderRotation *rot,
+	uint64_t initial_bytes)
+{
+	if (!rot)
+		return;
+	clock_gettime(CLOCK_MONOTONIC, &rot->segment_start_time);
+	rot->segment_bytes = initial_bytes;
+}
+
+int recorder_rotation_due(RecorderRotation *rot, int is_cut_point)
+{
+	struct timespec now;
+	unsigned long elapsed;
+	int should_rotate = 0;
+
+	if (!rot)
+		return 0;
+
+	/* Check time-based rotation */
+	if (rot->max_seconds > 0) {
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		elapsed = (unsigned long)(now.tv_sec -
+			rot->segment_start_time.tv_sec);
+		if (elapsed >= rot->max_seconds)
+			should_rotate = 1;
+	}
+
+	/* Check size-based rotation.
+	 *
+	 * Rotate on whichever limit binds first: the operator's, or the one
+	 * this binary's off_t can actually reach.  A configured max_mb above
+	 * the ceiling is not an error to reject -- the operator asked for big
+	 * segments and gets the biggest writable ones -- and max_bytes == 0
+	 * ("no size limit") still cannot mean past the ceiling.  One write of
+	 * headroom keeps the write that follows this check on the near side of
+	 * the wall.  Inert on a 64-bit off_t build, where the ceiling is
+	 * UINT64_MAX and this is always just max_bytes. */
+	{
+		uint64_t ceiling = RECORDER_OFF_T_CEILING - rot->write_headroom;
+		uint64_t limit = rot->max_bytes;
+
+		if (limit == 0 || limit > ceiling)
+			limit = ceiling;
+		if (rot->segment_bytes >= limit)
+			should_rotate = 1;
+	}
+
+	if (!should_rotate) {
+		rot->rotation_due_since = 0;
+		rot->warned_no_cut_point = 0;
+		return 0;
+	}
+
+	/* Threshold crossed.  WAIT for a point a decoder can start from; never
+	 * ask the encoder to manufacture one.  An IDR is a large frame, and one
+	 * per segment raises the bitrate the link has to carry -- on a GDR
+	 * craft that undoes the very thing intra-refresh is for, and in
+	 * record.mode=mirror it would spike the LIVE channel for the benefit of
+	 * a file. */
+	if (!is_cut_point) {
+		if (rot->rotation_due_since == 0) {
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			rot->rotation_due_since = now.tv_sec;
+			return 0;
+		}
+		/* A cut point is due once per GOP on every stream shape these
+		 * encoders produce -- an IRAP when keyframing, a parameter-set
+		 * boundary under intra-refresh.  If one has not arrived long
+		 * after the threshold, something is emitting neither, and the
+		 * operator's max_seconds/max_mb are silently not happening.
+		 * Say so once rather than growing the file in silence. */
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (!rot->warned_no_cut_point &&
+		    now.tv_sec - rot->rotation_due_since >= 10) {
+			rot->warned_no_cut_point = 1;
+			fprintf(stderr,
+				"[recorder] rotation due for 10s but the stream has "
+				"produced no IRAP and no parameter sets to cut on; "
+				"the segment will keep growing\n");
+		}
+		return 0;
+	}
+
+	rot->rotation_due_since = 0;
+	rot->warned_no_cut_point = 0;
+	return 1;
+}
+
+/* Does this Annex-B access unit BEGIN with a parameter set?
+ *
+ * Only the first NAL is examined, which is both cheap and correct: VPS/SPS/PPS
+ * lead the access unit they configure -- measured on Star6E, every IRAP was
+ * immediately preceded by VPS+SPS+PPS, and every GDR refresh wave head was a
+ * VPS.  A parameter set buried mid-AU would not be a place a segment could
+ * open anyway. */
+static int au_leads_with_param_sets(const uint8_t *au, size_t len)
+{
+	size_t i = 0;
+
+	if (!au)
+		return 0;
+	/* Annex-B start code: 00 00 01 or 00 00 00 01. */
+	if (len >= 4 && au[0] == 0 && au[1] == 0 && au[2] == 0 && au[3] == 1)
+		i = 4;
+	else if (len >= 3 && au[0] == 0 && au[1] == 0 && au[2] == 1)
+		i = 3;
+	else
+		return 0;
+	if (i >= len)
+		return 0;
+	return recorder_nal_is_cut_point((unsigned int)((au[i] >> 1) & 0x3F));
 }
 
 static int build_recording_path(char *path, size_t path_size, const char *dir)
@@ -175,8 +293,12 @@ int star6e_recorder_start(Star6eRecorderState *state, const char *dir)
 	build_recording_path(state->path, sizeof(state->path), dir);
 	star6e_recorder_status_unlock(state);
 
+	/* O_EXCL for the same reason as open_next_segment(): the generated name
+	 * is not collision-proof and truncating would destroy an earlier
+	 * recording.  A collision here is a failed start, which is loud, rather
+	 * than silent data loss. */
 	state->fd = open(state->path,
-		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+		O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
 	if (state->fd < 0) {
 		fprintf(stderr, "[recorder] open %s failed: %s\n",
 			state->path, strerror(errno));
@@ -186,9 +308,11 @@ int star6e_recorder_start(Star6eRecorderState *state, const char *dir)
 		return -1;
 	}
 
+	recorder_rotation_segment_opened(&state->rot, 0);
 	star6e_recorder_status_lock(state);
 	state->bytes_written = 0;
 	state->frames_written = 0;
+	state->segments = 1;
 	state->frames_since_sync = 0;
 	state->space_check_countdown = RECORDER_SPACE_CHECK_INTERVAL;
 	state->last_stop_reason = RECORDER_STOP_MANUAL;
@@ -200,6 +324,104 @@ int star6e_recorder_start(Star6eRecorderState *state, const char *dir)
 	star6e_recorder_status_unlock(state);
 
 	fprintf(stderr, "[recorder] started: %s\n", state->path);
+	return 0;
+}
+
+/* Open the next .hevc segment.  The raw counterpart of the TS recorder's
+ * open_new_segment(): no PAT/PMT to regenerate, because an elementary stream
+ * carries its own parameter sets -- device-measured on Star6E, every IRAP
+ * access unit is immediately preceded by VPS+SPS+PPS, so a segment cut on one
+ * opens self-sufficiently. */
+static int open_next_segment(Star6eRecorderState *state)
+{
+	char newpath[RECORDER_PATH_MAX];
+	int attempt;
+
+	/* Built into a LOCAL and published together with the segment count, so
+	 * a status poll cannot pair the new path with the old count.
+	 *
+	 * O_EXCL, not O_TRUNC: the name carries only uptime seconds plus 16
+	 * bits derived from the nanosecond clock, so it is not collision-proof
+	 * -- and after a reboot the uptime restarts, which can reproduce a name
+	 * left by an earlier session.  Truncating would silently destroy that
+	 * recording.  Rotation multiplies the exposure (one name per segment
+	 * now, not one per recording), so retry with a fresh name instead. */
+	for (attempt = 0; attempt < 8; attempt++) {
+		build_recording_path(newpath, sizeof(newpath), state->dir);
+		state->fd = open(newpath,
+			O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+		if (state->fd >= 0)
+			break;
+		if (errno != EEXIST) {
+			fprintf(stderr, "[recorder] open %s failed: %s\n",
+				newpath, strerror(errno));
+			return -1;
+		}
+	}
+	if (state->fd < 0) {
+		fprintf(stderr,
+			"[recorder] could not find an unused segment name in %s\n",
+			state->dir);
+		return -1;
+	}
+
+	recorder_rotation_segment_opened(&state->rot, 0);
+
+	star6e_recorder_status_lock(state);
+	snprintf(state->path, sizeof(state->path), "%s", newpath);
+	state->segments++;
+	star6e_recorder_status_unlock(state);
+
+	/* stderr like every other line this recorder emits, including
+	 * "started" a few lines up: splitting one recording's progress across
+	 * two streams would make it harder to follow, not easier. */
+	fprintf(stderr, "[recorder] segment %u: %s\n",
+		state->segments, state->path);
+	return 0;
+}
+
+/* Cut a segment if one is due.  The WHEN is recorder_rotation_due(), shared
+ * verbatim with the TS recorder; only the WHAT differs. */
+int star6e_recorder_check_rotation(Star6eRecorderState *state,
+	int is_cut_point)
+{
+	int finalise_failed;
+
+	if (!state || state->fd < 0)
+		return 0;
+	if (!recorder_rotation_due(&state->rot, is_cut_point))
+		return 0;
+
+	/* Finalising the OLD segment can fail -- a delayed write surfacing at
+	 * fdatasync(), or close() reporting one.  Reporting that as a clean
+	 * rotation would leave the operator with a segment that may be short
+	 * and no indication of it, so it is a stop, exactly like a failed
+	 * reopen below. */
+	finalise_failed = (fdatasync(state->fd) != 0);
+	if (close(state->fd) != 0)
+		finalise_failed = 1;
+	state->fd = -1;
+	if (finalise_failed) {
+		fprintf(stderr,
+			"[recorder] segment %u (%s) failed to finalise: %s\n",
+			state->segments, state->path, strerror(errno));
+		star6e_recorder_status_lock(state);
+		__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
+		state->last_stop_reason = RECORDER_STOP_WRITE_ERROR;
+		star6e_recorder_status_unlock(state);
+		return -1;
+	}
+
+	if (open_next_segment(state) != 0) {
+		/* A rotation that cannot reopen is a stop, not a gap. */
+		star6e_recorder_status_lock(state);
+		__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
+		state->last_stop_reason = RECORDER_STOP_WRITE_ERROR;
+		star6e_recorder_status_unlock(state);
+		return -1;
+	}
+	/* The AU about to be written IS the cut point, so the new segment
+	 * opens on it. */
 	return 0;
 }
 
@@ -249,7 +471,7 @@ static ssize_t write_all(int fd, const uint8_t *data, size_t len)
 }
 
 int star6e_recorder_write_au(Star6eRecorderState *state,
-	const uint8_t *au, size_t len)
+	const uint8_t *au, size_t len, int is_idr)
 {
 	ssize_t written;
 	off_t frame_start;
@@ -258,10 +480,15 @@ int star6e_recorder_write_au(Star6eRecorderState *state,
 		return 0;
 
 	/* Same order as star6e_recorder_write_frame() below: space check
-	 * first (it can stop the recorder), then the frame boundary, then the
-	 * write, then the counters and the sync cadence. */
+	 * first (it can stop the recorder), then rotation -- which must run
+	 * BEFORE the frame boundary is taken, because a cut replaces the fd
+	 * and the offset it would have recorded -- then the write, then the
+	 * counters and the sync cadence. */
 	if (check_disk_space(state) != 0)
 		return 0;
+	if (star6e_recorder_check_rotation(state,
+		    is_idr || au_leads_with_param_sets(au, len)) != 0)
+		return -1;
 	frame_start = lseek(state->fd, 0, SEEK_CUR);
 
 	written = write_all(state->fd, au, len);
@@ -278,15 +505,17 @@ int star6e_recorder_write_au(Star6eRecorderState *state,
 			fprintf(stderr, "[recorder] disk full (ENOSPC)\n");
 			stop_with_reason(state, RECORDER_STOP_DISK_FULL);
 		} else if (errno == EFBIG) {
-			/* A file size ceiling, not bad media: this recorder
-			 * writes one unrotated file, so it is terminal.  Name
-			 * it -- "write error" sent the original report hunting
-			 * the SD card when the limit was in the binary. */
+			/* A file size ceiling, not bad media.  Reachable only
+			 * when rotation could not cut in time -- the IDR ask is
+			 * bounded, so a stream that answers none of them keeps
+			 * one segment growing.  The rollback above has already
+			 * put the file back on its frame boundary, so it stays
+			 * playable; name the ceiling rather than blaming the
+			 * card, as "write error" once did. */
 			fprintf(stderr,
 				"[recorder] file size limit reached at %llu bytes "
-				"(EFBIG); this format does not rotate -- use "
-				"record.format=ts for long recordings\n",
-				(unsigned long long)state->bytes_written);
+				"(EFBIG) -- lower record.maxMB\n",
+				(unsigned long long)state->rot.segment_bytes);
 			stop_with_reason(state, RECORDER_STOP_SIZE_LIMIT);
 		} else {
 			fprintf(stderr, "[recorder] write error: %s\n",
@@ -296,6 +525,7 @@ int star6e_recorder_write_au(Star6eRecorderState *state,
 		return -1;
 	}
 
+	state->rot.segment_bytes += (uint64_t)written;
 	star6e_recorder_status_lock(state);
 	state->bytes_written += (uint64_t)written;
 	state->frames_written++;
@@ -322,6 +552,28 @@ int star6e_recorder_write_au(Star6eRecorderState *state,
  * separate change with its own verification. */
 
 #if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
+/* Can a new segment open on this access unit?  An IRAP, or the parameter sets
+ * that head a GDR refresh wave -- see RecorderRotation.  Deliberately the same
+ * h265-only reading the TS recorder uses, so the two cannot disagree about
+ * where a segment may start on one backend. */
+static int stream_is_cut_point(const MI_VENC_Stream_t *stream)
+{
+	for (unsigned int i = 0; i < stream->count; ++i) {
+		const MI_VENC_Pack_t *pack = &stream->packet[i];
+
+		if (!pack->data || pack->packNum <= 0)
+			continue;
+		for (unsigned int k = 0; k < (unsigned int)pack->packNum; ++k) {
+			unsigned int nalu = (unsigned int)
+				pack->packetInfo[k].packType.h265Nalu;
+
+			if (recorder_nal_is_cut_point(nalu))
+				return 1;
+		}
+	}
+	return 0;
+}
+
 int star6e_recorder_write_frame(Star6eRecorderState *state,
 	const MI_VENC_Stream_t *stream)
 {
@@ -346,6 +598,11 @@ int star6e_recorder_write_frame(Star6eRecorderState *state,
 	/* Periodic disk space check */
 	if (check_disk_space(state) != 0)
 		return 0;
+	/* Before the frame boundary: a cut replaces the fd, and with it the
+	 * offset the rollback would restore. */
+	if (star6e_recorder_check_rotation(state,
+		    stream_is_cut_point(stream)) != 0)
+		return -1;
 	frame_start = lseek(state->fd, 0, SEEK_CUR);
 
 	for (unsigned int i = 0; i < stream->count; ++i) {
@@ -407,6 +664,7 @@ int star6e_recorder_write_frame(Star6eRecorderState *state,
 	}
 
 	star6e_recorder_status_lock(state);
+	state->rot.segment_bytes += total;
 	state->bytes_written += total;
 	state->frames_written++;
 	star6e_recorder_status_unlock(state);
@@ -480,6 +738,7 @@ void star6e_recorder_snapshot(Star6eRecorderState *state,
 	out->active = __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
 	out->bytes_written = state->bytes_written;
 	out->frames_written = state->frames_written;
+	out->segments = state->segments;
 	out->elapsed_ms = out->active
 		? star6e_recorder_elapsed_ms(&state->start_time) : 0;
 	out->last_stop_reason = state->last_stop_reason;

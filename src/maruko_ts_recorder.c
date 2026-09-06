@@ -44,9 +44,13 @@ int maruko_ts_recorder_write_stream(Star6eTsRecorderState *state,
 				    len > (pack->length - off))
 					continue;
 
+				/* A segment may open on an IRAP or on the
+				 * parameter sets heading a refresh wave -- see
+				 * RecorderRotation.  Without the second kind,
+				 * rotation is inert on a GDR craft. */
 				unsigned int nalu = (unsigned int)
 					pack->packetInfo[k].packType.h265Nalu;
-				if (nalu == 19 || nalu == 20)
+				if (recorder_nal_is_cut_point(nalu))
 					is_idr = 1;
 
 				if (nal_len + len > sizeof(nal_buf)) {

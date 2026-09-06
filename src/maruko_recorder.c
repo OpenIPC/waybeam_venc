@@ -92,15 +92,14 @@ static void stop_with_error(Star6eRecorderState *state, int err)
 		state->last_stop_reason = RECORDER_STOP_DISK_FULL;
 		star6e_recorder_status_unlock(state);
 	} else if (err == EFBIG) {
-		/* A file size ceiling, not bad media, and terminal here: this
-		 * recorder writes one unrotated file.  Named separately so the
-		 * status does not blame the SD card for a limit that is not
-		 * its. */
+		/* A file size ceiling, not bad media.  Reachable only when
+		 * rotation could not cut in time -- the stream produced no
+		 * point a segment may open on.  Named separately so the status
+		 * does not blame the card for a limit that is not its. */
 		fprintf(stderr,
 			"[maruko_recorder] file size limit reached at %llu bytes "
-			"(EFBIG); this format does not rotate -- use "
-			"record.format=ts for long recordings\n",
-			(unsigned long long)state->bytes_written);
+			"(EFBIG) -- lower record.maxMB\n",
+			(unsigned long long)state->rot.segment_bytes);
 		star6e_recorder_status_lock(state);
 		state->last_stop_reason = RECORDER_STOP_SIZE_LIMIT;
 		star6e_recorder_status_unlock(state);
@@ -116,6 +115,26 @@ static void stop_with_error(Star6eRecorderState *state, int err)
 		close(state->fd);
 		state->fd = -1;
 	}
+}
+
+/* Can a new segment open on this access unit?  Same reading as the Star6E and
+ * TS paths -- an IRAP, or the parameter sets that head a GDR refresh wave. */
+static int stream_is_cut_point(const i6c_venc_strm *stream)
+{
+	for (unsigned int i = 0; i < stream->count; ++i) {
+		const i6c_venc_pack *pack = &stream->packet[i];
+
+		if (!pack->data || pack->packNum <= 0)
+			continue;
+		for (unsigned int k = 0; k < (unsigned int)pack->packNum; ++k) {
+			unsigned int nalu = (unsigned int)
+				pack->packetInfo[k].packType.h265Nalu;
+
+			if (recorder_nal_is_cut_point(nalu))
+				return 1;
+		}
+	}
+	return 0;
 }
 
 int maruko_recorder_write_frame(Star6eRecorderState *state,
@@ -142,6 +161,13 @@ int maruko_recorder_write_frame(Star6eRecorderState *state,
 
 	if (check_disk_space(state) != 0)
 		return 0;
+	/* Before the frame boundary: a cut replaces the fd, and with it the
+	 * offset the rollback would restore.  This writer is the dual and
+	 * synchronous-fallback path on Maruko -- without this, record.format=
+	 * "hevc" there would still ignore maxSeconds and maxMB entirely. */
+	if (star6e_recorder_check_rotation(state,
+		    stream_is_cut_point(stream)) != 0)
+		return -1;
 	frame_start = lseek(state->fd, 0, SEEK_CUR);
 
 	for (unsigned int i = 0; i < stream->count; ++i) {
@@ -206,6 +232,7 @@ int maruko_recorder_write_frame(Star6eRecorderState *state,
 	/* One section for both: a poll between two would report frame N's
 	 * bytes with frame N-1's count. */
 	star6e_recorder_status_lock(state);
+	state->rot.segment_bytes += total;
 	state->bytes_written += total;
 	state->frames_written++;
 	star6e_recorder_status_unlock(state);

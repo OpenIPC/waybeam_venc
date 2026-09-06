@@ -1,5 +1,65 @@
 # History
 
+## [0.84.0] - 2026-09-06
+
+`record.format="hevc"` now rotates, and **neither recorder forces a keyframe
+to do it any more**. `contract_version` moves to **0.31.0**: `segments` is
+meaningful on the raw path for the first time.
+
+- **The raw recorder ignored `maxSeconds` and `maxMB` entirely.** It had no
+  rotation code at all — no segment counter, no threshold check, no second
+  `open()` — so a raw recording was one file that grew until the card filled,
+  silently. It is also why the "lower `maxMB`" workaround for the 2 GB ceiling
+  did not generalise: on that path there was no threshold to lower.
+- **Rotation no longer requests an IDR, on either recorder.** Since 0.70.0 the
+  TS recorder asked the encoder for a keyframe when a threshold was crossed
+  and none was coming. That works, but an IDR is a large frame and one per
+  segment raises the bitrate the link must carry — on an intra-refresh craft
+  it undoes precisely what the mode exists for, and under
+  `record.mode=mirror` the recorder taps the live channel, so the spike went
+  out over the air for the benefit of a file. The whole ask — the pacing, the
+  bound, the `take`/`requeue` hand-off at six sites across three backends — is
+  deleted.
+- **A segment now opens on a point the stream already produces:** an IRAP
+  where one exists, or the VPS/SPS/PPS that head each refresh wave under
+  intra-refresh. Both cases are measured on Star6E, not assumed. At
+  `resilience=off`, 601 frames: 4 parameter-set groups, 4 IRAP access units,
+  and **0/4** groups detached from an IDR — so normal GOP recording still cuts
+  on its IRAP, which is where it has to cut. At `resilience=racing`, 800
+  frames: ONE IRAP at startup and never again, with parameter sets every ~200
+  frames decoupled from it — so there the wave head is the only point that
+  ever arrives.
+- **Segment granularity on an intra-refresh craft is one GOP.** The threshold
+  decides whether to rotate; the wave head decides when. Verified on Star6E
+  (`gopSize 2.0`, 100 fps, `maxMB=2`): 10 segments in 20 s, each opening
+  `VPS, SPS, PPS`, each holding exactly 1206 slice NALs (201 frames x 6
+  slices = one wave), and **zero IRAPs in any of them**.
+- **The rotation policy is shared rather than copied.** `RecorderRotation` in
+  `star6e_recorder.h` holds the decision once; each recorder supplies only its
+  own open/close, which is the only place they differ.
+- **`segments` is reported for `hevc`.** The three backends disagreed: two
+  left it `0` while segments were on disk, and Maruko hardcoded `1`.
+- **Maruko's own writer rotates too.** `maruko_recorder_write_frame()` — the
+  dual and synchronous-fallback path on that backend — bypassed the rotation
+  policy entirely, so `format="hevc"` there would still have grown one
+  unbounded file. It now takes the same shared cut, and Maruko's TS adapter
+  accepts parameter-set boundaries as well, without which rotation stayed
+  inert on an intra-refresh craft there.
+- **A rotation can no longer overwrite an existing recording.** The segment
+  name carries only uptime seconds plus 16 bits from the nanosecond clock, and
+  after a reboot the uptime restarts — so a name can repeat. Opening with
+  `O_TRUNC` destroyed whatever was there; segments now open `O_EXCL` and retry
+  with a fresh name, at start as well as on rotation. Rotation multiplied the
+  exposure, since it is now one name per segment rather than one per
+  recording.
+- **A segment that fails to finalise is no longer reported as a clean
+  rotation.** `fdatasync()` and `close()` results were discarded, so a delayed
+  write surfacing at the end of a segment left a possibly short file and no
+  indication of it. Both are checked; a failure stops the recorder the same
+  way a failed reopen does.
+- If a stream produces neither cut point, rotation waits rather than forcing
+  anything, and says so once instead of growing the file in silence.
+
 ## [0.83.0] - 2026-09-06
 
 Recording no longer stops at 2 GB. The ceiling was in the binary, not the

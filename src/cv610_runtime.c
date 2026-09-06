@@ -482,7 +482,8 @@ static void cv610_record_sink(void *opaque, const uint8_t *au, size_t len,
 		(void)star6e_ts_recorder_write_video(&ctx->ts_recorder, au, len,
 			pts_90khz, is_idr);
 	else
-		(void)star6e_recorder_write_au(&ctx->recorder, au, len);
+		(void)star6e_recorder_write_au(&ctx->recorder, au, len,
+			is_idr);
 }
 
 /* Runs once the writer thread has been joined and freed, inline on the encode
@@ -713,7 +714,7 @@ static void cv610_record_status_callback(VencRecordStatus *out)
 	}
 
 	/* is_RECORDING, not is_active: rotation runs on the writer thread here
-	 * too (see the take_idr_request hand-off in the drain loop) and holds
+	 * too (see the recorder hand-off in the drain loop) and holds
 	 * fd == -1 across it, so the descriptor is not the right question for a
 	 * reader on the httpd thread. */
 	{
@@ -744,6 +745,9 @@ static void cv610_record_status_callback(VencRecordStatus *out)
 			snprintf(out->format, sizeof(out->format), "hevc");
 			out->bytes_written = rec_snap.bytes_written;
 			out->frames_written = rec_snap.frames_written;
+			/* Meaningful since this recorder rotates: it read 0
+			 * while 16 segments were on disk, device-measured. */
+			out->segments = rec_snap.segments;
 			out->elapsed_ms = rec_snap.elapsed_ms;
 			snprintf(out->path, sizeof(out->path), "%s",
 				rec_snap.path);
@@ -2296,11 +2300,19 @@ static int cv610_init(void *opaque)
 	 * i.e. close STDIN.  No caller reaches it there today, but the flag
 	 * means "the things I guard are initialised" and must not lie. */
 	ctx->rec_locks_ready = 1;
-	if (ctx->config.record.max_seconds > 0)
-		ctx->ts_recorder.max_seconds = ctx->config.record.max_seconds;
-	if (ctx->config.record.max_mb > 0)
-		ctx->ts_recorder.max_bytes =
+	/* Both recorders: the rotation thresholds are the operator's,
+	 * not the format's, and only one recorder is ever active. */
+	if (ctx->config.record.max_seconds > 0) {
+		ctx->ts_recorder.rot.max_seconds = ctx->config.record.max_seconds;
+		ctx->recorder.rot.max_seconds = ctx->config.record.max_seconds;
+	}
+	if (ctx->config.record.max_mb > 0) {
+		uint64_t max_bytes =
 			(uint64_t)ctx->config.record.max_mb * 1024 * 1024;
+
+		ctx->ts_recorder.rot.max_bytes = max_bytes;
+		ctx->recorder.rot.max_bytes = max_bytes;
+	}
 
 	g_cv610_runner = ctx;
 	/* A craft flashed without libbin.so cannot import or export a .bin, and
@@ -2824,15 +2836,6 @@ static int cv610_run(void *opaque)
 				&ctx->recorder))
 			cv610_record_stop(ctx, 1);
 
-		/* Rotation asked for a keyframe.  Serviced here rather than
-		 * inside the recorder: after the release, coalesced (a periodic
-		 * rotation is not a bootstrap event), and on this backend the
-		 * flag is raised on the WRITER thread, so it is deliberately an
-		 * atomic hand-off rather than a direct SDK call from there. */
-		if (star6e_ts_recorder_take_idr_request(&ctx->ts_recorder) &&
-		    cv610_rotate_idr() == 0)
-			star6e_ts_recorder_requeue_idr_request(
-				&ctx->ts_recorder);
 		if (ret != TD_SUCCESS)
 			return -1;
 	}
