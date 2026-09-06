@@ -1259,17 +1259,12 @@ static int cv610_apply_server(const char *uri)
 	 *
 	 * Gated on the type: the ring URIs carry no sockaddr, and their own
 	 * validity is checked where they are created. */
-	if (parsed.type == VENC_OUTPUT_URI_UDP ||
-	    parsed.type == VENC_OUTPUT_URI_UNIX) {
-		struct sockaddr_storage probe_dst;
-		socklen_t probe_len = 0;
-
-		if (output_socket_fill_destination(&parsed, &probe_dst,
-			&probe_len) != 0) {
-			fprintf(stderr, "ERROR: outgoing.server %s has no usable "
-				"destination; transport left unchanged\n", uri);
-			return -1;
-		}
+	if ((parsed.type == VENC_OUTPUT_URI_UDP ||
+	     parsed.type == VENC_OUTPUT_URI_UNIX) &&
+	    !output_socket_destination_is_usable(&parsed)) {
+		fprintf(stderr, "ERROR: outgoing.server %s has no usable "
+			"destination; transport left unchanged\n", uri);
+		return -1;
 	}
 
 	if (g_cv610_runner->frame_ring ||

@@ -69,6 +69,19 @@ typedef struct {
 	int logged_capacity;
 } OutputSocketQueue;
 
+/** Whether a parsed URI names a destination this module can actually use.
+ *
+ *  Answers the question without touching anything, so a caller that is about
+ *  to mutate live transport state can refuse a bad URI first.  Ring URIs
+ *  (shm://, frame-shm://) carry no sockaddr and always answer 0 -- their
+ *  validity is checked where the ring is created, not here.
+ *
+ *  output_socket_configure() already validates before it mutates, so a caller
+ *  that only ever goes through it does not need this.  It exists for the
+ *  callers that commit or respawn on a URI *without* reaching configure().
+ */
+int output_socket_destination_is_usable(const VencOutputUri *uri);
+
 /** Fill a sockaddr_storage from a parsed udp:// or unix:// destination. */
 int output_socket_fill_destination(const VencOutputUri *uri,
 	struct sockaddr_storage *dst, socklen_t *dst_len);

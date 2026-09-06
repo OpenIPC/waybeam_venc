@@ -2069,6 +2069,25 @@ static int test_output_socket_configure_is_all_or_nothing(void)
 	if (handle >= 0)
 		close(handle);
 
+	/* The helper answers the same question without touching anything, for
+	 * callers that commit or respawn on a URI without reaching configure(). */
+	CHECK("usable_good_udp", output_socket_destination_is_usable(&first) == 1);
+	CHECK("usable_good_unix",
+		output_socket_destination_is_usable(&unix_uri) == 1);
+	CHECK("usable_rejects_bad_host",
+		output_socket_destination_is_usable(&bad) == 0);
+	CHECK("usable_rejects_null", output_socket_destination_is_usable(NULL) == 0);
+	{
+		VencOutputUri ring;
+
+		/* Ring URIs carry no sockaddr; validity belongs to whoever creates
+		 * the ring, so the helper must not claim them. */
+		CHECK("cfg_parse_ring",
+			venc_config_parse_output_uri("frame-shm://venc_frame", &ring) == 0);
+		CHECK("usable_rejects_ring",
+			output_socket_destination_is_usable(&ring) == 0);
+	}
+
 	/* A bad URI on a fresh context leaves nothing open. */
 	{
 		int fresh = -1, fresh_connected = 0;

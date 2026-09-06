@@ -159,6 +159,18 @@ int output_socket_fill_udp_destination(const char *host, uint16_t port,
 	return 0;
 }
 
+int output_socket_destination_is_usable(const VencOutputUri *uri)
+{
+	struct sockaddr_storage probe;
+	socklen_t probe_len = 0;
+
+	if (!uri)
+		return 0;
+	if (uri->type != VENC_OUTPUT_URI_UDP && uri->type != VENC_OUTPUT_URI_UNIX)
+		return 0;
+	return output_socket_fill_destination(uri, &probe, &probe_len) == 0;
+}
+
 int output_socket_fill_destination(const VencOutputUri *uri,
 	struct sockaddr_storage *dst, socklen_t *dst_len)
 {
