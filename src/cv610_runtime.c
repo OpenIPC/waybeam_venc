@@ -2093,12 +2093,38 @@ static int cv610_output_start(Cv610RunnerContext *ctx)
 		fprintf(stderr, "ERROR: CV610 packet-shm output is not in the first bring-up slice; use frame-shm://\n");
 		return -1;
 	}
+	/* Non-fatal at STARTUP, deliberately -- and the asymmetry with the live
+	 * retarget path is the point.
+	 *
+	 * A destination that cannot be brought up used to abort the whole
+	 * daemon: measured on a CV610 bench, a single bad `outgoing.server` in
+	 * the config brought up sensor, ISP, VPSS, encoder, JPEG and sidecar and
+	 * then tore all of it down, leaving no video AND no HTTP -- so the only
+	 * way to correct a one-line config error was ssh, which a craft in the
+	 * field does not have.  Coming up with the output inert leaves the API
+	 * reachable, and `outgoing.server` is live-settable, so the operator can
+	 * fix it remotely; output_socket_send_parts() already refuses a negative
+	 * handle with EINVAL, so the frames are counted as drops rather than
+	 * crashing anything.
+	 *
+	 * A live retarget still REFUSES a bad URI, because there the craft has a
+	 * working output to lose.  Here it has none either way. */
 	if (output_socket_configure(&ctx->socket_handle, &ctx->destination,
 		&ctx->destination_len, &ctx->transport, &ctx->output_uri,
 		ctx->config.outgoing.connected_udp,
 		ctx->config.outgoing.allow_unix_encoder_stall,
-		&ctx->connected_udp) != 0)
-		return -1;
+		&ctx->connected_udp) != 0) {
+		fprintf(stderr, "ERROR: outgoing.server %s could not be brought up; "
+			"starting with NO video output so the craft stays reachable -- "
+			"set outgoing.server over the API to recover\n",
+			ctx->config.outgoing.server);
+		/* The record was seeded above with a destination that never came up.
+		 * Clearing it keeps the no-op guard in cv610_apply_server() from
+		 * matching, so a re-POST of a corrected URI is not mistaken for a
+		 * repeat of one already applied. */
+		ctx->applied_server[0] = '\0';
+		return 0;
+	}
 	(void)output_socket_capture_capacity(ctx->socket_handle, &ctx->send_queue);
 	/* The RTP session was seeded above, for every transport; re-seeding here
 	 * would re-randomise ssrc/seq/timestamp behind any reader added between

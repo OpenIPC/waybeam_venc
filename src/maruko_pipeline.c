@@ -2862,8 +2862,28 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	} else {
 		if (maruko_output_init(&ctx->output, &ctx->cfg.output_uri,
 		    ctx->cfg.connected_udp,
-		    ctx->cfg.allow_unix_encoder_stall) != 0)
-			return -1;
+		    ctx->cfg.allow_unix_encoder_stall) != 0) {
+		/* Non-fatal, deliberately, and only HERE -- a live retarget still
+		 * refuses a bad URI, because there the craft has a working output to
+		 * lose.  At boot it has none either way.
+		 *
+		 * Aborting used to take the whole daemon down: measured on all three
+		 * backends, one bad `outgoing.server` in the config brought the
+		 * pipeline up and then tore everything down, leaving no video AND no
+		 * HTTP -- so correcting a one-line config error needed ssh, which a
+		 * craft in the field does not have.  Coming up with the output inert
+		 * keeps the API reachable, and `outgoing.server` is live-settable, so
+		 * the operator can fix it remotely.
+		 *
+		 * The teardown is what makes that safe: it leaves socket_handle at
+		 * -1 and the destination zeroed, and every send path already refuses
+		 * a negative handle, so frames are counted as drops rather than
+		 * touching an unopened socket. */
+			maruko_output_teardown(&ctx->output);
+			fprintf(stderr, "ERROR: outgoing.server could not be brought up; "
+				"starting with NO video output so the craft stays reachable "
+				"-- set outgoing.server over the API to recover\n");
+		}
 	}
 
 	/* After the init above, whose reset would clear it.  Same
@@ -4921,9 +4941,26 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 	MarukoStreamRuntime rt;
 	int result = -1;
 
-	if (!ctx || (ctx->output.socket_handle < 0 && !ctx->output.ring &&
-	    !ctx->output.frame_ring))
+	if (!ctx)
 		return -1;
+
+	/* Running with NO output is a supported state, deliberately.
+	 *
+	 * This guard used to refuse it, which defeated the whole point of coming
+	 * up after a destination that could not be brought up: the pipeline
+	 * started, the API came up, and then this returned -1 and the daemon
+	 * exited anyway -- measured on the bench, which is the only reason this
+	 * was found.  Star6E and CV610 have no equivalent precondition.
+	 *
+	 * Safe because every path that touches the socket already guards a
+	 * negative handle: maruko_output_begin_frame() marks the batch inactive,
+	 * and output_socket_send_parts() refuses with EINVAL, so frames are
+	 * counted as drops.  The operator gets an HTTP-reachable craft and can
+	 * fix outgoing.server live. */
+	if (ctx->output.socket_handle < 0 && !ctx->output.ring &&
+	    !ctx->output.frame_ring)
+		fprintf(stderr, "WARNING: [maruko] running with no video output; "
+			"set outgoing.server over the API to bring one up\n");
 
 	if (ctx->cfg.stream_mode == MARUKO_STREAM_RTP &&
 	    ctx->cfg.rc_codec != PT_H265) {
