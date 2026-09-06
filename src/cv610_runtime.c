@@ -86,6 +86,10 @@ typedef struct {
 	 * maruko_output.c, which have the same gaps.  Fixing it properly means
 	 * validating the destination before the generation bump and routing a
 	 * live transport-TYPE change to the restart class. */
+	/* AE ceilings as the sensor plugin seeded them, latched on first apply so
+	 * clearing one back to 0 is not a one-way door.  Lives here, in the
+	 * context that already exists, rather than at file scope in cv610_iq.c. */
+	Cv610IqAeDefaults ae_defaults;
 	unsigned transport_gen;
 	/* Producer-thread snapshot, refreshed once per frame.  Same shape as
 	 * Maruko's output batch: take the seqlock once, then every datagram of
@@ -1393,6 +1397,39 @@ static int cv610_apply_output_enabled(bool on)
 	return 0;
 }
 
+/* Thin adapters: the shared vtable takes bare values, and the AE-defaults
+ * cache these three need lives in the runner context rather than at file scope
+ * in cv610_iq.c.  g_cv610_runner is assigned before venc_api_register(), so it
+ * is non-NULL for every call that can reach these. */
+static int cv610_apply_gain_max(uint32_t gain)
+{
+	if (!g_cv610_runner)
+		return -1;
+	return cv610_iq_set_gain_max(&g_cv610_runner->ae_defaults, gain);
+}
+
+static int cv610_apply_shutter_max(uint32_t us)
+{
+	if (!g_cv610_runner)
+		return -1;
+	return cv610_iq_set_shutter_max_us(&g_cv610_runner->ae_defaults, us);
+}
+
+static int cv610_apply_isp_bin(const char *path)
+{
+	int rc;
+
+	if (!g_cv610_runner)
+		return -1;
+	rc = cv610_pq_bin_import(path);
+	/* A .bin carries an AE ext-register record, so a successful import makes
+	 * the latched ceilings stale: without this, a later isp.gainMax=0 would
+	 * write the PRE-import value back over the imported one. */
+	if (rc == 0)
+		cv610_iq_forget_ae_defaults(&g_cv610_runner->ae_defaults);
+	return rc;
+}
+
 static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.apply_bitrate = cv610_apply_bitrate,
 	.apply_gop = cv610_apply_gop,
@@ -1408,10 +1445,10 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.apply_qp_bounds = cv610_apply_qp_bounds,
 	/* Unlike Star6E there is no /etc/sensors/<sensor>.bin convention to fall
 	 * back to, so an empty isp.sensorBin is a no-op rather than a resolve. */
-	.apply_isp_bin = cv610_pq_bin_import,
+	.apply_isp_bin = cv610_apply_isp_bin,
 	.export_isp_bin = cv610_pq_bin_export,
-	.apply_gain_max = cv610_iq_set_gain_max,
-	.apply_shutter_max = cv610_iq_set_shutter_max_us,
+	.apply_gain_max = cv610_apply_gain_max,
+	.apply_shutter_max = cv610_apply_shutter_max,
 	.apply_roi_qp = cv610_apply_roi_qp,
 	.apply_server = cv610_apply_server,
 	.apply_output_enabled = cv610_apply_output_enabled,
@@ -2254,7 +2291,7 @@ static int cv610_init(void *opaque)
 	 * re-wrote the field over HTTP.  Empty is the common case and costs
 	 * nothing.  Non-fatal: a craft that boots on the plugin's tuning beats
 	 * one that does not boot. */
-	if (cv610_pq_bin_import(ctx->config.isp.sensor_bin) != 0)
+	if (cv610_apply_isp_bin(ctx->config.isp.sensor_bin) != 0)
 		fprintf(stderr, "WARN: isp.sensorBin from config not applied (%s)\n",
 			ctx->config.isp.sensor_bin);
 
@@ -2264,10 +2301,10 @@ static int cv610_init(void *opaque)
 	 * "keep the plugin default", and cv610_iq_set_gain_max(0) captures that
 	 * default and writes it back -- so this also fixes the snapshot before
 	 * any live write can move the value it is supposed to restore. */
-	if (cv610_iq_set_gain_max(ctx->config.isp.gain_max) != 0)
+	if (cv610_apply_gain_max(ctx->config.isp.gain_max) != 0)
 		fprintf(stderr, "WARN: isp.gainMax from config not applied (%u)\n",
 			(unsigned)ctx->config.isp.gain_max);
-	if (cv610_iq_set_shutter_max_us(ctx->config.isp.shutter_max_us) != 0)
+	if (cv610_apply_shutter_max(ctx->config.isp.shutter_max_us) != 0)
 		fprintf(stderr, "WARN: isp.shutterMaxUs from config not applied "
 			"(%u)\n", (unsigned)ctx->config.isp.shutter_max_us);
 

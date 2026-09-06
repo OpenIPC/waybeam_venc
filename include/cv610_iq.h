@@ -14,6 +14,16 @@
 
 #include <stdint.h>
 
+/** The ISP's AE ceilings as the sensor plugin seeded them, latched on the
+ *  first apply so that clearing a ceiling back to 0 is not a one-way door.
+ *  Owned by the caller -- the CV610 runner keeps one in its context -- so
+ *  this module adds no global mutable state. */
+typedef struct {
+	uint32_t gain_max;
+	uint32_t exp_time_max;
+	int      valid;
+} Cv610IqAeDefaults;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,10 +54,10 @@ int cv610_iq_set(const char *param, const char *value);
 /** Drop the cached cold-boot AE ceilings.
  *  Call after anything that rewrites the ISP's exposure attributes behind
  *  this module's back -- a PQTools .bin import does exactly that. */
-void cv610_iq_forget_ae_defaults(void);
+void cv610_iq_forget_ae_defaults(Cv610IqAeDefaults *d);
 
-int cv610_iq_set_gain_max(uint32_t gain);
-int cv610_iq_set_shutter_max_us(uint32_t us);
+int cv610_iq_set_gain_max(Cv610IqAeDefaults *d, uint32_t gain);
+int cv610_iq_set_shutter_max_us(Cv610IqAeDefaults *d, uint32_t us);
 
 /** Query the AWB loop's applied result plus the exposure that selected it.
  *  Returns malloc'd JSON, caller frees.  NULL when the ISP is not running.

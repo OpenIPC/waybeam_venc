@@ -8,7 +8,6 @@
 
 #include "cv610_pq_bin.h"
 
-#include "cv610_iq.h"
 #include "cv610_pipeline.h"
 #include "file_util.h"
 
@@ -57,6 +56,13 @@ typedef struct {
 typedef struct {
 	void *bin;
 	void *ae;
+	/* Storage that libbin's `g_aeHandle` is pointed AT -- it is a `void **`
+	 * and the library loads through it, so the pointed-to object has to
+	 * outlive pq_lib_open().  It does not have to outlive the caller: this
+	 * struct is a local in import/export and lives across the whole transfer,
+	 * which is the last moment libbin reads it.  Keeping it here rather than
+	 * at file scope is what avoids adding global mutable state. */
+	void *ae_handle_slot;
 	void *import_bin;      /* int  (*)(PqBinModule *, unsigned char *, unsigned int) */
 	void *export_bin;      /* int  (*)(PqBinModule *, unsigned char *, unsigned int) */
 	void *isp_total_len;   /* unsigned int (*)(void) */
@@ -67,15 +73,20 @@ typedef int (*pq_transfer_fn)(PqBinModule *, unsigned char *, unsigned int);
 typedef unsigned int (*pq_isp_len_fn)(void);
 typedef unsigned int (*pq_struct_len_fn)(PqBinModule *);
 
-/* Storage for the AE library handle that libbin's g_aeHandle points AT.
- * Static because libbin dereferences the global long after pq_lib_open
- * returns. */
-static void *g_ae_handle;
-
 static void pq_lib_close(PqBinLib *lib)
 {
-	if (lib->bin)
+	if (lib->bin) {
+		/* Clear libbin's g_aeHandle before it can outlive the slot it points
+		 * at.  musl's dlclose is a no-op, so the library stays mapped with
+		 * whatever we last wrote there; leaving it aimed at a returned
+		 * stack frame would be a dangling pointer for the next caller to
+		 * trip over. */
+		void **ae_slot = (void **)dlsym(lib->bin, "g_aeHandle");
+
+		if (ae_slot)
+			*ae_slot = NULL;
 		dlclose(lib->bin);
+	}
 	if (lib->ae)
 		dlclose(lib->ae);
 	memset(lib, 0, sizeof(*lib));
@@ -139,8 +150,8 @@ static int pq_lib_open(PqBinLib *lib)
 		fprintf(stderr, "WARNING: %sno %s handle; AE parameters will not "
 			"transfer\n", PQ_LOG, PQ_AE_LIB);
 	} else {
-		g_ae_handle = lib->ae;
-		*ae_slot = &g_ae_handle;
+		lib->ae_handle_slot = lib->ae;
+		*ae_slot = &lib->ae_handle_slot;
 	}
 
 	return 0;
@@ -222,37 +233,36 @@ static unsigned char *pq_read_file(const char *path, size_t *out_len)
 
 int cv610_pq_bin_available(void)
 {
-	/* Probed once, and deliberately narrower than pq_lib_open(): this only
-	 * answers "is the blob here and loadable", so it resolves a single entry
-	 * point and touches no globals inside the library.  The answer gates what
-	 * /api/v1/capabilities advertises -- a craft flashed without libbin.so
-	 * should not claim a control surface it cannot serve. */
-	static int cached = -1;
+	/* Deliberately narrower than pq_lib_open(): this only answers "is the blob
+	 * here and loadable", so it touches none of the library's own globals.
+	 * The answer gates what /api/v1/capabilities advertises -- a craft flashed
+	 * without libbin.so should not claim a control surface it cannot serve.
+	 *
+	 * Not memoized.  cv610_init() is the single caller and calls it once, so a
+	 * cache would buy nothing and would be exactly the file-scope mutable
+	 * state the conventions rule out. */
+	int ok;
 	void *h;
-
-	if (cached >= 0)
-		return cached;
 
 	h = dlopen(PQ_BIN_LIB, RTLD_NOW | RTLD_LOCAL);
 	if (!h) {
 		fprintf(stderr, "WARNING: %s%s not loadable (%s); isp.sensorBin and "
 			"the .bin export are unavailable on this craft\n", PQ_LOG,
 			PQ_BIN_LIB, dlerror());
-		cached = 0;
-		return cached;
+		return 0;
 	}
 	/* All four, matching what pq_lib_open() insists on: a partial blob that
 	 * resolves only the import symbol would answer "available" here and then
 	 * fail every export. */
-	cached = dlsym(h, "OT_PQ_BIN_ImportBinData") != NULL &&
+	ok = dlsym(h, "OT_PQ_BIN_ImportBinData") != NULL &&
 		dlsym(h, "OT_PQ_BIN_ExportBinData") != NULL &&
 		dlsym(h, "OT_PQ_GetISPDataTotalLen") != NULL &&
 		dlsym(h, "OT_PQ_GetStructParamLen") != NULL;
-	if (!cached)
+	if (!ok)
 		fprintf(stderr, "WARNING: %s%s is missing a PQ entry point\n", PQ_LOG,
 			PQ_BIN_LIB);
 	dlclose(h);
-	return cached;
+	return ok;
 }
 
 int cv610_pq_bin_import(const char *path)
@@ -349,9 +359,10 @@ int cv610_pq_bin_import(const char *path)
 			PQ_LOG, (unsigned)ret, path);
 		return -1;
 	}
-	/* The image carried an AE ext-register record, so this module's sibling
-	 * must stop trusting the ceilings it latched at cold boot. */
-	cv610_iq_forget_ae_defaults();
+	/* The image carried an AE ext-register record, so the ceilings latched
+	 * from the pre-import ISP are stale.  Invalidating them is the CALLER's
+	 * job: it owns that cache, and this module has no business reaching into
+	 * a sibling's state to do it. */
 	printf("> %sISP tuning applied from %s\n", PQ_LOG, path);
 	return 0;
 }

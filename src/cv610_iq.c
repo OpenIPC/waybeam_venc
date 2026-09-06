@@ -789,9 +789,6 @@ out:
  *  taken on the first apply, before any write of ours has landed.
  * ========================================================================== */
 
-static uint32_t g_ae_default_gain_max;
-static uint32_t g_ae_default_exp_time_max;
-static int      g_ae_defaults_valid;
 
 /* Caller must NOT hold g_iq_mutex: this takes it, and cv610_iq_set() takes
  * it again on the way out.
@@ -801,7 +798,8 @@ static int      g_ae_defaults_valid;
  * the plugin seeds the exposure attr inside ss_mpi_isp_init(), which runs
  * before cv610_pipeline_isp_ready() turns true, so there is no window where
  * this reads an unseeded struct and caches it as "the default". */
-static int ae_defaults(uint32_t *gain_max, uint32_t *exp_time_max)
+static int ae_defaults(Cv610IqAeDefaults *d, uint32_t *gain_max,
+	uint32_t *exp_time_max)
 {
 	int rc = -1;
 
@@ -811,7 +809,7 @@ static int ae_defaults(uint32_t *gain_max, uint32_t *exp_time_max)
 	}
 
 	pthread_mutex_lock(&g_iq_mutex);
-	if (!g_ae_defaults_valid) {
+	if (!d->valid) {
 		int ret;
 
 		/* Reuses the shared scratch the mutex exists to guard, rather
@@ -823,19 +821,19 @@ static int ae_defaults(uint32_t *gain_max, uint32_t *exp_time_max)
 				(unsigned)ret);
 			goto out;
 		}
-		g_ae_default_gain_max =
+		d->gain_max =
 			(uint32_t)g_attr.exposure.auto_attr.a_gain_range.max;
-		g_ae_default_exp_time_max =
+		d->exp_time_max =
 			(uint32_t)g_attr.exposure.auto_attr.exp_time_range.max;
-		g_ae_defaults_valid = 1;
+		d->valid = 1;
 		printf("[cv610-iq] AE defaults from the sensor plugin: "
 			"a_gain_max=%u (%.2fx) exp_time_max=%u us\n",
-			g_ae_default_gain_max,
-			(double)g_ae_default_gain_max / 1024.0,
-			g_ae_default_exp_time_max);
+			d->gain_max,
+			(double)d->gain_max / 1024.0,
+			d->exp_time_max);
 	}
-	*gain_max = g_ae_default_gain_max;
-	*exp_time_max = g_ae_default_exp_time_max;
+	*gain_max = d->gain_max;
+	*exp_time_max = d->exp_time_max;
 	rc = 0;
 out:
 	pthread_mutex_unlock(&g_iq_mutex);
@@ -847,10 +845,12 @@ out:
  * cached, a later isp.gainMax=0 ("keep the default") would write the
  * PRE-import value back over the imported one.  cv610_pq_bin_import() calls
  * this on success; the next ae_defaults() re-latches from the live ISP. */
-void cv610_iq_forget_ae_defaults(void)
+void cv610_iq_forget_ae_defaults(Cv610IqAeDefaults *d)
 {
+	if (!d)
+		return;
 	pthread_mutex_lock(&g_iq_mutex);
-	g_ae_defaults_valid = 0;
+	d->valid = 0;
 	pthread_mutex_unlock(&g_iq_mutex);
 }
 
@@ -862,20 +862,20 @@ static int ae_set_limit(const char *param, uint32_t value, uint32_t dflt)
 	return cv610_iq_set(param, buf);
 }
 
-int cv610_iq_set_gain_max(uint32_t gain)
+int cv610_iq_set_gain_max(Cv610IqAeDefaults *d, uint32_t gain)
 {
 	uint32_t dflt_gain, dflt_exp;
 
-	if (ae_defaults(&dflt_gain, &dflt_exp) != 0)
+	if (!d || ae_defaults(d, &dflt_gain, &dflt_exp) != 0)
 		return -1;
 	return ae_set_limit("exposure.auto.a_gain_max", gain, dflt_gain);
 }
 
-int cv610_iq_set_shutter_max_us(uint32_t us)
+int cv610_iq_set_shutter_max_us(Cv610IqAeDefaults *d, uint32_t us)
 {
 	uint32_t dflt_gain, dflt_exp;
 
-	if (ae_defaults(&dflt_gain, &dflt_exp) != 0)
+	if (!d || ae_defaults(d, &dflt_gain, &dflt_exp) != 0)
 		return -1;
 	return ae_set_limit("exposure.auto.exp_time_max", us, dflt_exp);
 }
