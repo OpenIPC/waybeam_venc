@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <sys/types.h>
 #include <time.h>
 
 #define RECORDER_PATH_MAX 256
@@ -16,10 +17,28 @@
 /* Check disk space every N frames to avoid syscall overhead. */
 #define RECORDER_SPACE_CHECK_INTERVAL 300
 
+/* Highest offset this binary can write to a regular file.
+ *
+ * A 32-bit off_t build gets EFBIG from the kernel for any write crossing
+ * 2^31-1, whatever the filesystem allows -- it is a property of the ABI, not
+ * of the media, so no amount of exFAT fixes it.  Every supported target
+ * carries -D_FILE_OFFSET_BITS=64 (and the musl ones are 64-bit regardless),
+ * which makes this UINT64_MAX and every user of it inert.  It exists so that
+ * a build which LOSES that flag degrades into more segments or a clean stop
+ * instead of a file truncated mid-AU at an arbitrary byte.  Reported twice
+ * on SSC338Q at exactly 2147483647 bytes, and reproduced on a FAT32 card. */
+#define RECORDER_OFF_T_CEILING \
+	(sizeof(off_t) >= 8 ? UINT64_MAX : (uint64_t)0x7FFFFFFFULL)
+
 typedef enum {
 	RECORDER_STOP_MANUAL = 0,
 	RECORDER_STOP_DISK_FULL,
 	RECORDER_STOP_WRITE_ERROR,
+	/* The segment reached RECORDER_OFF_T_CEILING and could not be cut:
+	 * distinct from WRITE_ERROR because nothing failed -- the recorder
+	 * stopped on a frame boundary with the file intact, and the operator
+	 * needs to know it was a size ceiling rather than bad media. */
+	RECORDER_STOP_SIZE_LIMIT,
 } Star6eRecorderStopReason;
 
 typedef struct {

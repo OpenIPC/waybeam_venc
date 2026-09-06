@@ -99,17 +99,41 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 			snprintf(out->stop_reason, sizeof(out->stop_reason),
 				"none");
 		} else {
-			/* Either recorder may hold the reason; a manual stop on
-			 * one does not mask a disk-full on the other. */
+			/* Which recorder ran is decided by record.format, and
+			 * that field is MUT_RESTART -- so within one process only
+			 * ONE of these two can ever have recorded, and the other
+			 * snapshot is zeroed.  Select on the format.
+			 *
+			 * The previous rule ("take the TS reason unless it is
+			 * manual") guessed from a value that says nothing about
+			 * which session ended last: a TS write_error retained
+			 * from an earlier run would outrank a later, cleanly
+			 * stopped hevc recording and now, with the counters
+			 * following the reason, would name that older file's
+			 * path and byte count too. */
 			const char *reason = "manual";
-			Star6eRecorderStopReason sr = ts_snap.last_stop_reason;
+			const Star6eRecorderSnapshot *last =
+				(strcmp(ctx->vcfg.record.format, "hevc") == 0) ? &rec_snap : &ts_snap;
+			Star6eRecorderStopReason sr = last->last_stop_reason;
 
-			if (sr == RECORDER_STOP_MANUAL)
-				sr = rec_snap.last_stop_reason;
 			if (sr == RECORDER_STOP_DISK_FULL)
 				reason = "disk_full";
 			else if (sr == RECORDER_STOP_WRITE_ERROR)
 				reason = "write_error";
+			else if (sr == RECORDER_STOP_SIZE_LIMIT)
+				reason = "size_limit";
+			/* Report what the finished recording produced, from the
+			 * same snapshot the reason came from.  This branch used
+			 * to leave them at zero, so a recorder that stopped on
+			 * its own answered {path:"", frames:0, bytes:0} -- the
+			 * operator lost both the file that was cut short and how
+			 * far it got, which is the whole diagnosis for any stop
+			 * that was not manual.  elapsed_ms stays out: the
+			 * snapshot zeroes it when inactive by contract. */
+			out->bytes_written = last->bytes_written;
+			out->frames_written = last->frames_written;
+			out->segments = last->segments;
+			snprintf(out->path, sizeof(out->path), "%s", last->path);
 			snprintf(out->stop_reason, sizeof(out->stop_reason),
 				"%s", reason);
 		}
