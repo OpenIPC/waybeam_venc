@@ -3,6 +3,7 @@
 #include "timing.h"
 
 #include "output_socket.h"
+#include "venc_config.h"
 #include "test_helpers.h"
 
 #include <arpa/inet.h>
@@ -2007,10 +2008,87 @@ static int test_flatten_refuses_an_access_unit_over_the_queue_cap(void)
 	return failures;
 }
 
+/* output_socket_configure() is shared by all three backends.  It used to fill
+ * the destination AFTER opening or reusing the socket, and closed the fd when
+ * that fill failed -- including on the REUSE path, where the type was
+ * unchanged and the socket was working.  Since nothing resolves names, a
+ * hostname URI destroyed a live output on every backend that calls this.
+ *
+ * These arms pin the whole contract, not just the fix: the reorder has to keep
+ * fresh-open, same-type reuse and the close+reopen type change working, and it
+ * has to leave the destination untouched when it refuses -- otherwise a caller
+ * could be left sending to a destination it never committed to. */
+static int test_output_socket_configure_is_all_or_nothing(void)
+{
+	int failures = 0;
+	int handle = -1, connected = 0;
+	struct sockaddr_storage dst, kept;
+	socklen_t dst_len = 0, kept_len;
+	VencOutputUriType transport = VENC_OUTPUT_URI_UDP;
+	VencOutputUri first, second, unix_uri, bad;
+	int first_fd;
+
+	CHECK("cfg_parse_first",
+		venc_config_parse_output_uri("udp://127.0.0.1:5600", &first) == 0);
+	CHECK("cfg_parse_second",
+		venc_config_parse_output_uri("udp://127.0.0.2:5700", &second) == 0);
+	CHECK("cfg_parse_unix",
+		venc_config_parse_output_uri("unix:///tmp/test_output_socket.sock",
+			&unix_uri) == 0);
+	/* Not resolvable and never will be: the fill is inet_pton only. */
+	CHECK("cfg_parse_bad",
+		venc_config_parse_output_uri("udp://somehost:5600", &bad) == 0);
+
+	CHECK("cfg_fresh_udp", output_socket_configure(&handle, &dst, &dst_len,
+		&transport, &first, 1, 0, &connected) == 0);
+	CHECK("cfg_fresh_fd_open", handle >= 0);
+	first_fd = handle;
+
+	/* Same type: the socket must be reused, not churned. */
+	CHECK("cfg_reuse_same_type", output_socket_configure(&handle, &dst,
+		&dst_len, &transport, &second, 1, 0, &connected) == 0);
+	CHECK("cfg_reuse_kept_fd", handle == first_fd);
+
+	/* The regression: a bad destination must not take the socket down, and
+	 * must not half-apply either. */
+	kept = dst;
+	kept_len = dst_len;
+	CHECK("cfg_bad_uri_refused", output_socket_configure(&handle, &dst,
+		&dst_len, &transport, &bad, 1, 0, &connected) == -1);
+	CHECK("cfg_bad_uri_kept_handle", handle == first_fd);
+	CHECK("cfg_bad_uri_fd_still_open", fcntl(handle, F_GETFD) != -1);
+	CHECK("cfg_bad_uri_dst_untouched",
+		dst_len == kept_len && memcmp(&kept, &dst, sizeof(kept)) == 0);
+
+	/* Type change still closes and reopens. */
+	CHECK("cfg_type_change", output_socket_configure(&handle, &dst, &dst_len,
+		&transport, &unix_uri, 1, 0, &connected) == 0);
+	CHECK("cfg_type_change_transport", transport == VENC_OUTPUT_URI_UNIX);
+	CHECK("cfg_type_change_fd_open", handle >= 0 && fcntl(handle, F_GETFD) != -1);
+
+	if (handle >= 0)
+		close(handle);
+
+	/* A bad URI on a fresh context leaves nothing open. */
+	{
+		int fresh = -1, fresh_connected = 0;
+		struct sockaddr_storage fresh_dst;
+		socklen_t fresh_len = 0;
+		VencOutputUriType fresh_transport = VENC_OUTPUT_URI_UDP;
+
+		CHECK("cfg_bad_uri_fresh_refused",
+			output_socket_configure(&fresh, &fresh_dst, &fresh_len,
+				&fresh_transport, &bad, 1, 0, &fresh_connected) == -1);
+		CHECK("cfg_bad_uri_fresh_no_handle", fresh == -1);
+	}
+	return failures;
+}
+
 int test_star6e_output(void)
 {
 	int failures = 0;
 
+	failures += test_output_socket_configure_is_all_or_nothing();
 	failures += test_star6e_output_reset_state();
 	failures += test_star6e_output_udp_init();
 	failures += test_star6e_output_udp_invalid_host_rejected();
