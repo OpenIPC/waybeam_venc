@@ -506,6 +506,10 @@ static int test_recorder_rotates_on_idr_after_threshold(void)
 	int failures = 0;
 
 	memset(au, 0xA5, sizeof(au));
+	/* A plain slice: the recorder scans the access unit itself, so the
+	 * bytes must not lead with a parameter set either. */
+	au[0] = 0; au[1] = 0; au[2] = 0; au[3] = 1;
+	au[4] = (uint8_t)(1 << 1); au[5] = 0x01;
 	star6e_recorder_init(&state);
 	CHECK("raw rot start ok",
 		star6e_recorder_start(&state, g_test_dir) == 0);
@@ -513,12 +517,22 @@ static int test_recorder_rotates_on_idr_after_threshold(void)
 	state.rot.max_seconds = 0;
 	state.rot.max_bytes = 1;   /* due on the very first frame */
 
-	/* Threshold crossed, but no IRAP: the file must not be cut. */
+	/* Prime first: the threshold is tested BEFORE the write, so on the very
+	 * first access unit segment_bytes is still 0 and the cut-point gate is
+	 * never reached -- an unprimed assertion here passes even with the gate
+	 * removed entirely. */
+	CHECK("raw rot priming write ok",
+		star6e_recorder_write_au(&state, au, sizeof(au), 0) > 0);
+	CHECK("raw rot priming did not rotate", state.segments == 1);
+
+	/* NOW the threshold is genuinely crossed.  Still no cut point, so still
+	 * no cut. */
 	CHECK("raw rot non-IRAP write ok",
 		star6e_recorder_write_au(&state, au, sizeof(au), 0) > 0);
 	CHECK("raw rot did not cut on a non-IRAP", state.segments == 1);
 
-	/* An IRAP answers it. */
+	/* An IRAP answers it -- flagged by the caller, which is the other half
+	 * of the gate. */
 	CHECK("raw rot IRAP write ok",
 		star6e_recorder_write_au(&state, au, sizeof(au), 1) > 0);
 	CHECK("raw rot cut on the IRAP", state.segments == 2);
@@ -529,7 +543,7 @@ static int test_recorder_rotates_on_idr_after_threshold(void)
 	CHECK("raw rot per-segment bytes reset",
 		state.rot.segment_bytes == (uint64_t)sizeof(au));
 	CHECK("raw rot lifetime bytes kept",
-		state.bytes_written == (uint64_t)(2 * sizeof(au)));
+		state.bytes_written == (uint64_t)(3 * sizeof(au)));
 
 	star6e_recorder_stop(&state);
 	return failures;
@@ -587,7 +601,13 @@ static int test_recorder_rotates_on_param_sets_without_any_idr(void)
 	state.rot.max_seconds = 0;
 	state.rot.max_bytes = 1;
 
-	/* is_idr is 0 for every write below -- this stream has no keyframes. */
+	/* is_idr is 0 for every write below -- this stream has no keyframes.
+	 * Prime first so the threshold is genuinely crossed; otherwise the
+	 * cut-point gate is never consulted and this passes vacuously. */
+	CHECK("raw gdr priming write ok",
+		star6e_recorder_write_au(&state, slice, sizeof(slice), 0) > 0);
+	CHECK("raw gdr priming did not rotate", state.segments == 1);
+
 	CHECK("raw gdr slice write ok",
 		star6e_recorder_write_au(&state, slice, sizeof(slice), 0) > 0);
 	CHECK("raw gdr no cut on a plain slice", state.segments == 1);
@@ -645,7 +665,10 @@ static int test_recorder_rotation_hands_out_fresh_names(void)
 	}
 	star6e_recorder_stop(&state);
 
-	CHECK("noerase rotated", n == 6);
+	/* `n` is loop-controlled, so it proves nothing on its own -- assert the
+	 * recorder really did cut a segment for each captured path. */
+	CHECK("noerase rotated once per capture",
+		state.segments == (uint32_t)n);
 	for (i = 0; i < n; i++) {
 		for (j = i + 1; j < n; j++) {
 			if (strcmp(seen[i], seen[j]) == 0) {

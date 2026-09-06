@@ -139,6 +139,11 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 			snprintf(out->path, sizeof(out->path), "%s", last->path);
 			snprintf(out->stop_reason, sizeof(out->stop_reason),
 				"%s", reason);
+			/* The other two backends name it here; without this
+			 * Maruko answers a fully populated status record with
+			 * an empty format. */
+			snprintf(out->format, sizeof(out->format), "%s",
+				ctx->vcfg.record.format);
 		}
 	}
 }

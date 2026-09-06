@@ -191,10 +191,14 @@ VPS/SPS/PPS.
 
 When `maxSeconds` or `maxMB` thresholds are reached, the recorder:
 
-1. Waits for the next IDR (keyframe) boundary
+1. Waits for the next point a decoder can start from — an IRAP, or the
+   parameter sets that head a refresh wave (see below). It never asks the
+   encoder to produce one.
 2. Closes and fsyncs the current segment
-3. Opens a new `.ts` file with fresh PAT/PMT
-4. Resets continuity counters (each segment is self-contained)
+3. Opens the next file — a `.ts` with fresh PAT/PMT, or a `.hevc` elementary
+   stream, which needs no header of its own because the cut point carries the
+   parameter sets in-band
+4. Resets continuity counters (each `.ts` segment is self-contained)
 
 File naming: `rec_<HH>h<MM>m<SS>s_<rand>.ts` (or `.hevc`) based on system
 uptime. Each rotation draws a fresh name.

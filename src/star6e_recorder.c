@@ -10,6 +10,8 @@
 #include "star6e_output.h"
 #endif
 
+#include "h26x_util.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -137,29 +139,27 @@ int recorder_rotation_due(RecorderRotation *rot, int is_cut_point)
 	return 1;
 }
 
-/* Does this Annex-B access unit BEGIN with a parameter set?
+/* Can a new segment open on this access unit?  An IRAP, or the parameter sets
+ * that head a refresh wave -- see RecorderRotation.
  *
- * Only the first NAL is examined, which is both cheap and correct: VPS/SPS/PPS
- * lead the access unit they configure -- measured on Star6E, every IRAP was
- * immediately preceded by VPS+SPS+PPS, and every GDR refresh wave head was a
- * VPS.  A parameter set buried mid-AU would not be a place a segment could
- * open anyway. */
-static int au_leads_with_param_sets(const uint8_t *au, size_t len)
+ * Scans every NAL, not just the first: the SDK-pack scanners do, and an access
+ * unit may legitimately lead with an AUD or a prefix SEI before its VPS.
+ * Checking only the leading NAL would make rotation inert on any backend whose
+ * flattened access unit is shaped that way. */
+static int au_has_cut_point(const uint8_t *au, size_t len)
 {
-	size_t i = 0;
+	size_t cursor = 0;
+	const uint8_t *nal;
+	size_t nal_len;
 
 	if (!au)
 		return 0;
-	/* Annex-B start code: 00 00 01 or 00 00 00 01. */
-	if (len >= 4 && au[0] == 0 && au[1] == 0 && au[2] == 0 && au[3] == 1)
-		i = 4;
-	else if (len >= 3 && au[0] == 0 && au[1] == 0 && au[2] == 1)
-		i = 3;
-	else
-		return 0;
-	if (i >= len)
-		return 0;
-	return recorder_nal_is_cut_point((unsigned int)((au[i] >> 1) & 0x3F));
+	while (h26x_util_annexb_next(au, len, &cursor, &nal, &nal_len)) {
+		if (recorder_nal_is_cut_point(
+			    (unsigned int)h26x_util_hevc_nalu_type(nal, nal_len)))
+			return 1;
+	}
+	return 0;
 }
 
 static int build_recording_path(char *path, size_t path_size, const char *dir)
@@ -284,6 +284,15 @@ int star6e_recorder_start(Star6eRecorderState *state, const char *dir)
 			(unsigned long long)RECORDER_MIN_FREE_BYTES);
 		star6e_recorder_status_lock(state);
 		state->last_stop_reason = RECORDER_STOP_DISK_FULL;
+		/* Drop the previous recording's identity with it.  The status
+		 * now reports path/bytes alongside the reason, so leaving them
+		 * would answer "disk_full" naming an older file that ended
+		 * cleanly -- a start that never happened, attributed to a
+		 * recording that did. */
+		state->path[0] = '\0';
+		state->bytes_written = 0;
+		state->frames_written = 0;
+		state->segments = 0;
 		star6e_recorder_status_unlock(state);
 		return -1;
 	}
@@ -505,7 +514,7 @@ int star6e_recorder_write_au(Star6eRecorderState *state,
 	if (check_disk_space(state) != 0)
 		return 0;
 	if (star6e_recorder_check_rotation(state,
-		    is_idr || au_leads_with_param_sets(au, len)) != 0)
+		    is_idr || au_has_cut_point(au, len)) != 0)
 		return -1;
 	frame_start = lseek(state->fd, 0, SEEK_CUR);
 

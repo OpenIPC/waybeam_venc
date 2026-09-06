@@ -10,6 +10,8 @@
 #include "star6e_output.h"
 #endif
 
+#include "h26x_util.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -180,9 +182,14 @@ static int open_new_segment(Star6eTsRecorderState *state)
 			if (state->fd >= 0)
 				break;
 			if (errno != EEXIST) {
+				int saved_errno = errno;
+
 				fprintf(stderr,
 					"[ts_recorder] open %s failed: %s\n",
-					newpath, strerror(errno));
+					newpath, strerror(saved_errno));
+				/* fprintf may clobber errno and the caller
+				 * classifies the stop on it. */
+				errno = saved_errno;
 				return -1;
 			}
 			build_ts_path(newpath, sizeof(newpath), state->dir,
@@ -299,25 +306,27 @@ static int check_disk_space(Star6eTsRecorderState *state)
 	return 0;
 }
 
-/* Does this Annex-B access unit BEGIN with a parameter set?  Same reading as
- * the raw recorder's au_leads_with_param_sets(); duplicated rather than shared
- * because the two files are compiled into different backends and this is four
- * lines of byte inspection, not policy. */
-static int ts_au_leads_with_param_sets(const uint8_t *au, size_t len)
+/* Can a new segment open on this access unit?  An IRAP, or the parameter sets
+ * that head a refresh wave -- see RecorderRotation.
+ *
+ * Scans every NAL, not just the first: the SDK-pack scanners do, and an access
+ * unit may legitimately lead with an AUD or a prefix SEI before its VPS.
+ * Checking only the leading NAL would make rotation inert on any backend whose
+ * flattened access unit is shaped that way. */
+static int au_has_cut_point(const uint8_t *au, size_t len)
 {
-	size_t i = 0;
+	size_t cursor = 0;
+	const uint8_t *nal;
+	size_t nal_len;
 
 	if (!au)
 		return 0;
-	if (len >= 4 && au[0] == 0 && au[1] == 0 && au[2] == 0 && au[3] == 1)
-		i = 4;
-	else if (len >= 3 && au[0] == 0 && au[1] == 0 && au[2] == 1)
-		i = 3;
-	else
-		return 0;
-	if (i >= len)
-		return 0;
-	return recorder_nal_is_cut_point((unsigned int)((au[i] >> 1) & 0x3F));
+	while (h26x_util_annexb_next(au, len, &cursor, &nal, &nal_len)) {
+		if (recorder_nal_is_cut_point(
+			    (unsigned int)h26x_util_hevc_nalu_type(nal, nal_len)))
+			return 1;
+	}
+	return 0;
 }
 
 static int check_rotation(Star6eTsRecorderState *state, int is_cut_point)
@@ -355,10 +364,18 @@ static int check_rotation(Star6eTsRecorderState *state, int is_cut_point)
 
 	if (open_new_segment(state) != 0) {
 		/* A rotation that cannot reopen is a stop, not a gap: clear the
-		 * recording flag so producers stop handing over frames. */
+		 * recording flag so producers stop handing over frames.  Keep
+		 * the reason honest -- the space check only runs every
+		 * RECORDER_SPACE_CHECK_INTERVAL frames, so a card that filled in
+		 * between arrives here as ENOSPC and must not read as a media
+		 * error.  This is the default recording format, so it is the
+		 * likelier of the two paths to hit it. */
+		int reopen_errno = errno;
+
 		ts_status_lock(state);
 		__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
-		state->last_stop_reason = RECORDER_STOP_WRITE_ERROR;
+		state->last_stop_reason = (reopen_errno == ENOSPC)
+			? RECORDER_STOP_DISK_FULL : RECORDER_STOP_WRITE_ERROR;
 		ts_status_unlock(state);
 		return -1;
 	}
@@ -460,7 +477,7 @@ int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 
 	/* Check rotation (only at IDR boundaries) */
 	if (check_rotation(state, is_idr ||
-		    ts_au_leads_with_param_sets(video_data, video_len)) != 0)
+		    au_has_cut_point(video_data, video_len)) != 0)
 		return -1;
 
 	/* 1. Emit video TS packets first (ensures IDR is right after PAT/PMT
@@ -577,12 +594,15 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 				    len > (pack->length - off))
 					continue;
 
-				/* A segment may open on an IRAP (19/20) or on
-				 * the parameter sets that head a GDR refresh
-				 * wave (32/33/34) -- see RecorderRotation. */
+				/* IRAP only.  This value also becomes the TS
+				 * random_access_indicator, so widening it to
+				 * parameter-set boundaries would change the
+				 * wire format.  Rotation does not need it to:
+				 * write_video() scans the flattened access unit
+				 * for cut points itself. */
 				unsigned int nalu = (unsigned int)
 					pack->packetInfo[k].packType.h265Nalu;
-				if (recorder_nal_is_cut_point(nalu))
+				if (nalu == 19 || nalu == 20)
 					is_idr = 1;
 
 				if (nal_len + len > sizeof(nal_buf)) {

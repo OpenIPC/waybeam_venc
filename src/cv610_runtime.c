@@ -443,18 +443,6 @@ static int cv610_request_idr(void)
 		? 0 : -1;
 }
 
-/* Rotation's request, as distinct from the API's cv610_request_idr() above,
- * whose 0 means "no error" and cannot tell a coalesced request from an issued
- * one.  Returns 1 when the IDR was actually requested, 0 when the shared
- * limiter coalesced it away, -1 on SDK failure. */
-static int cv610_rotate_idr(void)
-{
-	if (!idr_rate_limit_allow(CV610_VENC_CHN))
-		return 0;
-	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
-		? 1 : -1;
-}
-
 /* Recorder start is a BOOTSTRAP event, not a request for a fresher picture.
  * The file that just opened contains nothing, and the shipped CV610 config is
  * resilience=racing — a GDR craft emits no periodic IDR at all, so a request

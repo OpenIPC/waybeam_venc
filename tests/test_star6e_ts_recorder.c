@@ -304,7 +304,12 @@ static int test_ts_rotation_state_resets_on_restart(void)
 	/* Cross the threshold on a non-cut-point frame: the wait is armed. */
 	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
 		90000, 0);
+	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
+		90000, 0);
 	CHECK("rot5 wait armed", state.rot.rotation_due_since != 0);
+	/* Raise the warning latch by hand -- nothing here waits 10 s for it --
+	 * so the restart assertion below has something to clear. */
+	state.rot.warned_no_cut_point = 1;
 
 	star6e_ts_recorder_stop(&state);
 	CHECK("rot5 restart ok",
@@ -574,6 +579,7 @@ static int test_ts_size_limit_rolls_back_partial_write(void)
 	void (*saved_xfsz)(int);
 	struct stat st;
 	char path[RECORDER_PATH_MAX];
+	uint64_t header_bytes, written_total = 0;
 	int failures = 0;
 	int i;
 
@@ -588,6 +594,9 @@ static int test_ts_size_limit_rolls_back_partial_write(void)
 	CHECK("efbig start ok",
 		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
 	snprintf(path, sizeof(path), "%s", state.path);
+	/* The PAT/PMT the segment opened with, set by open_new_segment() rather
+	 * than by the per-write accumulation under test. */
+	header_bytes = state.rot.segment_bytes;
 
 	small = saved;
 	small.rlim_cur = 100 * 1024;        /* a few frames in */
@@ -598,11 +607,19 @@ static int test_ts_size_limit_rolls_back_partial_write(void)
 	}
 
 	/* Write past the limit.  The crossing write is short, then the next
-	 * one fails with EFBIG -- the partial-write case. */
+	 * one fails with EFBIG -- the partial-write case.
+	 *
+	 * Sum the RETURNED byte counts as an independent expectation.  Checking
+	 * the file against state.rot.segment_bytes alone would be tautological:
+	 * that counter is the ftruncate target, so any wrong target is
+	 * self-consistent with the result. */
 	for (i = 0; i < 64; i++) {
-		if (star6e_ts_recorder_write_video(&state, video,
-			sizeof(video), (uint64_t)i * 3000, i == 0) < 0)
+		int rc = star6e_ts_recorder_write_video(&state, video,
+			sizeof(video), (uint64_t)i * 3000, i == 0);
+
+		if (rc < 0)
 			break;
+		written_total += (uint64_t)rc;
 	}
 
 	(void)setrlimit(RLIMIT_FSIZE, &saved);
@@ -617,7 +634,9 @@ static int test_ts_size_limit_rolls_back_partial_write(void)
 	 * whole number of TS packets. */
 	CHECK("efbig file exists", stat(path, &st) == 0);
 	CHECK("efbig rolled back to the frame boundary",
-		(uint64_t)st.st_size == state.rot.segment_bytes);
+		(uint64_t)st.st_size == header_bytes + written_total);
+	CHECK("efbig counter agrees with the file",
+		state.rot.segment_bytes == (uint64_t)st.st_size);
 	CHECK("efbig left whole TS packets only",
 		(st.st_size % TS_PACKET_SIZE) == 0);
 

@@ -1737,17 +1737,12 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * spread past a full frame period at 120 fps. */
 	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
 
-	/* Rotation asked for a keyframe.  Serviced HERE, after the release, so
-	 * the SDK call never lands inside the GetStream/ReleaseStream window,
-	 * and aimed at the channel that actually feeds this file.  Dual mode
-	 * services its own recorder on the ch1 thread instead. */
-
 	/* A recorder that stopped ITSELF (disk full, write error) does so on the
 	 * writer thread, so nothing but this loop is positioned to notice, and
 	 * the gate above would go on queueing into a dead writer indefinitely.
 	 *
-	 * AFTER the release, for the same reason the IDR request above is:
-	 * inside the GetStream/ReleaseStream window this would hold the
+	 * AFTER the release, because inside the GetStream/ReleaseStream window
+	 * this would hold the
 	 * encoder's output slot and stall the LIVE stream — precisely the
 	 * coupling the writer thread exists to remove.  Since 0.73.2 the stop
 	 * itself no longer ends in an unbounded join: past its deadline the

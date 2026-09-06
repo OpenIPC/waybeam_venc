@@ -74,6 +74,11 @@ static int check_disk_space(Star6eRecorderState *state)
 			"stopping\n", (unsigned long long)free_bytes);
 		star6e_recorder_status_lock(state);
 		state->last_stop_reason = RECORDER_STOP_DISK_FULL;
+		/* Clear the producer gate too.  Leaving it set makes the status
+		 * report this recording active for the rest of the process,
+		 * naming a file nothing is written to -- the same half of this
+		 * that stop_with_error() already fixes. */
+		__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
 		star6e_recorder_status_unlock(state);
 		fdatasync(state->fd);
 		close(state->fd);

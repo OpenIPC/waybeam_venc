@@ -4820,8 +4820,8 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	 * writer thread, so nothing but this loop is positioned to notice, and
 	 * the gate above would go on queueing into a dead writer indefinitely.
 	 *
-	 * AFTER the release, for the same reason the IDR request above is:
-	 * inside the GetStream/ReleaseStream window this would hold the
+	 * AFTER the release, because inside the GetStream/ReleaseStream window
+	 * this would hold the
 	 * encoder's output slot and stall the LIVE stream — precisely the
 	 * coupling the writer thread exists to remove.  Since 0.73.2 the stop
 	 * itself no longer ends in an unbounded join: past its deadline the

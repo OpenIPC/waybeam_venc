@@ -44,13 +44,15 @@ int maruko_ts_recorder_write_stream(Star6eTsRecorderState *state,
 				    len > (pack->length - off))
 					continue;
 
-				/* A segment may open on an IRAP or on the
-				 * parameter sets heading a refresh wave -- see
-				 * RecorderRotation.  Without the second kind,
-				 * rotation is inert on a GDR craft. */
+				/* IRAP only.  This value also becomes the TS
+				 * random_access_indicator, so widening it to
+				 * parameter-set boundaries would change the
+				 * wire format.  Rotation does not need it to:
+				 * write_video() scans the flattened access unit
+				 * for cut points itself. */
 				unsigned int nalu = (unsigned int)
 					pack->packetInfo[k].packType.h265Nalu;
-				if (recorder_nal_is_cut_point(nalu))
+				if (nalu == 19 || nalu == 20)
 					is_idr = 1;
 
 				if (nal_len + len > sizeof(nal_buf)) {
