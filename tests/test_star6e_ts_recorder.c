@@ -696,6 +696,56 @@ static int test_ts_no_rotation_on_param_sets_below_threshold(void)
 	return failures;
 }
 
+/* maxMB rotation for .ts, exercised by ACCUMULATING bytes rather than by a
+ * threshold the PAT/PMT header alone already satisfies.
+ *
+ * This is the test that was missing: extracting the write path into a helper
+ * once dropped `segment_bytes += written`, which pinned the counter at the
+ * header size.  Every existing rotation test set max_bytes to 1 -- satisfied by
+ * the header -- so all of them stayed green while size rotation was dead and
+ * the write-failure rollback truncated whole segments. */
+static int test_ts_size_rotation_needs_accumulated_bytes(void)
+{
+	Star6eTsRecorderState state;
+	uint8_t vps[8192];
+	uint64_t first_seg_bytes;
+	int failures = 0;
+	int i;
+
+	memset(vps, 0xAB, sizeof(vps));
+	vps[0] = 0; vps[1] = 0; vps[2] = 0; vps[3] = 1;
+	vps[4] = (uint8_t)(32 << 1); vps[5] = 0x01;
+
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
+	CHECK("acc start ok",
+		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
+	state.rot.max_seconds = 0;
+	/* Well above the PAT/PMT bytes a fresh segment opens with, so only real
+	 * accumulation can reach it. */
+	state.rot.max_bytes = 32u * 1024u;
+
+	first_seg_bytes = state.rot.segment_bytes;
+	CHECK("acc segment starts at header size only",
+		first_seg_bytes < 4096);
+
+	(void)star6e_ts_recorder_write_video(&state, vps, sizeof(vps), 90000, 0);
+	CHECK("acc bytes advance on a write",
+		state.rot.segment_bytes > first_seg_bytes);
+
+	/* Each AU is a cut point, so once the threshold is genuinely crossed the
+	 * very next one rotates.  With the counter pinned this never happens. */
+	for (i = 0; i < 12 && state.segments == 1; i++)
+		(void)star6e_ts_recorder_write_video(&state, vps, sizeof(vps),
+			90000, 0);
+
+	CHECK("acc size threshold actually rotated", state.segments >= 2);
+	CHECK("acc new segment restarted small",
+		state.rot.segment_bytes < 32u * 1024u);
+
+	star6e_ts_recorder_stop(&state);
+	return failures;
+}
+
 int test_star6e_ts_recorder(void)
 {
 	int failures = 0;
@@ -718,6 +768,7 @@ int test_star6e_ts_recorder(void)
 	failures += test_ts_failed_start_leaves_nothing_recording();
 	failures += test_ts_size_limit_rolls_back_partial_write();
 	failures += test_ts_rotates_on_param_sets_without_any_idr();
+	failures += test_ts_size_rotation_needs_accumulated_bytes();
 	failures += test_ts_no_rotation_on_param_sets_below_threshold();
 
 	cleanup_test_dir();

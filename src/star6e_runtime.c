@@ -887,21 +887,6 @@ static int runtime_request_idr_on(int chn)
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
-/* Segment rotation's request, as distinct from the bootstrap one above.
- * COALESCED, not forced: a periodic rotation is not a bootstrap event, and
- * forcing would also re-arm the rate limiter and swallow a scene-detector or
- * operator keyframe arriving in the next 100 ms.
- *
- * Returns 1 when the IDR was actually requested, 0 when the shared limiter
- * coalesced it away, -1 on SDK failure.  Callers servicing a rotation request
- * MUST re-queue on 0 -- see recorder_rotation_requeue_idr_request(). */
-static int runtime_rotate_idr_on(int chn)
-{
-	if (!idr_rate_limit_allow(chn))
-		return 0;
-	return MI_VENC_RequestIdr(chn, 1) == 0 ? 1 : -1;
-}
-
 /* Mirror-mode recorder: the file is fed by the main channel. */
 static int runtime_request_idr(void)
 {

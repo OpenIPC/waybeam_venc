@@ -309,6 +309,11 @@ int star6e_recorder_start(Star6eRecorderState *state, const char *dir)
 	}
 
 	recorder_rotation_segment_opened(&state->rot, 0);
+	/* Part of the per-recording reset: a restart must not inherit the old
+	 * recording's "threshold has been crossed since" anchor, or its warning
+	 * latch.  The TS recorder clears the same pair in its start(). */
+	state->rot.rotation_due_since = 0;
+	state->rot.warned_no_cut_point = 0;
 	star6e_recorder_status_lock(state);
 	state->bytes_written = 0;
 	state->frames_written = 0;
@@ -353,8 +358,14 @@ static int open_next_segment(Star6eRecorderState *state)
 		if (state->fd >= 0)
 			break;
 		if (errno != EEXIST) {
+			int saved_errno = errno;
+
 			fprintf(stderr, "[recorder] open %s failed: %s\n",
-				newpath, strerror(errno));
+				newpath, strerror(saved_errno));
+			/* fprintf may clobber errno; the caller classifies on
+			 * it (a card that filled between space checks must read
+			 * as disk_full, not as a media error). */
+			errno = saved_errno;
 			return -1;
 		}
 	}
@@ -413,10 +424,17 @@ int star6e_recorder_check_rotation(Star6eRecorderState *state,
 	}
 
 	if (open_next_segment(state) != 0) {
-		/* A rotation that cannot reopen is a stop, not a gap. */
+		/* A rotation that cannot reopen is a stop, not a gap.  Keep the
+		 * reason honest: the space check only runs every
+		 * RECORDER_SPACE_CHECK_INTERVAL frames, so a card that filled in
+		 * between arrives here as ENOSPC and must not be reported as a
+		 * media error. */
+		int reopen_errno = errno;
+
 		star6e_recorder_status_lock(state);
 		__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
-		state->last_stop_reason = RECORDER_STOP_WRITE_ERROR;
+		state->last_stop_reason = (reopen_errno == ENOSPC)
+			? RECORDER_STOP_DISK_FULL : RECORDER_STOP_WRITE_ERROR;
 		star6e_recorder_status_unlock(state);
 		return -1;
 	}
@@ -525,8 +543,8 @@ int star6e_recorder_write_au(Star6eRecorderState *state,
 		return -1;
 	}
 
-	state->rot.segment_bytes += (uint64_t)written;
 	star6e_recorder_status_lock(state);
+	state->rot.segment_bytes += (uint64_t)written;
 	state->bytes_written += (uint64_t)written;
 	state->frames_written++;
 	star6e_recorder_status_unlock(state);
@@ -696,10 +714,9 @@ write_error:
 		stop_with_reason(state, RECORDER_STOP_DISK_FULL);
 	} else if (errno == EFBIG) {
 		fprintf(stderr,
-			"[recorder] file size limit reached at %llu bytes (EFBIG); "
-			"this format does not rotate -- use record.format=ts for "
-			"long recordings\n",
-			(unsigned long long)state->bytes_written);
+			"[recorder] file size limit reached at %llu bytes "
+			"(EFBIG) -- lower record.maxMB\n",
+			(unsigned long long)state->rot.segment_bytes);
 		stop_with_reason(state, RECORDER_STOP_SIZE_LIMIT);
 	} else {
 		fprintf(stderr, "[recorder] write error: %s\n",

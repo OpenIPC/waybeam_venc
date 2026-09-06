@@ -110,6 +110,13 @@ static void stop_with_error(Star6eRecorderState *state, int err)
 		state->last_stop_reason = RECORDER_STOP_WRITE_ERROR;
 		star6e_recorder_status_unlock(state);
 	}
+	/* Clear the producer gate too.  Without this the recorder reports itself
+	 * active for the rest of the process after stopping itself, and the
+	 * status keeps naming a file nothing is being written to.  Matters more
+	 * now that this writer rotates and can therefore stop on a ceiling. */
+	star6e_recorder_status_lock(state);
+	__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
+	star6e_recorder_status_unlock(state);
 	if (state->fd >= 0) {
 		fdatasync(state->fd);
 		close(state->fd);

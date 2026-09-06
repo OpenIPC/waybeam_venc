@@ -52,6 +52,15 @@ meaningful on the raw path for the first time.
   with a fresh name, at start as well as on rotation. Rotation multiplied the
   exposure, since it is now one name per segment rather than one per
   recording.
+- **A rotation that cannot reopen because the card filled now reports
+  `disk_full`.** The space check only runs every 300 frames, so a card that
+  fills in between surfaces as `ENOSPC` from the segment `open()`; it was
+  reported as a write error, sending the operator after the media instead of
+  the space.
+- **Maruko's raw recorder clears its own producer gate when it stops itself.**
+  A disk-full or write-error stop closed the file but left `recording` set, so
+  the status reported that recording as active indefinitely, naming a file
+  nothing was being written to.
 - **A segment that fails to finalise is no longer reported as a clean
   rotation.** `fdatasync()` and `close()` results were discarded, so a delayed
   write surfacing at the end of a segment left a possibly short file and no

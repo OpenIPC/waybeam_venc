@@ -380,10 +380,10 @@ static ssize_t ts_write_muxed(Star6eTsRecorderState *state,
 {
 	ssize_t written;
 
-	/* The rotation clamp cuts before the ceiling, but only on an IRAP --
-	 * and check_rotation() gives up asking for one after
-	 * TS_RECORDER_MAX_IDR_REQUESTS, so a GDR stream that never produces one
-	 * carries the segment past the threshold with no cut in sight.  Walking
+	/* The rotation clamp cuts before the ceiling, but only on a cut point,
+	 * and rotation never asks for one -- so a stream that produces neither
+	 * an IRAP nor a parameter-set boundary carries the segment past the
+	 * threshold with no cut in sight.  Walking
 	 * into the resulting EFBIG would truncate the file mid-AU at an
 	 * arbitrary byte.  Stop on this frame boundary instead: nothing has
 	 * been written, so the .ts ends on its last complete access unit and
@@ -400,8 +400,15 @@ static ssize_t ts_write_muxed(Star6eTsRecorderState *state,
 	}
 
 	written = write_all(state->fd, ts_buf, ts_len);
-	if (written >= 0)
+	if (written >= 0) {
+		/* The rollback below and the whole size-rotation test read this,
+		 * so it MUST advance here: it is the offset of the last complete
+		 * frame.  Extracting this function out of write_video() once
+		 * dropped this line, which silently disabled maxMB for .ts and
+		 * made the rollback truncate the entire segment. */
+		state->rot.segment_bytes += (uint64_t)written;
 		return written;
+	}
 
 	{
 		int saved_errno = errno;
