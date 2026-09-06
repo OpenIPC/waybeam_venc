@@ -19,6 +19,15 @@
 #include <time.h>
 #include <unistd.h>
 
+/* TS packet buffer — sized for worst case:
+ * PAT/PMT (2 × 188) + video (128KB → ~713 packets × 188) +
+ * audio (~8 frames × 5 packets × 188) = ~142KB.
+ * Round up to 800 packets for margin. */
+/* 512KB video = ~2783 TS packets + PAT/PMT + audio = ~2900 packets */
+/* Declared here rather than above its only consumer because check_rotation()
+ * reserves one buffer of headroom below the off_t ceiling. */
+#define TS_BUF_SIZE (3000 * TS_PACKET_SIZE)
+
 /* ── Helpers (shared patterns from star6e_recorder.c) ────────────────── */
 
 static ssize_t write_all(int fd, const uint8_t *data, size_t len)
@@ -92,6 +101,8 @@ static const char *stop_reason_str(Star6eRecorderStopReason reason)
 		return "disk full";
 	if (reason == RECORDER_STOP_WRITE_ERROR)
 		return "write error";
+	if (reason == RECORDER_STOP_SIZE_LIMIT)
+		return "size limit";
 	return "manual";
 }
 
@@ -286,9 +297,25 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 			should_rotate = 1;
 	}
 
-	/* Check size-based rotation */
-	if (state->max_bytes > 0 && state->segment_bytes >= state->max_bytes)
-		should_rotate = 1;
+	/* Check size-based rotation.
+	 *
+	 * Rotate on whichever limit binds first: the operator's, or the one
+	 * this binary's off_t can actually reach.  A configured max_mb above
+	 * the ceiling is not an error to reject -- the operator asked for big
+	 * segments and gets the biggest writable ones -- and max_bytes == 0
+	 * ("no size limit") still cannot mean past the ceiling.  One TS buffer
+	 * of headroom keeps the write that follows this check on the near side
+	 * of the wall.  Inert on a 64-bit off_t build, where the ceiling is
+	 * UINT64_MAX and this is always just max_bytes. */
+	{
+		uint64_t ceiling = RECORDER_OFF_T_CEILING - TS_BUF_SIZE;
+		uint64_t limit = state->max_bytes;
+
+		if (limit == 0 || limit > ceiling)
+			limit = ceiling;
+		if (state->segment_bytes >= limit)
+			should_rotate = 1;
+	}
 
 	if (!should_rotate)
 		return 0;
@@ -371,12 +398,74 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	return 0;
 }
 
-/* TS packet buffer — sized for worst case:
- * PAT/PMT (2 × 188) + video (128KB → ~713 packets × 188) +
- * audio (~8 frames × 5 packets × 188) = ~142KB.
- * Round up to 800 packets for margin. */
-/* 512KB video = ~2783 TS packets + PAT/PMT + audio = ~2900 packets */
-#define TS_BUF_SIZE (3000 * TS_PACKET_SIZE)
+/* Write one muxed frame, classifying the ways it can fail.
+ *
+ * Split out of star6e_ts_recorder_write_video(), which AGENTS.md wants under
+ * ~80 lines: muxing is that function's job, and this is the file-ceiling and
+ * error-classification half of it.
+ *
+ * Returns the byte count, or -1 having already stopped the recorder. */
+static ssize_t ts_write_muxed(Star6eTsRecorderState *state,
+	const uint8_t *ts_buf, size_t ts_len)
+{
+	ssize_t written;
+
+	/* The rotation clamp cuts before the ceiling, but only on an IRAP --
+	 * and check_rotation() gives up asking for one after
+	 * TS_RECORDER_MAX_IDR_REQUESTS, so a GDR stream that never produces one
+	 * carries the segment past the threshold with no cut in sight.  Walking
+	 * into the resulting EFBIG would truncate the file mid-AU at an
+	 * arbitrary byte.  Stop on this frame boundary instead: nothing has
+	 * been written, so the .ts ends on its last complete access unit and
+	 * the status names a size ceiling rather than a write error.  Inert on
+	 * a 64-bit off_t build. */
+	if ((uint64_t)ts_len > RECORDER_OFF_T_CEILING - state->segment_bytes) {
+		fprintf(stderr,
+			"[ts_recorder] segment at %llu bytes cannot grow past the "
+			"32-bit file ceiling and the stream produced no IRAP to "
+			"rotate on; stopping\n",
+			(unsigned long long)state->segment_bytes);
+		stop_with_reason(state, RECORDER_STOP_SIZE_LIMIT);
+		return -1;
+	}
+
+	written = write_all(state->fd, ts_buf, ts_len);
+	if (written >= 0)
+		return written;
+
+	{
+		int saved_errno = errno;
+
+		/* A failure can follow a PARTIAL successful write -- measured:
+		 * an unpatched recorder's own counter stopped at 2147464968
+		 * while the file on disk was 2147483647, so 18679 bytes of a
+		 * half-written access unit stayed behind.  segment_bytes IS the
+		 * offset of the last complete frame (the segment opened at 0
+		 * and only completed writes are added), so rolling back to it
+		 * costs no lseek and leaves whole TS packets only. */
+		(void)ftruncate(state->fd, (off_t)state->segment_bytes);
+		errno = saved_errno;
+	}
+
+	if (errno == ENOSPC) {
+		fprintf(stderr, "[ts_recorder] disk full (ENOSPC)\n");
+		stop_with_reason(state, RECORDER_STOP_DISK_FULL);
+	} else if (errno == EFBIG) {
+		/* A ceiling below the off_t one -- FAT32 stops at 4 GB -- so the
+		 * guard above could not have anticipated it.  Name it: "write
+		 * error" sent the original report hunting the SD card. */
+		fprintf(stderr,
+			"[ts_recorder] file size limit reached at %llu bytes "
+			"(EFBIG) -- lower record.maxMB\n",
+			(unsigned long long)state->segment_bytes);
+		stop_with_reason(state, RECORDER_STOP_SIZE_LIMIT);
+	} else {
+		fprintf(stderr, "[ts_recorder] write error: %s\n",
+			strerror(errno));
+		stop_with_reason(state, RECORDER_STOP_WRITE_ERROR);
+	}
+	return -1;
+}
 
 int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 	const uint8_t *video_data, size_t video_len,
@@ -423,19 +512,9 @@ int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 
 	/* 3. Write to file */
 	if (ts_len > 0) {
-		written = write_all(state->fd, ts_buf, ts_len);
-		if (written < 0) {
-			if (errno == ENOSPC) {
-				fprintf(stderr, "[ts_recorder] disk full (ENOSPC)\n");
-				stop_with_reason(state, RECORDER_STOP_DISK_FULL);
-			} else {
-				fprintf(stderr, "[ts_recorder] write error: %s\n",
-					strerror(errno));
-				stop_with_reason(state, RECORDER_STOP_WRITE_ERROR);
-			}
+		written = ts_write_muxed(state, ts_buf, ts_len);
+		if (written < 0)
 			return -1;
-		}
-		state->segment_bytes += (uint64_t)written;
 	} else {
 		written = 0;
 	}

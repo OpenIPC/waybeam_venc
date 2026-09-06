@@ -117,6 +117,8 @@ static const char *stop_reason_str(Star6eRecorderStopReason reason)
 		return "disk full";
 	if (reason == RECORDER_STOP_WRITE_ERROR)
 		return "write error";
+	if (reason == RECORDER_STOP_SIZE_LIMIT)
+		return "size limit";
 	return "manual";
 }
 
@@ -275,6 +277,17 @@ int star6e_recorder_write_au(Star6eRecorderState *state,
 		if (errno == ENOSPC) {
 			fprintf(stderr, "[recorder] disk full (ENOSPC)\n");
 			stop_with_reason(state, RECORDER_STOP_DISK_FULL);
+		} else if (errno == EFBIG) {
+			/* A file size ceiling, not bad media: this recorder
+			 * writes one unrotated file, so it is terminal.  Name
+			 * it -- "write error" sent the original report hunting
+			 * the SD card when the limit was in the binary. */
+			fprintf(stderr,
+				"[recorder] file size limit reached at %llu bytes "
+				"(EFBIG); this format does not rotate -- use "
+				"record.format=ts for long recordings\n",
+				(unsigned long long)state->bytes_written);
+			stop_with_reason(state, RECORDER_STOP_SIZE_LIMIT);
 		} else {
 			fprintf(stderr, "[recorder] write error: %s\n",
 				strerror(errno));
@@ -423,6 +436,13 @@ write_error:
 	if (errno == ENOSPC) {
 		fprintf(stderr, "[recorder] disk full (ENOSPC)\n");
 		stop_with_reason(state, RECORDER_STOP_DISK_FULL);
+	} else if (errno == EFBIG) {
+		fprintf(stderr,
+			"[recorder] file size limit reached at %llu bytes (EFBIG); "
+			"this format does not rotate -- use record.format=ts for "
+			"long recordings\n",
+			(unsigned long long)state->bytes_written);
+		stop_with_reason(state, RECORDER_STOP_SIZE_LIMIT);
 	} else {
 		fprintf(stderr, "[recorder] write error: %s\n",
 			strerror(errno));

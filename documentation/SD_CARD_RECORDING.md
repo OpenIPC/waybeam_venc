@@ -84,8 +84,8 @@ Status response:
 | `mode` | string | `"mirror"` | Recording mode (see Gemini Mode below) |
 | `dir` | string | `"/mnt/mmcblk0p1"` | Output directory (must exist and be writable) |
 | `format` | string | `"ts"` | `"ts"` (MPEG-TS with audio) or `"hevc"` (raw NAL stream) |
-| `maxSeconds` | uint | `300` | Rotate to new file after this many seconds (0 = no time limit) |
-| `maxMB` | uint | `500` | Rotate to new file after this many MB (0 = no size limit) |
+| `maxSeconds` | uint | `300` | Rotate to new file after this many seconds (0 = keep the built-in 300) |
+| `maxMB` | uint | `500` | Rotate to new file after this many MB (0 = keep the built-in 500) |
 | `bitrate` | uint | `0` | Dual mode: ch1 bitrate in kbps (0 = same as video0) |
 | `fps` | uint | `0` | Dual mode: ch1 fps (0 = sensor max) |
 | `gopSize` | double | `0` | Dual mode: ch1 GOP in seconds (0 = same as video0) |
@@ -183,7 +183,12 @@ frame rates.
 
 ## File Rotation
 
-When `maxSeconds` or `maxMB` thresholds are reached, the recorder:
+Rotation applies to `format: "ts"` only. `format: "hevc"` writes one
+unrotated file and ignores `maxSeconds`/`maxMB` entirely; it stops with
+`stop_reason: "size_limit"` if it ever reaches a file-size ceiling. Use `ts`
+for long recordings.
+
+When `maxSeconds` or `maxMB` thresholds are reached, the TS recorder:
 
 1. Waits for the next IDR (keyframe) boundary
 2. Closes and fsyncs the current segment
@@ -192,9 +197,26 @@ When `maxSeconds` or `maxMB` thresholds are reached, the recorder:
 
 File naming: `rec_<HH>h<MM>m<SS>s_<rand>.ts` based on system uptime.
 
-Both `maxSeconds` and `maxMB` can be active simultaneously. Set either to `0`
-to disable that dimension. Setting both to `0` produces a single file until
-manually stopped or disk full.
+Both `maxSeconds` and `maxMB` can be active simultaneously, and rotation
+happens on whichever is reached first.
+
+`0` does **not** disable a dimension. The runtime only overrides the
+recorder's built-in threshold when the configured value is greater than zero,
+so `maxSeconds: 0` records 300-second segments and `maxMB: 0` records 500 MB
+ones -- the compiled-in defaults. There is no "single file until stopped"
+setting; to approximate one, set the thresholds high rather than to zero.
+
+Rotation can only cut on an IRAP, because a segment that does not open on one
+decodes from nothing. A stream that produces no keyframes of its own (a GDR
+craft, `resilience=racing`) is asked for one when a threshold is crossed, but
+that ask is bounded -- see `TS_RECORDER_MAX_IDR_REQUESTS`. If no IRAP arrives,
+the segment keeps growing past the threshold, and the recorder stops with
+`stop_reason: "size_limit"` rather than write into a file-size failure.
+
+Segment size is additionally capped by the largest offset the binary can
+write. That is unlimited on every shipped target (all of them are built with
+64-bit `off_t`), and the cap only becomes visible on a build that lost
+`-D_FILE_OFFSET_BITS=64`, where it is 2 GB.
 
 ## Disk Safety
 
@@ -205,6 +227,13 @@ manually stopped or disk full.
 - **Periodic fsync**: `fdatasync()` every 900 frames (~30s at 30fps) to flush
   kernel buffers to SD card.
 - **Short write handling**: the write loop retries on partial writes and EINTR.
+
+`stop_reason` values: `none` (recording), `manual`, `disk_full`,
+`size_limit` (a file-size ceiling, not a fault -- the file is intact and
+closed on a frame boundary), and `write_error` (an I/O failure). When a
+recording stops on its own, the status keeps the path, byte count, frame
+count and segment count of the recording that ended, so `GET
+/api/v1/record/status` still names the file that was cut short.
 
 ## Concurrent Streaming + Recording
 

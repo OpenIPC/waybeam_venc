@@ -1,5 +1,60 @@
 # History
 
+## [0.83.0] - 2026-09-06
+
+Recording no longer stops at 2 GB. The ceiling was in the binary, not the
+card: a 32-bit `off_t` build refuses any write past 2^31-1 with `EFBIG`
+whatever the filesystem allows. `contract_version` moves to **0.30.0** — the
+`stop_reason` enum gains `"size_limit"` and the inactive record status now
+carries the counters of the recording that ended.
+
+- **Built with `-D_FILE_OFFSET_BITS=64`.** Without it, glibc leaves `off_t`
+  32-bit and `open()` does not set `O_LARGEFILE`, so the kernel caps every
+  recording at 2147483647 bytes — reported on SSC338Q as a recording dying at
+  exactly that count on exFAT, which has no such limit of its own. It also
+  fixes `stat()`/`fstat()`, which returned `EOVERFLOW` for a file over 2 GB
+  and would have hidden such a recording from `/api/v1/recordings` and its
+  download even once the write succeeded. musl targets (Maruko, CV610) were
+  never affected — they are 64-bit `off_t` and force `O_LARGEFILE` regardless
+  — and are unchanged by the flag. **A CFLAGS change does not invalidate
+  objects: this needs a clean build.**
+- **Segment rotation is bounded by what `off_t` can reach.** A configured
+  `record.maxMB` above the ceiling now produces more segments instead of a
+  dead recorder. Inert on every shipped target.
+- **A segment that cannot be cut stops cleanly.** Rotation can only happen on
+  an IRAP and the IDR request is bounded, so a GDR stream can carry a segment
+  past any threshold. Rather than walk into an `EFBIG` that truncates
+  mid-access-unit, the recorder now stops on the frame boundary with the file
+  intact and reports `stop_reason: "size_limit"`.
+- **`EFBIG` is no longer reported as `"write_error"`.** All three recorders
+  name it, and the raw (`format: "hevc"`) recorder says in the log that it
+  does not rotate. Calling a size ceiling a write error sent the original
+  report looking at the SD card.
+- **The record status keeps its counters after a self-stop.** `GET
+  /api/v1/record/status` answered `{"path":"","frames":0,"bytes":0}` for any
+  stop the recorder made on its own — losing both the file that was cut short
+  and how far it got, which is the whole diagnosis. It now reports the path,
+  bytes, frames and segments of the recording that ended, taken from the
+  recorder `record.format` selects. The previous rule picked between the two
+  recorders by asking whether the TS one had stopped manually, which says
+  nothing about which session ended last: a retained `write_error` from an
+  earlier run would have outranked a later, cleanly stopped recording — and
+  with the counters now following the reason, named that older file too.
+- **A write that fails part-way through an access unit is rolled back.** The
+  TS recorder had no equivalent of the raw recorder's truncate-to-frame-
+  boundary, so a ceiling below the `off_t` one — FAT32 stops at 4 GB — left a
+  half-written access unit at the end of the file. Measured on an unpatched
+  build: the recorder's own counter stopped at 2147464968 while the file on
+  disk was 2147483647, so 18679 bytes of partial AU stayed behind. The file
+  now ends on a whole number of TS packets, which is what `size_limit`
+  claiming an intact file requires.
+- **Docs: `maxSeconds`/`maxMB` of `0` never meant "no limit".** The runtime
+  overrides its compiled-in threshold only when the value is greater than
+  zero, so `0` records 300-second / 500 MB segments. `documentation/
+  SD_CARD_RECORDING.md` said the opposite. It now also states that rotation
+  is `format: "ts"` only — `"hevc"` ignores both thresholds, which is tracked
+  separately.
+
 ## [0.82.0] - 2026-09-06
 
 A destination that cannot be brought up no longer destroys a working output,

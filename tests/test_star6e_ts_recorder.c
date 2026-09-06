@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
+#include <signal.h>
 #include <unistd.h>
 
 static char g_test_dir[256];
@@ -792,6 +794,77 @@ static int test_ts_failed_start_leaves_nothing_recording(void)
 	return failures;
 }
 
+/* A file-size ceiling BELOW the off_t one -- FAT32 stops at 4 GB -- is what
+ * the pre-write guard cannot anticipate, so the failure lands in write_all()
+ * mid-access-unit.  RLIMIT_FSIZE reproduces exactly that on any build, which
+ * is what makes this reachable from a host test at all: the off_t ceiling
+ * itself is unreachable where off_t is 64-bit.
+ *
+ * Two things must hold: the stop is classified as a size limit rather than a
+ * write error, and the partial write is rolled back so the .ts ends on a
+ * complete access unit -- measured on an unpatched build, the recorder's own
+ * counter stopped at 2147464968 while the file was 2147483647, leaving 18679
+ * bytes of half-written AU behind. */
+static int test_ts_size_limit_rolls_back_partial_write(void)
+{
+	Star6eTsRecorderState state;
+	uint8_t video[16 * 1024];
+	struct rlimit saved, small;
+	void (*saved_xfsz)(int);
+	struct stat st;
+	char path[RECORDER_PATH_MAX];
+	int failures = 0;
+	int i;
+
+	memset(video, 0xC3, sizeof(video));
+	if (getrlimit(RLIMIT_FSIZE, &saved) != 0)
+		return 0;                       /* cannot pose the question */
+	/* Exceeding RLIMIT_FSIZE also raises SIGXFSZ, whose default action is
+	 * to kill the test runner. */
+	saved_xfsz = signal(SIGXFSZ, SIG_IGN);
+
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
+	CHECK("efbig start ok",
+		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
+	snprintf(path, sizeof(path), "%s", state.path);
+
+	small = saved;
+	small.rlim_cur = 100 * 1024;        /* a few frames in */
+	if (setrlimit(RLIMIT_FSIZE, &small) != 0) {
+		star6e_ts_recorder_stop(&state);
+		signal(SIGXFSZ, saved_xfsz);
+		return failures;
+	}
+
+	/* Write past the limit.  The crossing write is short, then the next
+	 * one fails with EFBIG -- the partial-write case. */
+	for (i = 0; i < 64; i++) {
+		if (star6e_ts_recorder_write_video(&state, video,
+			sizeof(video), (uint64_t)i * 3000, i == 0) < 0)
+			break;
+	}
+
+	(void)setrlimit(RLIMIT_FSIZE, &saved);
+	signal(SIGXFSZ, saved_xfsz);
+
+	CHECK("efbig stopped the recorder",
+		!star6e_ts_recorder_is_recording(&state));
+	CHECK("efbig is a size limit, not a write error",
+		state.last_stop_reason == RECORDER_STOP_SIZE_LIMIT);
+	/* The rollback target: segment_bytes only ever advances by completed
+	 * writes, so the file must end exactly there -- and therefore on a
+	 * whole number of TS packets. */
+	CHECK("efbig file exists", stat(path, &st) == 0);
+	CHECK("efbig rolled back to the frame boundary",
+		(uint64_t)st.st_size == state.segment_bytes);
+	CHECK("efbig left whole TS packets only",
+		(st.st_size % TS_PACKET_SIZE) == 0);
+
+	star6e_ts_recorder_stop(&state);
+	unlink(path);
+	return failures;
+}
+
 int test_star6e_ts_recorder(void)
 {
 	int failures = 0;
@@ -819,6 +892,7 @@ int test_star6e_ts_recorder(void)
 	failures += test_ts_is_recording_clears_when_rotation_cannot_reopen();
 	failures += test_ts_rotation_never_makes_a_producer_drop();
 	failures += test_ts_failed_start_leaves_nothing_recording();
+	failures += test_ts_size_limit_rolls_back_partial_write();
 
 	cleanup_test_dir();
 	return failures;

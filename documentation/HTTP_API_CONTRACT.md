@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.29.0`
+- `contract_version`: `0.30.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -107,8 +107,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.82.0",
-    "contract_version": "0.29.0",
+    "app_version": "0.83.0",
+    "contract_version": "0.30.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1274,7 +1274,23 @@ Response `200`:
 
 `elapsed_ms` is the elapsed duration of the active or most recently stopped
 recording. `stop_reason` values: `"none"` (currently recording), `"manual"`,
-`"disk_full"`, `"write_error"`.
+`"disk_full"`, `"size_limit"` (**from 0.30.0**), `"write_error"`.
+
+`"size_limit"` means a file-size ceiling was reached, not a fault: the
+recorder stopped on a frame boundary and the file is intact and closed. It is
+reported separately from `"write_error"` because the two call for different
+responses — a ceiling is answered by lowering `record.maxMB`, an I/O error by
+looking at the card.
+
+**From 0.30.0**, when `active` is `false` because the recorder stopped by
+itself, `path`, `frames`, `bytes` and `segments` describe the recording that
+ended rather than being zero. They come from the recorder `record.format`
+selects; since that field is `restart_required`, only one recorder can have
+run in a given process, so there is no ambiguity about which recording is
+being described. Earlier builds answered `{"path":"","frames":0,
+"bytes":0,"segments":0}` for every non-manual stop, which left a client with
+no way to tell which file was cut short or how far it got. `elapsed_ms` is
+still `0` while inactive.
 
 ### `GET /api/v1/recordings`
 

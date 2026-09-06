@@ -91,6 +91,19 @@ static void stop_with_error(Star6eRecorderState *state, int err)
 		star6e_recorder_status_lock(state);
 		state->last_stop_reason = RECORDER_STOP_DISK_FULL;
 		star6e_recorder_status_unlock(state);
+	} else if (err == EFBIG) {
+		/* A file size ceiling, not bad media, and terminal here: this
+		 * recorder writes one unrotated file.  Named separately so the
+		 * status does not blame the SD card for a limit that is not
+		 * its. */
+		fprintf(stderr,
+			"[maruko_recorder] file size limit reached at %llu bytes "
+			"(EFBIG); this format does not rotate -- use "
+			"record.format=ts for long recordings\n",
+			(unsigned long long)state->bytes_written);
+		star6e_recorder_status_lock(state);
+		state->last_stop_reason = RECORDER_STOP_SIZE_LIMIT;
+		star6e_recorder_status_unlock(state);
 	} else {
 		fprintf(stderr, "[maruko_recorder] write error: %s\n",
 			strerror(err));
