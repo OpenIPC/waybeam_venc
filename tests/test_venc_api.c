@@ -45,6 +45,8 @@ typedef struct {
 	int apply_awb_rate_calls;
 	uint32_t last_awb_rate;
 	int apply_server_calls;
+	int apply_output_enabled_calls;
+	bool last_output_enabled;
 	int apply_max_payload_calls;
 	int apply_zoom_calls;
 	int apply_isp_bin_calls;
@@ -312,6 +314,24 @@ static int test_apply_awb_rate(uint32_t hz)
 	return 0;
 }
 
+static int test_apply_output_enabled(bool on)
+{
+	g_api_cb_state.apply_output_enabled_calls++;
+	g_api_cb_state.last_output_enabled = on;
+	return 0;
+}
+
+/* Accepts the value but asks for a respawn -- the shape CV610's apply_server()
+ * uses for the ring transports, which cannot be switched in place but must
+ * still be settable through the API. */
+static int test_apply_server_needs_restart(const char *uri)
+{
+	(void)uri;
+	g_api_cb_state.apply_server_calls++;
+	venc_api_request_reinit();
+	return 0;
+}
+
 static int test_apply_server(const char *uri)
 {
 	g_api_cb_state.apply_server_calls++;
@@ -528,6 +548,125 @@ static int test_field_support_by_backend(void)
 	CHECK("rc mode unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"video0.rc_mode") == 0);
+	/* The sidecar producer is compiled into the CV610 binary, so the port
+	 * is a field the backend genuinely reads rather than one that accepts
+	 * a value and does nothing.  Checked on all three backends: the entry
+	 * was added to CV610's allowlist, not to the shared gate. */
+	CHECK("sidecar port supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"outgoing.sidecar_port") == 1);
+	CHECK("sidecar port alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"outgoing.sidecarPort") == 1);
+	CHECK("sidecar port supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"outgoing.sidecar_port") == 1);
+	CHECK("sidecar port supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"outgoing.sidecar_port") == 1);
+	/* ROI reaches CV610 through ss_mpi_venc_set_roi_attr().  fpv.noise_level
+	 * is the control here and is deliberately NOT in the list: it proves the
+	 * allowlist matches whole field names, so a prefix match on "fpv." would
+	 * fail this block rather than quietly advertising a field the backend
+	 * never reads. */
+	CHECK("roi enabled supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roi_enabled") == 1);
+	CHECK("roi qp supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roi_qp") == 1);
+	CHECK("roi steps supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roi_steps") == 1);
+	CHECK("roi center supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roi_center") == 1);
+	CHECK("roi qp alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roiQp") == 1);
+	CHECK("roi center alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.roiCenter") == 1);
+	CHECK("fpv noise level unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"fpv.noise_level") == 0);
+	CHECK("roi qp supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"fpv.roi_qp") == 1);
+	CHECK("roi qp supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"fpv.roi_qp") == 1);
+	/* The two portable AE ceilings map onto CV610's exposure group with no
+	 * unit conversion (us and 22.10 gain, both documented in the SDK header
+	 * and confirmed on the live board).  The floors and the AWB pair are the
+	 * controls here: gain_min/shutter_min_us were not measured in this
+	 * slice, and awb_mode/awb_ct cannot be honoured at all because the ISP
+	 * has no Kelvin input.  All four must stay unsupported on CV610 while
+	 * remaining supported on the SigmaStar backends -- which is what
+	 * distinguishes a per-field allowlist entry from an "isp." prefix. */
+	CHECK("gain max supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.gain_max") == 1);
+	CHECK("shutter max supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.shutter_max_us") == 1);
+	CHECK("gain max alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.gainMax") == 1);
+	CHECK("shutter max alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.shutterMaxUs") == 1);
+	CHECK("gain min unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.gain_min") == 0);
+	CHECK("shutter min unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.shutter_min_us") == 0);
+	CHECK("awb mode unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.awb_mode") == 0);
+	CHECK("awb ct unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"isp.awb_ct") == 0);
+	CHECK("gain max supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"isp.gain_max") == 1);
+	CHECK("shutter max supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"isp.shutter_max_us") == 1);
+	CHECK("awb mode supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"isp.awb_mode") == 1);
+	CHECK("gain min supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"isp.gain_min") == 1);
+	/* Sensor orientation reaches CV610 through the plugin's
+	 * pfn_mirror_flip, the same place the SigmaStar backends apply it.
+	 * Checked on all three so the entry lands in CV610's allowlist rather
+	 * than the shared gate. */
+	CHECK("image mirror supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"image.mirror") == 1);
+	CHECK("image flip supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"image.flip") == 1);
+	CHECK("image mirror supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"image.mirror") == 1);
+	CHECK("image flip supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"image.flip") == 1);
+	/* image.rotate stays UNSUPPORTED on cv610 even though the pair it
+	 * decomposes into is now supported.  The decomposition runs in
+	 * venc_config's load_image(), on a file parse only, so a value that
+	 * arrives through /api/v1/set is never decomposed and never read by
+	 * any backend — advertising it would accept 90, persist it, raise
+	 * reinit_pending and read back 0.  A config file with rotate:180
+	 * still works; the field is unsupported because nothing reads ROTATE.
+	 * Device-measured on .181 before this was reverted. */
+	CHECK("image rotate unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"image.rotate") == 0);
 	/* Recording and snapshot arrived on CV610 in mirror mode: the main
 	 * channel's access unit is teed to file, and the JPEG channel is a
 	 * second bind target on the main stream's VPSS output. */
@@ -598,6 +737,161 @@ static int test_cv610_restart_only_mutability(void)
 	CHECK("cv610 live fps cfg untouched", cfg.video0.fps == 100);
 	CHECK("cv610 live fps not applied",
 		g_api_cb_state.apply_fps_calls == 0);
+
+	/* image.mirror is newly SUPPORTED on cv610 but still restart-required:
+	 * the sensor is programmed once at bring-up, so there is no live apply
+	 * callback behind it.  Advertising `supported` without this check is
+	 * exactly how a dashboard ends up offering a control that 501s. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	cfg.image.mirror = false;
+	CHECK("cv610 live mirror handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"image.mirror=true", &status, response,
+			sizeof(response)) == 0);
+	CHECK("cv610 live mirror rejected", status == 400);
+	CHECK("cv610 live mirror cfg untouched", cfg.image.mirror == false);
+	/* Same on star6e — this one is not a backend gate but the shared
+	 * table's mutability, so both must reject. */
+	venc_config_defaults(&cfg);
+	CHECK("star6e live mirror handled",
+		apply_query_http_path(&cfg, "star6e", &cb, "/api/v1/live/set",
+			"image.mirror=true", &status, response,
+			sizeof(response)) == 0);
+	CHECK("star6e live mirror rejected", status == 400);
+
+	/* outgoing.server / outgoing.enabled LEFT the restart-only list in
+	 * 0.77.0.  Asserted as an ACCEPTED live set that reaches the callback,
+	 * not merely as "not rejected": the failure this guards against is the
+	 * ordering one, where the field is widened to `live` before a backend
+	 * callback exists to honour it, and the write is then refused by
+	 * live_group_supported_for_cfg() instead of the mutability gate.  Both
+	 * paths would show a 4xx, so only the callback count separates them. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	cb.apply_server = test_apply_server;
+	cb.apply_output_enabled = test_apply_output_enabled;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 live server handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=udp://10.0.0.2:5600", &status, response,
+			sizeof(response)) == 0);
+	CHECK("cv610 live server accepted", status == 200);
+	CHECK("cv610 live server reached the backend",
+		g_api_cb_state.apply_server_calls == 1);
+	CHECK("cv610 live server committed",
+		strcmp(cfg.outgoing.server, "udp://10.0.0.2:5600") == 0);
+
+	/* Control: strip the callback and the SAME request must fail, which is
+	 * what proves the accept above came from the widening rather than from
+	 * the field having been live all along. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	cb.apply_server = NULL;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 live server w/o callback handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=udp://10.0.0.2:5600", &status, response,
+			sizeof(response)) == 0);
+	CHECK("cv610 live server w/o callback rejected", status != 200);
+	cb.apply_server = test_apply_server;
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	cfg.outgoing.enabled = true;
+	CHECK("cv610 live enabled handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.enabled=false", &status, response,
+			sizeof(response)) == 0);
+	CHECK("cv610 live enabled accepted", status == 200);
+	CHECK("cv610 live enabled reached the backend",
+		g_api_cb_state.apply_output_enabled_calls == 1);
+	CHECK("cv610 live enabled committed", cfg.outgoing.enabled == false);
+
+	/* A live apply that requests a respawn must SAY so.  Without this the
+	 * caller is told the change took effect live while the craft is about
+	 * to restart under it. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	venc_api_clear_reinit();
+	cb.apply_server = test_apply_server_needs_restart;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 restart-class server handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=frame-shm://venc_frame", &status,
+			response, sizeof(response)) == 0);
+	CHECK("cv610 restart-class server accepted", status == 200);
+	CHECK("cv610 restart-class server committed",
+		strcmp(cfg.outgoing.server, "frame-shm://venc_frame") == 0);
+	CHECK("cv610 restart-class server reports reinit",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+	/* Assert the response SHAPE too, not just the flag.  A single-field set
+	 * must answer the single form ("field": ...), never the batch form
+	 * ("applied": [...]).  Without this the suite is blind to the
+	 * single_response / reinit_requested arguments being swapped at the
+	 * call site -- which happened, and which both flag-only checks passed
+	 * straight through because the two values correlate in these cases. */
+	CHECK("cv610 restart-class server single-form response",
+		strstr(response, "\"field\":") != NULL &&
+		strstr(response, "\"applied\":") == NULL);
+
+	/* Control: the same field with a plain live apply must NOT claim a
+	 * respawn, or the flag would be noise on every write. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	venc_api_clear_reinit();
+	cb.apply_server = test_apply_server;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 live server handled 2",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=udp://10.0.0.3:5600", &status,
+			response, sizeof(response)) == 0);
+	CHECK("cv610 live server accepted 2", status == 200);
+	CHECK("cv610 live server reports no reinit",
+		strstr(response, "reinit_pending") == NULL);
+	CHECK("cv610 live server single-form response",
+		strstr(response, "\"field\":") != NULL &&
+		strstr(response, "\"applied\":") == NULL);
+
+	/* The BATCH path must report a requested respawn too.  This had no test,
+	 * which is exactly how it shipped reporting nothing while the single
+	 * path had just been fixed to report it. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	venc_api_clear_reinit();
+	cb.apply_server = test_apply_server_needs_restart;
+	cb.apply_bitrate = test_apply_bitrate;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 batch restart-class handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=frame-shm://venc_frame&video0.bitrate=9000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("cv610 batch restart-class accepted", status == 200);
+	CHECK("cv610 batch is the batch form",
+		strstr(response, "\"applied\":") != NULL);
+	CHECK("cv610 batch reports reinit",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+
+	/* Control: a batch with no reinit-requesting apply must stay silent, or
+	 * the flag is noise on every multi-field write. */
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	venc_api_clear_reinit();
+	cb.apply_server = test_apply_server;
+	snprintf(cfg.outgoing.server, sizeof(cfg.outgoing.server),
+		"udp://10.0.0.1:5600");
+	CHECK("cv610 batch live handled",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"outgoing.server=udp://10.0.0.4:5600&video0.bitrate=9000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("cv610 batch live accepted", status == 200);
+	CHECK("cv610 batch live reports no reinit",
+		strstr(response, "reinit_pending") == NULL);
 
 	/* Control 1: the same field on star6e is still a live apply, so the
 	 * rejection above is the backend gate and not a blanket fps block. */
@@ -1853,6 +2147,51 @@ static int test_live_set_isp_bin_no_callback_returns_501(void)
  * Asserts the surviving VALUE, not that the code took some path, so it fails
  * if the preserve is removed.  The third case is the do-nothing control: the
  * fix must not invent a value where the operator set none. */
+static int test_roi_qp_range_is_pm20(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	static const int accept[] = { 0, -20, 20, -19, 19 };
+	static const int reject[] = { -21, 21, -30, 30, -51, 51 };
+	size_t i;
+
+	/* +-20, not +-30.  roiQp is a RELATIVE delta and H.265 caps QP at 51,
+	 * so past 20 it stops being honoured at both ends -- and the negative
+	 * end is expensive: CBR pays for the discount by raising base QP about
+	 * 1:1, so once base + |roiQp| passes 51 the rate controller saturates.
+	 * Measured on a CV610 bench: -30 pinned every frame at qp 51 and
+	 * delivered 6x its bitrate target, -20 held it.
+	 *
+	 * Driven through venc_api_validate_loaded_config(), which is the gate
+	 * that actually runs -- validate_field_cfg() is static, and asserting
+	 * on a value assigned straight into the struct would test nothing. */
+	for (i = 0; i < sizeof(accept) / sizeof(accept[0]); i++) {
+		char name[64];
+
+		venc_config_defaults(&cfg);
+		cfg.fpv.roi_qp = accept[i];
+		snprintf(name, sizeof(name), "roi_qp %+d accepted", accept[i]);
+		CHECK(name, venc_api_validate_loaded_config(&cfg) == NULL);
+	}
+	for (i = 0; i < sizeof(reject) / sizeof(reject[0]); i++) {
+		char name[64];
+		const char *err;
+
+		venc_config_defaults(&cfg);
+		cfg.fpv.roi_qp = reject[i];
+		err = venc_api_validate_loaded_config(&cfg);
+		snprintf(name, sizeof(name), "roi_qp %+d rejected", reject[i]);
+		CHECK(name, err != NULL);
+		/* The message must name the field, not just fail: this validator
+		 * sweeps many keys and a bare non-NULL would also pass if some
+		 * unrelated default started failing. */
+		snprintf(name, sizeof(name), "roi_qp %+d names the field",
+			reject[i]);
+		CHECK(name, err != NULL && strstr(err, "roi_qp") != NULL);
+	}
+	return failures;
+}
+
 static int test_resilience_preset_preserves_intra_refresh_qp(void)
 {
 	int failures = 0;
@@ -2116,6 +2455,97 @@ static int test_capabilities_routes_track_callbacks(void)
 	return failures;
 }
 
+/* GET /api/v1/iq/export_bin serializes the live ISP to a PQTools .bin.
+ *
+ * The middle arm is the one that earns its keep.  venc_httpd routes by
+ * first-match prefix and accepts '/' as a boundary, so "/api/v1/iq" would
+ * swallow "/api/v1/iq/export_bin" if it were ever registered first -- and the
+ * request would then answer 200 with the full ISP sweep from handle_iq
+ * instead of the path.  That is a green-looking wrong answer no other test in
+ * this file would notice, so assert on the BODY, not just the status. */
+static int api_test_stub_export_bin_ok(const char *path)
+{
+	return path && *path ? 144774 : -1;
+}
+
+static int api_test_stub_export_bin_fail(const char *path)
+{
+	(void)path;
+	return -1;
+}
+
+static int test_iq_export_bin_route(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0, fd;
+	char response[65536];
+	static const char *const req =
+		"GET /api/v1/iq/export_bin HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+	size_t req_len = strlen(req);
+	int pass;
+
+	for (pass = 0; pass < 3; pass++) {
+		size_t sent;
+
+		venc_config_defaults(&cfg);
+		memset(&cb, 0, sizeof(cb));
+		if (pass == 1)
+			cb.export_isp_bin = api_test_stub_export_bin_ok;
+		else if (pass == 2)
+			cb.export_isp_bin = api_test_stub_export_bin_fail;
+
+		if (venc_api_register(&cfg, "cv610", &cb, NULL) != 0) {
+			CHECK("export_bin register", 0);
+			return failures;
+		}
+		if (ensure_api_test_server() != 0) {
+			CHECK("export_bin server", 0);
+			return failures;
+		}
+		fd = connect_api_test_socket();
+		CHECK("export_bin connect", fd >= 0);
+		if (fd < 0)
+			return failures;
+		for (sent = 0; sent < req_len; ) {
+			ssize_t n = write(fd, req + sent, req_len - sent);
+			if (n < 0 && errno == EINTR)
+				continue;
+			if (n <= 0) {
+				close(fd);
+				CHECK("export_bin write", 0);
+				return failures;
+			}
+			sent += (size_t)n;
+		}
+		shutdown(fd, SHUT_WR);
+		CHECK("export_bin read",
+			read_http_response(fd, &status, response, sizeof(response)) == 0);
+		close(fd);
+
+		if (pass == 0) {
+			CHECK("export_bin 501 without the callback", status == 501);
+			CHECK("export_bin 501 names not_implemented",
+				strstr(response, "not_implemented") != NULL);
+		} else if (pass == 1) {
+			CHECK("export_bin 200 with the callback", status == 200);
+			/* The route-shadowing detector: handle_iq would answer 200 too. */
+			CHECK("export_bin body carries the path",
+				strstr(response, "\"path\":\"/tmp/isp_export.bin\"") != NULL);
+			CHECK("export_bin body carries the byte count",
+				strstr(response, "\"bytes\":144774") != NULL);
+			CHECK("export_bin body is not the IQ sweep",
+				strstr(response, "_schema") == NULL);
+		} else {
+			CHECK("export_bin 500 when the backend fails", status == 500);
+			CHECK("export_bin 500 points at the log",
+				strstr(response, "venc log") != NULL);
+		}
+	}
+	return failures;
+}
+
 static int test_capabilities_awb_fps_backend_gate(void)
 {
 	int failures = 0;
@@ -2314,10 +2744,12 @@ int test_venc_api(void)
 	failures += test_live_apply_sees_already_committed_config();
 	failures += test_multi_set_url_decodes_values();
 	failures += test_set_rejects_malformed_percent_escape();
+	failures += test_roi_qp_range_is_pm20();
 	failures += test_resilience_preset_preserves_intra_refresh_qp();
 	failures += test_capabilities_emits_ui();
 	failures += test_capabilities_awb_fps_backend_gate();
 	failures += test_capabilities_routes_track_callbacks();
+	failures += test_iq_export_bin_route();
 	failures += test_snapshot_routes();
 	stop_api_test_server();
 	return failures;

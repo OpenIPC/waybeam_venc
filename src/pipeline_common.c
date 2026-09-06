@@ -294,3 +294,147 @@ int pipeline_common_resolve_isp_bin(const char *configured_path,
 		fallback, normalized);
 	return 0;
 }
+
+static uint32_t roi_align_down(uint32_t value, uint32_t align)
+{
+	return value / align * align;
+}
+
+/* Window long enough that one IDR cannot carry it, short enough that a real
+ * collapse is reported within a few seconds.  Two consecutive windows are
+ * required, which is what separates a sustained loss of control from the
+ * 1.43x single-window transient a moving scene produced on the bench. */
+#define RATE_WATCH_WINDOW_US    2000000ULL
+#define RATE_WATCH_TRIP_X100    150u
+#define RATE_WATCH_CLEAR_X100   120u
+#define RATE_WATCH_WINDOWS      2u
+
+void pipeline_common_rate_watch(PipelineRateWatch *rw, const VencConfig *cfg,
+	uint32_t frame_bytes, uint64_t now_us)
+{
+	uint64_t elapsed, delivered_kbps;
+	uint32_t ratio_x100;
+
+	/* cfg->video0.bitrate is read on the encode thread while the httpd
+	 * thread may be committing a new config under g_cfg_mutex.  Deliberately
+	 * unlocked, but NOT because the field is naturally aligned -- alignment
+	 * is not a validity argument in C, and this reads bitrate more than once
+	 * plus several ROI fields that can straddle one commit.
+	 *
+	 * The argument that actually carries the weight is that no concurrently
+	 * committable value changes control flow here.  bitrate == 0 is the only
+	 * one that could (it guards below and divides further down), and
+	 * validation rejects it, defaults set 8192, and /api/v1/defaults commits
+	 * defaults -- so no HTTP path can make the field transition to 0.  The
+	 * residue is a diagnostic that may quote a target or an ROI hint from
+	 * either side of a config change, and the two-window rule bounds even
+	 * that: one window computed against a stale target cannot raise a report
+	 * on its own.  Taking the config mutex once per encoded frame to protect
+	 * a diagnostic would be the worse trade. */
+	if (!rw || !cfg || cfg->video0.bitrate == 0)
+		return;
+
+	if (rw->window_start_us == 0)
+		rw->window_start_us = now_us;
+	rw->window_bytes += frame_bytes;
+
+	/* Unsigned, so a clock that went backwards wraps huge rather than
+	 * negative; treat any implausible span as a restart of the window. */
+	elapsed = now_us - rw->window_start_us;
+	if (now_us < rw->window_start_us) {
+		rw->window_start_us = now_us;
+		rw->window_bytes = 0;
+		return;
+	}
+	if (elapsed < RATE_WATCH_WINDOW_US)
+		return;
+
+	/* bytes * 8 bits / (elapsed us / 1e6) / 1000 == bytes * 8000 / elapsed. */
+	delivered_kbps = (rw->window_bytes * 8000ULL) / elapsed;
+	ratio_x100 = (uint32_t)((delivered_kbps * 100ULL) / cfg->video0.bitrate);
+	rw->window_start_us = now_us;
+	rw->window_bytes = 0;
+
+	if (ratio_x100 >= RATE_WATCH_TRIP_X100) {
+		if (rw->over_windows < 255u)
+			rw->over_windows++;
+		if (rw->over_windows >= RATE_WATCH_WINDOWS && !rw->reported) {
+			rw->reported = 1;
+			if (rw->reports < UINT16_MAX)
+				rw->reports++;
+			fprintf(stderr,
+				"WARNING: encoder delivered %u%% of the %u kbps target "
+				"for %llu s -- rate control has no headroom left\n",
+				ratio_x100, cfg->video0.bitrate,
+				(unsigned long long)
+					((RATE_WATCH_WINDOW_US * RATE_WATCH_WINDOWS)
+						/ 1000000ULL));
+			if (cfg->fpv.roi_enabled && cfg->fpv.roi_qp != 0)
+				fprintf(stderr,
+					"         fpv.roiQp is %+d against a QP ceiling of "
+					"%s: the ROI delta is subtracted from the frame QP, "
+					"so the controller raises the base QP to compensate "
+					"and cannot go past that ceiling.  Reduce |roiQp| or "
+					"raise video0.maxQp.\n",
+					cfg->fpv.roi_qp,
+					cfg->video0.max_qp ? "video0.maxQp" :
+						"the encoder default");
+		}
+	} else if (ratio_x100 <= RATE_WATCH_CLEAR_X100) {
+		if (rw->reported)
+			printf("> Bitrate overrun cleared (%u%% of target)\n",
+				ratio_x100);
+		rw->over_windows = 0;
+		rw->reported = 0;
+	} else if (!rw->reported) {
+		/* The dead band between clear and trip.  Breaking the streak here is
+		 * what makes "two CONSECUTIVE windows" true: without it a benign
+		 * window preserved the count, so two overruns an unbounded time apart
+		 * reported as one sustained episode -- and the worst measured benign
+		 * transient, 1.43x, lands squarely in this band, so that was the
+		 * common case rather than a corner.
+		 *
+		 * Only while !reported.  Once the warning is out, the hysteresis
+		 * between the two thresholds is the point: an episode oscillating in
+		 * the dead band must stay latched until it genuinely clears, or the
+		 * cleared/re-reported pair would flap. */
+		rw->over_windows = 0;
+	}
+}
+
+int pipeline_common_roi_band(uint32_t width, uint32_t height,
+	float center_frac, int qp, int steps, int index,
+	PipelineRoiBand *out)
+{
+	float frac;
+	uint32_t rw, rh, rx;
+	int level;
+
+	if (!out || index < 0 || index >= steps)
+		return -1;
+
+	/* Clamp rather than trust the caller -- see the header comment.  Without
+	 * it, frac outside [0,1] returns success with an underflowed origin or a
+	 * multi-gigabyte width, and a negative frac is undefined behaviour at the
+	 * float-to-unsigned conversion. */
+	if (!(center_frac >= 0.1f))   /* also catches NaN */
+		center_frac = 0.1f;
+	else if (center_frac > 0.9f)
+		center_frac = 0.9f;
+
+	level = index + 1;
+	frac = center_frac + (1.0f - center_frac) *
+		(float)(steps - level) / (float)steps;
+	rw = roi_align_down((uint32_t)(frac * width), 32);
+	rh = roi_align_down(height, 32);
+	rx = roi_align_down((width - rw) / 2, 32);
+	if (rw == 0 || rh == 0)
+		return -1;
+
+	out->x = rx;
+	out->y = 0;
+	out->width = rw;
+	out->height = rh;
+	out->qp = pipeline_common_scale_roi_qp(qp, level, steps);
+	return 0;
+}

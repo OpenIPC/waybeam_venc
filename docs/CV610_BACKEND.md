@@ -72,8 +72,10 @@ verifies the requested mode by reading it back before creating the VI pipe.
 CV610 has a substantially broader vendor encoder surface than the current
 backend exposes: nine declared RC families, multiple P/CRR GOP structures,
 intra refresh, reference prediction, SVC, hierarchical QP, native frame-loss
-and super-frame policies, ROI/QP maps, VUI/user data, and slice/low-delay
-controls. SSC338Q currently has the broader device-proven Waybeam integration.
+and super-frame policies, QP maps, VUI/user data, and slice/low-delay
+controls. (Plain delta-QP **ROI is no longer in that list** -- it landed in
+0.76.0 as `fpv.roi*`; the QP-map and per-frame-ROI halves of the vendor surface
+are still unexposed.) SSC338Q currently has the broader device-proven Waybeam integration.
 
 The evidence levels, live-device readback, exact comparison and deliberately
 deferred controls are documented in

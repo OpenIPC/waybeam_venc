@@ -181,6 +181,29 @@ static int maruko_runner_init(void *opaque)
 	mk_mirror_record_locks_init_public(&ctx->backend);
 	venc_api_set_record_status_fn(maruko_record_status_callback);
 	venc_api_set_record_http_control_supported(true);
+	/* fpv.roi* are MUT_LIVE and were only ever applied by the live path, so
+	 * a craft that carried roiQp in its config booted with every ROI region
+	 * unprogrammed while /api/v1/capabilities advertised the field
+	 * supported.  Measured on the Maruko bench: boot logged the qpDelta
+	 * apply below and no ROI line at all with roiEnabled:true, roiQp:-8 in
+	 * the file; one live set then logged the band immediately.  Star6E has
+	 * always applied it here (star6e_runtime_apply_startup_controls) -- this
+	 * is the missing half, not a new control. */
+	if (ctx->vcfg.fpv.roi_enabled &&
+	    maruko_controls_callbacks()->apply_roi_qp) {
+		/* Not (void): maruko_apply_roi_qp() returns -1 with NO output at
+		 * all when the frame geometry is still zero, which would
+		 * reproduce the exact symptom this call site exists to fix -- a
+		 * boot with roiQp configured and no ROI line in the log.  Same
+		 * reporting as the qpBounds apply below and the CV610 twin. */
+		if (maruko_controls_callbacks()->apply_roi_qp(
+			    ctx->vcfg.fpv.roi_qp) != 0)
+			fprintf(stderr, "WARN: ROI from config not applied "
+				"(qp=%+d steps=%u center=%.2f)\n",
+				ctx->vcfg.fpv.roi_qp,
+				(unsigned)ctx->vcfg.fpv.roi_steps,
+				ctx->vcfg.fpv.roi_center);
+	}
 	if (ctx->vcfg.video0.qp_delta != 0 &&
 	    maruko_controls_callbacks()->apply_qp_delta) {
 		maruko_controls_callbacks()->apply_qp_delta(

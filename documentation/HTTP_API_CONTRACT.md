@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.22.0`
+- `contract_version`: `0.29.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -32,6 +32,16 @@
 | `video0.qpDelta` | true | true | **false** |
 | `video0.minQp` / `maxQp` | true | true | true |
 | `video0.intraRefreshQp` | **false** | **false** | true |
+| `outgoing.sidecarPort` | true | true | true (**from 0.74.0**) |
+| `image.mirror` / `image.flip` | true | true | true (**from 0.75.0**) |
+| `image.rotate` | true | true | **false** |
+| `fpv.roiEnabled` / `roiQp` / `roiSteps` / `roiCenter` | true | true | true (**from 0.25.0**) |
+| `isp.gainMax` / `isp.shutterMaxUs` | true | true | true (**from 0.78.0**) |
+| `isp.sensorBin` | true | true | true (**from 0.81.0**, PQTools `.bin` via libbin.so) |
+| `fpv.roiQp` accepted range | ±20 | ±20 | ±20 (**±30 before 0.79.0**) |
+| `video0.maxQp` interacts with `fpv.roiQp` | yes | yes | yes (**measured**) | 
+| `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** |
+| `outgoing.server` / `outgoing.enabled` mutability | live | live | **live from 0.26.0** (restart_required before) |
 
 `video0.qpDelta` is `false` on CV610 and `video0.intraRefreshQp` is `false` on
 the SigmaStar backends because in each case the encoder accepts the value and
@@ -96,8 +106,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.73.3",
-    "contract_version": "0.22.0",
+    "app_version": "0.81.0",
+    "contract_version": "0.29.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -124,7 +134,7 @@ Response `200`:
       "image": { "mirror": false, "flip": false, "rotate": 0 },
       "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "sliceCount": 1, "resilience": "off", "intraRefreshQp": 0, "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "allowUnixEncoderStall": false },
-      "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
+      "fpv": { "roiEnabled": false, "roiQp": -20, "roiSteps": 2, "roiCenter": 0.4, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
       "debug": { "showOsd": false }
     },
@@ -231,6 +241,7 @@ endpoint just to discover whether it exists:
 |---|---|
 | `iq` | `/api/v1/iq` and `/api/v1/iq/set` are serviced (the backend registers **both** `query_iq_info` and `apply_iq_param`). |
 | `iq_import` | `/api/v1/iq/import` is compiled in (Star6E/Maruko only). |
+| `iq_export_bin` | `/api/v1/iq/export_bin` is serviced (the backend registers `export_isp_bin`; CV610 only). |
 
 Absent `routes` means an older build: treat every route as possibly present
 and fall back to calling it.
@@ -879,6 +890,46 @@ Response `200`:
 {"ok":true,"data":{"param":"colortrans.y_ofst","value":200}}
 {"ok":true,"data":{"param":"colortrans.matrix","value":[23,45,9,1005,987,56,56,977,1015]}}
 ```
+
+### `GET /api/v1/iq/export_bin`
+
+**CV610 only** (`501 not_implemented` elsewhere — the SigmaStar backends
+round-trip IQ as JSON through `/api/v1/iq` and `/api/v1/iq/import`).
+
+Serializes the **live** ISP state into a PQTools `.bin` through the vendor
+`libbin.so`, at the fixed path `/tmp/isp_export.bin`. The destination is fixed
+deliberately: the endpoint is unauthenticated, and a caller-supplied path would
+make it a write-anywhere primitive. Copy the file off with `scp` afterwards.
+
+The written file has the same shape PQTools produces — an ISP parameter image
+of exactly `OT_PQ_GetISPDataTotalLen()` bytes followed by an `OTPQNRX` 3DNR
+section — so it can be fed back through `isp.sensorBin`.
+
+The payload is integrity-checked by the vendor library: a `.bin` cannot be
+edited or spliced in place (one flipped byte returns `0xcb000005`). Produce
+files with PQTools or with this endpoint, and treat them as opaque.
+
+```bash
+curl http://<device-ip>/api/v1/iq/export_bin
+scp root@<device-ip>:/tmp/isp_export.bin .
+```
+
+Response `200`:
+```json
+{"ok":true,"data":{"path":"/tmp/isp_export.bin","bytes":144774}}
+```
+
+`bytes` is the length actually written, so a caller can confirm the write
+without a second round trip; `path` is a constant and on its own is no evidence
+the export happened. The value is `OT_PQ_GetISPDataTotalLen()` plus the 3DNR
+section, which is 144774 on the shipping SDK but is queried, not fixed. If the
+vendor library cannot supply 3DNR parameters the ISP half is exported alone and
+`bytes` is correspondingly smaller.
+
+The file is created with `O_NOFOLLOW` and rejected unless it is a plain,
+single-linked regular file: the path is predictable, `/tmp` is world-writable
+and the endpoint is unauthenticated, so a planted symlink must not be able to
+redirect the daemon's write.
 
 ### `POST /api/v1/iq/import`
 
@@ -1858,7 +1909,7 @@ Behavior:
 
 Endpoints that behave the same on all three backends are omitted. The table
 compares the two SigmaStar implementations; CV610 differences are called out
-in Notes. As of `contract_version: 0.22.0`:
+in Notes. As of `contract_version: 0.29.0`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|
@@ -1870,8 +1921,11 @@ in Notes. As of `contract_version: 0.22.0`:
 | `/api/v1/dual/status`, `/dual/idr` | yes | yes | `/dual/status` always 200 (`active:false` when off, `active:true,channel,bitrate,fps,gop` when on).  `/dual/idr` returns 200 when active, 404 when not. Maruko HTTP registration landed in 0.10.4 — earlier Maruko builds returned 404 from these even when `record.mode=dual` was running. |
 | `/api/v1/dual/set` | yes | **501** | Star6E-only: the underlying `MI_VENC_*ChnAttr` write path binds to `i6_venc_chn`, but Maruko's venc library expects `i6c_venc_chn` (different layout). Maruko returns 501 until the call path is ported. |
 | `/api/v1/iq` and `/api/v1/iq/set` | full (≈45 params) | full (parity in `maruko_iq.c`) | Star6E/Maruko share one IQ table schema. **CV610 also serves these from 0.18.4, in a DIFFERENT shape** — see "CV610 IQ response shape" below. `/api/v1/iq/import` stays Star6E/Maruko-only and 501s on CV610 (advertised as `routes.iq_import:false`). |
-| `/api/v1/awb` | live | live | Both backends register `query_awb_info`. CV610: **501**. |
+| `/api/v1/iq/export_bin` | **501** | **501** | **CV610-only from 0.81.0** (advertised as `routes.iq_export_bin`). Serializes the live ISP to a PQTools `.bin` through the vendor `libbin.so`, at the fixed path `/tmp/isp_export.bin`. The SigmaStar backends round-trip IQ as JSON instead, so they register no `export_isp_bin` callback. |
+| `isp.sensorBin` (`.bin` import) | live, `MI_ISP_*CmdLoadBinFile` | live, same | **CV610 from 0.81.0**, but a DIFFERENT format and library: HiSilicon PQ images via `OT_PQ_BIN_ImportBinData`. The two families are not interchangeable despite the shared field and extension. On CV610 an empty value is a no-op — there is no `/etc/sensors/<sensor>.bin` fallback. |
+| `/api/v1/awb` | live | live | All three backends register `query_awb_info`. CV610 serves `ot_isp_wb_info` plus `ot_isp_exp_info` (the AE's own applied `exp_time`, `a_gain`, `isp_d_gain`, `ave_lum`) — a different payload from the SigmaStar one, and the instrument the `isp.gainMax`/`isp.shutterMaxUs` mapping was verified against. |
 | `/api/v1/ae` | live + `runtime.active_precrop` | live + `runtime.active_precrop` | Both backends now include `runtime.active_precrop` in the AE response (Maruko parity landed in `0.8.4`). |
+| RTP sidecar (`outgoing.sidecarPort`, UDP :5602) | yes | yes | **CV610 from 0.74.0**; before that `src/rtp_sidecar.c` was not compiled into the CV610 binary at all, so the field was accepted, persisted and silently did nothing. CV610 emits the base FRAME plus TRANSPORT_INFO. It has no IMU and no detector, so ATTITUDE and DETECT trailers are never appended; ENC_INFO carries `frame_size_bytes`, `frame_type`, `qp` (the encoder's `h265_info.start_qp`) and `frames_since_idr`; `complexity`, `scene_change` **and `idr_inserted`** stay 0 because the shared scene detector is not compiled in on this backend. **`idr_inserted` is deliberately not produced here** (corrected in 0.81.0, which briefly set it): the field means "the controller *requested* an IDR after this frame", and on the SigmaStar backends the only writer is the scene detector, so there it is disjoint from `frame_type == IDR`. CV610 has no such controller, so setting it on every IDR would duplicate `frame_type` and `FLAG_KEYFRAME` — a ground consumer summing it as "IDR insertions" would read a once-per-GOP static scene as one insertion per second while an identically configured SigmaStar craft reported zero; `gop_state` is 0 on all three backends, as nothing in the tree writes it. **`qp` is CV610-only**: the SigmaStar encoder populates only `refType` in its H.265 stream-info struct — `size`, all eight CU counts, `updAttrCnt` and `startQual` read 0 on the device (dumped on i6 at 0.79.0; the struct offset is correct, since `refType` lands exactly where the header says). Reading `startQual` into the trailer was tried and shipped zeros, so Star6E and Maruko leave `qp` at 0 rather than advertise a value that is always 0. Recovering a per-frame QP there means parsing `slice_qp_delta` out of the slice header. Under `frame-shm://` only `seq_count` is 0 on every backend (the packetizer never runs, so no sequence numbers are consumed); `ssrc`, `rtp_timestamp` and `seq_first` are seeded and non-zero, because the RTP session is gated on the *stream mode* rather than the transport. The trailer carries the ring state. |
 | `/api/v1/transport/status` | yes | yes | Three distinct field sets by transport: `frame-shm://` (ring fields plus `ringLowWaterSlots`/`otherDrops`), `shm://` (packet-ring fields), and UDP/Unix (socket subset). `badAuDrops` appears on every transport. **CV610** serves the same endpoint but emits no `badAuDrops` (no packet-table validation in its stream path); its `frame-shm` branch does carry `ringLowWaterSlots` and `otherDrops`. |
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
@@ -1880,9 +1934,162 @@ in Notes. As of `contract_version: 0.22.0`:
 | `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **live** | Both backends hot-swap the NPU detector on the pipeline thread without respawning video. Star6E uses VPE port 1; Maruko uses SCL port 3 and its drain-while-disable teardown. A model whose reported input geometry disagrees with the configured tap is refused and leaves detection off. |
 | `detect.net_width` / `net_height` | restart | restart | Tap geometry is fixed when the VPE/SCL detector port is created. |
 | `video0.min_qp` / `max_qp` | live | live | RC QP bounds, live and from config at startup on all three. **Maruko gained them in 0.73.0**; before that it reported unsupported. **CV610 from 0.18.4** — it sets the P bounds and the I-frame ceiling, but the I-frame floor is not steerable there (`video0.qp_delta` is not offered on CV610; see Per-Backend Field Support). |
-| `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
+| `fpv.roi_enabled` / `roi_qp` / `roi_steps` / `roi_center` | live | live | Centre-priority horizontal delta-QP bands. **CV610 from 0.76.0** (`ss_mpi_venc_set_roi_attr`); before that the fields were accepted by a config parse, reported `supported:false` and never reached the encoder. All three backends share one band geometry (`pipeline_common_roi_band`). `roi_qp == 0` clears every region regardless of `roi_enabled` — a zero delta is not a region worth programming — and the disabled log line names which of the two caused it. **`roi_qp` and `video0.max_qp` interact**: the delta is subtracted from the frame QP, so CBR raises the base QP roughly 1:1 to pay for it and pins at the RC ceiling once `base_qp + |roi_qp|` passes it — at which point the target is missed by multiples. The `±20` bound is calibrated for the *default* ceiling; measured on CV610 at a fixed `roiQp -20`, `max_qp` 45/40/35 delivered 1.4x / **5.8x** / **12.0x** of target with the frame QP pinned at the configured ceiling. Star6E's default ceiling is **48**, not 51 (`/proc/mi_modules/mi_venc/mi_venc0`: `MaxQp 48 MinQp 12`), so it has three fewer QP of margin than CV610. Since 0.80.0 a sustained overrun is reported in the log rather than left silent. The shipped pair is `roiEnabled:false, roiQp:-20` (**-25 in 0.76.0-0.78.0**), so the flag reads true only when ROI is really running; it previously shipped `true`/`0`, which read as on while every region was cleared. **Maruko applied it only on a live write until 0.76.0** — a value already in the config file was never programmed at boot. |
+| `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.29.0` (additive — CV610 gains PQTools `.bin` import and export):
+    Adds `GET /api/v1/iq/export_bin`, which writes the live ISP state to a
+    PQTools `.bin` at the fixed path `/tmp/isp_export.bin` and answers
+    `{"path":...,"bytes":N}`. CV610-only; the SigmaStar backends register no
+    `export_isp_bin` callback and return **501**, advertised as the new
+    `routes.iq_export_bin` capability flag. The destination is fixed rather
+    than caller-supplied because the endpoint is unauthenticated.
+    Also flips `isp.sensorBin` from unsupported to **live** on CV610 — the
+    field, its mutability and its payload are unchanged, only the set of
+    backends that honour it, so `capabilities.fields[].supported` moves from
+    `false` to `true` there. Device-verified on a Hi3516CV610 + IMX662 bench:
+    a tune built for a different sensor imports cleanly (the format is locked
+    to the chip register map and SDK ISP version, not to the sensor), and an
+    exported file re-imported restores an identical `/api/v1/iq` read-back.
+    A `.bin` is integrity-checked by the vendor library and cannot be edited
+    or spliced in place.
+- `0.28.0` (**narrowing** — `fpv.roi_qp` accepted range `[-30, 30]` -> `[-20, 20]`):
+    a client that sends `±21..±30` now gets **400** where it previously got 200.
+    `roi_qp` is a *relative* delta and H.265 caps QP at 51, so past ±20 it stops
+    being honoured at both ends — and the negative end is expensive rather than
+    merely truncated: CBR pays for the ROI discount by raising the frame's base
+    QP roughly 1:1 with `|roiQp|`, so once `base + |roiQp|` passes 51 the rate
+    controller saturates and loses authority. Measured on a CV610 bench at
+    720p60: `roiQp -30` pinned every frame at `qp 51/51/51` and delivered
+    16976 kbps against a 2829 kbps target (**6.0x**), while `-20` sat at qp 45
+    and held 2802. Reproduced at three targets — the cliff is exactly
+    `base_qp + |roiQp| > 51`. The band width does not move it, only its
+    severity (at `-30`, `roiCenter` 0.6/0.4/0.2 all pinned at 51 and delivered
+    17661/12520/6977 kbps), so there is nothing to bound on that axis instead.
+    Positive `roiQp` is the benign end but truncates just as quietly: at `+30`
+    the base sat at 21.5, so the region wanted 51.5 and got 51.
+  - **A config file is clamped, not rejected.** `load_fpv()` clamps to the new
+    bound at parse time, so a craft already carrying `-30` still boots and
+    lands on `-20`. Only the API path returns 400, so an operator typing `-30`
+    is told rather than reading back a value they did not write.
+  - Shipped default `fpv.roiQp` `-25` -> **`-20`**, so the default is inside
+    the range it documents.
+  - NOT reproduced on Star6E: 1080p60 at both a 19092 and a forced 1500 kbps
+    target held rate at `roiQp` 0/-15/-25/-30. Its sidecar reports `qp=0`, so
+    its rate controller could not be watched directly — treat SigmaStar as
+    unreproduced rather than immune. The bound is applied on all three
+    backends regardless, because the QP ceiling it derives from is an H.265
+    limit, not a vendor one.
+- `0.27.0` (additive — the portable AE ceilings reach CV610): `isp.gain_max`
+    and `isp.shutter_max_us` change from `supported:false` to `supported:true`
+    on CV610 only; both were already `MUT_LIVE` in the shared table, so no
+    mutability changes. They map onto the exposure group `/api/v1/iq` already
+    exposes, with **no unit conversion** — `exp_time_range` is documented
+    "unit: us" and `a_gain_range` "Format:22.10 ... unit: times, 10bit
+    precision", i.e. 1024 == 1x, the same scale the SigmaStar supervisory AE
+    uses. `isp.gain_max` maps to `auto.a_gain_max` (the *analog* ceiling, which
+    is what the name means on the other backends) rather than
+    `auto.sys_gain_max` (the product of analog, sensor-digital and ISP-digital
+    gain).
+  - `0` still means "use the sensor plugin's default" and now restores it: the
+    default is snapshotted before the first write, so clearing a ceiling is not
+    a one-way door.
+  - Both also apply at cold boot, not only on a live write — the ISP is seeded
+    by the sensor plugin, which never sees the config file.
+  - `isp.gain_min`, `isp.shutter_min_us`, `isp.awb_mode` and `isp.awb_ct` stay
+    `supported:false` on CV610 and still return **501**. The floors were simply
+    not measured in this slice. For the AWB pair that is a two-call flow rather
+    than a missing capability: where SigmaStar has one call
+    (`MI_ISP_AWB_SetCTMwbAttr(ct)`), this SDK has
+    `ss_mpi_isp_cal_gain_by_temp()`, which converts Kelvin to r/gr/gb/b gains
+    against the current `ot_isp_wb_attr`; those gains then go back through
+    `set_wb_attr` with `op_type` manual. Calibration-dependent, so it needs the
+    same device measurement every other CV610 field had to clear. Manual white
+    balance on CV610 is reachable today, under its own name, through
+    `/api/v1/iq`'s `wb` group.
+- `0.26.0` (additive — live output retarget reaches CV610): `outgoing.server`
+    and `outgoing.enabled` change from `restart_required` to `live` on CV610
+    only. Both SigmaStar backends already reported `live`; CV610 read the URI
+    once in `cv610_prepare()` and ran `cv610_output_start()` once, so the
+    fields were honestly advertised restart-class. They are now backed by
+    `cv610_apply_server()` / `cv610_apply_output_enabled()`. The callbacks
+    landed BEFORE the mutability widened, not after: the live-apply gate keys
+    on the callback being present, so the reverse order would have advertised
+    `live` while every write was refused.
+
+    **Socket transports switch live; ring transports stay restart-class.** A
+    `udp://` <-> `unix://` change takes effect in place. A write naming
+    `shm://` or `frame-shm://` (or made while a ring is running) is COMMITTED
+    and answered `200` with `"reinit_pending": true`, and the craft respawns
+    onto it — the ring is created once at start and cannot move in place.
+    CV610 deliberately differs from Star6E and Maruko here, which refuse such
+    a write: on this backend `outgoing.server` was restart-required until
+    0.26.0, so refusing would have made the fleet's normal production
+    transport unreachable through the API.
+
+    Clients should therefore treat a `200` with `reinit_pending` on
+    `outgoing.server` as "accepted, applying after respawn", exactly as they
+    already do for restart-class fields.
+
+    **One deliberate divergence:** Star6E drops the encoder to 5 fps while
+    output is disabled. CV610 cannot — `video0.fps` is restart-only there — so
+    a disable gates the send and the encoder keeps running at its configured
+    rate.
+- `0.25.0` (additive — centre-priority ROI reaches CV610): `fpv.roi_enabled`,
+    `fpv.roi_qp`, `fpv.roi_steps` and `fpv.roi_center` flip from
+    `supported:false` to `true` on CV610, which had no `apply_roi_qp` at all —
+    every craft carried an `fpv` block nothing on the board read. Programmed
+    through `ss_mpi_venc_set_roi_attr()`; `ot_venc_roi_attr` is field-for-field
+    `MI_VENC_RoiCfg_t`, so the three backends now share one band geometry.
+    Verified in the bitstream **on CV610 itself**, not by return code and not
+    by inference from a sibling SoC — the SDK call differs per part, and issue
+    #259 is the counter-example where a QP control returned success, logged as
+    applied and read back clean while the picture never moved. CV610 720p100
+    CBR: in-band detail drops 7.4x between `roiQp` -30 and +30, the columns
+    just outside the band move the opposite way, and a repeat of the -30 arm
+    lands within 8.8%. Measured separately on Maruko for the shared band
+    geometry. No wire or field-name change; a client that already renders the
+    CV610 capability map sees four controls ungrey.
+
+    Shipped **defaults** also change, which `/api/v1/defaults` actuates and a
+    freshly provisioned craft reads back: `fpv.roiEnabled` `true` -> **false**
+    and `fpv.roiQp` `0` -> **-25**. The old pair read as "ROI on" while the
+    apply cleared every region (a zero delta is not a region worth
+    programming). Existing crafts are unaffected — their own config values
+    win.
+- `0.24.0` (additive — sensor orientation reaches CV610): `image.mirror` and
+    `image.flip` flip from `supported:false` to `true` on CV610. Both were
+    hardcoded `TD_FALSE` on the VI channel attribute, so an inverted lens mount
+    had no software fix on that board. They are now applied at the **sensor**,
+    through the plugin's `pfn_mirror_flip`, which is where both SigmaStar
+    backends already apply orientation (`MI_SNR_SetOrien`) — so `image.*` means
+    one thing across the fleet and the encoder is never asked to do geometry.
+    Mutability is unchanged (`restart_required` on all three; the sensor is
+    programmed once at bring-up). `image.rotate` does **not** flip and stays
+    `supported:false` on CV610: the decomposition it relies on —
+    `venc_config`'s `load_image()` turning `rotate: 180` into `mirror + flip` —
+    runs on a **file parse and nowhere else**, so a value arriving through
+    `/api/v1/set` is never decomposed and never read by any backend.
+    Advertising it was measured to turn a clean `501` into: accept `90`,
+    persist `90`, raise `reinit_pending`, restart the encoder, then read back
+    `0`. A config file carrying `rotate: 180` still works on all three
+    backends. The SigmaStar backends report it `true` only because they have no
+    per-backend allowlist.
+- `0.23.0` (additive — the RTP sidecar reaches CV610): `outgoing.sidecarPort`
+    flips from `supported:false` to `true` on CV610. `src/rtp_sidecar.c` was
+    never compiled into that binary, so the field was accepted, validated and
+    persisted while no datagram was ever sent — the ground station's attitude
+    and link-log consumers had no source on a CV610 craft, and the per-frame
+    timing probe had nothing to read. No wire change: CV610 emits the same
+    FRAME the SigmaStar backends do. ENC_INFO carries `frame_size_bytes`,
+    `frame_type`, `qp` and `frames_since_idr` (`idr_inserted` is not produced
+    on this backend — see the Backend Support Matrix); `complexity` and
+    `scene_change` stay 0 because the shared scene detector is not compiled in
+    here; `gop_state` is 0 on all three backends, as nothing writes it. ATTITUDE and DETECT are never appended (no IMU, no detector), so a
+    consumer whose only input is the ATTITUDE trailer has no source here. Under `frame-shm://` `seq_count` is 0 on every
+    backend and the other RTP identifiers are seeded non-zero; the session is
+    gated on stream mode, not transport.
 - `0.21.0` (**breaking**, `video0.maxIBytes`/`video0.maxPBytes` removed): the
     per-frame size caps are gone from the config, the capabilities payload and
     both SigmaStar backends. They never imposed the ceiling they named.

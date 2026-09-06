@@ -159,11 +159,6 @@ static int apply_encoder_gop(uint32_t gop_size);
 static int request_idr(void);
 static int request_idr_bootstrap(void);
 
-static uint32_t align_down(uint32_t value, uint32_t align)
-{
-	return value / align * align;
-}
-
 static int apply_rc_qp_delta(const MI_VENC_ChnAttr_t *attr, MI_VENC_RcParam_t *param,
 	int delta)
 {
@@ -679,30 +674,20 @@ static int compute_horizontal_roi(uint32_t width, uint32_t height,
 	float center_frac, int qp, int steps, int index,
 	MI_VENC_RoiCfg_t *roi)
 {
-	float frac;
-	uint32_t rw, rh, rx;
-	int level;
+	PipelineRoiBand band;
 
-	if (!roi || index < 0 || index >= steps)
-		return -1;
-
-	level = index + 1;
-	frac = center_frac + (1.0f - center_frac) *
-		(float)(steps - level) / (float)steps;
-	rw = align_down((uint32_t)(frac * width), 32);
-	rh = align_down(height, 32);
-	rx = align_down((width - rw) / 2, 32);
-	if (rw == 0 || rh == 0)
+	if (!roi || pipeline_common_roi_band(width, height, center_frac, qp,
+	    steps, index, &band) != 0)
 		return -1;
 
 	roi->u32Index = (uint32_t)index;
 	roi->bEnable = 1;
 	roi->bAbsQp = 0;
-	roi->s32Qp = pipeline_common_scale_roi_qp(qp, level, steps);
-	roi->stRect.u32Left = rx;
-	roi->stRect.u32Top = 0;
-	roi->stRect.u32Width = rw;
-	roi->stRect.u32Height = rh;
+	roi->s32Qp = band.qp;
+	roi->stRect.u32Left = band.x;
+	roi->stRect.u32Top = band.y;
+	roi->stRect.u32Width = band.width;
+	roi->stRect.u32Height = band.height;
 	return 0;
 }
 
@@ -712,6 +697,7 @@ static int apply_roi_qp(int qp)
 	uint32_t width = g_star6e_control_ctx.frame_width;
 	uint32_t height = g_star6e_control_ctx.frame_height;
 	int ok = 1;
+	int programmed = 0;
 	uint16_t steps;
 	float center_frac;
 
@@ -720,19 +706,41 @@ static int apply_roi_qp(int qp)
 
 	for (int i = 0; i < PIPELINE_ROI_MAX_STEPS; i++) {
 		MI_VENC_RoiCfg_t roi = {0};
+		MI_S32 cret;
+
 		roi.u32Index = i;
 		roi.bEnable = 0;
-		MI_VENC_SetRoiCfg(g_star6e_control_ctx.venc_chn, &roi);
+		cret = MI_VENC_SetRoiCfg(g_star6e_control_ctx.venc_chn, &roi);
+		/* Checked, not discarded: a refused clear leaves the stale band
+		 * enabled with its previous geometry, so shrinking roiSteps
+		 * would overlap the new bands with the old ones while this
+		 * function logged success. */
+		if (cret != 0) {
+			printf("> ROI[%d] clear failed (ret=0x%08x), stale "
+				"band may still be enabled\n", i,
+				(unsigned)cret);
+			ok = 0;
+		}
 	}
 
 	if (!g_star6e_control_ctx.vcfg ||
 	    !g_star6e_control_ctx.vcfg->fpv.roi_enabled || qp == 0) {
-		printf("> ROI disabled (all regions cleared)\n");
-		return 0;
+		/* Name the cause.  Three different states land here and the old
+		 * single line could not tell them apart, so an operator who set
+		 * roiEnabled:true and left roiQp at 0 read "disabled" as "my
+		 * flag was ignored". */
+		printf("> ROI disabled (%s), %s\n",
+			!g_star6e_control_ctx.vcfg ? "no config bound" :
+			!g_star6e_control_ctx.vcfg->fpv.roi_enabled ?
+				"roiEnabled=false" :
+				"roiQp=0, no delta to apply",
+			ok ? "all regions cleared" :
+				"CLEAR FAILED, see above");
+		return ok ? 0 : -1;
 	}
 
-	if (qp < -30) qp = -30;
-	if (qp > 30) qp = 30;
+	if (qp < -20) qp = -20;
+	if (qp > 20) qp = 20;
 
 	steps = g_star6e_control_ctx.vcfg->fpv.roi_steps;
 	if (steps < 1) steps = 1;
@@ -759,6 +767,16 @@ static int apply_roi_qp(int qp)
 				roi.s32Qp);
 			ok = 0;
 		}
+		programmed++;
+	}
+
+	if (programmed == 0) {
+		/* Every band was skipped as degenerate.  Logging "ROI
+		 * horizontal" here would assert an ROI that does not exist. */
+		printf("> ROI programmed no bands at %ux%u (steps=%u "
+			"center=%.2f)\n", width, height, steps,
+			(double)center_frac);
+		return -1;
 	}
 
 	if (ok) {

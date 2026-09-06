@@ -274,7 +274,7 @@ omitted fields keep their compiled-in defaults.
     "audioPort": 5601, "sidecarPort": 5602
   },
   "fpv":      {
-    "roiEnabled": true, "roiQp": 0, "roiSteps": 2,
+    "roiEnabled": false, "roiQp": -20, "roiSteps": 2,
     "roiCenter": 0.4, "noiseLevel": 0
   },
   "audio":    {
@@ -309,7 +309,10 @@ omitted fields keep their compiled-in defaults.
   userspace cus3a; on Maruko `custom` additionally installs the no-op
   adaptor + supervisory thread for the CPU win), AE rate, gain
   ceiling, AWB mode, aspect-preserving crop.
-- **`image`** — mirror / flip / rotate.
+- **`image`** — mirror / flip / rotate. mirror and flip are applied at the
+  sensor on all three backends. `rotate` is file-level sugar: `load_image()`
+  turns `180` into mirror + flip and anything else into 0, on a config parse
+  only — it is not reachable through `/api/v1/set`.
 - **`video0`** — rate control, fps, resolution, bitrate, GOP,
   per-section QP delta. Video codec is hardcoded H.265 (HEVC).
   Scene-change-triggered IDR (`sceneThreshold`,
@@ -388,7 +391,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.73.3","backend":"star6e","contract_version":"0.22.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.81.0","backend":"star6e","contract_version":"0.29.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -621,7 +624,7 @@ load cleanly; the keys are silently ignored.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `isp.sensor_bin` | string | live | ISP tuning binary path (empty = auto-detect /etc/sensors/&lt;sensor&gt;.bin) |
+| `isp.sensor_bin` | string | live | ISP tuning binary path. On Star6E/Maruko empty auto-detects `/etc/sensors/&lt;sensor&gt;.bin`; on CV610 empty is a no-op (no fallback) and the file is a HiSilicon PQTools `.bin`, not a SigmaStar one. |
 | `isp.ae_engine` | string | restart | `"sdk"` (default) lets the SDK firmware run AE on Star6E and Maruko.  `"custom"` runs userspace cus3a — on Star6E it spins the supervisory AE thread; on Maruko it installs the no-op adaptor + 15 Hz `SetAeParam` thread (~24% sys CPU saving at 120 fps).  Alias: `isp.aeEngine`. |
 | `isp.ae_fps` | uint | restart | Custom 3A processing rate in Hz (default 15) |
 | `isp.gain_max` | uint | live | AE max ISP gain ceiling (0 = use ISP bin default) |
@@ -633,9 +636,9 @@ load cleanly; the keys are silently ignored.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `image.mirror` | bool | restart | Horizontal mirror. Applied at the sensor (`MI_SNR_SetOrien`) once at bring-up. Star6E + Maruko. |
-| `image.flip` | bool | restart | Vertical flip. Applied at the sensor (`MI_SNR_SetOrien`) once at bring-up. Star6E + Maruko. |
-| `image.rotate` | int | restart | Rotation (0, 90, 180, 270) |
+| `image.mirror` | bool | restart | Horizontal mirror. Applied at the sensor once at bring-up — `MI_SNR_SetOrien` on Star6E/Maruko, the sensor plugin's `pfn_mirror_flip` on CV610. All three backends **from 0.75.0**. |
+| `image.flip` | bool | restart | Vertical flip. Applied at the sensor once at bring-up — `MI_SNR_SetOrien` on Star6E/Maruko, the sensor plugin's `pfn_mirror_flip` on CV610. All three backends **from 0.75.0**. |
+| `image.rotate` | int | restart | `180` or `0`. File-level sugar only: `load_image()` turns `180` into `mirror`+`flip` and **anything else into `0`**, on a config parse. Not reachable through `/api/v1/set` — `supported:false` on CV610 for that reason. Star6E + Maruko report it supported because they have no per-backend allowlist. |
 
 #### Video
 
@@ -749,7 +752,8 @@ overshoot.
 | `video0.qp_delta` | yes | yes | **not offered** |
 | `video0.min_qp` / `max_qp` | yes | yes | yes |
 | `video0.intra_refresh_qp` | **inert, not offered** | **inert, not offered** | yes |
-| `outgoing.sidecar_port` | yes | yes | not implemented |
+| `fpv.roi_*` | yes | yes | yes **from 0.76.0** |
+| `outgoing.sidecar_port` | yes | yes | yes **from 0.74.0** |
 
 `video0.intra_refresh_qp` is advertised on CV610 only. It reaches
 `MI_VENC_SetIntraRefresh` on Star6E and Maruko as well, and both log it as
@@ -1269,7 +1273,7 @@ Notes:
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `outgoing.enabled` | bool | live | Enable/disable streaming output |
-| `outgoing.server` | string | live | Destination URI (`udp://ip:port`, `unix://name`, `shm://name`, or `frame-shm://name`) |
+| `outgoing.server` | string | live | Destination URI (`udp://ip:port`, `unix://name`, `shm://name`, or `frame-shm://name`). Live on all three backends — **CV610 from 0.77.0**. A `udp://` ↔ `unix://` change takes effect in place. The ring transports are created once at start and cannot move in place: Star6E and Maruko **refuse** such a write, while CV610 **commits it and respawns**, answering `200` with `reinit_pending` (it was restart-required there until 0.77.0, and refusing would have made `frame-shm://` unreachable through the API) |
 | `outgoing.stream_mode` | string | restart | `"rtp"` or `"compact"` |
 | `outgoing.max_payload_size` | uint16 | restart | Max UDP payload bytes |
 | `outgoing.connected_udp` | bool | restart | Connect UDP socket (applies only to `udp://`) |
@@ -1334,8 +1338,8 @@ audio track). Settable via the config file or the runtime API
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `fpv.roi_enabled` | bool | live | Enable horizontal ROI bands |
-| `fpv.roi_qp` | int | live | Signed ROI delta QP (-30..30, negative = sharper center) |
+| `fpv.roi_enabled` | bool | live | Enable horizontal ROI bands. Ships **off**, paired with a non-zero `roi_qp`, so switching it on has an effect |
+| `fpv.roi_qp` | int | live | Signed ROI delta QP (-20..20, negative = sharper center). **`0` clears every region regardless of `roi_enabled`** — a zero delta is not a region worth programming. Ships at `-20`. **The safe magnitude depends on `video0.maxQp`**: the delta is subtracted from the frame QP, so the controller raises the base QP ~1:1 to compensate and pins at the ceiling once `base + |roiQp|` passes it — at `maxQp 40`, even `-20` delivered 5.8x its target. `±20` is calibrated for the *default* ceiling. Range narrowed from `-30..30` **in 0.79.0**: past `±20` the delta exceeds the encoder's QP range, and a large negative value saturates rate control and overruns the bitrate target. All three backends **from 0.76.0** (CV610 had no implementation before it) |
 | `fpv.roi_steps` | uint16 | live | Number of horizontal bands (1-4) |
 | `fpv.roi_center` | double | live | Center band width ratio (0.1-0.9) |
 | `fpv.noise_level` | int | restart | 3DNR noise reduction level |

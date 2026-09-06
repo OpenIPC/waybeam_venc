@@ -7,7 +7,7 @@
  * and fails if they drift.  0.73.0 shipped with the document on 0.22.0 and the
  * code still answering 0.21.0, so every craft advertised a contract it was not
  * serving. */
-#define VENC_CONTRACT_VERSION "0.22.0"
+#define VENC_CONTRACT_VERSION "0.29.0"
 #include "venc_config.h"
 
 #ifdef __cplusplus
@@ -85,11 +85,19 @@ typedef struct {
 	 * backend has no zoom path. */
 	int (*apply_zoom)(double pct, double x, double y);
 	/* Reload the ISP tuning bin (isp.sensor_bin) on the running pipeline.
-	 * Empty path falls back to /etc/sensors/<sensor>.bin.  Returns 0 on
+	 * Empty path falls back to /etc/sensors/<sensor>.bin on the SigmaStar
+	 * backends; CV610 has no such convention and treats empty as a no-op,
+	 * and its file is a HiSilicon PQTools .bin, not a SigmaStar one.
+	 * Returns 0 on
 	 * success (or no-op when the resolved path already matches the
 	 * last-loaded one), -1 on resolve/load error.  NULL when the backend
 	 * cannot reload bins without a full restart. */
 	int (*apply_isp_bin)(const char *path);
+	/* Serialize the live ISP state into a PQTools `.bin` at `path`,
+	 * overwriting it.  Returns the byte count written, -1 on failure.  NULL when
+	 * the backend has no such on-disk format -- the SigmaStar backends
+	 * round-trip IQ as JSON instead (see /api/v1/iq/import). */
+	int (*export_isp_bin)(const char *path);
 	/* Live-update the MJPEG snapshot channel q-factor (1..99).  Hits
 	 * MI_VENC_SetChnAttr on the running snapshot channel — no pipeline
 	 * reinit, no buffer reallocation.  Returns 0 on success, -1 on
@@ -155,6 +163,10 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg);
  * /api/v1/restart, /api/v1/defaults, and MUT_RESTART /api/v1/set
  * all enqueue the same request. */
 void venc_api_request_reinit(void);
+/** Monotonic count of reinit requests.  Sample it around an apply to learn
+ *  whether THAT apply asked for a respawn; the boolean latch cannot say, since
+ *  it shows no transition when one is already pending. */
+unsigned venc_api_reinit_seq(void);
 bool venc_api_get_reinit(void);
 void venc_api_clear_reinit(void);
 

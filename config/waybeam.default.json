@@ -66,8 +66,8 @@
     "bareAlias": true
   },
   "fpv": {
-    "roiEnabled": true,
-    "roiQp": 0,
+    "roiEnabled": false,
+    "roiQp": -20,
     "roiSteps": 2,
     "roiCenter": 0.4,
     "noiseLevel": 0

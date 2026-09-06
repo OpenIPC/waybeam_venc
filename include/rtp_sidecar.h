@@ -134,7 +134,16 @@ typedef struct {
 typedef struct {
 	uint32_t frame_size_bytes; /* encoded frame bytes                        */
 	uint8_t  frame_type;       /* RTP_SIDECAR_FRAME_*                        */
-	uint8_t  qp;               /* start QP / closest available per-frame QP  */
+	uint8_t  qp;               /* start QP / closest available per-frame QP.
+	                            * CV610 only.  SigmaStar leaves this 0 and
+	                            * cannot do better: its encoder fills just
+	                            * refType in the H.265 stream-info struct --
+	                            * size, every CU count, updAttrCnt and
+	                            * startQual all read 0 (device-dumped on
+	                            * i6, 0.79.0).  The struct offset is right;
+	                            * the driver simply does not populate them.
+	                            * A per-frame QP there means parsing
+	                            * slice_qp_delta out of the slice header.   */
 	uint8_t  complexity;       /* 0-255 scene complexity estimate            */
 	uint8_t  scene_change;     /* 1 = scene spike detected                   */
 	uint8_t  gop_state;        /* GopState enum value                        */

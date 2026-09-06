@@ -38,6 +38,13 @@ CV610_SDK_INC ?= ../openhisilicon
 CV610_SDK_LIB ?= ../firmware/output/target/usr/lib
 CV610_CC_SUBMAKE := $(if $(findstring /,$(CV610_CC)),$(abspath $(CV610_CC)),$(CV610_CC))
 
+# Vendor PQ library, needed for isp.sensorBin and /api/v1/iq/export_bin on
+# CV610.  It is NOT in this repo: it is a third-party blob whose licensing is
+# the vendor's, so `make stage` copies it when the path resolves and says so
+# when it does not.  A craft without it boots normally; the import warns and
+# no-ops.  Override with CV610_PQ_LIB=/path/to/libbin.so.
+CV610_PQ_LIB ?= ../hisilicon/vendor/pq/libbin.so
+
 OUT_DIR := out/$(SOC_BUILD)
 OBJ_DIR := $(OUT_DIR)/obj
 TARGET := $(OUT_DIR)/waybeam
@@ -67,6 +74,7 @@ CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
 	src/cv610_encoder_config.c \
 	src/cv610_iq.c \
 	src/cv610_modes.c \
+	src/cv610_pq_bin.c \
 	src/cv610_jpeg.c \
 	src/cv610_pipeline.c src/cv610_validation.c src/backend.c \
 	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
@@ -76,7 +84,7 @@ CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
 	src/framing_kalman.c src/attitude_est.c src/debug_osd.c \
 	src/debug_osd_draw.c lib/cJSON.c \
 	src/h26x_util.c src/h26x_param_sets.c src/rtp_packetizer.c \
-	src/hevc_rtp.c src/rtp_session.c src/output_socket.c \
+	src/hevc_rtp.c src/rtp_session.c src/rtp_sidecar.c src/output_socket.c \
 	src/venc_frame_ring.c src/mdns_wire.c src/mdns_beacon.c \
 	src/device_id.c src/venc_respawn.c
 # Image-stabilization framing module (Star6E).  STAB=1 (default) compiles it
@@ -378,6 +386,17 @@ stage: build qr-decode
 		chmod +x $(OUT_DIR)/load-cv610-online; \
 		cp -f config/waybeam-cv610-platform.conf \
 			$(OUT_DIR)/waybeam-cv610.conf; \
+		if ls iq-profiles/cv610-bin/*.bin >/dev/null 2>&1; then \
+			mkdir -p $(OUT_DIR)/isp-bins; cp -f iq-profiles/cv610-bin/*.bin $(OUT_DIR)/isp-bins/; \
+		fi; \
+		if [ -f "$(CV610_PQ_LIB)" ]; then \
+			mkdir -p $(OUT_DIR)/lib; cp -f "$(CV610_PQ_LIB)" $(OUT_DIR)/lib/libbin.so; \
+			echo "  stage: libbin.so from $(CV610_PQ_LIB)"; \
+		else \
+			echo "  stage: NOTE no libbin.so at $(CV610_PQ_LIB) -- isp.sensorBin"; \
+			echo "         and /api/v1/iq/export_bin will no-op on the craft."; \
+			echo "         Set CV610_PQ_LIB to stage it."; \
+		fi; \
 	fi
 
 print-config:
@@ -435,7 +454,7 @@ TEST_LIB_SRCS := src/qr_scan.c tools/qr/waybeam_qr_format.c \
 	tools/qr/quirc/identify.c tools/qr/quirc/version_db.c \
 	src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/maruko_video.c src/maruko_output.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/venc_rec_writer.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c src/maruko_scl_ports.c lib/cJSON.c
 
-$(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/h26x_param_sets.h include/hevc_rtp.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h include/venc_frame_ring.h
+$(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/venc_api.h include/h26x_param_sets.h include/hevc_rtp.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h include/venc_frame_ring.h
 	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $@
 
 $(CV610_VALIDATION_TEST): tests/test_cv610_validation.c src/cv610_validation.c \

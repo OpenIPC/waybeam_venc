@@ -12,6 +12,18 @@
  * directly, so the attribute structs are the SDK's own types and the field
  * table is built from offsetof() rather than hand-computed offsets. */
 
+#include <stdint.h>
+
+/** The ISP's AE ceilings as the sensor plugin seeded them, latched on the
+ *  first apply so that clearing a ceiling back to 0 is not a one-way door.
+ *  Owned by the caller -- the CV610 runner keeps one in its context -- so
+ *  this module adds no global mutable state. */
+typedef struct {
+	uint32_t gain_max;
+	uint32_t exp_time_max;
+	int      valid;
+} Cv610IqAeDefaults;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -29,6 +41,23 @@ char *cv610_iq_query(void);
  *  no visible effect.
  *  Returns 0 on success, -1 on unknown name, bad value, or an MPI error. */
 int cv610_iq_set(const char *param, const char *value);
+
+/** Apply the portable AE ceilings, in the fleet-wide units.
+ *  `gain` is analog sensor gain in 22.10 fixed point (1024 == 1x) and maps to
+ *  exposure.auto.a_gain_max; `us` is microseconds and maps to
+ *  exposure.auto.exp_time_max.  Neither needs a unit conversion -- that is
+ *  why they are wired rather than approximated.
+ *  0 restores the value the sensor plugin seeded, captured on the first call
+ *  so that clearing a ceiling is not a one-way door.
+ *  Returns 0 on success, -1 when the ISP is not running or the MPI rejects
+ *  the write. */
+/** Drop the cached cold-boot AE ceilings.
+ *  Call after anything that rewrites the ISP's exposure attributes behind
+ *  this module's back -- a PQTools .bin import does exactly that. */
+void cv610_iq_forget_ae_defaults(Cv610IqAeDefaults *d);
+
+int cv610_iq_set_gain_max(Cv610IqAeDefaults *d, uint32_t gain);
+int cv610_iq_set_shutter_max_us(Cv610IqAeDefaults *d, uint32_t us);
 
 /** Query the AWB loop's applied result plus the exposure that selected it.
  *  Returns malloc'd JSON, caller frees.  NULL when the ISP is not running.

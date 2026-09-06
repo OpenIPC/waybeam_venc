@@ -235,6 +235,9 @@ void venc_api_set_sensor_info(int pad, int mode_index, int forced_pad)
 /* ── Reinit flag (shared with backend via accessors) ─────────────────── */
 
 static volatile sig_atomic_t g_reinit = 0;
+/* Monotonic count of reinit requests.  Only the single httpd dispatch thread
+ * writes it, and only via venc_api_request_reinit(). */
+static volatile sig_atomic_t g_reinit_seq = 0;
 
 /* ── Record control flags ────────────────────────────────────────────── */
 
@@ -254,6 +257,16 @@ static bool g_record_http_control_supported;
 void venc_api_request_reinit(void)
 {
 	g_reinit = 1;
+	/* Bumped alongside the latch because the latch alone cannot answer "did
+	 * THIS apply ask for a respawn".  A caller that samples the boolean sees
+	 * no transition when a reinit is already pending from an earlier request,
+	 * which is exactly the case the persistence guard below exists for. */
+	g_reinit_seq++;
+}
+
+unsigned venc_api_reinit_seq(void)
+{
+	return (unsigned)g_reinit_seq;
 }
 
 bool venc_api_get_reinit(void)
@@ -806,8 +819,13 @@ static int cv610_field_is_restart_only(const char *canonical_key)
 {
 	static const char *const restart_only[] = {
 		"video0.fps",        /* pipeline fps, MIPI raw_bit, RTP clock */
-		"outgoing.enabled",  /* output_start() runs once, in cv610_init */
-		"outgoing.server",   /* URI parsed in cv610_prepare */
+		/* outgoing.enabled and outgoing.server LEFT this list in 0.77.0,
+		 * once cv610_apply_output_enabled() and cv610_apply_server()
+		 * existed to honour them.  Order matters and is not cosmetic:
+		 * live_group_supported_for_cfg() gates LIVE_GROUP_OUTGOING on
+		 * those callbacks being present, so widening first would have
+		 * advertised `live` in /api/v1/capabilities while every write
+		 * was rejected -- the exact lie this list exists to prevent. */
 		"audio.mute",        /* acodec gain set once, at audio start */
 	};
 	size_t i;
@@ -858,6 +876,84 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"system.web_port", "system.verbose",
 			"sensor.index", "sensor.mode",
 			"isp.keep_aspect",
+			/* The two portable AE ceilings, mapped onto the exposure
+			 * group cv610_iq.c already owns.  Wired because the units
+			 * match exactly and need no conversion: exp_time_range is
+			 * documented "unit: us" and a_gain_range "Format:22.10 ...
+			 * unit: times, 10bit precision", i.e. 1024 == 1x, which is
+			 * the scale the SigmaStar supervisory AE uses.  The live
+			 * board confirms the format independently -- sys_gain_max
+			 * 1630616 == a_gain_max 407654 x ispd_gain_max 4096 / 1024.
+			 * Listed because the ceilings MOVE THE AE LOOP on this
+			 * part, not merely because the write returns success.
+			 * Measured on a CV610 bench, sc4336p, ave_lum 43: capping
+			 * shutterMaxUs to 4000 pulled the applied exp_time from
+			 * 16560 to exactly 4000 us and the AE raised a_gain 1497
+			 * -> 6611 to hold the same luma, and capping gainMax to
+			 * 2048 clamped the applied a_gain to 2043 while the ISP
+			 * took up the slack in DIGITAL gain (isp_d_gain 1024 ->
+			 * 1948) -- which is also what shows the field is the
+			 * ANALOG ceiling rather than the system one.  Clearing
+			 * each back to 0 restored 873800 / 407654 and the
+			 * original applied values, and a restart with 6000/8192
+			 * in the file came up honouring both.  All readings from
+			 * /api/v1/awb, which reports the AE's own output.
+			 *
+			 * isp.gain_min / isp.shutter_min_us are deliberately ABSENT:
+			 * the floors are a separate pair and this slice did not
+			 * measure them.  isp.awb_mode / isp.awb_ct are absent for a
+			 * different reason.  ct_manual means "pin white balance to a
+			 * colour temperature", and unlike SigmaStar -- one call,
+			 * MI_ISP_AWB_SetCTMwbAttr(ct) -- this SDK has no single CT
+			 * setter.  It has ss_mpi_isp_cal_gain_by_temp() (ss_mpi_awb.h,
+			 * present in libss_mpi_awb.so), which converts Kelvin to
+			 * r/gr/gb/b gains against the CURRENT ot_isp_wb_attr; those
+			 * gains then go back through set_wb_attr with op_type manual.
+			 * A two-call flow whose result depends on the sensor's AWB
+			 * calibration, and this slice neither implemented nor measured
+			 * it -- so the pair stays unsupported pending measurement, the
+			 * same bar every other entry in this list had to clear.
+			 * Manual white balance is reachable today, under its own name,
+			 * through /api/v1/iq's "wb" group. */
+			"isp.gain_max", "isp.shutter_max_us",
+			/* The PQTools `.bin` path, applied through libbin.so by
+			 * src/cv610_pq_bin.c -- live via apply_isp_bin and once at
+			 * cold boot in cv610_init().  Listed under the same bar as
+			 * the AE ceilings above: it MOVES THE ISP on this part, not
+			 * merely returns success.  Measured on .181 (IMX662) with a
+			 * vendor tune built for a DIFFERENT sensor: the import moved
+			 * 39 of the 102 fields /api/v1/iq reads back, across ten
+			 * groups, and the operator saw the picture go red -- which is
+			 * the point, since a foreign tune brings its own CCM and AWB.
+			 * Export round-trips: importing our own exported file
+			 * restored a read-back identical to the pre-import one.
+			 *
+			 * Unlike the SigmaStar backends there is no
+			 * /etc/sensors/<sensor>.bin fallback, so an empty value is a
+			 * no-op rather than a resolve -- which is also what makes the
+			 * cold-boot apply free on a craft that names no bin. */
+			"isp.sensor_bin",
+			/* Applied at the SENSOR by apply_sensor_orientation(),
+			 * through the plugin's pfn_mirror_flip — the same place
+			 * both SigmaStar backends apply orientation, so image.*
+			 * means one thing across the fleet.  Both are already
+			 * MUT_RESTART in the shared table, so no
+			 * cv610_field_is_restart_only() entry and no mutability
+			 * widening.
+			 *
+			 * image.rotate is deliberately ABSENT, though the pair it
+			 * decomposes into is here.  The decomposition lives in
+			 * venc_config's load_image(), which runs on a FILE parse
+			 * and nowhere else, so it never sees a value that arrives
+			 * through /api/v1/set.  Listing it would turn today's
+			 * clean 501 into: accept 90, persist 90, raise
+			 * reinit_pending, restart the encoder, and read back 0
+			 * once load_image() coerces it — measured on .181.  A
+			 * config file carrying rotate:180 still works, because
+			 * load_image() decomposes it before the backend reads
+			 * mirror/flip; the field reads unsupported because no
+			 * backend reads ROTATE, which is what this list means. */
+			"image.mirror", "image.flip",
 			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size",
 			"video0.slice_count", "video0.resilience",
@@ -873,10 +969,32 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			 * CBR cannot hold its target in a noise-dominated scene
 			 * without room to raise QP. */
 			"video0.min_qp", "video0.max_qp",
+			/* Read by cv610_apply_roi_qp(), live and at cold boot.
+			 * Listed only because the delta reaches the encoder and
+			 * moves the picture ON THIS PART -- a measurement on a
+			 * sibling SoC would not qualify it, because the SDK call
+			 * differs (ss_mpi_venc_set_roi_attr here,
+			 * MI_VENC_SetRoiCfg there).  Measured on a CV610 bench,
+			 * 720p100 CBR: with a 384-px band at x=448, decoded
+			 * detail inside the band drops 7.4x between roiQp -30 and
+			 * +30 while the columns just outside it move the opposite
+			 * way, and a repeat of the -30 arm lands within 8.8%.
+			 * That measurement is the bar for this list -- issue #259
+			 * is the counter-example, where an SDK call returned
+			 * success, logged as applied and read back clean while
+			 * the bitstream never moved. */
+			"fpv.roi_enabled", "fpv.roi_qp",
+			"fpv.roi_steps", "fpv.roi_center",
 			"outgoing.enabled", "outgoing.server",
 			"outgoing.max_payload_size", "outgoing.audio_port",
 			"outgoing.connected_udp",
 			"outgoing.allow_unix_encoder_stall",
+			/* Read once by cv610_output_start(), which binds the
+			 * sidecar listener before the transport dispatch.  The
+			 * shared table already marks it MUT_RESTART, so there is
+			 * no cv610_field_is_restart_only() entry to add and no
+			 * mutability widening here. */
+			"outgoing.sidecar_port",
 			"audio.enabled", "audio.mute",
 			/* Snapshot: the JPEG channel is a second bind target on
 			 * the main stream's VPSS output, so it inherits that
@@ -900,9 +1018,22 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 
 		for (i = 0; i < sizeof(supported) / sizeof(supported[0]); ++i) {
 			if (strcmp(canonical_key, supported[i]) == 0)
-				return 1;
+				break;
 		}
-		return 0;
+		if (i == sizeof(supported) / sizeof(supported[0]))
+			return 0;
+
+		/* One entry is conditional on more than the backend name.
+		 * isp.sensor_bin needs the vendor PQ blob, which is not shipped in
+		 * the source tree, so a craft flashed without it must not advertise
+		 * the field as supported and then 501 every write.  cv610_init drops
+		 * apply_isp_bin when the probe fails, so the callback is the truth --
+		 * the same thing routes.iq_export_bin already tracks.  Before
+		 * registration g_cb is NULL; answer from the list then, since no
+		 * request can be in flight yet. */
+		if (g_cb && strcmp(canonical_key, "isp.sensor_bin") == 0)
+			return g_cb->apply_isp_bin != NULL;
+		return 1;
 	}
 
 	/* video0.intra_refresh_qp reaches MI_VENC_SetIntraRefresh on Star6E and
@@ -1106,11 +1237,15 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 			return "ae_engine must be 'sdk'";
 	}
 	if (strcmp(key, "isp.sensor_bin") == 0) {
-		/* Empty string opts into the /etc/sensors/<sensor>.bin fallback;
+		/* Empty string opts into the /etc/sensors/<sensor>.bin fallback on
+		 * the SigmaStar backends -- on CV610 it is a no-op, and there is no
+		 * live way to un-apply an imported image short of importing another;
 		 * a non-empty path must point at a readable file or the live
 		 * apply callback would silently fall back to auto-detect (or to
 		 * the previously-loaded bin via dedup) while the persisted
-		 * config still names a bogus path. */
+		 * config still names a bogus path.  Note the check cannot help a
+		 * path that was readable at set time and is gone by the next boot,
+		 * which is what a bin left in tmpfs does. */
 		if (cfg->isp.sensor_bin[0] &&
 		    access(cfg->isp.sensor_bin, R_OK) != 0)
 			return "isp.sensor_bin path is not readable";
@@ -1221,8 +1356,25 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 				"(0 = stop the userspace AWB loop)";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
-		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
-			return "roi_qp must be in range [-30, 30]";
+		/* +-20, not +-30.  Beyond 20 the delta stops being honoured at
+		 * BOTH ends, because it is a RELATIVE delta and H.265 caps QP at
+		 * 51.  Negative is the expensive end: CBR pays for the ROI
+		 * discount by raising the frame's base QP roughly 1:1 with
+		 * |roiQp|, so once base + |roiQp| passes 51 the rate controller
+		 * saturates -- measured on a CV610 bench at 720p60, roiQp -30
+		 * pinned every frame at qp 51/51/51 and delivered 16976 kbps
+		 * against a 2829 kbps target, a 6x overrun, while -20 landed at
+		 * qp 45 and held the target at 2802.  Positive is the benign end
+		 * but truncates just as quietly: at +30 the base sat at 21.5, so
+		 * the region wanted 51.5 and got 51.  The band width does NOT
+		 * move the cliff, only its severity -- at -30, roiCenter 0.6 /
+		 * 0.4 / 0.2 all pinned at 51 and delivered 17661 / 12520 / 6977
+		 * kbps -- so there is nothing to clamp on that axis instead. */
+		if (cfg->fpv.roi_qp < -20 || cfg->fpv.roi_qp > 20)
+			return "roi_qp must be in range [-20, 20] (beyond that the "
+				"delta exceeds the encoder's QP range: a large "
+				"negative value saturates rate control and overruns "
+				"the bitrate target)";
 	}
 	if (strcmp(key, "fpv.roi_steps") == 0) {
 		if (cfg->fpv.roi_steps < 1 ||
@@ -1605,7 +1757,7 @@ static int make_single_set_success_json(const char *field_key,
 }
 
 static int make_multi_live_set_success_json(const SetQueryParam *params,
-	size_t count, char **out_json)
+	size_t count, int reinit_requested, char **out_json)
 {
 	cJSON *root;
 	cJSON *data;
@@ -1622,6 +1774,12 @@ static int make_multi_live_set_success_json(const SetQueryParam *params,
 
 	cJSON_AddBoolToObject(root, "ok", 1);
 	data = cJSON_AddObjectToObject(root, "data");
+	/* Same contract as the single-field response: a batch whose apply asked
+	 * for a respawn has to say so, or a caller batching outgoing.server with
+	 * anything else is told the whole set went live while the craft is about
+	 * to restart under it. */
+	if (reinit_requested)
+		cJSON_AddBoolToObject(data, "reinit_pending", 1);
 	applied = cJSON_AddArrayToObject(data, "applied");
 
 	for (i = 0; i < count; i++) {
@@ -2422,7 +2580,7 @@ static int apply_live_group_sequence_locked(const LiveApplyGroup *group_order,
 
 static int make_live_set_response_locked(const VencConfig *cfg,
 	const SetQueryParam *params, size_t param_count, int single_response,
-	int *status_code, char **response_json)
+	int reinit_requested, int *status_code, char **response_json)
 {
 	if (!cfg || !params || param_count == 0 || !status_code || !response_json)
 		return -1;
@@ -2438,14 +2596,21 @@ static int make_live_set_response_locked(const VencConfig *cfg,
 				response_json);
 		}
 
-		rc = make_single_set_success_json(params[0].key, jval, 0,
-			response_json);
+		/* Report a respawn the apply itself asked for.  A backend can
+		 * accept a live-class field and still need a restart to honour
+		 * it -- CV610's apply_server() does exactly that for the ring
+		 * transports, committing the value and calling
+		 * venc_api_request_reinit() rather than refusing.  Answering a
+		 * flat "ok" there would tell the operator the change was live
+		 * when the craft is about to respawn under them. */
+		rc = make_single_set_success_json(params[0].key, jval,
+			reinit_requested, response_json);
 		free(jval);
 		if (rc != 0)
 			return -1;
 	} else {
 		if (make_multi_live_set_success_json(params, param_count,
-		    response_json) != 0) {
+		    reinit_requested, response_json) != 0) {
 			return -1;
 		}
 	}
@@ -2465,6 +2630,12 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	VencConfig new_cfg;
 	VencConfig actual_cfg;
 	int rc;
+	/* g_reinit is a LATCH the runtime consumes on its own schedule, so it
+	 * can already be set from an earlier request when this one arrives.
+	 * Only a false->true transition across THIS apply means this write is
+	 * the one that needs a respawn -- reading the flag absolutely made an
+	 * unrelated live set report reinit_pending. */
+	unsigned reinit_seq_before = venc_api_reinit_seq();
 
 	rc = collect_live_groups(params, param_count, group_order, &group_count,
 		&touched, status_code, response_json);
@@ -2514,7 +2685,9 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	}
 
 	rc = make_live_set_response_locked(&actual_cfg, params, param_count,
-		single_response, status_code, response_json);
+		single_response,
+		(venc_api_reinit_seq() != reinit_seq_before) ? 1 : 0,
+		status_code, response_json);
 	if (rc != 0) {
 		pthread_mutex_unlock(&g_cfg_mutex);
 		return rc;
@@ -2533,7 +2706,26 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	 * automated writers (waybeam-link adaptive actuation); a later
 	 * persisting /set snapshots the whole running config, volatile
 	 * changes included (one config struct, by design). */
-	if (persist)
+	/* `persist || reinit` is the condition, not `persist`.
+	 *
+	 * /api/v1/live/set passes persist=0 by design, and that is safe for a
+	 * change that took effect in the running process.  It is NOT safe once a
+	 * backend's apply has asked for a respawn: the respawn re-execs and
+	 * reloads /etc/waybeam.json, so an unpersisted value is silently
+	 * discarded by a restart the caller did not ask for.  The restart-class
+	 * path already refuses this shape outright ("restart-class field
+	 * requires persistence; use /api/v1/set"); a backend-level restart class
+	 * reaches the same hazard through the live path, so the value is written
+	 * out instead of lost.
+	 *
+	 * The test is a sequence number, not a false->true transition on the
+	 * latch.  The latch is consumed by the main loop, which can be a whole
+	 * second away (its select() carries a 1 s timeout), so a second live/set
+	 * of a restart-class field while the first respawn is still pending saw
+	 * no transition, skipped this write, and was then discarded by the
+	 * re-exec that reloaded the FIRST value -- silently, in exactly the
+	 * situation this guard was written to cover. */
+	if (persist || venc_api_reinit_seq() != reinit_seq_before)
 		(void)venc_api_save_config_to_disk(&actual_cfg);
 	return 0;
 }
@@ -3013,6 +3205,10 @@ static int handle_capabilities(int fd, const HttpRequest *req, void *ctx)
 #else
 	cJSON_AddBoolToObject(routes, "iq_import", 0);
 #endif
+	/* Tracks the callback rather than a compile-time backend test, which is
+	 * what tests/test_venc_api.c asserts the value must do. */
+	cJSON_AddBoolToObject(routes, "iq_export_bin",
+		(g_cb && g_cb->export_isp_bin) ? 1 : 0);
 
 	cJSON *fields = cJSON_AddObjectToObject(data, "fields");
 	for (size_t i = 0; i < FIELD_COUNT; i++) {
@@ -3262,6 +3458,38 @@ static int handle_iq_import(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_error(fd, 501, "not_implemented",
 		"IQ import not available on this backend");
 #endif
+}
+
+/* Fixed export destination.  /tmp is tmpfs on these boards, which is the
+ * right lifetime for a file the operator is about to copy off. */
+#define VENC_ISP_BIN_EXPORT_PATH "/tmp/isp_export.bin"
+
+static int handle_iq_export_bin(int fd, const HttpRequest *req, void *ctx)
+{
+	char body[128];
+	int written;
+
+	(void)req; (void)ctx;
+	if (!g_cb || !g_cb->export_isp_bin) {
+		return httpd_send_error(fd, 501, "not_implemented",
+			"ISP bin export not available on this backend");
+	}
+	/* The destination is fixed rather than taken from the query string: this
+	 * endpoint is unauthenticated, and a caller-supplied path would make it a
+	 * write-anywhere primitive.  Copy the file off afterwards. */
+	written = g_cb->export_isp_bin(VENC_ISP_BIN_EXPORT_PATH);
+	if (written <= 0) {
+		/* Every distinct cause -- no libbin.so, a refused tuning connect, a
+		 * short write on a full /tmp -- is named in the venc log; the HTTP
+		 * layer has no channel for it. */
+		return httpd_send_error(fd, 500, "internal_error",
+			"ISP bin export failed; see the venc log for the reason");
+	}
+	/* Echo the byte count so a caller can confirm the write it is about to
+	 * scp off, rather than trusting a constant path string. */
+	snprintf(body, sizeof(body),
+		"{\"path\":\"%s\",\"bytes\":%d}", VENC_ISP_BIN_EXPORT_PATH, written);
+	return httpd_send_ok(fd, body);
 }
 
 static int handle_ae(int fd, const HttpRequest *req, void *ctx)
@@ -4204,8 +4432,13 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/defaults",     handle_defaults, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/ae",           handle_ae, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/awb",          handle_awb, NULL);
+	/* Longer prefix first — routing is first-match prefix and accepts '/' as
+	 * a boundary, so "/api/v1/iq" would otherwise swallow any longer
+	 * "/api/v1/iq/..." route registered after it and answer that request with
+	 * the full ISP sweep instead of 404. */
 	r |= venc_httpd_route("GET", "/api/v1/iq/set",       handle_iq_set, NULL);
 	r |= venc_httpd_route("POST", "/api/v1/iq/import",  handle_iq_import, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/iq/export_bin", handle_iq_export_bin, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/iq",           handle_iq, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/modes",        handle_modes, NULL);
 	r |= venc_httpd_route("GET", "/metrics/isp",         handle_isp_metrics, NULL);

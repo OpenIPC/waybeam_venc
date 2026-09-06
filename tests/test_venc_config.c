@@ -68,8 +68,10 @@ static int test_defaults(void)
 	CHECK("defaults_allow_unix_encoder_stall",
 		cfg.outgoing.allow_unix_encoder_stall == false);
 
-	CHECK("defaults_roi_on", cfg.fpv.roi_enabled == true);
-	CHECK("defaults_roi_qp", cfg.fpv.roi_qp == 0);
+	/* Off, but pre-loaded with a delta that bites when switched on -- the
+	 * two halves of the shipped pair are asserted together on purpose. */
+	CHECK("defaults_roi_off", cfg.fpv.roi_enabled == false);
+	CHECK("defaults_roi_qp", cfg.fpv.roi_qp == -20);
 	CHECK("defaults_roi_steps", cfg.fpv.roi_steps == 2);
 	CHECK("defaults_noise", cfg.fpv.noise_level == 0);
 
@@ -345,6 +347,46 @@ static int test_load_full_json(void)
 	CHECK("load_roi_qp", cfg.fpv.roi_qp == -18);
 	CHECK("load_roi_steps", cfg.fpv.roi_steps == 2);
 	CHECK("load_noise", cfg.fpv.noise_level == 5);
+
+	/* A craft already carrying the old -30 must still BOOT, landing on the
+	 * new bound rather than failing to load: beyond +-20 the delta exceeds
+	 * what the encoder's QP range can honour, and on the negative side it
+	 * saturates rate control and overruns the bitrate target.  Clamped on
+	 * the file path, rejected on the API path -- an operator typing -30
+	 * gets told, a config file that predates the bound gets migrated. */
+	{
+		VencConfig old;
+		char *p2 = write_temp_json("{ \"fpv\": { \"roiQp\": -30 } }");
+
+		CHECK("roi_qp_tmpfile", p2 != NULL);
+		if (p2) {
+			venc_config_defaults(&old);
+			CHECK("roi_qp_old_file_loads",
+				venc_config_load(p2, &old) == 0);
+			CHECK("roi_qp_old_file_clamps", old.fpv.roi_qp == -20);
+			unlink(p2); free(p2);
+		}
+		p2 = write_temp_json("{ \"fpv\": { \"roiQp\": 30 } }");
+		CHECK("roi_qp_tmpfile_pos", p2 != NULL);
+		if (p2) {
+			venc_config_defaults(&old);
+			CHECK("roi_qp_pos_file_loads",
+				venc_config_load(p2, &old) == 0);
+			CHECK("roi_qp_pos_file_clamps", old.fpv.roi_qp == 20);
+			unlink(p2); free(p2);
+		}
+		/* In-range values must survive untouched, or the clamp above
+		 * would be indistinguishable from one that pins everything. */
+		p2 = write_temp_json("{ \"fpv\": { \"roiQp\": -17 } }");
+		CHECK("roi_qp_tmpfile_mid", p2 != NULL);
+		if (p2) {
+			venc_config_defaults(&old);
+			CHECK("roi_qp_mid_file_loads",
+				venc_config_load(p2, &old) == 0);
+			CHECK("roi_qp_mid_survives", old.fpv.roi_qp == -17);
+			unlink(p2); free(p2);
+		}
+	}
 	/* scene_threshold/scene_holdoff live in video0 section */
 
 	return failures;
@@ -878,6 +920,40 @@ static int test_rotate_180(void)
 
 	CHECK("rotate180_mirror", cfg.image.mirror == true);
 	CHECK("rotate180_flip", cfg.image.flip == true);
+	/* rotate is write-only: it decomposes and is then cleared.  Left at 180 it
+	 * re-decomposed on every parse and won permanently -- and because save()
+	 * writes the field back, a craft that once carried rotate:180 could never
+	 * turn image.mirror off again.  Checking the decomposition alone cannot
+	 * see that, which is why this assertion is here. */
+	CHECK("rotate180_cleared_after_decompose", cfg.image.rotate == 0);
+	return failures;
+}
+
+/* The failure the cleared rotate prevents, end to end: turn mirror off on a
+ * config that arrived with rotate:180, save, reload.  Before the fix the value
+ * came back true, silently, across the restart the MUT_RESTART write had just
+ * asked for. */
+static int test_rotate_180_does_not_resurrect(void)
+{
+	int failures = 0;
+	const char *json = "{ \"image\": { \"rotate\": 180 } }";
+	char *path = write_temp_json(json);
+	VencConfig cfg;
+
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	CHECK("rotate_resurrect_loaded_mirror", cfg.image.mirror == true);
+
+	cfg.image.mirror = false;
+	CHECK("rotate_resurrect_saved", venc_config_save(path, &cfg) == 0);
+
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	CHECK("rotate_resurrect_mirror_stays_off", cfg.image.mirror == false);
+	CHECK("rotate_resurrect_flip_untouched", cfg.image.flip == true);
+
+	unlink(path);
+	free(path);
 	return failures;
 }
 
@@ -910,6 +986,61 @@ static int test_sample_config_file(void)
 			cfg.video0.bitrate == seeded.video0.bitrate);
 		CHECK("sample_web_port_matches_seed",
 			cfg.system.web_port == seeded.system.web_port);
+		/* roiQp is stated by BOTH shipped JSONs, so a bound change that
+		 * moves the compiled seed and forgets them ships a default
+		 * outside the range it documents.  Read the RAW json, not the
+		 * loaded struct: load_fpv() clamps into range, so a stale -25
+		 * loads as -20 and a comparison against the seed passes while
+		 * the shipped file is still wrong.  Mutation-checked -- against
+		 * the loaded value, seeding -25 into either file produced no
+		 * failure here at all. */
+		static const char *const shipped[] = {
+			"config/waybeam.default.json",
+			"config/waybeam.default.maruko.json",
+		};
+		size_t si;
+
+		for (si = 0; si < sizeof(shipped) / sizeof(shipped[0]); si++) {
+			char name[96];
+			char *text = NULL;
+			cJSON *root, *fpv, *qp;
+			long len;
+			FILE *jf = fopen(shipped[si], "rb");
+
+			snprintf(name, sizeof(name), "shipped_open_%zu", si);
+			CHECK(name, jf != NULL);
+			if (!jf)
+				continue;
+			fseek(jf, 0, SEEK_END);
+			len = ftell(jf);
+			fseek(jf, 0, SEEK_SET);
+			if (len > 0 && (text = malloc((size_t)len + 1)) != NULL) {
+				size_t got = fread(text, 1, (size_t)len, jf);
+				text[got] = '\0';
+			}
+			fclose(jf);
+			snprintf(name, sizeof(name), "shipped_read_%zu", si);
+			CHECK(name, text != NULL);
+			if (!text)
+				continue;
+			root = cJSON_Parse(text);
+			free(text);
+			snprintf(name, sizeof(name), "shipped_parse_%zu", si);
+			CHECK(name, root != NULL);
+			if (!root)
+				continue;
+			fpv = cJSON_GetObjectItem(root, "fpv");
+			qp = fpv ? cJSON_GetObjectItem(fpv, "roiQp") : NULL;
+			snprintf(name, sizeof(name), "shipped_roi_qp_present_%zu",
+				si);
+			CHECK(name, qp != NULL && cJSON_IsNumber(qp));
+			snprintf(name, sizeof(name),
+				"shipped_roi_qp_matches_seed_%zu", si);
+			CHECK(name, qp != NULL && cJSON_IsNumber(qp) &&
+				(int)cJSON_GetNumberValue(qp) ==
+					seeded.fpv.roi_qp);
+			cJSON_Delete(root);
+		}
 	}
 	CHECK("sample_enabled", cfg.outgoing.enabled == false);
 	CHECK("sample_server", strcmp(cfg.outgoing.server, "") == 0);
@@ -1353,6 +1484,7 @@ int test_venc_config(void)
 	failures += test_framing_presets();
 	failures += test_resolution_aliases();
 	failures += test_rotate_180();
+	failures += test_rotate_180_does_not_resurrect();
 	failures += test_sample_config_file();
 	failures += test_audio_config();
 	failures += test_audio_volume_clamping();

@@ -5,6 +5,8 @@
 #include "sensor_select.h"
 #endif
 
+#include "venc_config.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -77,8 +79,83 @@ static inline int pipeline_common_scale_roi_qp(int qp, int level, int steps)
 	return qp < 0 ? -mag : mag;
 }
 
+/** Rolling delivered-vs-target bitrate check.
+ *
+ * The encoder can lose rate control entirely and there is no in-band signal
+ * for it on two of the three backends: the frame QP that shows the failure is
+ * CV610-only (see rtp_sidecar.h -- SigmaStar fills only refType).  What every
+ * backend does have is the frame size, and the failure is far easier to see in
+ * the consequence than in the cause.
+ *
+ * The mechanism worth catching: fpv.roiQp is a RELATIVE delta, so CBR pays for
+ * the ROI discount by raising the frame's base QP roughly 1:1.  Once
+ * base_qp + |roiQp| passes the controller's QP ceiling the base pins there and
+ * the target is missed by multiples -- measured on a CV610 bench at 5.8x with
+ * video0.max_qp 40 and 12.0x at 35, both at a roiQp of only -20.
+ *
+ * Thresholds are compiled in, not configurable, because the measurement leaves
+ * no room to tune: normal operation ran 0.96-1.06x of target across every arm,
+ * the worst benign scene transient hit 1.43x for a single window, and a real
+ * collapse ran 1.9x-39x and did not decay.  Zero bitrate disables the check.
+ *
+ * Scope: the main video0 channel on each backend.  Maruko's second "dual"
+ * VENC channel runs its own thread and never passes through the drain loop
+ * this is called from, so that stream is not watched -- video0 is the one
+ * with a configured target to compare against. */
+typedef struct {
+	uint64_t window_start_us;
+	uint64_t window_bytes;
+	uint8_t  over_windows;
+	uint8_t  reported;    /* latched, so one episode logs once */
+	uint16_t reports;     /* episodes actually reported; the latch is not
+	                       * observable from `reported` alone, since that
+	                       * stays 1 either way */
+} PipelineRateWatch;
+
+/** Call once per encoded frame, with the configured (not measured) target. */
+void pipeline_common_rate_watch(PipelineRateWatch *rw, const VencConfig *cfg,
+	uint32_t frame_bytes, uint64_t now_us);
+
 /** Maximum number of ROI band regions. */
 #define PIPELINE_ROI_MAX_STEPS 4
+
+/** One horizontal ROI band, in encoder pixel coordinates.
+ *
+ * Horizontal bands, delta QP tapering from the innermost band (full qp)
+ * outward.  Higher index = narrower = stronger, so on a backend where a
+ * higher-index region overrides a lower one in the overlap the centre lands the
+ * full delta and the edges the weakest step.
+ *
+ * "Full-height, centred" is the intent, not the arithmetic: every edge is
+ * rounded DOWN to a 32-px multiple for H.265 CTU compatibility, so a 1080-row
+ * frame yields height 1056 and leaves the bottom 24 rows outside every band,
+ * and an origin that rounds down can sit up to 31 px left of true centre
+ * (1920 wide, centre 0.35, index 3 -> x=608, w=672, band centre 944 vs 960).
+ *
+ * Shared because all three backends draw the identical rectangle; only the SDK
+ * struct it is copied into differs (MI_VENC_RoiCfg_t on the two SigmaStar
+ * parts, ot_venc_roi_attr on CV610). */
+typedef struct {
+	uint32_t x, y, width, height;
+	int qp;
+} PipelineRoiBand;
+
+/** Compute band `index` of `steps`.  Returns 0 and fills *out when the band is
+ * usable, -1 when the caller should skip it: a NULL out, an index outside
+ * [0, steps), or a rectangle that degenerates to zero width or height once
+ * aligned (a frame under 32 px, or a centre fraction that rounds away).
+ *
+ * center_frac is CLAMPED to [0.1, 0.9] here, not merely assumed.  All three
+ * backends clamp before calling and config load validates the field, so an
+ * out-of-range value is unreachable today -- but this is now a cross-TU
+ * primitive with three callers, and the failure mode without the clamp is not a
+ * bad number: frac > 1 underflows the unsigned (width - rw)/2 to ~2^31, and a
+ * negative frac makes (uint32_t)(frac * width) an out-of-range float-to-unsigned
+ * conversion, i.e. undefined behaviour.  Both returned SUCCESS with a garbage
+ * rect.  A shared primitive should be total over its declared domain. */
+int pipeline_common_roi_band(uint32_t width, uint32_t height,
+	float center_frac, int qp, int steps, int index,
+	PipelineRoiBand *out);
 
 /** Upper bound the live-apply path accepts for video0.fps.
  *
