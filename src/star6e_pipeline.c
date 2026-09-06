@@ -2274,6 +2274,17 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		 * a negative handle, so frames are counted as drops rather than
 		 * touching an unopened socket. */
 		star6e_output_teardown(&state->output);
+		/* The teardown resets transport policy along with transport state,
+		 * and a later live recovery reads those fields back out of the
+		 * output -- so leaving them cleared would silently apply a DIFFERENT
+		 * policy than the config asks for once the operator sets a working
+		 * destination.  Star6E loses connected-UDP as well as the Unix
+		 * stall option; Maruko loses the stall option.  Re-seed them from
+		 * the same source init would have. */
+		state->output.requested_connected_udp =
+			pconf->output_setup.requested_connected_udp;
+		state->output.allow_unix_encoder_stall =
+			pconf->output_setup.allow_unix_encoder_stall;
 		fprintf(stderr, "ERROR: outgoing.server could not be brought up; "
 			"starting with NO video output so the craft stays reachable -- "
 			"set outgoing.server over the API to recover\n");

@@ -2880,6 +2880,17 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		 * a negative handle, so frames are counted as drops rather than
 		 * touching an unopened socket. */
 			maruko_output_teardown(&ctx->output);
+		/* The teardown resets transport policy along with transport state,
+		 * and a later live recovery reads those fields back out of the
+		 * output -- so leaving them cleared would silently apply a DIFFERENT
+		 * policy than the config asks for once the operator sets a working
+		 * destination.  Star6E loses connected-UDP as well as the Unix
+		 * stall option; Maruko loses the stall option.  Re-seed them from
+		 * the same source init would have. */
+			ctx->output.requested_connected_udp =
+				ctx->cfg.connected_udp ? 1 : 0;
+			ctx->output.allow_unix_encoder_stall =
+				ctx->cfg.allow_unix_encoder_stall ? 1 : 0;
 			fprintf(stderr, "ERROR: outgoing.server could not be brought up; "
 				"starting with NO video output so the craft stays reachable "
 				"-- set outgoing.server over the API to recover\n");

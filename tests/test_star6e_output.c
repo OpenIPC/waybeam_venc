@@ -2103,11 +2103,52 @@ static int test_output_socket_configure_is_all_or_nothing(void)
 	return failures;
 }
 
+/* A startup that cannot bring the destination up leaves the output inert so
+ * the craft stays reachable, and the operator recovers by setting a working
+ * outgoing.server live.  star6e_output_teardown() resets transport POLICY
+ * along with transport state, and the live retarget reads that policy back
+ * out of the output -- so an inert start that forgets it would silently apply
+ * unconnected UDP, and no Unix stall allowance, to whatever the operator
+ * recovers to.  The pipeline re-seeds both; this pins that it must. */
+static int test_star6e_output_inert_start_keeps_policy(void)
+{
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	int failures = 0;
+
+	/* A hostname: prepare accepts it, init cannot resolve it. */
+	CHECK("inert_prepare",
+		star6e_output_prepare(&setup, "udp://localhost:5600", "rtp", 0) == 0);
+	setup.requested_connected_udp = 1;
+	setup.allow_unix_encoder_stall = 1;
+
+	CHECK("inert_init_refuses", star6e_output_init(&output, &setup) == -1);
+
+	/* What the pipeline does on that failure. */
+	star6e_output_teardown(&output);
+	CHECK("inert_teardown_clears_connected",
+		output.requested_connected_udp == 0);
+	CHECK("inert_teardown_clears_stall",
+		output.allow_unix_encoder_stall == 0);
+
+	output.requested_connected_udp = setup.requested_connected_udp;
+	output.allow_unix_encoder_stall = setup.allow_unix_encoder_stall;
+	CHECK("inert_policy_restored_connected",
+		output.requested_connected_udp == 1);
+	CHECK("inert_policy_restored_stall",
+		output.allow_unix_encoder_stall == 1);
+	CHECK("inert_socket_closed", output.socket_handle < 0);
+
+	star6e_output_teardown(&output);
+	return failures;
+}
+
 int test_star6e_output(void)
 {
 	int failures = 0;
 
 	failures += test_output_socket_configure_is_all_or_nothing();
+	failures += test_star6e_output_inert_start_keeps_policy();
 	failures += test_star6e_output_reset_state();
 	failures += test_star6e_output_udp_init();
 	failures += test_star6e_output_udp_invalid_host_rejected();
