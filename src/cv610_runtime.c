@@ -1231,6 +1231,43 @@ static int cv610_apply_server(const char *uri)
 	    strcmp(g_cv610_runner->applied_server, uri) == 0)
 		return 0;
 
+	/* Validate a socket destination BEFORE either branch acts, because both
+	 * of them act destructively on a URI they never checked.
+	 *
+	 * Nothing here resolves names -- the fill is inet_pton only -- so
+	 * `outgoing.server=udp://somehost:5600` used to reach:
+	 *
+	 *   - the ring branch, on a craft already running frame-shm://, which
+	 *     COMMITS the value and respawns.  The re-exec then reloads the bad
+	 *     URI, fails to bring the output up, and the daemon stays down --
+	 *     measured on the bench: one HTTP set left the craft dead until the
+	 *     config was repaired over ssh.  That is worse than the socket case
+	 *     below, because it survives the restart and takes video with it.
+	 *   - output_socket_configure(), which closes the fd when fill fails --
+	 *     including on the fd-REUSE path where the type is unchanged and the
+	 *     socket was working -- leaving socket_handle -1 across the error
+	 *     return, the JSON build and the rollback re-entry.
+	 *
+	 * Filling a throwaway sockaddr with the same input the real call will use
+	 * refuses both, with the live transport untouched, nothing committed and
+	 * the generation counter never bumped.  One inet_pton on a stack buffer,
+	 * on an operator-rate path.
+	 *
+	 * Gated on the type: the ring URIs carry no sockaddr, and their own
+	 * validity is checked where they are created. */
+	if (parsed.type == VENC_OUTPUT_URI_UDP ||
+	    parsed.type == VENC_OUTPUT_URI_UNIX) {
+		struct sockaddr_storage probe_dst;
+		socklen_t probe_len = 0;
+
+		if (output_socket_fill_destination(&parsed, &probe_dst,
+			&probe_len) != 0) {
+			fprintf(stderr, "ERROR: outgoing.server %s has no usable "
+				"destination; transport left unchanged\n", uri);
+			return -1;
+		}
+	}
+
 	if (g_cv610_runner->frame_ring ||
 	    parsed.type == VENC_OUTPUT_URI_SHM ||
 	    parsed.type == VENC_OUTPUT_URI_FRAME_SHM) {
@@ -1243,33 +1280,6 @@ static int cv610_apply_server(const char *uri)
 			sizeof(g_cv610_runner->applied_server), "%s", uri);
 		venc_api_request_reinit();
 		return 0;
-	}
-
-	/* Validate the destination BEFORE anything mutates.
-	 *
-	 * output_socket_configure() closes the fd when fill_destination fails --
-	 * including on the fd-REUSE path, where the transport type is unchanged
-	 * and the socket was working.  Nothing resolves names (fill is inet_pton
-	 * only), so `outgoing.server=udp://somehost:5600` destroyed a live socket
-	 * and left socket_handle -1 across the error return, the JSON build and
-	 * the rollback re-entry.  The recovery below survives that; it does not
-	 * prevent it.
-	 *
-	 * Filling a throwaway sockaddr first is the whole fix: the same input the
-	 * real call will use, so a URI that would have failed inside configure()
-	 * is refused here with the live transport untouched and the generation
-	 * counter never bumped.  Cheap enough to do unconditionally -- it is one
-	 * inet_pton on a stack buffer, on an operator-rate path. */
-	{
-		struct sockaddr_storage probe_dst;
-		socklen_t probe_len = 0;
-
-		if (output_socket_fill_destination(&parsed, &probe_dst,
-			&probe_len) != 0) {
-			fprintf(stderr, "ERROR: outgoing.server %s has no usable "
-				"destination; transport left unchanged\n", uri);
-			return -1;
-		}
 	}
 
 	__atomic_fetch_add(&g_cv610_runner->transport_gen, 1, __ATOMIC_RELEASE);
