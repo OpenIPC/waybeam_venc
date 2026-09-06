@@ -2257,12 +2257,37 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	}
 
 	if (star6e_output_init(&state->output, &pconf->output_setup) != 0) {
+		/* Non-fatal, deliberately, and only HERE -- a live retarget still
+		 * refuses a bad URI, because there the craft has a working output to
+		 * lose.  At boot it has none either way.
+		 *
+		 * Aborting used to take the whole daemon down: measured on all three
+		 * backends, one bad `outgoing.server` in the config brought the
+		 * pipeline up and then tore everything down, leaving no video AND no
+		 * HTTP -- so correcting a one-line config error needed ssh, which a
+		 * craft in the field does not have.  Coming up with the output inert
+		 * keeps the API reachable, and `outgoing.server` is live-settable, so
+		 * the operator can fix it remotely.
+		 *
+		 * The teardown is what makes that safe: it leaves socket_handle at
+		 * -1 and the destination zeroed, and every send path already refuses
+		 * a negative handle, so frames are counted as drops rather than
+		 * touching an unopened socket. */
 		star6e_output_teardown(&state->output);
-		MI_SYS_UnBindChnPort(&state->vpe_port, &state->venc_port);
-		state->bound_vpe_venc = 0;
-		MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
-		state->bound_vif_vpe = 0;
-		return -1;
+		/* The teardown resets transport policy along with transport state,
+		 * and a later live recovery reads those fields back out of the
+		 * output -- so leaving them cleared would silently apply a DIFFERENT
+		 * policy than the config asks for once the operator sets a working
+		 * destination.  Star6E loses connected-UDP as well as the Unix
+		 * stall option; Maruko loses the stall option.  Re-seed them from
+		 * the same source init would have. */
+		state->output.requested_connected_udp =
+			pconf->output_setup.requested_connected_udp;
+		state->output.allow_unix_encoder_stall =
+			pconf->output_setup.allow_unix_encoder_stall;
+		fprintf(stderr, "ERROR: outgoing.server could not be brought up; "
+			"starting with NO video output so the craft stays reachable -- "
+			"set outgoing.server over the API to recover\n");
 	}
 
 	star6e_video_init(&state->video, vcfg, pconf->sensor_framerate,

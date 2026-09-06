@@ -42,6 +42,7 @@
 | `video0.maxQp` interacts with `fpv.roiQp` | yes | yes | yes (**measured**) | 
 | `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** |
 | `outgoing.server` / `outgoing.enabled` mutability | live | live | **live from 0.26.0** (restart_required before) |
+| `outgoing.server` that cannot be brought up | inert output, craft runs (**from 0.82.0**) | same | same |
 
 `video0.qpDelta` is `false` on CV610 and `video0.intraRefreshQp` is `false` on
 the SigmaStar backends because in each case the encoder accepts the value and
@@ -106,7 +107,7 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.81.0",
+    "app_version": "0.82.0",
     "contract_version": "0.29.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
@@ -587,6 +588,26 @@ curl "http://<device-ip>/api/v1/set?outgoing.enabled=false"
 - Encoder keeps running at the reduced rate; frames are encoded and discarded.
 - The previous FPS is stored and restored when output is re-enabled.
 - An IDR keyframe is issued on re-enable for immediate stream sync.
+
+### A destination that cannot be brought up
+
+From **0.82.0**, on all three backends, an `outgoing.server` the craft cannot
+bring up is handled differently depending on *when* it is seen:
+
+- **At boot** it is **not fatal**. The craft starts with the output inert: an
+  `ERROR` naming the URI goes to the log, `GET /api/v1/transport/status`
+  reports `"active": false`, and the HTTP API is reachable. Setting a working
+  `outgoing.server` recovers the output **live, with no restart**. Before
+  0.82.0 the daemon brought the whole pipeline up and then exited, leaving no
+  video *and* no API — so a one-line config error could only be corrected over
+  ssh.
+- **On a live change** it is **refused**: `/api/v1/set?outgoing.server=…`
+  returns an error, the running transport is untouched, and the previous value
+  stays both in memory and on disk. The asymmetry is deliberate — a live
+  retarget has a working output to lose, a boot does not.
+
+Note that names are not resolved: a destination is `udp://<IPv4>:<port>` or
+`unix://<path>`, so `udp://somehost:5600` is refused at both points.
 
 **Default:** `false` — output must be explicitly enabled. Configure `outgoing.server`
 before enabling.

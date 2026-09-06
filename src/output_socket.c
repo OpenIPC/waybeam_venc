@@ -159,6 +159,18 @@ int output_socket_fill_udp_destination(const char *host, uint16_t port,
 	return 0;
 }
 
+int output_socket_destination_is_usable(const VencOutputUri *uri)
+{
+	struct sockaddr_storage probe;
+	socklen_t probe_len = 0;
+
+	if (!uri)
+		return 0;
+	if (uri->type != VENC_OUTPUT_URI_UDP && uri->type != VENC_OUTPUT_URI_UNIX)
+		return 0;
+	return output_socket_fill_destination(uri, &probe, &probe_len) == 0;
+}
+
 int output_socket_fill_destination(const VencOutputUri *uri,
 	struct sockaddr_storage *dst, socklen_t *dst_len)
 {
@@ -184,12 +196,31 @@ int output_socket_configure(int *socket_handle, struct sockaddr_storage *dst,
 {
 	int want_connected;
 
+	struct sockaddr_storage new_dst;
+	socklen_t new_len = 0;
+
 	if (!socket_handle || !dst || !dst_len || !transport || !uri)
 		return -1;
 	if (uri->type == VENC_OUTPUT_URI_SHM) {
 		fprintf(stderr, "[output_socket] shm:// requires ring-buffer output\n");
 		return -1;
 	}
+
+	/* Resolve the destination BEFORE touching the socket.
+	 *
+	 * This used to run after, and closed the fd on failure -- including on
+	 * the REUSE path, where the transport type is unchanged and the socket
+	 * was working.  Nothing here resolves names (the fill is inet_pton only),
+	 * so `outgoing.server=udp://somehost:5600` destroyed a live output and
+	 * left socket_handle -1, on every backend that calls this.  A caller that
+	 * rejects the URI cannot be worse off than one that keeps sending to the
+	 * old destination, so failing before any mutation is strictly safer.
+	 *
+	 * Filling a local and committing only on success also makes the whole
+	 * function all-or-nothing: no path now leaves dst updated but the socket
+	 * closed, or vice versa. */
+	if (output_socket_fill_destination(uri, &new_dst, &new_len) != 0)
+		return -1;
 
 	if (*socket_handle < 0 || *transport != uri->type) {
 		close_socket_if_open(socket_handle);
@@ -199,10 +230,8 @@ int output_socket_configure(int *socket_handle, struct sockaddr_storage *dst,
 		*transport = uri->type;
 	}
 
-	if (output_socket_fill_destination(uri, dst, dst_len) != 0) {
-		close_socket_if_open(socket_handle);
-		return -1;
-	}
+	*dst = new_dst;
+	*dst_len = new_len;
 	if (!connected_udp)
 		return 0;
 

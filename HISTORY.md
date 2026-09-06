@@ -1,5 +1,34 @@
 # History
 
+## [0.82.0] - 2026-09-06
+
+A destination that cannot be brought up no longer destroys a working output,
+and no longer brings the craft down at boot. `contract_version` stays
+**0.29.0** — no field, endpoint or payload changed, only behaviour, which is
+documented under "A destination that cannot be brought up".
+
+- **`output_socket_configure()` no longer closes a working socket.** The
+  destination fill ran after the open/reuse block and closed the fd when it
+  failed — including on the reuse path, where the type was unchanged and the
+  socket was working. Since names are not resolved, `outgoing.server=
+  udp://somehost:5600` took a live output down on every backend. The fill now
+  happens first and the result is committed only on success, so the call is
+  all-or-nothing. Device-verified on Star6E and Maruko: the bad URI is refused,
+  packets keep flowing, and the output is still retargetable afterwards.
+- **A bad `outgoing.server` in the config no longer bricks the craft.**
+  Measured on all three: the pipeline came up — sensor, ISP, VPSS, encoder,
+  JPEG, sidecar, on Maruko even the HTTP server — and then tore all of it down
+  and exited, leaving no video and no API. The output now comes up inert,
+  `transport/status` honestly reports `active:false`, and setting a working
+  destination recovers it live. Verified end to end on all three, no restart.
+  A live retarget still refuses a bad URI: there the craft has a working output
+  to lose.
+- The startup path re-seeds the transport policy the teardown clears, so a
+  craft that started inert does not silently recover onto unconnected UDP or
+  without the configured Unix stall allowance.
+- `output_socket_destination_is_usable()` names the "can this URI be used"
+  question that the CV610 retarget guard previously open-coded.
+
 ## [0.81.0] - 2026-09-05
 
 CV610 gains PQTools `.bin` import and export, so the whole ISP parameter image
