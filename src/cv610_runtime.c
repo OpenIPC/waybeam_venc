@@ -1245,6 +1245,33 @@ static int cv610_apply_server(const char *uri)
 		return 0;
 	}
 
+	/* Validate the destination BEFORE anything mutates.
+	 *
+	 * output_socket_configure() closes the fd when fill_destination fails --
+	 * including on the fd-REUSE path, where the transport type is unchanged
+	 * and the socket was working.  Nothing resolves names (fill is inet_pton
+	 * only), so `outgoing.server=udp://somehost:5600` destroyed a live socket
+	 * and left socket_handle -1 across the error return, the JSON build and
+	 * the rollback re-entry.  The recovery below survives that; it does not
+	 * prevent it.
+	 *
+	 * Filling a throwaway sockaddr first is the whole fix: the same input the
+	 * real call will use, so a URI that would have failed inside configure()
+	 * is refused here with the live transport untouched and the generation
+	 * counter never bumped.  Cheap enough to do unconditionally -- it is one
+	 * inet_pton on a stack buffer, on an operator-rate path. */
+	{
+		struct sockaddr_storage probe_dst;
+		socklen_t probe_len = 0;
+
+		if (output_socket_fill_destination(&parsed, &probe_dst,
+			&probe_len) != 0) {
+			fprintf(stderr, "ERROR: outgoing.server %s has no usable "
+				"destination; transport left unchanged\n", uri);
+			return -1;
+		}
+	}
+
 	__atomic_fetch_add(&g_cv610_runner->transport_gen, 1, __ATOMIC_RELEASE);
 	if (output_socket_configure(&g_cv610_runner->socket_handle,
 		&g_cv610_runner->destination, &g_cv610_runner->destination_len,
@@ -1252,11 +1279,12 @@ static int cv610_apply_server(const char *uri)
 		g_cv610_runner->config.outgoing.connected_udp,
 		g_cv610_runner->config.outgoing.allow_unix_encoder_stall,
 		&g_cv610_runner->connected_udp) != 0) {
-		/* output_socket_configure() closes the socket when it fails
-		 * partway -- including on the fd-REUSE path, where a bad
-		 * destination (an unresolvable udp:// host; nothing validates
-		 * outgoing.server) closes a working fd and leaves
-		 * socket_handle -1.  Clear the applied record so the rollback
+		/* Kept as a backstop, not as the primary defence: the
+		 * destination is now validated above, so the bad-URI route into
+		 * this branch is unreachable and what remains is a genuine
+		 * socket() or bind() failure.  output_socket_configure() still
+		 * closes the socket when it fails partway, so the recovery below
+		 * is still required.  Clear the applied record so the rollback
 		 * that venc_api runs next actually re-configures instead of
 		 * hitting the no-op guard above and returning 0 -- which left
 		 * the craft with a rolled-back config, an HTTP 500, and no
