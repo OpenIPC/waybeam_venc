@@ -92,7 +92,10 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 			snprintf(out->format, sizeof(out->format), "hevc");
 			out->bytes_written = rec_snap.bytes_written;
 			out->frames_written = rec_snap.frames_written;
-			out->segments = 1;  /* HEVC recorder has no rotation */
+			/* Meaningful since this recorder rotates: star6e and
+			 * cv610 left it 0 while segments were on disk, and
+			 * this backend hardcoded 1.  All three now report it. */
+			out->segments = rec_snap.segments;
 			out->elapsed_ms = rec_snap.elapsed_ms;
 			snprintf(out->path, sizeof(out->path), "%s",
 				rec_snap.path);
@@ -136,6 +139,11 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 			snprintf(out->path, sizeof(out->path), "%s", last->path);
 			snprintf(out->stop_reason, sizeof(out->stop_reason),
 				"%s", reason);
+			/* The other two backends name it here; without this
+			 * Maruko answers a fully populated status record with
+			 * an empty format. */
+			snprintf(out->format, sizeof(out->format), "%s",
+				ctx->vcfg.record.format);
 		}
 	}
 }

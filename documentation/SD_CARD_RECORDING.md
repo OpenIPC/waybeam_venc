@@ -183,19 +183,25 @@ frame rates.
 
 ## File Rotation
 
-Rotation applies to `format: "ts"` only. `format: "hevc"` writes one
-unrotated file and ignores `maxSeconds`/`maxMB` entirely; it stops with
-`stop_reason: "size_limit"` if it ever reaches a file-size ceiling. Use `ts`
-for long recordings.
+Rotation applies to **both** formats. `format: "hevc"` rotates on the same
+thresholds and the same IRAP boundary as `ts`; the only difference is what a
+segment is — a `.ts` with fresh PAT/PMT, or a `.hevc` elementary stream, which
+needs no header of its own because every IRAP access unit carries its own
+VPS/SPS/PPS.
 
-When `maxSeconds` or `maxMB` thresholds are reached, the TS recorder:
+When `maxSeconds` or `maxMB` thresholds are reached, the recorder:
 
-1. Waits for the next IDR (keyframe) boundary
+1. Waits for the next point a decoder can start from — an IRAP, or the
+   parameter sets that head a refresh wave (see below). It never asks the
+   encoder to produce one.
 2. Closes and fsyncs the current segment
-3. Opens a new `.ts` file with fresh PAT/PMT
-4. Resets continuity counters (each segment is self-contained)
+3. Opens the next file — a `.ts` with fresh PAT/PMT, or a `.hevc` elementary
+   stream, which needs no header of its own because the cut point carries the
+   parameter sets in-band
+4. Resets continuity counters (each `.ts` segment is self-contained)
 
-File naming: `rec_<HH>h<MM>m<SS>s_<rand>.ts` based on system uptime.
+File naming: `rec_<HH>h<MM>m<SS>s_<rand>.ts` (or `.hevc`) based on system
+uptime. Each rotation draws a fresh name.
 
 Both `maxSeconds` and `maxMB` can be active simultaneously, and rotation
 happens on whichever is reached first.
@@ -206,12 +212,34 @@ so `maxSeconds: 0` records 300-second segments and `maxMB: 0` records 500 MB
 ones -- the compiled-in defaults. There is no "single file until stopped"
 setting; to approximate one, set the thresholds high rather than to zero.
 
-Rotation can only cut on an IRAP, because a segment that does not open on one
-decodes from nothing. A stream that produces no keyframes of its own (a GDR
-craft, `resilience=racing`) is asked for one when a threshold is crossed, but
-that ask is bounded -- see `TS_RECORDER_MAX_IDR_REQUESTS`. If no IRAP arrives,
-the segment keeps growing past the threshold, and the recorder stops with
-`stop_reason: "size_limit"` rather than write into a file-size failure.
+A segment must open somewhere a decoder can start, so a crossed threshold
+makes rotation *due* and the next such point is where the cut lands. Two
+kinds qualify, and the encoder produces one or the other without being asked:
+
+- an **IRAP** (`IDR_W_RADL` / `IDR_N_LP`), on a keyframing stream;
+- a **parameter-set boundary** (VPS/SPS/PPS), which an intra-refresh stream
+  (`resilience=racing`/`range`) emits once per GOP at the head of a refresh
+  wave. A raw `.hevc` has no container to hold codec config, so this is also
+  the only place such a segment can begin and still decode. The picture
+  converges over one refresh wave — the same thing the ground does on every
+  tune-in.
+
+**Rotation never asks the encoder for a keyframe.** An IDR is a large frame,
+and manufacturing one per segment raises the bitrate the link has to carry —
+on an intra-refresh craft that undoes exactly what the mode is for, and in
+`record.mode=mirror` the recorder taps the live channel, so the spike would go
+out over the air for the benefit of a file.
+
+A consequence worth planning around: on an intra-refresh craft the cut point
+arrives once per GOP, so **segment granularity is one GOP**. With
+`gopSize: 2.0` a `maxMB` far below one GOP of data still yields ~2 s segments;
+the threshold decides *whether* to rotate, the wave head decides *when*.
+Measured on Star6E (`resilience=racing`, `gopSize 2.0`, 100 fps, `maxMB=2`):
+10 segments in 20 s, each opening `VPS, SPS, PPS` and containing exactly 1206
+slice NALs — 201 frames x 6 slices, one wave — and **zero** IRAPs.
+
+If a stream produces neither kind of point, rotation waits rather than forcing
+one, and logs that it is waiting so the situation is visible instead of silent.
 
 Segment size is additionally capped by the largest offset the binary can
 write. That is unlimited on every shipped target (all of them are built with

@@ -3125,25 +3125,6 @@ static void *maruko_dual_stream_thread(void *arg)
 		(void)maruko_mi_venc_release_stream(ctx->venc_device,
 			d->channel, &stream);
 
-		/* Rotation asked for a keyframe.  Serviced after the release so
-		 * the SDK call is outside the GetStream/ReleaseStream window,
-		 * COALESCED because a periodic rotation is not a bootstrap
-		 * event, and on ch1 — the channel that actually feeds this
-		 * file.  A shared hook would have aimed it at ch0 and keyframed
-		 * the live stream instead. */
-		if (d->ts_recorder &&
-		    star6e_ts_recorder_take_idr_request(d->ts_recorder)) {
-			/* take_idr_request() has already cleared the flag, so a
-			 * request the limiter swallows must be put back or the
-			 * rotation is lost -- and its budget already spent. */
-			if (idr_rate_limit_allow(d->channel))
-				(void)maruko_mi_venc_request_idr(
-					ctx->venc_device, d->channel, 1);
-			else
-				star6e_ts_recorder_requeue_idr_request(
-					d->ts_recorder);
-		}
-
 		total_count++;
 		if (stat.curPacks >= 2)
 			behind_count++;
@@ -3722,11 +3703,19 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	}
 	star6e_recorder_init(&ctx->recorder);
 	mk_mirror_record_locks_init(ctx);
-	if (ctx->cfg.record.max_seconds > 0)
-		ctx->ts_recorder.max_seconds = ctx->cfg.record.max_seconds;
-	if (ctx->cfg.record.max_mb > 0)
-		ctx->ts_recorder.max_bytes =
+	/* Both recorders: the rotation thresholds are the operator's,
+	 * not the format's, and only one recorder is ever active. */
+	if (ctx->cfg.record.max_seconds > 0) {
+		ctx->ts_recorder.rot.max_seconds = ctx->cfg.record.max_seconds;
+		ctx->recorder.rot.max_seconds = ctx->cfg.record.max_seconds;
+	}
+	if (ctx->cfg.record.max_mb > 0) {
+		uint64_t max_bytes =
 			(uint64_t)ctx->cfg.record.max_mb * 1024 * 1024;
+
+		ctx->ts_recorder.rot.max_bytes = max_bytes;
+		ctx->recorder.rot.max_bytes = max_bytes;
+	}
 
 	/* Phase 7: dual VENC chn 1.  Started AFTER bind_maruko_pipeline
 	 * succeeds — the Phase 7 SDK probe confirmed CreateChn(dev,1,...)
@@ -4053,7 +4042,8 @@ static void mk_mirror_record_sink(void *opaque, const uint8_t *au, size_t len,
 		(void)star6e_ts_recorder_write_video(&ctx->ts_recorder, au, len,
 			pts_90khz, is_idr);
 	else
-		(void)star6e_recorder_write_au(&ctx->recorder, au, len);
+		(void)star6e_recorder_write_au(&ctx->recorder, au, len,
+			is_idr);
 }
 
 /* Initialised before anything can reach it — the status callback runs on the
@@ -4826,26 +4816,12 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	(void)maruko_mi_venc_release_stream(ctx->venc_device,
 		ctx->venc_channel, &stream);
 
-	/* Rotation asked for a keyframe.  After the release, coalesced, on the
-	 * channel feeding this file.  Dual mode services its own recorder on
-	 * the ch1 thread. */
-	if (!ctx->dual &&
-	    star6e_ts_recorder_take_idr_request(&ctx->ts_recorder)) {
-		/* Re-queue a coalesced ask -- see the ch1 site above. */
-		if (idr_rate_limit_allow(ctx->venc_channel))
-			(void)maruko_mi_venc_request_idr(ctx->venc_device,
-				ctx->venc_channel, 1);
-		else
-			star6e_ts_recorder_requeue_idr_request(
-				&ctx->ts_recorder);
-	}
-
 	/* A recorder that stopped ITSELF (disk full, write error) does so on the
 	 * writer thread, so nothing but this loop is positioned to notice, and
 	 * the gate above would go on queueing into a dead writer indefinitely.
 	 *
-	 * AFTER the release, for the same reason the IDR request above is:
-	 * inside the GetStream/ReleaseStream window this would hold the
+	 * AFTER the release, because inside the GetStream/ReleaseStream window
+	 * this would hold the
 	 * encoder's output slot and stall the LIVE stream — precisely the
 	 * coupling the writer thread exists to remove.  Since 0.73.2 the stop
 	 * itself no longer ends in an unbounded join: past its deadline the

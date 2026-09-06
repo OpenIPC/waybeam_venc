@@ -44,6 +44,12 @@ int maruko_ts_recorder_write_stream(Star6eTsRecorderState *state,
 				    len > (pack->length - off))
 					continue;
 
+				/* IRAP only.  This value also becomes the TS
+				 * random_access_indicator, so widening it to
+				 * parameter-set boundaries would change the
+				 * wire format.  Rotation does not need it to:
+				 * write_video() scans the flattened access unit
+				 * for cut points itself. */
 				unsigned int nalu = (unsigned int)
 					pack->packetInfo[k].packType.h265Nalu;
 				if (nalu == 19 || nalu == 20)

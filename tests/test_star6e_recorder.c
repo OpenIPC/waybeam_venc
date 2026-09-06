@@ -402,7 +402,7 @@ static int test_recorder_write_au_not_active(void)
 
 	star6e_recorder_init(&state);
 	CHECK("write_au not active returns 0",
-		star6e_recorder_write_au(&state, au, sizeof(au)) == 0);
+		star6e_recorder_write_au(&state, au, sizeof(au), 0) == 0);
 	CHECK("write_au not active wrote nothing", state.bytes_written == 0);
 	return failures;
 }
@@ -414,12 +414,12 @@ static int test_recorder_write_au_null(void)
 	int failures = 0;
 
 	star6e_recorder_init(&state);
-	CHECK("write_au null state", star6e_recorder_write_au(NULL, au, 1) == 0);
+	CHECK("write_au null state", star6e_recorder_write_au(NULL, au, 1, 0) == 0);
 	CHECK("write_au null buffer",
 		star6e_recorder_start(&state, g_test_dir) == 0 &&
-		star6e_recorder_write_au(&state, NULL, 4) == 0);
+		star6e_recorder_write_au(&state, NULL, 4, 0) == 0);
 	CHECK("write_au zero length",
-		star6e_recorder_write_au(&state, au, 0) == 0);
+		star6e_recorder_write_au(&state, au, 0, 0) == 0);
 	CHECK("write_au null/zero left the file empty", state.bytes_written == 0);
 	star6e_recorder_stop(&state);
 	return failures;
@@ -439,7 +439,7 @@ static int test_recorder_write_au_bytes(void)
 
 	for (int i = 0; i < 10; i++)
 		CHECK("write_au returns byte count",
-			star6e_recorder_write_au(&state, au, sizeof(au)) ==
+			star6e_recorder_write_au(&state, au, sizeof(au), 0) ==
 				(int)sizeof(au));
 
 	CHECK("write_au frames_written", state.frames_written == 10);
@@ -480,19 +480,262 @@ static int test_recorder_write_au_error_stops(void)
 	CHECK("write_au err start ok",
 		star6e_recorder_start(&state, g_test_dir) == 0);
 	CHECK("write_au err first write ok",
-		star6e_recorder_write_au(&state, au, sizeof(au)) > 0);
+		star6e_recorder_write_au(&state, au, sizeof(au), 0) > 0);
 
 	/* Close the descriptor behind the recorder's back; the next write
 	 * fails with EBADF, which is neither ENOSPC nor success. */
 	close(state.fd);
 	CHECK("write_au err returns -1",
-		star6e_recorder_write_au(&state, au, sizeof(au)) == -1);
+		star6e_recorder_write_au(&state, au, sizeof(au), 0) == -1);
 	CHECK("write_au err recorder stopped",
 		!star6e_recorder_is_active(&state));
 	CHECK("write_au err stop reason",
 		state.last_stop_reason == RECORDER_STOP_WRITE_ERROR);
 	CHECK("write_au err is idempotent",
-		star6e_recorder_write_au(&state, au, sizeof(au)) == 0);
+		star6e_recorder_write_au(&state, au, sizeof(au), 0) == 0);
+	return failures;
+}
+
+/* The whole point of #123: thresholds that the raw recorder used to ignore.
+ * A cut still has to land on an IRAP, so a crossed threshold alone must not
+ * produce one. */
+static int test_recorder_rotates_on_idr_after_threshold(void)
+{
+	Star6eRecorderState state;
+	uint8_t au[256];
+	int failures = 0;
+
+	memset(au, 0xA5, sizeof(au));
+	/* A plain slice: the recorder scans the access unit itself, so the
+	 * bytes must not lead with a parameter set either. */
+	au[0] = 0; au[1] = 0; au[2] = 0; au[3] = 1;
+	au[4] = (uint8_t)(1 << 1); au[5] = 0x01;
+	star6e_recorder_init(&state);
+	CHECK("raw rot start ok",
+		star6e_recorder_start(&state, g_test_dir) == 0);
+	CHECK("raw rot starts at one segment", state.segments == 1);
+	state.rot.max_seconds = 0;
+	state.rot.max_bytes = 1;   /* due on the very first frame */
+
+	/* Prime first: the threshold is tested BEFORE the write, so on the very
+	 * first access unit segment_bytes is still 0 and the cut-point gate is
+	 * never reached -- an unprimed assertion here passes even with the gate
+	 * removed entirely. */
+	CHECK("raw rot priming write ok",
+		star6e_recorder_write_au(&state, au, sizeof(au), 0) > 0);
+	CHECK("raw rot priming did not rotate", state.segments == 1);
+
+	/* NOW the threshold is genuinely crossed.  Still no cut point, so still
+	 * no cut. */
+	CHECK("raw rot non-IRAP write ok",
+		star6e_recorder_write_au(&state, au, sizeof(au), 0) > 0);
+	CHECK("raw rot did not cut on a non-IRAP", state.segments == 1);
+
+	/* An IRAP answers it -- flagged by the caller, which is the other half
+	 * of the gate. */
+	CHECK("raw rot IRAP write ok",
+		star6e_recorder_write_au(&state, au, sizeof(au), 1) > 0);
+	CHECK("raw rot cut on the IRAP", state.segments == 2);
+	CHECK("raw rot still recording",
+		star6e_recorder_is_recording(&state));
+	/* The new segment holds only the AU that opened it, while the lifetime
+	 * counter keeps both -- the distinction rotation exists to make. */
+	CHECK("raw rot per-segment bytes reset",
+		state.rot.segment_bytes == (uint64_t)sizeof(au));
+	CHECK("raw rot lifetime bytes kept",
+		state.bytes_written == (uint64_t)(3 * sizeof(au)));
+
+	star6e_recorder_stop(&state);
+	return failures;
+}
+
+/* Rotation must not fire on an IRAP that arrives with no threshold crossed --
+ * otherwise every keyframe would start a new file. */
+static int test_recorder_no_rotation_without_threshold(void)
+{
+	Star6eRecorderState state;
+	uint8_t au[256];
+	int failures = 0;
+	int i;
+
+	memset(au, 0xA5, sizeof(au));
+	star6e_recorder_init(&state);
+	CHECK("raw nothr start ok",
+		star6e_recorder_start(&state, g_test_dir) == 0);
+	state.rot.max_seconds = 0;
+	state.rot.max_bytes = 1024 * 1024;   /* far above what we write */
+
+	for (i = 0; i < 8; i++)
+		(void)star6e_recorder_write_au(&state, au, sizeof(au), 1);
+
+	CHECK("raw nothr no rotation on keyframes alone",
+		state.segments == 1);
+	CHECK("raw nothr armed no wait",
+		state.rot.rotation_due_since == 0);
+	CHECK("raw nothr wrote everything",
+		state.bytes_written == (uint64_t)(8 * sizeof(au)));
+
+	star6e_recorder_stop(&state);
+	return failures;
+}
+
+/* The GDR case on the raw path: no IRAP ever, rotation still happens, and
+ * nothing is asked of the encoder -- an injected IDR would raise the bitrate
+ * the live link has to carry, which is what intra-refresh exists to avoid. */
+static int test_recorder_rotates_on_param_sets_without_any_idr(void)
+{
+	Star6eRecorderState state;
+	uint8_t slice[256];
+	uint8_t vps[256];
+	int failures = 0;
+
+	memset(slice, 0xA5, sizeof(slice));
+	slice[0] = 0; slice[1] = 0; slice[2] = 0; slice[3] = 1;
+	slice[4] = (uint8_t)(1 << 1); slice[5] = 0x01;
+	memcpy(vps, slice, sizeof(vps));
+	vps[4] = (uint8_t)(32 << 1);
+
+	star6e_recorder_init(&state);
+	CHECK("raw gdr start ok",
+		star6e_recorder_start(&state, g_test_dir) == 0);
+	state.rot.max_seconds = 0;
+	state.rot.max_bytes = 1;
+
+	/* is_idr is 0 for every write below -- this stream has no keyframes.
+	 * Prime first so the threshold is genuinely crossed; otherwise the
+	 * cut-point gate is never consulted and this passes vacuously. */
+	CHECK("raw gdr priming write ok",
+		star6e_recorder_write_au(&state, slice, sizeof(slice), 0) > 0);
+	CHECK("raw gdr priming did not rotate", state.segments == 1);
+
+	CHECK("raw gdr slice write ok",
+		star6e_recorder_write_au(&state, slice, sizeof(slice), 0) > 0);
+	CHECK("raw gdr no cut on a plain slice", state.segments == 1);
+
+	CHECK("raw gdr wave-head write ok",
+		star6e_recorder_write_au(&state, vps, sizeof(vps), 0) > 0);
+	CHECK("raw gdr cut on the parameter-set boundary",
+		state.segments == 2);
+	CHECK("raw gdr still recording",
+		star6e_recorder_is_recording(&state));
+	CHECK("raw gdr new segment holds only the wave head",
+		state.rot.segment_bytes == (uint64_t)sizeof(vps));
+
+	star6e_recorder_stop(&state);
+	return failures;
+}
+
+/* Rotation must hand out a fresh name every time and lose no segment.
+ *
+ * NOTE ON WHAT THIS DOES NOT COVER: the O_EXCL-and-retry in
+ * open_next_segment() guards a name COLLISION, which this cannot provoke --
+ * the name derives from the nanosecond clock, so a test cannot force a repeat.
+ * Mutation-checked and confirmed: reverting that open to O_TRUNC leaves this
+ * test green.  O_EXCL rests on open(2) semantics, not on this test; what is
+ * covered here is that rotation itself neither reuses state->path nor drops a
+ * segment. */
+static int test_recorder_rotation_hands_out_fresh_names(void)
+{
+	Star6eRecorderState state;
+	uint8_t vps[256];
+	char seen[6][RECORDER_PATH_MAX];
+	struct stat st;
+	int failures = 0;
+	int i, j, n = 0;
+
+	memset(vps, 0xA5, sizeof(vps));
+	vps[0] = 0; vps[1] = 0; vps[2] = 0; vps[3] = 1;
+	vps[4] = (uint8_t)(32 << 1); vps[5] = 0x01;
+
+	star6e_recorder_init(&state);
+	CHECK("noerase start ok",
+		star6e_recorder_start(&state, g_test_dir) == 0);
+	state.rot.max_seconds = 0;
+	state.rot.max_bytes = 1;            /* every cut point rotates */
+	snprintf(seen[n++], RECORDER_PATH_MAX, "%s", state.path);
+
+	/* The threshold is tested BEFORE the write, so the first access unit
+	 * cannot rotate -- segment_bytes is still 0.  Prime it. */
+	(void)star6e_recorder_write_au(&state, vps, sizeof(vps), 0);
+	CHECK("noerase first write did not rotate", state.segments == 1);
+
+	for (i = 0; i < 5 && n < 6; i++) {
+		(void)star6e_recorder_write_au(&state, vps, sizeof(vps), 0);
+		snprintf(seen[n++], RECORDER_PATH_MAX, "%s", state.path);
+	}
+	star6e_recorder_stop(&state);
+
+	/* `n` is loop-controlled, so it proves nothing on its own -- assert the
+	 * recorder really did cut a segment for each captured path. */
+	CHECK("noerase rotated once per capture",
+		state.segments == (uint32_t)n);
+	for (i = 0; i < n; i++) {
+		for (j = i + 1; j < n; j++) {
+			if (strcmp(seen[i], seen[j]) == 0) {
+				CHECK("noerase paths are all distinct", 0);
+				break;
+			}
+		}
+	}
+	/* Every segment must still be on disk: a reused name would have
+	 * truncated an earlier one rather than opened a new file. */
+	for (i = 0; i < n; i++) {
+		int ok = (stat(seen[i], &st) == 0);
+
+		CHECK("noerase every segment still exists", ok);
+		if (ok)
+			unlink(seen[i]);
+	}
+	return failures;
+}
+
+/* Finalising the OLD segment can fail -- a delayed write surfacing at
+ * fdatasync().  Calling that a clean rotation would leave the operator with a
+ * possibly short segment and no sign of it. */
+static int test_recorder_rotation_reports_finalise_failure(void)
+{
+	Star6eRecorderState state;
+	uint8_t vps[256];
+	int failures = 0;
+	int pipefd[2];
+
+	memset(vps, 0xA5, sizeof(vps));
+	vps[0] = 0; vps[1] = 0; vps[2] = 0; vps[3] = 1;
+	vps[4] = (uint8_t)(32 << 1); vps[5] = 0x01;
+
+	star6e_recorder_init(&state);
+	CHECK("finfail start ok",
+		star6e_recorder_start(&state, g_test_dir) == 0);
+	state.rot.max_seconds = 0;
+	state.rot.max_bytes = 1;
+
+	/* Prime the segment so the NEXT cut point actually rotates: the
+	 * threshold is tested before the write. */
+	(void)star6e_recorder_write_au(&state, vps, sizeof(vps), 0);
+	CHECK("finfail primed without rotating", state.segments == 1);
+
+	/* Put a pipe under the recorder's descriptor: fdatasync() on a pipe
+	 * fails with EINVAL, which is a finalise failure without the fd-reuse
+	 * hazard of closing it behind the recorder's back. */
+	if (pipe(pipefd) != 0) {
+		star6e_recorder_stop(&state);
+		return failures;
+	}
+	if (dup2(pipefd[1], state.fd) < 0) {
+		close(pipefd[0]); close(pipefd[1]);
+		star6e_recorder_stop(&state);
+		return failures;
+	}
+
+	CHECK("finfail rotation returns an error",
+		star6e_recorder_write_au(&state, vps, sizeof(vps), 0) == -1);
+	CHECK("finfail recorder stopped",
+		!star6e_recorder_is_recording(&state));
+	CHECK("finfail reported as a write error",
+		state.last_stop_reason == RECORDER_STOP_WRITE_ERROR);
+	CHECK("finfail did not publish a new segment", state.segments == 1);
+
+	close(pipefd[0]); close(pipefd[1]);
 	return failures;
 }
 
@@ -518,6 +761,11 @@ int test_star6e_recorder(void)
 	failures += test_recorder_free_space();
 	failures += test_recorder_dir_stored();
 	failures += test_recorder_write_au_not_active();
+	failures += test_recorder_rotates_on_idr_after_threshold();
+	failures += test_recorder_rotates_on_param_sets_without_any_idr();
+	failures += test_recorder_rotation_hands_out_fresh_names();
+	failures += test_recorder_rotation_reports_finalise_failure();
+	failures += test_recorder_no_rotation_without_threshold();
 	failures += test_recorder_write_au_null();
 	failures += test_recorder_write_au_bytes();
 	failures += test_recorder_write_au_error_stops();

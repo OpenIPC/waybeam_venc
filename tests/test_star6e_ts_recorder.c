@@ -41,7 +41,7 @@ static int test_ts_recorder_init(void)
 	CHECK("ts_rec init not active",
 		!star6e_ts_recorder_is_active(&state));
 	CHECK("ts_rec init max_seconds",
-		state.max_seconds == TS_RECORDER_DEFAULT_MAX_SECONDS);
+		state.rot.max_seconds == TS_RECORDER_DEFAULT_MAX_SECONDS);
 
 	star6e_ts_recorder_init(NULL, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	CHECK("ts_rec init null no crash", 1);
@@ -210,7 +210,7 @@ static int test_ts_recorder_status_snapshot_is_coherent(void)
 	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	/* Rotate often, so the poll races a path rewrite rather than only
 	 * counter bumps -- the rotation is the interesting window. */
-	state.max_bytes = 64 * 1024;
+	state.rot.max_bytes = 64 * 1024;
 	CHECK("snapshot start ok",
 		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
 
@@ -286,196 +286,8 @@ static int test_ts_recorder_multi_frame(void)
 
 /* ── Rotation IDR request (the GDR path) ──────────────────────────────── */
 
-/* Drive rotation-due by size, with a non-IRAP frame, and check the recorder
- * ASKS instead of silently waiting forever. */
-static int test_ts_rotation_requests_idr_when_not_idr(void)
-{
-	Star6eTsRecorderState state;
-	uint8_t video[500];
-	int failures = 0;
-
-	memset(video, 0xAB, sizeof(video));
-	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
-	CHECK("rot start ok",
-		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
-	state.max_seconds = 0;
-	state.max_bytes = 1;   /* rotation due on the very first frame */
-
-	CHECK("rot no request before any write",
-		star6e_ts_recorder_take_idr_request(&state) == 0);
-
-	/* First crossing only ARMS the grace period — a keyframing stream gets
-	 * a chance to rotate on its own before anything is asked for. */
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);
-	CHECK("rot grace armed, nothing asked yet",
-		state.idr_requests_unanswered == 0);
-	CHECK("rot no flag during grace",
-		star6e_ts_recorder_take_idr_request(&state) == 0);
-
-	/* Grace elapsed: now it asks. */
-	state.rotation_due_since -= 2;
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);
-	CHECK("rot did not cut on a non-IRAP", state.segments == 1);
-	CHECK("rot asked for an IDR", state.idr_requests_unanswered == 1);
-	CHECK("rot take returns the request",
-		star6e_ts_recorder_take_idr_request(&state) == 1);
-	CHECK("rot take is one-shot",
-		star6e_ts_recorder_take_idr_request(&state) == 0);
-
-	/* Same second: paced, so no second ask. */
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);
-	CHECK("rot paced within one second",
-		state.idr_requests_unanswered == 1);
-	CHECK("rot no new flag while paced",
-		star6e_ts_recorder_take_idr_request(&state) == 0);
-
-	star6e_ts_recorder_stop(&state);
-	return failures;
-}
-
-/* A keyframing stream must cost ZERO extra keyframes: within the grace
- * window no request is made at all, however many frames arrive.  Measured on
- * Maruko before this guard existed, resilience=off/max_seconds=15 turned 1
- * honored IDR into 4 for rotations that happened naturally anyway. */
-static int test_ts_rotation_grace_suppresses_requests(void)
-{
-	Star6eTsRecorderState state;
-	uint8_t video[500];
-	int failures = 0;
-	int i;
-
-	memset(video, 0xAB, sizeof(video));
-	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
-	CHECK("grace start ok",
-		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
-	state.max_seconds = 0;
-	state.max_bytes = 1;   /* due immediately */
-
-	/* Many non-IRAP frames, all inside the grace second: not one ask. */
-	for (i = 0; i < 30; i++)
-		(void)star6e_ts_recorder_write_video(&state, video,
-			sizeof(video), 90000, 0);
-	CHECK("grace suppressed every request",
-		state.idr_requests_unanswered == 0);
-	CHECK("grace raised no flag",
-		star6e_ts_recorder_take_idr_request(&state) == 0);
-	CHECK("grace armed the timer", state.rotation_due_since != 0);
-	CHECK("grace did not rotate", state.segments == 1);
-
-	/* A natural IRAP inside the window rotates and disarms — the
-	 * keyframing-stream path, with no request ever issued. */
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 1);
-	CHECK("grace rotated naturally", state.segments == 2);
-	CHECK("grace disarmed after rotation", state.rotation_due_since == 0);
-	CHECK("grace never asked", state.idr_requests_unanswered == 0);
-
-	star6e_ts_recorder_stop(&state);
-	return failures;
-}
-
-/* The answering IRAP must rotate AND clear the outstanding ask, so the next
- * threshold starts from a clean slate. */
-static int test_ts_rotation_idr_answers_and_resets(void)
-{
-	Star6eTsRecorderState state;
-	uint8_t video[500];
-	int failures = 0;
-
-	memset(video, 0xAB, sizeof(video));
-	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
-	CHECK("rot2 start ok",
-		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
-	state.max_seconds = 0;
-	state.max_bytes = 1;
-
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);
-	state.rotation_due_since -= 2;
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);
-	CHECK("rot2 asked", state.idr_requests_unanswered == 1);
-
-	/* IRAP arrives: cut, and the ask is considered answered. */
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 1);
-	CHECK("rot2 rotated on the IRAP", state.segments == 2);
-	CHECK("rot2 cleared the outstanding ask",
-		state.idr_requests_unanswered == 0);
-	CHECK("rot2 cleared the pacing anchor",
-		state.idr_request_last_sec == 0);
-
-	star6e_ts_recorder_stop(&state);
-	return failures;
-}
-
-/* An ask nobody answers must give up, or it becomes a permanent 1 Hz
- * keyframe tax on the live link for the whole recording. */
-static int test_ts_rotation_idr_requests_are_bounded(void)
-{
-	Star6eTsRecorderState state;
-	uint8_t video[500];
-	int failures = 0;
-	int i;
-
-	memset(video, 0xAB, sizeof(video));
-	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
-	CHECK("rot3 start ok",
-		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
-	state.max_seconds = 0;
-	state.max_bytes = 1;
-
-	/* Forge the pacing anchor backwards each round so every write is
-	 * eligible, without the test sleeping for N seconds. */
-	for (i = 0; i < TS_RECORDER_MAX_IDR_REQUESTS + 5; i++) {
-		state.idr_request_last_sec -= 2;
-		state.rotation_due_since -= 2;
-		(void)star6e_ts_recorder_write_video(&state, video,
-			sizeof(video), 90000, 0);
-	}
-	CHECK("rot3 stopped asking at the bound",
-		state.idr_requests_unanswered == TS_RECORDER_MAX_IDR_REQUESTS);
-
-	star6e_ts_recorder_stop(&state);
-	return failures;
-}
-
-/* Pre-0.70.0 behaviour must survive for anyone who never services the flag:
- * rotation simply waits for a natural keyframe. */
-static int test_ts_rotation_unserviced_still_rotates_on_natural_idr(void)
-{
-	Star6eTsRecorderState state;
-	uint8_t video[500];
-	int failures = 0;
-
-	memset(video, 0xAB, sizeof(video));
-	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
-	CHECK("rot4 start ok",
-		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
-	state.max_seconds = 0;
-	state.max_bytes = 1;
-
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);
-	state.rotation_due_since -= 2;
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);   /* flag raised, nobody takes it */
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 1);   /* a natural IRAP still cuts */
-	CHECK("rot4 rotated without the flag being serviced",
-		state.segments == 2);
-
-	star6e_ts_recorder_stop(&state);
-	return failures;
-}
-
-/* A stop/restart inside the same second must not inherit the previous
- * recording's pacing anchor and swallow the new one's first request. */
+/* A stop/restart must not inherit the previous recording's "threshold has
+ * been crossed since" anchor, or the new one would carry a stale wait. */
 static int test_ts_rotation_state_resets_on_restart(void)
 {
 	Star6eTsRecorderState state;
@@ -486,74 +298,28 @@ static int test_ts_rotation_state_resets_on_restart(void)
 	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
 	CHECK("rot5 start ok",
 		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
-	state.max_seconds = 0;
-	state.max_bytes = 1;
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);
-	state.rotation_due_since -= 2;
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);
-	CHECK("rot5 asked once", state.idr_requests_unanswered == 1);
-	star6e_ts_recorder_stop(&state);
+	state.rot.max_seconds = 0;
+	state.rot.max_bytes = 1;
 
+	/* Cross the threshold on a non-cut-point frame: the wait is armed. */
+	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
+		90000, 0);
+	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
+		90000, 0);
+	CHECK("rot5 wait armed", state.rot.rotation_due_since != 0);
+	/* Raise the warning latch by hand -- nothing here waits 10 s for it --
+	 * so the restart assertion below has something to clear. */
+	state.rot.warned_no_cut_point = 1;
+
+	star6e_ts_recorder_stop(&state);
 	CHECK("rot5 restart ok",
 		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
-	CHECK("rot5 unanswered reset", state.idr_requests_unanswered == 0);
-	CHECK("rot5 anchor reset", state.idr_request_last_sec == 0);
-	CHECK("rot5 grace reset", state.rotation_due_since == 0);
-	CHECK("rot5 pending reset",
-		star6e_ts_recorder_take_idr_request(&state) == 0);
-
-	state.max_seconds = 0;
-	state.max_bytes = 1;
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);
-	state.rotation_due_since -= 2;
-	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
-		90000, 0);
-	CHECK("rot5 new recording asks immediately",
-		state.idr_requests_unanswered == 1);
+	CHECK("rot5 anchor cleared by restart",
+		state.rot.rotation_due_since == 0);
+	CHECK("rot5 warning latch cleared by restart",
+		state.rot.warned_no_cut_point == 0);
 
 	star6e_ts_recorder_stop(&state);
-	return failures;
-}
-
-/* No rotation due -> never ask.  Guards against a threshold bug turning into
- * a permanent keyframe request. */
-static int test_ts_no_request_when_rotation_not_due(void)
-{
-	Star6eTsRecorderState state;
-	uint8_t video[500];
-	int failures = 0;
-	int i;
-
-	memset(video, 0xAB, sizeof(video));
-	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
-	CHECK("rot6 start ok",
-		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
-	state.max_seconds = 100000;
-	state.max_bytes = 1024ULL * 1024 * 1024;
-
-	for (i = 0; i < 20; i++)
-		(void)star6e_ts_recorder_write_video(&state, video,
-			sizeof(video), 90000, 0);
-	CHECK("rot6 never asked", state.idr_requests_unanswered == 0);
-	CHECK("rot6 no pending flag",
-		star6e_ts_recorder_take_idr_request(&state) == 0);
-	CHECK("rot6 single segment", state.segments == 1);
-
-	star6e_ts_recorder_stop(&state);
-	return failures;
-}
-
-/* take_idr_request must tolerate NULL — maruko passes d->ts_recorder, which
- * is NULL in dual-stream mode. */
-static int test_ts_take_idr_request_null_safe(void)
-{
-	int failures = 0;
-
-	CHECK("rot7 NULL state safe",
-		star6e_ts_recorder_take_idr_request(NULL) == 0);
 	return failures;
 }
 
@@ -584,9 +350,9 @@ static int test_ts_is_recording_survives_rotation_but_not_a_stop(void)
 	CHECK("is_recording true after start",
 		star6e_ts_recorder_is_recording(&state) == 1);
 
-	state.max_seconds = 0;
-	state.max_bytes = 1;            /* rotation due immediately */
-	state.rotation_due_since = 1;   /* skip the grace window */
+	state.rot.max_seconds = 0;
+	state.rot.max_bytes = 1;            /* rotation due immediately */
+	state.rot.rotation_due_since = 1;   /* skip the grace window */
 
 	/* An IRAP cuts the segment: close + reopen, all inside this call. */
 	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
@@ -638,9 +404,9 @@ static int test_ts_is_recording_clears_when_rotation_cannot_reopen(void)
 		star6e_ts_recorder_start(&state, subdir, NULL) == 0);
 	CHECK("rotfail recording true", star6e_ts_recorder_is_recording(&state) == 1);
 
-	state.max_seconds = 0;
-	state.max_bytes = 1;
-	state.rotation_due_since = 1;
+	state.rot.max_seconds = 0;
+	state.rot.max_bytes = 1;
+	state.rot.rotation_due_since = 1;
 	CHECK("rotfail chmod", chmod(subdir, 0500) == 0);
 
 	(void)star6e_ts_recorder_write_video(&state, video, sizeof(video),
@@ -713,9 +479,9 @@ static int test_ts_rotation_never_makes_a_producer_drop(void)
 	CHECK("rotdrop start ok",
 		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
 
-	state.max_seconds = 0;
-	state.max_bytes = 1;            /* rotate on every IRAP */
-	state.rotation_due_since = 1;   /* skip the grace window */
+	state.rot.max_seconds = 0;
+	state.rot.max_bytes = 1;            /* rotate on every IRAP */
+	state.rot.rotation_due_since = 1;   /* skip the grace window */
 
 	memset(&s, 0, sizeof(s));
 	s.ts = &state;
@@ -813,6 +579,7 @@ static int test_ts_size_limit_rolls_back_partial_write(void)
 	void (*saved_xfsz)(int);
 	struct stat st;
 	char path[RECORDER_PATH_MAX];
+	uint64_t header_bytes, written_total = 0;
 	int failures = 0;
 	int i;
 
@@ -827,6 +594,9 @@ static int test_ts_size_limit_rolls_back_partial_write(void)
 	CHECK("efbig start ok",
 		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
 	snprintf(path, sizeof(path), "%s", state.path);
+	/* The PAT/PMT the segment opened with, set by open_new_segment() rather
+	 * than by the per-write accumulation under test. */
+	header_bytes = state.rot.segment_bytes;
 
 	small = saved;
 	small.rlim_cur = 100 * 1024;        /* a few frames in */
@@ -837,11 +607,19 @@ static int test_ts_size_limit_rolls_back_partial_write(void)
 	}
 
 	/* Write past the limit.  The crossing write is short, then the next
-	 * one fails with EFBIG -- the partial-write case. */
+	 * one fails with EFBIG -- the partial-write case.
+	 *
+	 * Sum the RETURNED byte counts as an independent expectation.  Checking
+	 * the file against state.rot.segment_bytes alone would be tautological:
+	 * that counter is the ftruncate target, so any wrong target is
+	 * self-consistent with the result. */
 	for (i = 0; i < 64; i++) {
-		if (star6e_ts_recorder_write_video(&state, video,
-			sizeof(video), (uint64_t)i * 3000, i == 0) < 0)
+		int rc = star6e_ts_recorder_write_video(&state, video,
+			sizeof(video), (uint64_t)i * 3000, i == 0);
+
+		if (rc < 0)
 			break;
+		written_total += (uint64_t)rc;
 	}
 
 	(void)setrlimit(RLIMIT_FSIZE, &saved);
@@ -856,12 +634,134 @@ static int test_ts_size_limit_rolls_back_partial_write(void)
 	 * whole number of TS packets. */
 	CHECK("efbig file exists", stat(path, &st) == 0);
 	CHECK("efbig rolled back to the frame boundary",
-		(uint64_t)st.st_size == state.segment_bytes);
+		(uint64_t)st.st_size == header_bytes + written_total);
+	CHECK("efbig counter agrees with the file",
+		state.rot.segment_bytes == (uint64_t)st.st_size);
 	CHECK("efbig left whole TS packets only",
 		(st.st_size % TS_PACKET_SIZE) == 0);
 
 	star6e_ts_recorder_stop(&state);
 	unlink(path);
+	return failures;
+}
+
+/* The GDR case, and the reason rotation no longer asks for anything: a stream
+ * that emits NO IRAP ever must still rotate, on the parameter sets that head
+ * each refresh wave.  Device-measured on Star6E at resilience=racing: one IRAP
+ * at startup and never again, VPS/SPS/PPS every ~200 frames. */
+static int test_ts_rotates_on_param_sets_without_any_idr(void)
+{
+	Star6eTsRecorderState state;
+	uint8_t slice[500];
+	uint8_t vps[500];
+	int failures = 0;
+
+	memset(slice, 0xAB, sizeof(slice));
+	slice[0] = 0; slice[1] = 0; slice[2] = 0; slice[3] = 1;
+	slice[4] = (uint8_t)(1 << 1); slice[5] = 0x01;   /* plain slice */
+	memcpy(vps, slice, sizeof(vps));
+	vps[4] = (uint8_t)(32 << 1);                     /* VPS heads the AU */
+
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
+	CHECK("gdr start ok",
+		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
+	state.rot.max_seconds = 0;
+	state.rot.max_bytes = 1;        /* due from the first frame */
+
+	/* Plain slices cross the threshold but are not a place a decoder can
+	 * start, so nothing is cut -- and nothing is asked for either. */
+	(void)star6e_ts_recorder_write_video(&state, slice, sizeof(slice),
+		90000, 0);
+	(void)star6e_ts_recorder_write_video(&state, slice, sizeof(slice),
+		90000, 0);
+	CHECK("gdr no cut on plain slices", state.segments == 1);
+
+	/* The wave head IS a cut point, with is_idr still 0 throughout. */
+	(void)star6e_ts_recorder_write_video(&state, vps, sizeof(vps),
+		90000, 0);
+	CHECK("gdr cut on the parameter-set boundary", state.segments == 2);
+	CHECK("gdr still recording",
+		star6e_ts_recorder_is_recording(&state));
+
+	star6e_ts_recorder_stop(&state);
+	return failures;
+}
+
+/* A cut point with no threshold crossed must not rotate, or every refresh
+ * wave would start a new file. */
+static int test_ts_no_rotation_on_param_sets_below_threshold(void)
+{
+	Star6eTsRecorderState state;
+	uint8_t vps[500];
+	int failures = 0;
+	int i;
+
+	memset(vps, 0xAB, sizeof(vps));
+	vps[0] = 0; vps[1] = 0; vps[2] = 0; vps[3] = 1;
+	vps[4] = (uint8_t)(32 << 1); vps[5] = 0x01;
+
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
+	CHECK("gdr2 start ok",
+		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
+	state.rot.max_seconds = 0;
+	state.rot.max_bytes = 1024 * 1024;
+
+	for (i = 0; i < 8; i++)
+		(void)star6e_ts_recorder_write_video(&state, vps, sizeof(vps),
+			90000, 0);
+
+	CHECK("gdr2 no rotation below the threshold", state.segments == 1);
+	star6e_ts_recorder_stop(&state);
+	return failures;
+}
+
+/* maxMB rotation for .ts, exercised by ACCUMULATING bytes rather than by a
+ * threshold the PAT/PMT header alone already satisfies.
+ *
+ * This is the test that was missing: extracting the write path into a helper
+ * once dropped `segment_bytes += written`, which pinned the counter at the
+ * header size.  Every existing rotation test set max_bytes to 1 -- satisfied by
+ * the header -- so all of them stayed green while size rotation was dead and
+ * the write-failure rollback truncated whole segments. */
+static int test_ts_size_rotation_needs_accumulated_bytes(void)
+{
+	Star6eTsRecorderState state;
+	uint8_t vps[8192];
+	uint64_t first_seg_bytes;
+	int failures = 0;
+	int i;
+
+	memset(vps, 0xAB, sizeof(vps));
+	vps[0] = 0; vps[1] = 0; vps[2] = 0; vps[3] = 1;
+	vps[4] = (uint8_t)(32 << 1); vps[5] = 0x01;
+
+	star6e_ts_recorder_init(&state, 0, 0, TS_AUDIO_CODEC_PCM_S302M);
+	CHECK("acc start ok",
+		star6e_ts_recorder_start(&state, g_test_dir, NULL) == 0);
+	state.rot.max_seconds = 0;
+	/* Well above the PAT/PMT bytes a fresh segment opens with, so only real
+	 * accumulation can reach it. */
+	state.rot.max_bytes = 32u * 1024u;
+
+	first_seg_bytes = state.rot.segment_bytes;
+	CHECK("acc segment starts at header size only",
+		first_seg_bytes < 4096);
+
+	(void)star6e_ts_recorder_write_video(&state, vps, sizeof(vps), 90000, 0);
+	CHECK("acc bytes advance on a write",
+		state.rot.segment_bytes > first_seg_bytes);
+
+	/* Each AU is a cut point, so once the threshold is genuinely crossed the
+	 * very next one rotates.  With the counter pinned this never happens. */
+	for (i = 0; i < 12 && state.segments == 1; i++)
+		(void)star6e_ts_recorder_write_video(&state, vps, sizeof(vps),
+			90000, 0);
+
+	CHECK("acc size threshold actually rotated", state.segments >= 2);
+	CHECK("acc new segment restarted small",
+		state.rot.segment_bytes < 32u * 1024u);
+
+	star6e_ts_recorder_stop(&state);
 	return failures;
 }
 
@@ -880,19 +780,15 @@ int test_star6e_ts_recorder(void)
 	failures += test_ts_recorder_status_snapshot_is_coherent();
 	failures += test_ts_recorder_start_null();
 	failures += test_ts_recorder_multi_frame();
-	failures += test_ts_rotation_requests_idr_when_not_idr();
-	failures += test_ts_rotation_grace_suppresses_requests();
-	failures += test_ts_rotation_idr_answers_and_resets();
-	failures += test_ts_rotation_idr_requests_are_bounded();
-	failures += test_ts_rotation_unserviced_still_rotates_on_natural_idr();
 	failures += test_ts_rotation_state_resets_on_restart();
-	failures += test_ts_no_request_when_rotation_not_due();
-	failures += test_ts_take_idr_request_null_safe();
 	failures += test_ts_is_recording_survives_rotation_but_not_a_stop();
 	failures += test_ts_is_recording_clears_when_rotation_cannot_reopen();
 	failures += test_ts_rotation_never_makes_a_producer_drop();
 	failures += test_ts_failed_start_leaves_nothing_recording();
 	failures += test_ts_size_limit_rolls_back_partial_write();
+	failures += test_ts_rotates_on_param_sets_without_any_idr();
+	failures += test_ts_size_rotation_needs_accumulated_bytes();
+	failures += test_ts_no_rotation_on_param_sets_below_threshold();
 
 	cleanup_test_dir();
 	return failures;

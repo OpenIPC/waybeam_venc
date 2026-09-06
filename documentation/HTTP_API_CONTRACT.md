@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.30.0`
+- `contract_version`: `0.31.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -107,8 +107,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.83.0",
-    "contract_version": "0.30.0",
+    "app_version": "0.84.0",
+    "contract_version": "0.31.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1275,6 +1275,12 @@ Response `200`:
 `elapsed_ms` is the elapsed duration of the active or most recently stopped
 recording. `stop_reason` values: `"none"` (currently recording), `"manual"`,
 `"disk_full"`, `"size_limit"` (**from 0.30.0**), `"write_error"`.
+
+**From 0.31.0**, `segments` is meaningful for `format: "hevc"` too — that
+recorder rotates on `maxSeconds`/`maxMB` like the TS one. Earlier builds
+ignored both thresholds on that path and reported `segments` as `0` (Star6E,
+CV610) or a hardcoded `1` (Maruko) while a single unrotated file grew without
+bound.
 
 `"size_limit"` means a file-size ceiling was reached, not a fault: the
 recorder stopped on a frame boundary and the file is intact and closed. It is

@@ -529,7 +529,8 @@ static void mirror_record_sink(void *opaque, const uint8_t *au, size_t len,
 		(void)star6e_ts_recorder_write_video(&ps->ts_recorder, au, len,
 			pts_90khz, is_idr);
 	else
-		(void)star6e_recorder_write_au(&ps->recorder, au, len);
+		(void)star6e_recorder_write_au(&ps->recorder, au, len,
+			is_idr);
 }
 
 /* Initialised before anything can reach it.  This runs ahead of
@@ -821,6 +822,9 @@ static void record_status_callback(VencRecordStatus *out)
 			snprintf(out->format, sizeof(out->format), "hevc");
 			out->bytes_written = rec_snap.bytes_written;
 			out->frames_written = rec_snap.frames_written;
+			/* Meaningful since this recorder rotates: it read 0
+			 * while 16 segments were on disk, device-measured. */
+			out->segments = rec_snap.segments;
 			out->elapsed_ms = rec_snap.elapsed_ms;
 			snprintf(out->path, sizeof(out->path), "%s",
 				rec_snap.path);
@@ -881,21 +885,6 @@ static int runtime_request_idr_on(int chn)
 {
 	idr_rate_limit_force(chn);
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
-}
-
-/* Segment rotation's request, as distinct from the bootstrap one above.
- * COALESCED, not forced: a periodic rotation is not a bootstrap event, and
- * forcing would also re-arm the rate limiter and swallow a scene-detector or
- * operator keyframe arriving in the next 100 ms.
- *
- * Returns 1 when the IDR was actually requested, 0 when the shared limiter
- * coalesced it away, -1 on SDK failure.  Callers servicing a rotation request
- * MUST re-queue on 0 -- see star6e_ts_recorder_requeue_idr_request(). */
-static int runtime_rotate_idr_on(int chn)
-{
-	if (!idr_rate_limit_allow(chn))
-		return 0;
-	return MI_VENC_RequestIdr(chn, 1) == 0 ? 1 : -1;
 }
 
 /* Mirror-mode recorder: the file is fed by the main channel. */
@@ -1131,14 +1120,6 @@ static void *dual_rec_thread_fn(void *arg)
 
 		MI_VENC_ReleaseStream(d->channel, &stream);
 
-		/* ch1 feeds this recorder, so ch1 is the channel to ask.  The
-		 * shared record-start path already learned this the hard way
-		 * (see the comment above runtime_request_idr_on's ch1 caller):
-		 * aimed at ch0 it keyframes the LIVE stream and the recording
-		 * still rotates on nothing. */
-		if (star6e_ts_recorder_take_idr_request(d->ts_recorder) &&
-		    runtime_rotate_idr_on(d->channel) == 0)
-			star6e_ts_recorder_requeue_idr_request(d->ts_recorder);
 		total_count++;
 
 		/* Backpressure signal: the pre-GetStream Query found >= 2
@@ -1308,10 +1289,19 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		}
 		star6e_ts_recorder_init(&ps->ts_recorder, rate, ch, ts_codec);
 	}
-	if (vcfg->record.max_seconds > 0)
-		ps->ts_recorder.max_seconds = vcfg->record.max_seconds;
-	if (vcfg->record.max_mb > 0)
-		ps->ts_recorder.max_bytes = (uint64_t)vcfg->record.max_mb * 1024 * 1024;
+	/* Both recorders: the rotation thresholds are the operator's,
+	 * not the format's, and only one recorder is ever active. */
+	if (vcfg->record.max_seconds > 0) {
+		ps->ts_recorder.rot.max_seconds = vcfg->record.max_seconds;
+		ps->recorder.rot.max_seconds = vcfg->record.max_seconds;
+	}
+	if (vcfg->record.max_mb > 0) {
+		uint64_t max_bytes =
+			(uint64_t)vcfg->record.max_mb * 1024 * 1024;
+
+		ps->ts_recorder.rot.max_bytes = max_bytes;
+		ps->recorder.rot.max_bytes = max_bytes;
+	}
 
 	/* Both recorders now hold fd == -1, so record/status can no longer read
 	 * a calloc'd fd == 0 as an open file, and a stop can no longer close
@@ -1747,21 +1737,12 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * spread past a full frame period at 120 fps. */
 	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
 
-	/* Rotation asked for a keyframe.  Serviced HERE, after the release, so
-	 * the SDK call never lands inside the GetStream/ReleaseStream window,
-	 * and aimed at the channel that actually feeds this file.  Dual mode
-	 * services its own recorder on the ch1 thread instead. */
-	if (!ps->dual &&
-	    star6e_ts_recorder_take_idr_request(&ps->ts_recorder) &&
-	    runtime_rotate_idr_on(ps->venc_channel) == 0)
-		star6e_ts_recorder_requeue_idr_request(&ps->ts_recorder);
-
 	/* A recorder that stopped ITSELF (disk full, write error) does so on the
 	 * writer thread, so nothing but this loop is positioned to notice, and
 	 * the gate above would go on queueing into a dead writer indefinitely.
 	 *
-	 * AFTER the release, for the same reason the IDR request above is:
-	 * inside the GetStream/ReleaseStream window this would hold the
+	 * AFTER the release, because inside the GetStream/ReleaseStream window
+	 * this would hold the
 	 * encoder's output slot and stall the LIVE stream — precisely the
 	 * coupling the writer thread exists to remove.  Since 0.73.2 the stop
 	 * itself no longer ends in an unbounded join: past its deadline the
